@@ -1,0 +1,34 @@
+# Zig build system output directories
+zig-out/
+zig-cache/
+.zig-cache/
+
+# Dataset and downloaded binary data
+data/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDEs and editors configuration
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Jujutsu version control directory
+.jj/
+
+# Compiled binary files and artifacts
+*.o
+*.obj
+*.dll
+*.dylib
+*.so
+*.exe
+*.bin
+*.tar.gz
+*.zip
