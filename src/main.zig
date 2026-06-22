@@ -247,16 +247,7 @@ pub fn main(init: std.process.Init) !void {
         const x_tensor = try graph.tensor(1, ni, false);
         @memcpy(x_tensor.data, img_slice);
 
-        const z1 = try graph.matmul(x_tensor, model.w1);
-        const z1_bias = try graph.addBias(z1, model.b1);
-        const a1 = try graph.relu(z1_bias);
-
-        const z2 = try graph.matmul(a1, model.w2);
-        const z2_bias = try graph.addBias(z2, model.b2);
-        const a2 = try graph.relu(z2_bias);
-
-        const z3 = try graph.matmul(a2, model.w3);
-        const logits = try graph.addBias(z3, model.b3);
+        const logits = try model.forward(&graph, x_tensor);
 
         const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
         const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
