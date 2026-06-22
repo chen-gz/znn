@@ -5,6 +5,7 @@ zig-cache/
 
 # Dataset and downloaded binary data
 data/
+data_py/
 
 # OS-specific files
 .DS_Store
@@ -18,6 +19,10 @@ Thumbs.db
 *.njsproj
 *.sln
 *.swp
+
+# Python Virtual Environment
+venv/
+.venv/
 
 # Jujutsu version control directory
 .jj/
