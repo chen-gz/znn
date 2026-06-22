@@ -213,6 +213,12 @@ pub fn main(init: std.process.Init) !void {
         lr *= 0.90;
     }
 
+    // Save model parameters
+    std.debug.print("\nSaving trained model to 'model.bin'...\n", .{});
+    model.save(io, "model.bin") catch |err| {
+        std.debug.print("Failed to save model: {}\n", .{err});
+    };
+
     // Print sample predictions
     std.debug.print("\nSample Predictions from Test Set:\n", .{});
     for (0..5) |i| {

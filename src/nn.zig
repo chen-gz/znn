@@ -141,6 +141,42 @@ pub const NeuralNetwork = struct {
         const u_2 = random.float(f32);
         return @sqrt(-2.0 * @log(u_1)) * @cos(2.0 * std.math.pi * u_2);
     }
+
+    pub fn save(self: *const NeuralNetwork, io: std.Io, file_path: []const u8) !void {
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.createFile(io, file_path, .{});
+        defer file.close(io);
+
+        var buf: [65536]u8 = undefined;
+        var file_writer = file.writer(io, &buf);
+        const writer = &file_writer.interface;
+
+        try writer.writeAll(std.mem.sliceAsBytes(self.w1.data));
+        try writer.writeAll(std.mem.sliceAsBytes(self.b1.data));
+        try writer.writeAll(std.mem.sliceAsBytes(self.w2.data));
+        try writer.writeAll(std.mem.sliceAsBytes(self.b2.data));
+        try writer.writeAll(std.mem.sliceAsBytes(self.w3.data));
+        try writer.writeAll(std.mem.sliceAsBytes(self.b3.data));
+
+        try file_writer.flush();
+    }
+
+    pub fn load(self: *NeuralNetwork, io: std.Io, file_path: []const u8) !void {
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.openFile(io, file_path, .{});
+        defer file.close(io);
+
+        var buf: [65536]u8 = undefined;
+        var file_reader = file.reader(io, &buf);
+        const reader = &file_reader.interface;
+
+        try reader.readSliceAll(std.mem.sliceAsBytes(self.w1.data));
+        try reader.readSliceAll(std.mem.sliceAsBytes(self.b1.data));
+        try reader.readSliceAll(std.mem.sliceAsBytes(self.w2.data));
+        try reader.readSliceAll(std.mem.sliceAsBytes(self.b2.data));
+        try reader.readSliceAll(std.mem.sliceAsBytes(self.w3.data));
+        try reader.readSliceAll(std.mem.sliceAsBytes(self.b3.data));
+    }
 };
 
 fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: usize, requires_grad: bool) !*autodiff.Tensor {
