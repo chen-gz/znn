@@ -18,9 +18,35 @@ const CLASS_NAMES = [10][]const u8{
 };
 
 pub fn main(init: std.process.Init) !void {
+    // Zig 进程初始化提供的 arena 分配器，用于进程级的内存分配
     const arena = init.arena.allocator();
     const io = init.io;
 
+    // 解析命令行参数，检查是否传入了 --gpu 开关
+    const args = try init.minimal.args.toSlice(arena);
+    var run_gpu = false;
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--gpu")) {
+            run_gpu = true;
+        }
+    }
+    // 设置 autodiff 引擎中的全局模式标志
+    autodiff.use_gpu = run_gpu;
+
+    if (run_gpu) {
+        // 如果是 GPU 模式，初始化 macOS Metal Compute Shader 后端
+        const rc = autodiff.metal_init();
+        if (rc != 0) {
+            std.debug.print("Failed to initialize Metal GPU backend: {}\n", .{rc});
+            return error.MetalInitializationFailed;
+        }
+        std.debug.print("Running on GPU (Metal)...\n", .{});
+    } else {
+        // 否则，默认运行在 CPU 上，链接 Apple Accelerate 框架的 CBLAS 高性能库
+        std.debug.print("Running on CPU (Accelerate CBLAS)...\n", .{});
+    }
+
+    // 初始化多线程池（用于加速需要并行的 CPU 算子，尽管本框架大部分高性能算子已交给 CBLAS/GPU，此设计依然提供了线程管理模板）
     try autodiff.initThreadPool();
     defer autodiff.deinitThreadPool();
 
@@ -88,20 +114,21 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("Starting training (3-layer NN with dynamic autodiff: {} -> {} -> {} -> {})...\n", .{ni, nh1, nh2, no});
 
+    // 开始主循环（15 个 Epoch 的 Fashion MNIST 训练）
     for (0..epochs) |epoch| {
         const start_time = std.Io.Clock.awake.now(io);
 
-        // Shuffle training indices
+        // 随机打乱训练数据集的索引顺序
         shuffle(random, train_indices);
 
         var epoch_loss: f32 = 0.0;
         var epoch_acc: f32 = 0.0;
-        const num_batches = num_train / batch_size; // drop last incomplete batch
+        const num_batches = num_train / batch_size; // 丢弃最后一个非整 Batch
 
         for (0..num_batches) |b| {
             const batch_start = b * batch_size;
 
-            // Prepare batch
+            // 从数据集抓取并拼接一个 Batch 的输入数据和目标标签
             for (0..batch_size) |j| {
                 const idx = train_indices[batch_start + j];
                 @memcpy(
@@ -111,29 +138,34 @@ pub fn main(init: std.process.Init) !void {
                 y_batch[j] = train_labels.data[idx];
             }
 
-            // Create batch graph in transient arena
+            // 关键：初始化一个新的、生命周期处于当前 batch 内的局部计算图。
+            // 使用 Arena 分配器，当前 batch 结束后通过 `defer graph.deinit()` 一次性自动释放所有中间层 Tensor 内存。
             var graph = autodiff.Graph.init(arena);
             defer graph.deinit();
 
-            // Wrap batch input data as a tensor node (does not require gradient)
+            // 将 Batch 的输入数据封装为计算图中的 Tensor 节点（注意输入数据 requires_grad = false）
             const x_tensor = try graph.tensor(batch_size, ni, false);
             @memcpy(x_tensor.data, x_batch);
 
-            // Forward propagation
+            // 执行前向传播构建动态计算图：
+            // 第一层：线性变换 MatMul -> 偏置加法 AddBias -> 激活函数 ReLU
             const z1 = try graph.matmul(x_tensor, model.w1);
             const z1_bias = try graph.addBias(z1, model.b1);
             const a1 = try graph.relu(z1_bias);
 
+            // 第二层：线性变换 MatMul -> 偏置加法 AddBias -> 激活函数 ReLU
             const z2 = try graph.matmul(a1, model.w2);
             const z2_bias = try graph.addBias(z2, model.b2);
             const a2 = try graph.relu(z2_bias);
 
+            // 第三层：线性输出层 MatMul -> 偏置加法 AddBias (Logits)
             const z3 = try graph.matmul(a2, model.w3);
             const logits = try graph.addBias(z3, model.b3);
 
+            // 损失函数：交叉熵损失节点，附带 Softmax 概率
             const loss = try graph.softmaxCrossEntropy(logits, y_batch);
 
-            // Compute batch metrics
+            // 提取批次的 Loss 标量与准确率
             const batch_loss = loss.data[0];
             const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
             const batch_acc = computeAccuracy(batch_size, no, probs, y_batch);
@@ -141,13 +173,13 @@ pub fn main(init: std.process.Init) !void {
             epoch_loss += batch_loss;
             epoch_acc += batch_acc;
 
-            // Zero out persistent parameters' gradients
+            // 1. 在反向传播前，清空神经网络模型中持久化权重的梯度值 (w.grad = 0)
             model.zeroGrad();
 
-            // Backward propagation (populates parameter gradients)
+            // 2. 触发反向传播，自 loss 节点开始，通过拓扑排序逆序逐个算子求导，填充各 Tensor 的 grad 梯度缓冲区
             try graph.backward(loss);
 
-            // SGD updates
+            // 3. 执行权重更新：采用带 Momentum 动量的随机梯度下降（SGD）更新网络权重与偏置项
             model.updateWeights(lr, beta);
         }
 

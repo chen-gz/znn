@@ -42,6 +42,12 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mod.linkFramework("Accelerate", .{});
+    mod.linkFramework("Metal", .{});
+    mod.linkFramework("Foundation", .{});
+    mod.addCSourceFile(.{
+        .file = b.path("src/metal_backend.mm"),
+        .flags = &.{ "-std=c++11", "-ObjC++" },
+    });
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -86,6 +92,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.linkFramework("Accelerate", .{});
+    exe.root_module.linkFramework("Metal", .{});
+    exe.root_module.linkFramework("Foundation", .{});
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
