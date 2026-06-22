@@ -5,8 +5,11 @@ import torch.optim as optim
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 
-# Use CPU for a fair comparison with our Zig CPU implementation
-device = torch.device('cpu')
+# Use Apple Silicon GPU (MPS) if available, otherwise CPU
+if torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
 
 # Transform to load fashion mnist
 transform = transforms.Compose([

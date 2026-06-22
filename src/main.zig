@@ -21,6 +21,9 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
 
+    try autodiff.initThreadPool();
+    defer autodiff.deinitThreadPool();
+
     std.debug.print("Loading dataset...\n", .{});
     var train_images = dataset.loadImages(io, arena, "data/train-images-idx3-ubyte") catch |err| {
         std.debug.print("Failed to load training images: {}\n", .{err});
