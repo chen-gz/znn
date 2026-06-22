@@ -65,20 +65,20 @@ pub const Linear = struct {
 };
 
 // ============================================================================
-// 2. Comptime 编译期反射函数（实现类似于 PyTorch 基类继承的自动化处理）
+// 2. Comptime 编译期反射函数（用于底层递归扫描，由 Module 包装器调用）
 // ============================================================================
 
 // 自动扫描结构体，调用子层（如 Linear）的 deinit 或释放对应的 Tensor 和 Slice 字段
-pub fn deinitModel(model: anytype) void {
+pub fn deinitModel(model: anytype, allocator: std.mem.Allocator) void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
     inline for (info.@"struct".fields) |field| {
         if (field.type == Linear) {
-            @field(model, field.name).deinit(model.allocator);
+            @field(model, field.name).deinit(allocator);
         } else if (field.type == *autodiff.Tensor) {
-            freePersistentTensor(model.allocator, @field(model, field.name));
+            freePersistentTensor(allocator, @field(model, field.name));
         } else if (field.type == []f32) {
-            model.allocator.free(@field(model, field.name));
+            allocator.free(@field(model, field.name));
         }
     }
 }
@@ -166,18 +166,66 @@ pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8) !void {
 }
 
 // ============================================================================
-// 3. 多层感知机 NeuralNetwork（只需定义层结构和 forward）
+// 3. 通用 Module 包装器（类似于 PyTorch 的 nn.Module 基类继承效果）
 // ============================================================================
-pub const NeuralNetwork = struct {
-    allocator: std.mem.Allocator,
+pub fn Module(comptime T: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        inner: T,
 
-    // 定义子层（类似于 PyTorch 的 fc1, fc2, fc3）
+        const Self = @This();
+
+        // 自动托管模型的初始化，并将参数转发给内部具体模型结构体的 init 方法
+        pub fn init(allocator: std.mem.Allocator, ni: usize, nh1: usize, nh2: usize, no: usize, seed: u64) !Self {
+            return Self{
+                .allocator = allocator,
+                .inner = try T.init(allocator, ni, nh1, nh2, no, seed),
+            };
+        }
+
+        // 自动托管 deinit：直接利用反射自动释放内部结构体中的全部参数内存
+        pub fn deinit(self: *Self) void {
+            deinitModel(&self.inner, self.allocator);
+        }
+
+        // 自动托管 zeroGrad
+        pub fn zeroGrad(self: *Self) void {
+            zeroGradModel(&self.inner);
+        }
+
+        // 自动托管 updateWeights
+        pub fn updateWeights(self: *Self, lr: f32, beta: f32) void {
+            updateWeightsModel(&self.inner, lr, beta);
+        }
+
+        // 自动托管 save
+        pub fn save(self: *const Self, io: std.Io, file_path: []const u8) !void {
+            try saveModel(&self.inner, io, file_path);
+        }
+
+        // 自动托管 load
+        pub fn load(self: *Self, io: std.Io, file_path: []const u8) !void {
+            try loadModel(&self.inner, io, file_path);
+        }
+
+        // 自动托管前向传播：将接口直接路由到具体实现的 forward 函数
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+            return try self.inner.forward(graph, x);
+        }
+    };
+}
+
+// ============================================================================
+// 4. 用户定义的多层感知机具体结构（只写结构和前向即可）
+// ============================================================================
+const MLP = struct {
+    // 定义模型结构
     fc1: Linear,
     fc2: Linear,
     fc3: Linear,
 
-    // 初始化模型
-    pub fn init(allocator: std.mem.Allocator, ni: usize, nh1: usize, nh2: usize, no: usize, seed: u64) !NeuralNetwork {
+    // 定义初始化每一层参数的规则
+    pub fn init(allocator: std.mem.Allocator, ni: usize, nh1: usize, nh2: usize, no: usize, seed: u64) !MLP {
         var prng = std.Random.DefaultPrng.init(seed);
         const random = prng.random();
 
@@ -190,38 +238,15 @@ pub const NeuralNetwork = struct {
         const fc3 = try Linear.init(allocator, nh2, no, random);
         errdefer fc3.deinit(allocator);
 
-        return NeuralNetwork{
-            .allocator = allocator,
+        return MLP{
             .fc1 = fc1,
             .fc2 = fc2,
             .fc3 = fc3,
         };
     }
 
-    // 如下核心基类方法已被 Comptime 自动托管实现！完全零模板代码（Boilerplate）
-
-    pub fn deinit(self: *NeuralNetwork) void {
-        deinitModel(self);
-    }
-
-    pub fn zeroGrad(self: *NeuralNetwork) void {
-        zeroGradModel(self);
-    }
-
-    pub fn updateWeights(self: *NeuralNetwork, lr: f32, beta: f32) void {
-        updateWeightsModel(self, lr, beta);
-    }
-
-    pub fn save(self: *const NeuralNetwork, io: std.Io, file_path: []const u8) !void {
-        try saveModel(self, io, file_path);
-    }
-
-    pub fn load(self: *NeuralNetwork, io: std.Io, file_path: []const u8) !void {
-        try loadModel(self, io, file_path);
-    }
-
     // 用户只需专注定义前向传播逻辑
-    pub fn forward(self: *const NeuralNetwork, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+    pub fn forward(self: *const MLP, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
         const x1 = try self.fc1.forward(graph, x);
         const a1 = try graph.relu(x1);
 
@@ -232,8 +257,12 @@ pub const NeuralNetwork = struct {
     }
 };
 
+// 导出 NeuralNetwork 作为被 Module 包装后的类型
+// 这就让 NeuralNetwork 自动获得了 deinit, zeroGrad, updateWeights, save, load 等方法！
+pub const NeuralNetwork = Module(MLP);
+
 // ============================================================================
-// 4. 底层数学与内存辅助函数
+// 5. 底层数学与内存辅助函数
 // ============================================================================
 
 fn updateLayerWeights(w: []f32, dw: []const f32, v: []f32, lr: f32, beta: f32) void {
