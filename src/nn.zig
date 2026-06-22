@@ -86,6 +86,25 @@ pub const NeuralNetwork = struct {
         return self;
     }
 
+    // 类似于 PyTorch 中 nn.Module.forward
+    pub fn forward(self: *const NeuralNetwork, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+        // 第一层：Linear -> ReLU
+        const z1 = try graph.matmul(x, self.w1);
+        const z1_bias = try graph.addBias(z1, self.b1);
+        const a1 = try graph.relu(z1_bias);
+
+        // 第二层：Linear -> ReLU
+        const z2 = try graph.matmul(a1, self.w2);
+        const z2_bias = try graph.addBias(z2, self.b2);
+        const a2 = try graph.relu(z2_bias);
+
+        // 第三层：Linear (logits)
+        const z3 = try graph.matmul(a2, self.w3);
+        const logits = try graph.addBias(z3, self.b3);
+
+        return logits;
+    }
+
     pub fn deinit(self: *NeuralNetwork) void {
         freePersistentTensor(self.allocator, self.w1);
         freePersistentTensor(self.allocator, self.b1);

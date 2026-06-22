@@ -147,20 +147,8 @@ pub fn main(init: std.process.Init) !void {
             const x_tensor = try graph.tensor(batch_size, ni, false);
             @memcpy(x_tensor.data, x_batch);
 
-            // 执行前向传播构建动态计算图：
-            // 第一层：线性变换 MatMul -> 偏置加法 AddBias -> 激活函数 ReLU
-            const z1 = try graph.matmul(x_tensor, model.w1);
-            const z1_bias = try graph.addBias(z1, model.b1);
-            const a1 = try graph.relu(z1_bias);
-
-            // 第二层：线性变换 MatMul -> 偏置加法 AddBias -> 激活函数 ReLU
-            const z2 = try graph.matmul(a1, model.w2);
-            const z2_bias = try graph.addBias(z2, model.b2);
-            const a2 = try graph.relu(z2_bias);
-
-            // 第三层：线性输出层 MatMul -> 偏置加法 AddBias (Logits)
-            const z3 = try graph.matmul(a2, model.w3);
-            const logits = try graph.addBias(z3, model.b3);
+            // 执行前向传播构建动态计算图（类似于 PyTorch 的 model(x)）
+            const logits = try model.forward(&graph, x_tensor);
 
             // 损失函数：交叉熵损失节点，附带 Softmax 概率
             const loss = try graph.softmaxCrossEntropy(logits, y_batch);
@@ -211,16 +199,7 @@ pub fn main(init: std.process.Init) !void {
             const x_tensor = try graph.tensor(test_batch_size, ni, false);
             @memcpy(x_tensor.data, eval_x_batch);
 
-            const z1 = try graph.matmul(x_tensor, model.w1);
-            const z1_bias = try graph.addBias(z1, model.b1);
-            const a1 = try graph.relu(z1_bias);
-
-            const z2 = try graph.matmul(a1, model.w2);
-            const z2_bias = try graph.addBias(z2, model.b2);
-            const a2 = try graph.relu(z2_bias);
-
-            const z3 = try graph.matmul(a2, model.w3);
-            const logits = try graph.addBias(z3, model.b3);
+            const logits = try model.forward(&graph, x_tensor);
 
             const loss = try graph.softmaxCrossEntropy(logits, eval_y_batch);
 
