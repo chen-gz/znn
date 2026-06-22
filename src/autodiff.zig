@@ -1,5 +1,32 @@
 const std = @import("std");
 
+const cblas_sgemm_accelerate = @extern(*const fn (
+    order: c_int,
+    TransA: c_int,
+    TransB: c_int,
+    M: c_int,
+    N: c_int,
+    K: c_int,
+    alpha: f32,
+    A: [*]const f32,
+    lda: c_int,
+    B: [*]const f32,
+    ldb: c_int,
+    beta: f32,
+    C: [*]f32,
+    ldc: c_int,
+) callconv(.c) void, .{
+    .name = "cblas_sgemm",
+});
+
+const c = struct {
+    pub const CblasRowMajor = 101;
+    pub const CblasColMajor = 102;
+    pub const CblasNoTrans = 111;
+    pub const CblasTrans = 112;
+    pub const cblas_sgemm = cblas_sgemm_accelerate;
+};
+
 const num_threads = 4; // Using 4 threads is the sweet spot for performance and thread spawn overhead
 
 pub const Tensor = struct {
@@ -148,86 +175,7 @@ pub fn deinitThreadPool() void {
     }
 }
 
-// Helper contexts and tasks for ThreadPool execution (Only heavy MatMul needs ThreadPool)
 
-const MatMulContext = struct {
-    M: usize, N: usize, K: usize,
-    A_data: []const f32,
-    B_data: []const f32,
-    C_data: []f32,
-    chunk_size: usize,
-};
-
-fn matmulTask(ctx_ptr: ?*anyopaque, thread_idx: usize) void {
-    const ctx: *const MatMulContext = @ptrCast(@alignCast(ctx_ptr.?));
-    const start_row = thread_idx * ctx.chunk_size;
-    if (start_row >= ctx.M) return;
-    const end_row = @min(start_row + ctx.chunk_size, ctx.M);
-
-    for (start_row..end_row) |i| {
-        for (0..ctx.K) |k| {
-            const a_val = ctx.A_data[i * ctx.K + k];
-            const b_row = ctx.B_data[k * ctx.N .. (k + 1) * ctx.N];
-            const c_row = ctx.C_data[i * ctx.N .. (i + 1) * ctx.N];
-            for (0..ctx.N) |j| {
-                c_row[j] += a_val * b_row[j];
-            }
-        }
-    }
-}
-
-const dAContext = struct {
-    M: usize, K: usize, N: usize,
-    B_data: []const f32,
-    dC_grad: []const f32,
-    dA_grad: []f32,
-    chunk_size: usize,
-};
-
-fn dATask(ctx_ptr: ?*anyopaque, thread_idx: usize) void {
-    const ctx: *const dAContext = @ptrCast(@alignCast(ctx_ptr.?));
-    const start_row = thread_idx * ctx.chunk_size;
-    if (start_row >= ctx.M) return;
-    const end_row = @min(start_row + ctx.chunk_size, ctx.M);
-
-    for (start_row..end_row) |m| {
-        for (0..ctx.K) |k| {
-            const b_row = ctx.B_data[k * ctx.N .. (k + 1) * ctx.N];
-            const dC_row = ctx.dC_grad[m * ctx.N .. (m + 1) * ctx.N];
-            var sum: f32 = 0.0;
-            for (0..ctx.N) |n| {
-                sum += dC_row[n] * b_row[n];
-            }
-            ctx.dA_grad[m * ctx.K + k] += sum;
-        }
-    }
-}
-
-const dBContext = struct {
-    M: usize, K: usize, N: usize,
-    A_data: []const f32,
-    dC_grad: []const f32,
-    dB_grad: []f32,
-    chunk_size: usize,
-};
-
-fn dBTask(ctx_ptr: ?*anyopaque, thread_idx: usize) void {
-    const ctx: *const dBContext = @ptrCast(@alignCast(ctx_ptr.?));
-    const start_k = thread_idx * ctx.chunk_size;
-    if (start_k >= ctx.K) return;
-    const end_k = @min(start_k + ctx.chunk_size, ctx.K);
-
-    for (start_k..end_k) |k| {
-        const dB_row = ctx.dB_grad[k * ctx.N .. (k + 1) * ctx.N];
-        for (0..ctx.M) |m| {
-            const a_val = ctx.A_data[m * ctx.K + k];
-            const dC_row = ctx.dC_grad[m * ctx.N .. (m + 1) * ctx.N];
-            for (0..ctx.N) |n| {
-                dB_row[n] += a_val * dC_row[n];
-            }
-        }
-    }
-}
 
 pub const Op = struct {
     op_type: OpType,
@@ -245,53 +193,44 @@ pub const Op = struct {
                 const K = A.cols;
                 const N = B.cols;
 
-                // dA += dC * B^T (Parallelized via ThreadPool)
+                // dA += dC * B^T
                 if (A.requires_grad) {
-                    if (global_pool_initialized) {
-                        const chunk_size = (M + num_threads - 1) / num_threads;
-                        var ctx = dAContext{
-                            .M = M, .K = K, .N = N,
-                            .B_data = B.data, .dC_grad = C.grad, .dA_grad = A.grad,
-                            .chunk_size = chunk_size,
-                        };
-                        global_pool.run(dATask, &ctx);
-                    } else {
-                        for (0..M) |m| {
-                            for (0..K) |k| {
-                                const b_row = B.data[k * N .. (k + 1) * N];
-                                const dC_row = C.grad[m * N .. (m + 1) * N];
-                                var sum: f32 = 0.0;
-                                for (0..N) |n| {
-                                    sum += dC_row[n] * b_row[n];
-                                }
-                                A.grad[m * K + k] += sum;
-                            }
-                        }
-                    }
+                    c.cblas_sgemm(
+                        c.CblasRowMajor,
+                        c.CblasNoTrans,
+                        c.CblasTrans,
+                        @intCast(M),
+                        @intCast(K),
+                        @intCast(N),
+                        1.0,
+                        C.grad.ptr,
+                        @intCast(N),
+                        B.data.ptr,
+                        @intCast(N),
+                        1.0,
+                        A.grad.ptr,
+                        @intCast(K),
+                    );
                 }
 
-                // dB += A^T * dC (Parallelized via ThreadPool)
+                // dB += A^T * dC
                 if (B.requires_grad) {
-                    if (global_pool_initialized) {
-                        const chunk_size = (K + num_threads - 1) / num_threads;
-                        var ctx = dBContext{
-                            .M = M, .K = K, .N = N,
-                            .A_data = A.data, .dC_grad = C.grad, .dB_grad = B.grad,
-                            .chunk_size = chunk_size,
-                        };
-                        global_pool.run(dBTask, &ctx);
-                    } else {
-                        for (0..K) |k| {
-                            const dB_row = B.grad[k * N .. (k + 1) * N];
-                            for (0..M) |m| {
-                                const a_val = A.data[m * K + k];
-                                const dC_row = C.grad[m * N .. (m + 1) * N];
-                                for (0..N) |n| {
-                                    dB_row[n] += a_val * dC_row[n];
-                                }
-                            }
-                        }
-                    }
+                    c.cblas_sgemm(
+                        c.CblasRowMajor,
+                        c.CblasTrans,
+                        c.CblasNoTrans,
+                        @intCast(K),
+                        @intCast(N),
+                        @intCast(M),
+                        1.0,
+                        A.data.ptr,
+                        @intCast(K),
+                        C.grad.ptr,
+                        @intCast(N),
+                        1.0,
+                        B.grad.ptr,
+                        @intCast(N),
+                    );
                 }
             },
             .AddBias => {
@@ -399,26 +338,22 @@ pub const Graph = struct {
         const K = A.cols;
         const N = B.cols;
 
-        if (global_pool_initialized) {
-            const chunk_size = (M + num_threads - 1) / num_threads;
-            var ctx = MatMulContext{
-                .M = M, .N = N, .K = K,
-                .A_data = A.data, .B_data = B.data, .C_data = C.data,
-                .chunk_size = chunk_size,
-            };
-            global_pool.run(matmulTask, &ctx);
-        } else {
-            for (0..M) |i| {
-                for (0..K) |k| {
-                    const a_val = A.data[i * K + k];
-                    const b_row = B.data[k * N .. (k + 1) * N];
-                    const c_row = C.data[i * N .. (i + 1) * N];
-                    for (0..N) |j| {
-                        c_row[j] += a_val * b_row[j];
-                    }
-                }
-            }
-        }
+        c.cblas_sgemm(
+            c.CblasRowMajor,
+            c.CblasNoTrans,
+            c.CblasNoTrans,
+            @intCast(M),
+            @intCast(N),
+            @intCast(K),
+            1.0,
+            A.data.ptr,
+            @intCast(K),
+            B.data.ptr,
+            @intCast(N),
+            0.0,
+            C.data.ptr,
+            @intCast(N),
+        );
 
         const allocator = self.arena.allocator();
         const inputs = try allocator.alloc(*Tensor, 2);
