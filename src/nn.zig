@@ -218,7 +218,7 @@ pub fn Module(comptime T: type) type {
 // ============================================================================
 // 4. 用户定义的多层感知机具体结构（只写结构和前向即可）
 // ============================================================================
-const MLP = struct {
+pub const MLP = struct {
     // 定义模型结构
     fc1: Linear,
     fc2: Linear,
@@ -260,6 +260,96 @@ const MLP = struct {
 // 导出 NeuralNetwork 作为被 Module 包装后的类型
 // 这就让 NeuralNetwork 自动获得了 deinit, zeroGrad, updateWeights, save, load 等方法！
 pub const NeuralNetwork = Module(MLP);
+
+// ============================================================================
+// 4b. 加大版多层感知机（4层 MLP：784 -> 1024 -> 512 -> 256 -> 10）
+// ============================================================================
+pub const LargeMLP = struct {
+    fc1: Linear,
+    fc2: Linear,
+    fc3: Linear,
+    fc4: Linear,
+
+    pub fn init(allocator: std.mem.Allocator, ni: usize, nh1: usize, nh2: usize, nh3: usize, no: usize, seed: u64) !LargeMLP {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const random = prng.random();
+
+        const fc1 = try Linear.init(allocator, ni, nh1, random);
+        errdefer fc1.deinit(allocator);
+
+        const fc2 = try Linear.init(allocator, nh1, nh2, random);
+        errdefer fc2.deinit(allocator);
+
+        const fc3 = try Linear.init(allocator, nh2, nh3, random);
+        errdefer fc3.deinit(allocator);
+
+        const fc4 = try Linear.init(allocator, nh3, no, random);
+        errdefer fc4.deinit(allocator);
+
+        return LargeMLP{
+            .fc1 = fc1,
+            .fc2 = fc2,
+            .fc3 = fc3,
+            .fc4 = fc4,
+        };
+    }
+
+    pub fn forward(self: *const LargeMLP, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+        const x1 = try self.fc1.forward(graph, x);
+        const a1 = try graph.relu(x1);
+
+        const x2 = try self.fc2.forward(graph, a1);
+        const a2 = try graph.relu(x2);
+
+        const x3 = try self.fc3.forward(graph, a2);
+        const a3 = try graph.relu(x3);
+
+        return try self.fc4.forward(graph, a3);
+    }
+};
+
+pub fn LargeModule(comptime T: type) type {
+    return struct {
+        allocator: std.mem.Allocator,
+        inner: T,
+
+        const Self = @This();
+
+        pub fn init(allocator: std.mem.Allocator, ni: usize, nh1: usize, nh2: usize, nh3: usize, no: usize, seed: u64) !Self {
+            return Self{
+                .allocator = allocator,
+                .inner = try T.init(allocator, ni, nh1, nh2, nh3, no, seed),
+            };
+        }
+
+        pub fn deinit(self: *Self) void {
+            deinitModel(&self.inner, self.allocator);
+        }
+
+        pub fn zeroGrad(self: *Self) void {
+            zeroGradModel(&self.inner);
+        }
+
+        pub fn updateWeights(self: *Self, lr: f32, beta: f32) void {
+            updateWeightsModel(&self.inner, lr, beta);
+        }
+
+        pub fn save(self: *const Self, io: std.Io, file_path: []const u8) !void {
+            try saveModel(&self.inner, io, file_path);
+        }
+
+        pub fn load(self: *Self, io: std.Io, file_path: []const u8) !void {
+            try loadModel(&self.inner, io, file_path);
+        }
+
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+            return try self.inner.forward(graph, x);
+        }
+    };
+}
+
+pub const LargeNeuralNetwork = LargeModule(LargeMLP);
+
 
 // ============================================================================
 // 5. 底层数学与内存辅助函数
