@@ -21,38 +21,16 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
 
-    // 解析命令行参数，检查是否传入了 --gpu, --mlx 或 --large 开关
+    // 解析命令行参数，检查是否传入了 --large 开关
     const args = try init.minimal.args.toSlice(arena);
-    var run_gpu = false;
-    var run_mlx = false;
     var run_large = false;
     for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--gpu")) {
-            run_gpu = true;
-        } else if (std.mem.eql(u8, arg, "--mlx")) {
-            run_mlx = true;
-        } else if (std.mem.eql(u8, arg, "--large")) {
+        if (std.mem.eql(u8, arg, "--large")) {
             run_large = true;
         }
     }
-    // 设置 autodiff 引擎中的全局模式标志
-    autodiff.use_gpu = run_gpu;
-    autodiff.use_mlx = run_mlx;
 
-    if (run_mlx) {
-        std.debug.print("Running on GPU (Apple MLX)...\n", .{});
-    } else if (run_gpu) {
-        // 如果是 GPU 模式，初始化 macOS Metal Compute Shader 后端
-        const rc = autodiff.metal_init();
-        if (rc != 0) {
-            std.debug.print("Failed to initialize Metal GPU backend: {}\n", .{rc});
-            return error.MetalInitializationFailed;
-        }
-        std.debug.print("Running on GPU (Metal)...\n", .{});
-    } else {
-        // 否则，默认运行在 CPU 上，链接 Apple Accelerate 框架的 CBLAS 高性能库
-        std.debug.print("Running on CPU (Accelerate CBLAS)...\n", .{});
-    }
+    std.debug.print("Running on CPU (Accelerate CBLAS sgemm)...\n", .{});
 
     // 初始化多线程池（用于加速需要并行的 CPU 算子，尽管本框架大部分高性能算子已交给 CBLAS/GPU，此设计依然提供了线程管理模板）
     try autodiff.initThreadPool();

@@ -16,9 +16,6 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
-    const use_mlx = b.option(bool, "use_mlx", "Enable MLX GPU backend (requires mlx-c)") orelse false;
-    const options = b.addOptions();
-    options.addOption(bool, "use_mlx", use_mlx);
 
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -40,21 +37,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
     });
-    mod.addOptions("build_options", options);
     mod.linkFramework("Accelerate", .{});
-    mod.linkFramework("Metal", .{});
-    mod.linkFramework("Foundation", .{});
-    mod.addCSourceFile(.{
-        .file = b.path("src/metal_backend.mm"),
-        .flags = &.{ "-std=c++11", "-ObjC++" },
-    });
-
-    if (use_mlx) {
-        mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-        mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-        mod.linkSystemLibrary("mlx", .{});
-        mod.linkSystemLibrary("mlxc", .{});
-    }
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -99,17 +82,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const exe_mod = exe.root_module;
-    exe_mod.addOptions("build_options", options);
     exe_mod.linkFramework("Accelerate", .{});
-    exe_mod.linkFramework("Metal", .{});
-    exe_mod.linkFramework("Foundation", .{});
-
-    if (use_mlx) {
-        exe_mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-        exe_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
-        exe_mod.linkSystemLibrary("mlx", .{});
-        exe_mod.linkSystemLibrary("mlxc", .{});
-    }
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default

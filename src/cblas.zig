@@ -28,18 +28,4 @@ pub const CblasNoTrans = 111;
 pub const CblasTrans = 112;
 pub const cblas_sgemm = cblas_sgemm_accelerate;
 
-// 动态链接 Objective-C++ 实现的 Metal GPU 初始化与矩阵乘法接口
-pub const metal_init = @extern(*const fn () callconv(.c) c_int, .{
-    .name = "metal_init",
-});
 
-pub const metal_matmul = @extern(*const fn (
-    transA: c_int, transB: c_int,
-    M: c_int, N: c_int, K: c_int,
-    A: [*]const f32,
-    B: [*]const f32,
-    C: [*]f32,
-    beta: f32,
-) callconv(.c) void, .{
-    .name = "metal_matmul",
-});

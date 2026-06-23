@@ -1,245 +1,5 @@
 const std = @import("std");
 const c = @import("cblas.zig");
-const build_options = @import("build_options");
-const use_mlx_enabled = build_options.use_mlx;
-
-// 运行模式开关：true 表示使用 Metal GPU 运行，false 表示使用 Accelerate CPU 运行
-pub var use_gpu: bool = false;
-pub var use_mlx: bool = false;
-
-// 重新导出外部 C 绑定以保持 API 兼容性
-pub const metal_init = c.metal_init;
-pub const metal_matmul = c.metal_matmul;
-
-const mlx = struct {
-    const mlx_array = extern struct {
-        ctx: ?*anyopaque,
-    };
-    const mlx_stream = extern struct {
-        ctx: ?*anyopaque,
-    };
-    const MLX_FLOAT32: c_int = 10;
-
-    const mlx_array_new: ?*const fn () callconv(.c) mlx_array = if (use_mlx_enabled) @extern(*const fn () callconv(.c) mlx_array, .{ .name = "mlx_array_new" }) else null;
-    const mlx_array_new_data: ?*const fn (data: ?*const anyopaque, shape: [*]const c_int, ndim: c_int, dtype: c_int) callconv(.c) mlx_array = if (use_mlx_enabled) @extern(*const fn (data: ?*const anyopaque, shape: [*]const c_int, ndim: c_int, dtype: c_int) callconv(.c) mlx_array, .{ .name = "mlx_array_new_data" }) else null;
-    const mlx_array_new_float32: ?*const fn (val: f32) callconv(.c) mlx_array = if (use_mlx_enabled) @extern(*const fn (val: f32) callconv(.c) mlx_array, .{ .name = "mlx_array_new_float32" }) else null;
-    const mlx_transpose: ?*const fn (res: *mlx_array, a: mlx_array, s: mlx_stream) callconv(.c) c_int = if (use_mlx_enabled) @extern(*const fn (res: *mlx_array, a: mlx_array, s: mlx_stream) callconv(.c) c_int, .{ .name = "mlx_transpose" }) else null;
-    const mlx_matmul: ?*const fn (res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) callconv(.c) c_int = if (use_mlx_enabled) @extern(*const fn (res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) callconv(.c) c_int, .{ .name = "mlx_matmul" }) else null;
-    const mlx_add: ?*const fn (res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) callconv(.c) c_int = if (use_mlx_enabled) @extern(*const fn (res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) callconv(.c) c_int, .{ .name = "mlx_add" }) else null;
-    const mlx_sum_axis: ?*const fn (res: *mlx_array, a: mlx_array, axis: c_int, keepdims: bool, s: mlx_stream) callconv(.c) c_int = if (use_mlx_enabled) @extern(*const fn (res: *mlx_array, a: mlx_array, axis: c_int, keepdims: bool, s: mlx_stream) callconv(.c) c_int, .{ .name = "mlx_sum_axis" }) else null;
-    const mlx_maximum: ?*const fn (res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) callconv(.c) c_int = if (use_mlx_enabled) @extern(*const fn (res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) callconv(.c) c_int, .{ .name = "mlx_maximum" }) else null;
-    const mlx_greater: ?*const fn (res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) callconv(.c) c_int = if (use_mlx_enabled) @extern(*const fn (res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) callconv(.c) c_int, .{ .name = "mlx_greater" }) else null;
-    const mlx_multiply: ?*const fn (res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) callconv(.c) c_int = if (use_mlx_enabled) @extern(*const fn (res: *mlx_array, a: mlx_array, b: mlx_array, s: mlx_stream) callconv(.c) c_int, .{ .name = "mlx_multiply" }) else null;
-    const mlx_array_eval: ?*const fn (a: mlx_array) callconv(.c) c_int = if (use_mlx_enabled) @extern(*const fn (a: mlx_array) callconv(.c) c_int, .{ .name = "mlx_array_eval" }) else null;
-    const mlx_array_data_float32: ?*const fn (a: mlx_array) callconv(.c) [*]f32 = if (use_mlx_enabled) @extern(*const fn (a: mlx_array) callconv(.c) [*]f32, .{ .name = "mlx_array_data_float32" }) else null;
-    const mlx_array_free: ?*const fn (a: mlx_array) callconv(.c) void = if (use_mlx_enabled) @extern(*const fn (a: mlx_array) callconv(.c) void, .{ .name = "mlx_array_free" }) else null;
-    const mlx_default_gpu_stream_new: ?*const fn () callconv(.c) mlx_stream = if (use_mlx_enabled) @extern(*const fn () callconv(.c) mlx_stream, .{ .name = "mlx_default_gpu_stream_new" }) else null;
-    const mlx_stream_free: ?*const fn (s: mlx_stream) callconv(.c) void = if (use_mlx_enabled) @extern(*const fn (s: mlx_stream) callconv(.c) void, .{ .name = "mlx_stream_free" }) else null;
-};
-
-fn mlx_matmul_impl(
-    transA: bool, transB: bool,
-    M: usize, N: usize, K: usize,
-    A: []const f32, B: []const f32, C: []f32,
-    beta: f32
-) void {
-    if (!use_mlx_enabled) return;
-
-    const stream = mlx.mlx_default_gpu_stream_new.?();
-    defer mlx.mlx_stream_free.?(stream);
-
-    // Dimensions of inputs before transposition:
-    // If transA, input A has shape K x M (so we transpose to M x K)
-    // If not transA, input A has shape M x K
-    const rowsA = if (transA) K else M;
-    const colsA = if (transA) M else K;
-    const shapeA = [2]c_int{ @intCast(rowsA), @intCast(colsA) };
-    const a_arr = mlx.mlx_array_new_data.?(A.ptr, &shapeA, 2, mlx.MLX_FLOAT32);
-    defer mlx.mlx_array_free.?(a_arr);
-
-    const rowsB = if (transB) N else K;
-    const colsB = if (transB) K else N;
-    const shapeB = [2]c_int{ @intCast(rowsB), @intCast(colsB) };
-    const b_arr = mlx.mlx_array_new_data.?(B.ptr, &shapeB, 2, mlx.MLX_FLOAT32);
-    defer mlx.mlx_array_free.?(b_arr);
-
-    // Apply transpositions if required
-    var a_input = a_arr;
-    var b_input = b_arr;
-
-    if (transA) {
-        var a_trans = mlx.mlx_array_new.?();
-        _ = mlx.mlx_transpose.?(&a_trans, a_arr, stream);
-        a_input = a_trans;
-    }
-    defer if (transA) mlx.mlx_array_free.?(a_input);
-
-    if (transB) {
-        var b_trans = mlx.mlx_array_new.?();
-        _ = mlx.mlx_transpose.?(&b_trans, b_arr, stream);
-        b_input = b_trans;
-    }
-    defer if (transB) mlx.mlx_array_free.?(b_input);
-
-    var res_arr = mlx.mlx_array_new.?();
-    defer mlx.mlx_array_free.?(res_arr);
-
-    _ = mlx.mlx_matmul.?(&res_arr, a_input, b_input, stream);
-    
-    // Evaluate res_arr and get underlying buffer
-    _ = mlx.mlx_array_eval.?(res_arr);
-    const data_ptr = mlx.mlx_array_data_float32.?(res_arr);
-
-    if (beta == 0.0) {
-        @memcpy(C, data_ptr[0 .. M * N]);
-    } else {
-        for (0..M * N) |i| {
-            C[i] = data_ptr[i] + beta * C[i];
-        }
-    }
-}
-
-fn mlx_add_bias_impl(
-    M: usize, N: usize,
-    A: []const f32, bias: []const f32, C: []f32
-) void {
-    if (!use_mlx_enabled) return;
-
-    const stream = mlx.mlx_default_gpu_stream_new.?();
-    defer mlx.mlx_stream_free.?(stream);
-
-    const shapeA = [2]c_int{ @intCast(M), @intCast(N) };
-    const a_arr = mlx.mlx_array_new_data.?(A.ptr, &shapeA, 2, mlx.MLX_FLOAT32);
-    defer mlx.mlx_array_free.?(a_arr);
-
-    const shapeB = [2]c_int{ 1, @intCast(N) };
-    const b_arr = mlx.mlx_array_new_data.?(bias.ptr, &shapeB, 2, mlx.MLX_FLOAT32);
-    defer mlx.mlx_array_free.?(b_arr);
-
-    var res_arr = mlx.mlx_array_new.?();
-    defer mlx.mlx_array_free.?(res_arr);
-
-    _ = mlx.mlx_add.?(&res_arr, a_arr, b_arr, stream);
-    _ = mlx.mlx_array_eval.?(res_arr);
-
-    const data_ptr = mlx.mlx_array_data_float32.?(res_arr);
-    @memcpy(C, data_ptr[0 .. M * N]);
-}
-
-fn mlx_add_bias_backward_impl(
-    M: usize, N: usize,
-    C_grad: []const f32,
-    A_grad: ?[]f32,
-    bias_grad: ?[]f32
-) void {
-    if (!use_mlx_enabled) return;
-
-    const stream = mlx.mlx_default_gpu_stream_new.?();
-    defer mlx.mlx_stream_free.?(stream);
-
-    const shapeC = [2]c_int{ @intCast(M), @intCast(N) };
-    const c_grad_arr = mlx.mlx_array_new_data.?(C_grad.ptr, &shapeC, 2, mlx.MLX_FLOAT32);
-    defer mlx.mlx_array_free.?(c_grad_arr);
-
-    if (A_grad) |a_g| {
-        const a_grad_arr = mlx.mlx_array_new_data.?(a_g.ptr, &shapeC, 2, mlx.MLX_FLOAT32);
-        defer mlx.mlx_array_free.?(a_grad_arr);
-
-        var new_a_grad = mlx.mlx_array_new.?();
-        defer mlx.mlx_array_free.?(new_a_grad);
-
-        _ = mlx.mlx_add.?(&new_a_grad, a_grad_arr, c_grad_arr, stream);
-        _ = mlx.mlx_array_eval.?(new_a_grad);
-        const data_ptr = mlx.mlx_array_data_float32.?(new_a_grad);
-        @memcpy(a_g, data_ptr[0 .. M * N]);
-    }
-
-    if (bias_grad) |b_g| {
-        var sum_arr = mlx.mlx_array_new.?();
-        defer mlx.mlx_array_free.?(sum_arr);
-
-        _ = mlx.mlx_sum_axis.?(&sum_arr, c_grad_arr, 0, false, stream);
-
-        const shapeB = [2]c_int{ 1, @intCast(N) };
-        const b_grad_arr = mlx.mlx_array_new_data.?(b_g.ptr, &shapeB, 2, mlx.MLX_FLOAT32);
-        defer mlx.mlx_array_free.?(b_grad_arr);
-
-        var new_b_grad = mlx.mlx_array_new.?();
-        defer mlx.mlx_array_free.?(new_b_grad);
-
-        _ = mlx.mlx_add.?(&new_b_grad, b_grad_arr, sum_arr, stream);
-        _ = mlx.mlx_array_eval.?(new_b_grad);
-        const data_ptr = mlx.mlx_array_data_float32.?(new_b_grad);
-        @memcpy(b_g, data_ptr[0 .. N]);
-    }
-}
-
-fn mlx_relu_impl(
-    total_size: usize,
-    A: []const f32, C: []f32
-) void {
-    if (!use_mlx_enabled) return;
-
-    const stream = mlx.mlx_default_gpu_stream_new.?();
-    defer mlx.mlx_stream_free.?(stream);
-
-    const shape = [1]c_int{ @intCast(total_size) };
-    const a_arr = mlx.mlx_array_new_data.?(A.ptr, &shape, 1, mlx.MLX_FLOAT32);
-    defer mlx.mlx_array_free.?(a_arr);
-
-    const zero = mlx.mlx_array_new_float32.?(0.0);
-    defer mlx.mlx_array_free.?(zero);
-
-    var res_arr = mlx.mlx_array_new.?();
-    defer mlx.mlx_array_free.?(res_arr);
-
-    _ = mlx.mlx_maximum.?(&res_arr, a_arr, zero, stream);
-    _ = mlx.mlx_array_eval.?(res_arr);
-
-    const data_ptr = mlx.mlx_array_data_float32.?(res_arr);
-    @memcpy(C, data_ptr[0..total_size]);
-}
-
-fn mlx_relu_backward_impl(
-    total_size: usize,
-    A_data: []const f32,
-    C_grad: []const f32,
-    A_grad: []f32
-) void {
-    if (!use_mlx_enabled) return;
-
-    const stream = mlx.mlx_default_gpu_stream_new.?();
-    defer mlx.mlx_stream_free.?(stream);
-
-    const shape = [1]c_int{ @intCast(total_size) };
-    const a_data_arr = mlx.mlx_array_new_data.?(A_data.ptr, &shape, 1, mlx.MLX_FLOAT32);
-    defer mlx.mlx_array_free.?(a_data_arr);
-
-    const c_grad_arr = mlx.mlx_array_new_data.?(C_grad.ptr, &shape, 1, mlx.MLX_FLOAT32);
-    defer mlx.mlx_array_free.?(c_grad_arr);
-
-    const zero = mlx.mlx_array_new_float32.?(0.0);
-    defer mlx.mlx_array_free.?(zero);
-
-    var cond = mlx.mlx_array_new.?();
-    defer mlx.mlx_array_free.?(cond);
-    _ = mlx.mlx_greater.?(&cond, a_data_arr, zero, stream);
-
-    var grad_step = mlx.mlx_array_new.?();
-    defer mlx.mlx_array_free.?(grad_step);
-    _ = mlx.mlx_multiply.?(&grad_step, c_grad_arr, cond, stream);
-
-    const a_grad_arr = mlx.mlx_array_new_data.?(A_grad.ptr, &shape, 1, mlx.MLX_FLOAT32);
-    defer mlx.mlx_array_free.?(a_grad_arr);
-
-    var new_grad = mlx.mlx_array_new.?();
-    defer mlx.mlx_array_free.?(new_grad);
-    _ = mlx.mlx_add.?(&new_grad, a_grad_arr, grad_step, stream);
-    _ = mlx.mlx_array_eval.?(new_grad);
-
-    const data_ptr = mlx.mlx_array_data_float32.?(new_grad);
-    @memcpy(A_grad, data_ptr[0..total_size]);
-}
 
 const num_threads = 4; // Using 4 threads is the sweet spot for performance and thread spawn overhead
 
@@ -418,57 +178,44 @@ pub const Op = struct {
                 // 1. 计算对左乘矩阵 A 的梯度: dA += dC * B^T
                 // 数学原理: d(A * B)/dA = dC * B^T，形状为 (M x N) * (N x K) -> M x K
                 if (A.requires_grad) {
-                    if (use_mlx) {
-                        mlx_matmul_impl(false, true, M, K, N, C.grad, B.data, A.grad, 1.0);
-                    } else if (use_gpu) {
-                        // 使用 GPU Metal 矩阵乘法进行计算，并使用 beta=1.0 累加当前梯度
-                        metal_matmul(0, 1, @intCast(M), @intCast(K), @intCast(N), C.grad.ptr, B.data.ptr, A.grad.ptr, 1.0);
-                    } else {
-                        // 使用 CPU Apple Accelerate (AMX) sgemm 矩阵乘法
-                        c.cblas_sgemm(
-                            c.CblasRowMajor,
-                            c.CblasNoTrans, // C.grad 不转置
-                            c.CblasTrans,   // B.data 需转置为 B^T
-                            @intCast(M),
-                            @intCast(K),
-                            @intCast(N),
-                            1.0,            // alpha = 1.0
-                            C.grad.ptr,
-                            @intCast(N),
-                            B.data.ptr,
-                            @intCast(N),
-                            1.0,            // beta = 1.0 表示累加到 A.grad，不覆盖已有值
-                            A.grad.ptr,
-                            @intCast(K),
-                        );
-                    }
+                    // 使用 CPU Apple Accelerate (AMX) sgemm 矩阵乘法
+                    c.cblas_sgemm(
+                        c.CblasRowMajor,
+                        c.CblasNoTrans, // C.grad 不转置
+                        c.CblasTrans,   // B.data 需转置为 B^T
+                        @intCast(M),
+                        @intCast(K),
+                        @intCast(N),
+                        1.0,            // alpha = 1.0
+                        C.grad.ptr,
+                        @intCast(N),
+                        B.data.ptr,
+                        @intCast(N),
+                        1.0,            // beta = 1.0 表示累加到 A.grad，不覆盖已有值
+                        A.grad.ptr,
+                        @intCast(K),
+                    );
                 }
 
                 // 2. 计算对右乘矩阵 B 的梯度: dB += A^T * dC
                 // 数学原理: d(A * B)/dB = A^T * dC，形状为 (K x M) * (M x N) -> K x N
                 if (B.requires_grad) {
-                    if (use_mlx) {
-                        mlx_matmul_impl(true, false, K, N, M, A.data, C.grad, B.grad, 1.0);
-                    } else if (use_gpu) {
-                        metal_matmul(1, 0, @intCast(K), @intCast(N), @intCast(M), A.data.ptr, C.grad.ptr, B.grad.ptr, 1.0);
-                    } else {
-                        c.cblas_sgemm(
-                            c.CblasRowMajor,
-                            c.CblasTrans,   // A.data 需转置为 A^T
-                            c.CblasNoTrans, // C.grad 不转置
-                            @intCast(K),
-                            @intCast(N),
-                            @intCast(M),
-                            1.0,            // alpha = 1.0
-                            A.data.ptr,
-                            @intCast(K),
-                            C.grad.ptr,
-                            @intCast(N),
-                            1.0,            // beta = 1.0 同样进行累加
-                            B.grad.ptr,
-                            @intCast(N),
-                        );
-                    }
+                    c.cblas_sgemm(
+                        c.CblasRowMajor,
+                        c.CblasTrans,   // A.data 需转置为 A^T
+                        c.CblasNoTrans, // C.grad 不转置
+                        @intCast(K),
+                        @intCast(N),
+                        @intCast(M),
+                        1.0,            // alpha = 1.0
+                        A.data.ptr,
+                        @intCast(K),
+                        C.grad.ptr,
+                        @intCast(N),
+                        1.0,            // beta = 1.0 同样进行累加
+                        B.grad.ptr,
+                        @intCast(N),
+                    );
                 }
             },
             .AddBias => {
@@ -482,27 +229,18 @@ pub const Op = struct {
                 // 1. 关于输入 A 的梯度为 dC，按元素累加到 A.grad
                 // 2. 关于偏置 bias (1 x N) 的梯度为 dC 按行累加（降维累加）：
                 //    bias_grad[j] = sum_{i=0..M-1} dC[i, j]
-                if (use_mlx) {
-                    mlx_add_bias_backward_impl(
-                        M, N,
-                        C.grad,
-                        if (A.requires_grad) A.grad else null,
-                        if (bias.requires_grad) bias.grad else null
-                    );
-                } else {
-                    // 保持单线程处理，避免多线程调度和同步造成的开销
-                    for (0..N) |n| {
-                        var bias_sum: f32 = 0.0;
-                        for (0..M) |m| {
-                            const grad_val = C.grad[m * N + n];
-                            if (A.requires_grad) {
-                                A.grad[m * N + n] += grad_val;
-                            }
-                            bias_sum += grad_val;
+                // 保持单线程处理，避免多线程调度和同步造成的开销
+                for (0..N) |n| {
+                    var bias_sum: f32 = 0.0;
+                    for (0..M) |m| {
+                        const grad_val = C.grad[m * N + n];
+                        if (A.requires_grad) {
+                            A.grad[m * N + n] += grad_val;
                         }
-                        if (bias.requires_grad) {
-                            bias.grad[n] += bias_sum;
-                        }
+                        bias_sum += grad_val;
+                    }
+                    if (bias.requires_grad) {
+                        bias.grad[n] += bias_sum;
                     }
                 }
             },
@@ -514,13 +252,9 @@ pub const Op = struct {
                 // 如果前向值 A.data[i] > 0，则梯度原样传递：dA[i] += dC[i]
                 // 如果前向值 A.data[i] <= 0，则梯度置为 0
                 if (A.requires_grad) {
-                    if (use_mlx) {
-                        mlx_relu_backward_impl(A.data.len, A.data, C.grad, A.grad);
-                    } else {
-                        const total = A.data.len;
-                        for (0..total) |i| {
-                            A.grad[i] += if (A.data[i] > 0.0) C.grad[i] else 0.0;
-                        }
+                    const total = A.data.len;
+                    for (0..total) |i| {
+                        A.grad[i] += if (A.data[i] > 0.0) C.grad[i] else 0.0;
                     }
                 }
             },
@@ -603,31 +337,23 @@ pub const Graph = struct {
         const K = A.cols;
         const N = B.cols;
 
-        // 根据硬件后端类型分流计算
-        if (use_mlx) {
-            mlx_matmul_impl(false, false, M, N, K, A.data, B.data, C.data, 0.0);
-        } else if (use_gpu) {
-            // 调用 Metal GPU 计算：无转置矩阵乘法，结果累加因子为 0.0（全新覆盖）
-            metal_matmul(0, 0, @intCast(M), @intCast(N), @intCast(K), A.data.ptr, B.data.ptr, C.data.ptr, 0.0);
-        } else {
-            // 调用 CPU macOS Accelerate CBLAS 计算
-            c.cblas_sgemm(
-                c.CblasRowMajor,
-                c.CblasNoTrans, // A 不转置
-                c.CblasNoTrans, // B 不转置
-                @intCast(M),
-                @intCast(N),
-                @intCast(K),
-                1.0,            // alpha = 1.0
-                A.data.ptr,
-                @intCast(K),
-                B.data.ptr,
-                @intCast(N),
-                0.0,            // beta = 0.0（不覆盖/不累加）
-                C.data.ptr,
-                @intCast(N),
-            );
-        }
+        // 调用 CPU macOS Accelerate CBLAS 计算
+        c.cblas_sgemm(
+            c.CblasRowMajor,
+            c.CblasNoTrans, // A 不转置
+            c.CblasNoTrans, // B 不转置
+            @intCast(M),
+            @intCast(N),
+            @intCast(K),
+            1.0,            // alpha = 1.0
+            A.data.ptr,
+            @intCast(K),
+            B.data.ptr,
+            @intCast(N),
+            0.0,            // beta = 0.0（不覆盖/不累加）
+            C.data.ptr,
+            @intCast(N),
+        );
 
         // 构建并保存当前算子节点以构成计算图的依赖链
         const allocator = self.arena.allocator();
@@ -657,16 +383,12 @@ pub const Graph = struct {
         const M = A.rows;
         const N = A.cols;
 
-        if (use_mlx) {
-            mlx_add_bias_impl(M, N, A.data, bias.data, C.data);
-        } else {
-            // 偏置向量形状为 1 x N，按行广播复制相加到每一行
-            for (0..M) |i| {
-                const a_row = A.data[i * N .. (i + 1) * N];
-                const c_row = C.data[i * N .. (i + 1) * N];
-                for (0..N) |j| {
-                    c_row[j] = a_row[j] + bias.data[j];
-                }
+        // 偏置向量形状为 1 x N，按行广播复制相加到每一行
+        for (0..M) |i| {
+            const a_row = A.data[i * N .. (i + 1) * N];
+            const c_row = C.data[i * N .. (i + 1) * N];
+            for (0..N) |j| {
+                c_row[j] = a_row[j] + bias.data[j];
             }
         }
 
@@ -694,13 +416,9 @@ pub const Graph = struct {
     pub fn relu(self: *Graph, A: *Tensor) !*Tensor {
         const C = try self.tensor(A.rows, A.cols, A.requires_grad);
 
-        if (use_mlx) {
-            mlx_relu_impl(A.data.len, A.data, C.data);
-        } else {
-            const total = A.data.len;
-            for (0..total) |i| {
-                C.data[i] = if (A.data[i] > 0.0) A.data[i] else 0.0;
-            }
+        const total = A.data.len;
+        for (0..total) |i| {
+            C.data[i] = if (A.data[i] > 0.0) A.data[i] else 0.0;
         }
 
         const allocator = self.arena.allocator();
