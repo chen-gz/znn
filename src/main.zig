@@ -18,22 +18,30 @@ const CLASS_NAMES = [10][]const u8{
 };
 
 pub fn main(init: std.process.Init) !void {
-    // Zig 进程初始化提供的 arena 分配器，用于进程级的内存分配
     const arena = init.arena.allocator();
     const io = init.io;
 
-    // 解析命令行参数，检查是否传入了 --gpu 开关
+    // 解析命令行参数，检查是否传入了 --gpu, --mlx 或 --large 开关
     const args = try init.minimal.args.toSlice(arena);
     var run_gpu = false;
+    var run_mlx = false;
+    var run_large = false;
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--gpu")) {
             run_gpu = true;
+        } else if (std.mem.eql(u8, arg, "--mlx")) {
+            run_mlx = true;
+        } else if (std.mem.eql(u8, arg, "--large")) {
+            run_large = true;
         }
     }
     // 设置 autodiff 引擎中的全局模式标志
     autodiff.use_gpu = run_gpu;
+    autodiff.use_mlx = run_mlx;
 
-    if (run_gpu) {
+    if (run_mlx) {
+        std.debug.print("Running on GPU (Apple MLX)...\n", .{});
+    } else if (run_gpu) {
         // 如果是 GPU 模式，初始化 macOS Metal Compute Shader 后端
         const rc = autodiff.metal_init();
         if (rc != 0) {
@@ -78,17 +86,39 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Loaded {} training images, {} test images.\n", .{train_images.num_images, test_images.num_images});
 
     const ni = 784; // 28 * 28 pixels
-    const nh1 = 128;
-    const nh2 = 64;
+    const no = 10; // 10 classes
+
+    if (run_large) {
+        std.debug.print("Initializing Large Model (4-layer MLP: 784 -> 2048 -> 2048 -> 1024 -> 10)...\n", .{});
+        var model = try nn.LargeNeuralNetwork.init(arena, ni, 2048, 2048, 1024, no, 42);
+        defer model.deinit();
+        try runTraining(nn.LargeMLP, &model.inner, arena, io, train_images, train_labels, test_images, test_labels, true);
+    } else {
+        std.debug.print("Initializing Standard Model (3-layer MLP: 784 -> 128 -> 64 -> 10)...\n", .{});
+        var model = try nn.NeuralNetwork.init(arena, ni, 128, 64, no, 42);
+        defer model.deinit();
+        try runTraining(nn.MLP, &model.inner, arena, io, train_images, train_labels, test_images, test_labels, false);
+    }
+}
+
+fn runTraining(
+    comptime T: type,
+    inner_model: *T,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    train_images: dataset.ImageDataset,
+    train_labels: dataset.LabelDataset,
+    test_images: dataset.ImageDataset,
+    test_labels: dataset.LabelDataset,
+    run_large: bool,
+) !void {
+    const ni = 784; // 28 * 28 pixels
     const no = 10; // 10 classes
     const batch_size = 64;
     const test_batch_size = 100;
     const epochs = 15;
     var lr: f32 = 0.05;
     const beta: f32 = 0.9; // SGD momentum factor
-
-    var model = try nn.NeuralNetwork.init(arena, ni, nh1, nh2, no, 42);
-    defer model.deinit();
 
     // Indices for shuffling
     const num_train = train_images.num_images;
@@ -112,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
     var eval_y_batch = try arena.alloc(u8, test_batch_size);
     defer arena.free(eval_y_batch);
 
-    std.debug.print("Starting training (3-layer NN with dynamic autodiff: {} -> {} -> {} -> {})...\n", .{ni, nh1, nh2, no});
+    std.debug.print("Starting training (3-layer NN with dynamic autodiff, Large={})...\n", .{run_large});
 
     // 开始主循环（15 个 Epoch 的 Fashion MNIST 训练）
     for (0..epochs) |epoch| {
@@ -148,7 +178,7 @@ pub fn main(init: std.process.Init) !void {
             @memcpy(x_tensor.data, x_batch);
 
             // 执行前向传播构建动态计算图（类似于 PyTorch 的 model(x)）
-            const logits = try model.forward(&graph, x_tensor);
+            const logits = try inner_model.forward(&graph, x_tensor);
 
             // 损失函数：交叉熵损失节点，附带 Softmax 概率
             const loss = try graph.softmaxCrossEntropy(logits, y_batch);
@@ -162,13 +192,13 @@ pub fn main(init: std.process.Init) !void {
             epoch_acc += batch_acc;
 
             // 1. 在反向传播前，清空神经网络模型中持久化权重的梯度值 (w.grad = 0)
-            model.zeroGrad();
+            nn.zeroGradModel(inner_model);
 
             // 2. 触发反向传播，自 loss 节点开始，通过拓扑排序逆序逐个算子求导，填充各 Tensor 的 grad 梯度缓冲区
             try graph.backward(loss);
 
             // 3. 执行权重更新：采用带 Momentum 动量的随机梯度下降（SGD）更新网络权重与偏置项
-            model.updateWeights(lr, beta);
+            nn.updateWeightsModel(inner_model, lr, beta);
         }
 
         epoch_loss /= @as(f32, @floatFromInt(num_batches));
@@ -199,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
             const x_tensor = try graph.tensor(test_batch_size, ni, false);
             @memcpy(x_tensor.data, eval_x_batch);
 
-            const logits = try model.forward(&graph, x_tensor);
+            const logits = try inner_model.forward(&graph, x_tensor);
 
             const loss = try graph.softmaxCrossEntropy(logits, eval_y_batch);
 
@@ -229,7 +259,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Save model parameters
     std.debug.print("\nSaving trained model to 'model.bin'...\n", .{});
-    model.save(io, "model.bin") catch |err| {
+    nn.saveModel(inner_model, io, "model.bin") catch |err| {
         std.debug.print("Failed to save model: {}\n", .{err});
     };
 
@@ -247,7 +277,7 @@ pub fn main(init: std.process.Init) !void {
         const x_tensor = try graph.tensor(1, ni, false);
         @memcpy(x_tensor.data, img_slice);
 
-        const logits = try model.forward(&graph, x_tensor);
+        const logits = try inner_model.forward(&graph, x_tensor);
 
         const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
         const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
