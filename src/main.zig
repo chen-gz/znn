@@ -5,16 +5,8 @@ const nn = zig_ml.nn;
 const autodiff = zig_ml.autodiff;
 
 const CLASS_NAMES = [10][]const u8{
-    "T-shirt/top",
-    "Trouser",
-    "Pullover",
-    "Dress",
-    "Coat",
-    "Sandal",
-    "Shirt",
-    "Sneaker",
-    "Bag",
-    "Ankle boot",
+    "T-shirt/top", "Trouser", "Pullover", "Dress", "Coat",
+    "Sandal",      "Shirt",   "Sneaker",  "Bag",   "Ankle boot",
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -36,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
     var test_labels = try dataset.loadLabels(io, arena, "data/t10k-labels-idx1-ubyte");
     defer test_labels.deinit(arena);
 
-    std.debug.print("Loaded {} training images, {} test images.\n", .{train_images.num_images, test_images.num_images});
+    std.debug.print("Loaded {} training images, {} test images.\n", .{ train_images.num_images, test_images.num_images });
 
     const input_dim = train_images.rows * train_images.cols;
     const num_classes = CLASS_NAMES.len;
@@ -105,10 +97,7 @@ fn runTraining(
             // 从数据集抓取并拼接一个 Batch 的输入数据和目标标签
             for (0..batch_size) |j| {
                 const idx = train_indices[batch_start + j];
-                @memcpy(
-                    x_batch[j * input_dim .. (j + 1) * input_dim],
-                    train_images.data[idx * input_dim .. (idx + 1) * input_dim]
-                );
+                @memcpy(x_batch[j * input_dim .. (j + 1) * input_dim], train_images.data[idx * input_dim .. (idx + 1) * input_dim]);
                 y_batch[j] = train_labels.data[idx];
             }
 
@@ -160,10 +149,7 @@ fn runTraining(
             // Prepare batch
             for (0..test_batch_size) |j| {
                 const idx = batch_start + j;
-                @memcpy(
-                    eval_x_batch[j * input_dim .. (j + 1) * input_dim],
-                    test_images.data[idx * input_dim .. (idx + 1) * input_dim]
-                );
+                @memcpy(eval_x_batch[j * input_dim .. (j + 1) * input_dim], test_images.data[idx * input_dim .. (idx + 1) * input_dim]);
                 eval_y_batch[j] = test_labels.data[idx];
             }
 
