@@ -100,3 +100,26 @@ pub fn loadLabels(io: std.Io, allocator: std.mem.Allocator, file_path: []const u
         .data = data,
     };
 }
+
+pub const Dataset = struct {
+    images: ImageDataset,
+    labels: LabelDataset,
+
+    pub fn deinit(self: *Dataset, allocator: std.mem.Allocator) void {
+        self.images.deinit(allocator);
+        self.labels.deinit(allocator);
+    }
+};
+
+pub fn loadDataset(io: std.Io, allocator: std.mem.Allocator, images_path: []const u8, labels_path: []const u8) !Dataset {
+    var images = try loadImages(io, allocator, images_path);
+    errdefer images.deinit(allocator);
+
+    var labels = try loadLabels(io, allocator, labels_path);
+    errdefer labels.deinit(allocator);
+
+    return Dataset{
+        .images = images,
+        .labels = labels,
+    };
+}
