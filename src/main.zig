@@ -67,14 +67,10 @@ fn runTraining(
     var prng = std.Random.DefaultPrng.init(1337);
     const random = prng.random();
 
-    // Allocate batch buffers (we copy images into these contiguous buffers before wrapping as tensors)
-    var x_batch = try arena.alloc(f32, batch_size * input_dim);
-    defer arena.free(x_batch);
+    // Allocate label batch buffers (since images are wrapped directly into Tensors, we only need buffers for targets)
     var y_batch = try arena.alloc(u8, batch_size);
     defer arena.free(y_batch);
 
-    var eval_x_batch = try arena.alloc(f32, test_batch_size * input_dim);
-    defer arena.free(eval_x_batch);
     var eval_y_batch = try arena.alloc(u8, test_batch_size);
     defer arena.free(eval_y_batch);
 
@@ -94,21 +90,23 @@ fn runTraining(
         for (0..num_batches) |b| {
             const batch_start = b * batch_size;
 
-            // 从数据集抓取并拼接一个 Batch 的输入数据和目标标签
-            for (0..batch_size) |j| {
-                const idx = train_indices[batch_start + j];
-                @memcpy(x_batch[j * input_dim .. (j + 1) * input_dim], train_images.data[idx * input_dim .. (idx + 1) * input_dim]);
-                y_batch[j] = train_labels.data[idx];
-            }
-
             // 关键：初始化一个新的、生命周期处于当前 batch 内的局部计算图。
             // 使用 Arena 分配器，当前 batch 结束后通过 `defer graph.deinit()` 一次性自动释放所有中间层 Tensor 内存。
             var graph = autodiff.Graph.init(arena);
             defer graph.deinit();
 
-            // 将 Batch 的输入数据封装为计算图中的 Tensor 节点（注意输入数据 requires_grad = false）
+            // 将 Batch 的输入数据直接封装为计算图中的 Tensor 节点并分配内存（注意输入数据 requires_grad = false）
             const x_tensor = try graph.tensor(batch_size, input_dim, false);
-            @memcpy(x_tensor.data, x_batch);
+
+            // 从数据集直接抓取并拼接一个 Batch 的输入数据到 x_tensor.data 和目标标签
+            for (0..batch_size) |j| {
+                const idx = train_indices[batch_start + j];
+                @memcpy(
+                    x_tensor.data[j * input_dim .. (j + 1) * input_dim],
+                    train_images.data[idx * input_dim .. (idx + 1) * input_dim]
+                );
+                y_batch[j] = train_labels.data[idx];
+            }
 
             // 执行前向传播构建动态计算图（类似于 PyTorch 的 model(x)）
             const logits = try model.forward(&graph, x_tensor);
@@ -146,18 +144,20 @@ fn runTraining(
         for (0..num_test_batches) |b| {
             const batch_start = b * test_batch_size;
 
-            // Prepare batch
-            for (0..test_batch_size) |j| {
-                const idx = batch_start + j;
-                @memcpy(eval_x_batch[j * input_dim .. (j + 1) * input_dim], test_images.data[idx * input_dim .. (idx + 1) * input_dim]);
-                eval_y_batch[j] = test_labels.data[idx];
-            }
-
             var graph = autodiff.Graph.init(arena);
             defer graph.deinit();
 
             const x_tensor = try graph.tensor(test_batch_size, input_dim, false);
-            @memcpy(x_tensor.data, eval_x_batch);
+
+            // Prepare batch directly into x_tensor.data
+            for (0..test_batch_size) |j| {
+                const idx = batch_start + j;
+                @memcpy(
+                    x_tensor.data[j * input_dim .. (j + 1) * input_dim],
+                    test_images.data[idx * input_dim .. (idx + 1) * input_dim]
+                );
+                eval_y_batch[j] = test_labels.data[idx];
+            }
 
             const logits = try model.forward(&graph, x_tensor);
 
