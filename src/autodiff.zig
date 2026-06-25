@@ -1,7 +1,6 @@
 const std = @import("std");
 const c = @import("cblas.zig");
 
-const num_threads = 4; // Using 4 threads is the sweet spot for performance and thread spawn overhead
 
 // 张量（Tensor）结构体：自动微分引擎的核心数据单元
 // 封装了前向传播数据数据流和反向传播的梯度数据流
@@ -40,119 +39,6 @@ pub const OpContext = union(enum) {
     },
 };
 
-// ThreadPool implementation
-pub const ThreadPool = struct {
-    workers: [num_threads - 1]Worker,
-    task: std.atomic.Value(?*const Task),
-    barrier: std.atomic.Value(usize),
-
-    const Worker = struct {
-        thread: std.Thread,
-        state: std.atomic.Value(u32), // 0: idle, 1: busy, 2: exit
-        id: usize,
-    };
-
-    const Task = struct {
-        func: *const fn (ctx: ?*anyopaque, thread_idx: usize) void,
-        ctx: ?*anyopaque,
-    };
-
-    fn sleepNs(ns: u64) void {
-        var ts = std.posix.timespec{
-            .sec = @intCast(ns / 1_000_000_000),
-            .nsec = @intCast(ns % 1_000_000_000),
-        };
-        _ = std.posix.system.nanosleep(&ts, null);
-    }
-
-    fn workerEntry(self: *ThreadPool, worker_id: usize) void {
-        const worker = &self.workers[worker_id];
-        while (true) {
-            var state = worker.state.load(.acquire);
-            var spins: usize = 0;
-            while (state == 0) {
-                spins += 1;
-                if (spins > 1000) {
-                    sleepNs(10_000); // 10 microseconds
-                } else {
-                    std.Thread.yield() catch {};
-                }
-                state = worker.state.load(.acquire);
-            }
-            if (state == 2) {
-                break;
-            }
-
-            if (self.task.load(.acquire)) |task| {
-                task.func(task.ctx, worker_id + 1);
-            }
-
-            worker.state.store(0, .release);
-            _ = self.barrier.fetchAdd(1, .acq_rel);
-        }
-    }
-
-    pub fn run(self: *ThreadPool, func: *const fn (ctx: ?*anyopaque, thread_idx: usize) void, ctx: ?*anyopaque) void {
-        const task = Task{
-            .func = func,
-            .ctx = ctx,
-        };
-        self.task.store(&task, .release);
-        self.barrier.store(0, .release);
-
-        for (0..num_threads - 1) |i| {
-            self.workers[i].state.store(1, .release);
-        }
-
-        func(ctx, 0);
-
-        var spins: usize = 0;
-        while (self.barrier.load(.acquire) < num_threads - 1) {
-            spins += 1;
-            if (spins > 1000) {
-                std.Thread.yield() catch {};
-            }
-        }
-
-        self.task.store(null, .release);
-    }
-};
-
-pub var global_pool: ThreadPool = undefined;
-pub var global_pool_initialized: bool = false;
-
-pub fn initThreadPool() !void {
-    if (global_pool_initialized) return;
-    global_pool = ThreadPool{
-        .workers = undefined,
-        .task = std.atomic.Value(?*const ThreadPool.Task).init(null),
-        .barrier = std.atomic.Value(usize).init(0),
-    };
-    for (0..num_threads - 1) |i| {
-        global_pool.workers[i] = .{
-            .thread = undefined,
-            .state = std.atomic.Value(u32).init(0),
-            .id = i,
-        };
-    }
-    // Spawn threads
-    for (0..num_threads - 1) |i| {
-        global_pool.workers[i].thread = try std.Thread.spawn(.{}, ThreadPool.workerEntry, .{ &global_pool, i });
-    }
-    global_pool_initialized = true;
-}
-
-pub fn deinitThreadPool() void {
-    if (global_pool_initialized) {
-        for (0..num_threads - 1) |i| {
-            global_pool.workers[i].state.store(2, .release);
-        }
-        for (0..num_threads - 1) |i| {
-            global_pool.workers[i].thread.join();
-        }
-        global_pool_initialized = false;
-    }
-}
 
 
 
