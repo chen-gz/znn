@@ -1,38 +1,43 @@
-# Zig ML: 基于 Zig 0.16.0 与双硬件加速的高性能深度学习框架
+# Zig ML (Educational): 极简 Zig 深度学习教学项目
 
-本项目是一个使用 **Zig 0.16.0** 从零实现的三层前馈神经网络（MLP），用于 Fashion MNIST 图像分类。它内置了完整的**动态逆向自动微分引擎（Dynamic Autodiff）**，并在 macOS 上提供了高性能的 CPU（Apple AMX 协处理器）与 GPU（Metal Compute Shader）双加速计算后端。
+本项目是一个为教学目的设计的、使用 **Zig 0.16.0** 从零实现的三层前馈神经网络（MLP）框架，用于 Fashion MNIST 图像分类。
 
----
-
-## 🚀 核心特性
-
-1. **动态逆向自动微分引擎**：
-   * 支持 `MatMul`（矩阵乘法）、`AddBias`（偏置相加）、`ReLU`（激活函数）和 `SoftmaxCrossEntropy`（损失函数）等核心算子的动态求导。
-   * 采用 **DFS 拓扑排序** 算法，自动规划反向传播求导链条。
-   * 基于 **ArenaAllocator** 的计算图生命周期管理，每次 Batch 结束后一键释放所有临时层节点内存，无内存泄露和碎片。
-
-2. **极简 PyTorch-like API**：
-   * 封装了 `forward` 接口，在 Zig 中以接近 PyTorch 的可读性（`logits = model.forward(&graph, x)`）定义并构建多层复杂神经网络。
-
-3. **双硬件加速后端**：
-   * **CPU 加速（AMX）**：通过 macOS `Accelerate` 动态链接库直接调用系统 `cblas_sgemm`，深度压榨 Apple Silicon 芯片中的 AMX 矩阵计算硬件。
-   * **GPU 加速（Metal）**：通过 Objective-C++ 联合编译，利用 Metal Compute Shader 在苹果 GPU 上执行矩阵并行计算。
-
-4. **无外部依赖 & 极致轻量化**：
-   * 除 macOS 系统自带的核心框架（`Accelerate`、`Metal`、`Foundation`）外，100% 纯 Zig 实现，编译产出的 Release 独立运行二进制文件仅为 **~420KB**。
+它非常适合作为学习以下内容的实战案例：
+1. **自动微分原理**：理解动态逆向自动微分引擎（Dynamic Autodiff）的运行方式。
+2. **Zig 语言实战**：学习 Zig 的内存分配（Allocator）、所有权托管与编译期反射等语法特性。
+3. **C 语言互操作**：掌握如何在 Zig 中直接链接并调用底层的系统 C 语言库（CBLAS/AMX 矩阵加速）。
 
 ---
 
-## 📊 性能表现（Apple Silicon）
+## 🚀 核心教学特性
 
-在相同的硬件环境下，训练 15 个 Epoch 的 Fashion MNIST（Batch Size = 64），平均每个 Epoch 的训练耗时对比如下：
+1. **从零实现动态自动微分引擎 (Dynamic Autodiff)**：
+   * 支持 `MatMul`（矩阵乘法）、`AddBias`（偏置相加）、`ReLU`（激活函数）和 `SoftmaxCrossEntropy`（损失函数结合）等核心算子的求导逻辑。
+   * 采用 **DFS 拓扑排序** 算法，自动寻找并构建反向传播求导链条。
+   * 使用 **ArenaAllocator** 托管计算图生命周期，每次 Batch 结束后一键释放所有求导中间层的 Tensor 节点内存，展示了 Zig 极简而安全的内存管理技巧。
 
-| 运行环境/版本 | 底层芯片与后端 | 平均 Epoch 耗时 | 备注 |
-| :--- | :--- | :--- | :--- |
-| **自研 Zig (CBLAS 加速版)** 🚀 | **苹果 CPU (AMX)** | **~0.18 秒** | 缓存友好，无额外调用延迟，表现最快。 |
-| **自研 Zig (Metal GPU 版)** ⚡ | **苹果 GPU (Metal)** | **~2.20 秒** | 适合大规模矩阵，小矩阵受设备指令编码与调度开销限制。 |
-| **PyTorch CPU (多线程)** | CPU 多线程 (MKL/OpenMP) | **~1.70 秒** | 工业级优化，但受 Python 解释器及封装影响慢于原生 Zig CBLAS。 |
-| **PyTorch MPS (GPU)** | 苹果 GPU (MPS) | **~2.75 秒** | PyTorch 官方的苹果 GPU 加速通道。 |
+2. **精巧的仿 PyTorch 式 API (PyTorch-like Wrapper)**：
+   * 提供了高可读性的前向接口：`logits = try model.forward(&graph, x)`。
+   * 通过 Zig 的编译期反射（`comptime`），实现了一个轻量级的 `Module` 包装器，自动路由和实现模型的参数初始化、梯度清零 (`zeroGrad`)、梯度更新 (`updateWeights`) 和模型的二进制存取 (`save` & `load`)。
+
+3. **极致简单的 CPU 矩阵乘法加速 (CBLAS sgemm)**：
+   * 摒弃了复杂的 GPU (Metal/MLX) 依赖和多线程调度逻辑（移除了不必要的 ThreadPool）。
+   * 直接通过 macOS 的 `Accelerate` 框架链接系统 CBLAS 库，底层自动使用 Apple Silicon 的 AMX 协处理器执行单线程矩阵乘法，性能卓越且代码高度简化。
+
+4. **100% 纯 Zig & 零第三方包依赖**：
+   * 独立运行二进制文件，除了 macOS 自带的 `Accelerate` CBLAS 动态库外，无任何第三方包依赖。
+
+---
+
+## 📂 项目结构说明
+
+* **[src/main.zig](file:///Users/guangzong/Documents/zig_ml/src/main.zig)**：框架的教学执行入口。负责加载数据集、构建标准模型、运行 Epoch 训练循环，并展示最终的预测结果与模型保存。
+* **[src/autodiff.zig](file:///Users/guangzong/Documents/zig_ml/src/autodiff.zig)**：核心自动微分引擎实现。定义了张量节点（`Tensor`）、计算图结构（`Graph`）及其算子反向传播机制。
+* **[src/nn.zig](file:///Users/guangzong/Documents/zig_ml/src/nn.zig)**：神经网络层定义。包括标准 MLP 的三层模型结构设计、Kaiming (He) 参数初始化、带有 Momentum 动量的 SGD 权重更新机制、以及 `Module` 包装器。
+* **[src/cblas.zig](file:///Users/guangzong/Documents/zig_ml/src/cblas.zig)**：系统 C 语言加速库接口绑定，声明了 CBLAS 矩阵乘法接口。
+* **[src/dataset.zig](file:///Users/guangzong/Documents/zig_ml/src/dataset.zig)**：自定义的 Fashion MNIST idx 格式文件二进制解析器。
+* **[src/root.zig](file:///Users/guangzong/Documents/zig_ml/src/root.zig)**：项目的导出根模块以及存放基础编译期单元测试的地方。
+* **[build.zig](file:///Users/guangzong/Documents/zig_ml/build.zig)**：Zig 构建描述脚本。配置了 C 语言编译环境与 macOS Accelerate 系统框架链接。
 
 ---
 
@@ -45,32 +50,18 @@
 * `t10k-images-idx3-ubyte`
 * `t10k-labels-idx1-ubyte`
 
-### 2. 编译并运行 (CPU - CBLAS / AMX)
+### 2. 编译并运行
+运行命令行：
 ```bash
-# 运行高性能 Release 模式
+# 运行高性能 Release 模式进行模型训练
 zig build run -Doptimize=ReleaseFast
 
-# 运行 Debug 模式（含越界与安全检查）
+# 运行 Debug 模式（含完整运行时安全与越界检查）
 zig build run
 ```
 
-### 3. 编译并运行 (GPU - Metal)
+### 3. 运行单元测试
 ```bash
-# 运行高性能 Release 模式并使用 GPU
-zig build run -Doptimize=ReleaseFast -- --gpu
-
-# 运行 Debug 模式并使用 GPU
-zig build run -- --gpu
+# 运行项目自带的单元测试
+zig build test
 ```
-
----
-
-## 📂 项目结构说明
-
-* **[src/main.zig](file:///Users/guangzong/Documents/zig_ml/src/main.zig)**：框架的执行入口。负责解析参数、加载数据集、配置神经网络大小、运行训练 Epoch 循环、输出评测指标并保存模型。
-* **[src/autodiff.zig](file:///Users/guangzong/Documents/zig_ml/src/autodiff.zig)**：自动微分引擎的实现。定义了张量节点（`Tensor`）、计算图（`Graph`）的拓扑排序、图分配和反向回传求导逻辑。
-* **[src/cblas.zig](file:///Users/guangzong/Documents/zig_ml/src/cblas.zig)**：底层 C 语言绑定接口。隔离平台相关的 C 动态链接配置，封装了 Accelerate Framework 的 BLAS 接口及 Metal GPU 的调用接口。
-* **[src/nn.zig](file:///Users/guangzong/Documents/zig_ml/src/nn.zig)**：神经网络模型定义。包括 Kaiming (He) 参数初始化、带有 Momentum 动量的 SGD 权重更新机制、模型的序列化二进制保存与加载、以及 PyTorch 风格的 `forward` 前向接口。
-* **[src/dataset.zig](file:///Users/guangzong/Documents/zig_ml/src/dataset.zig)**：Fashion MNIST idx 格式数据集的自定义解析器，解析为一维的 `f32` 浮点数切片。
-* **[src/metal_backend.mm](file:///Users/guangzong/Documents/zig_ml/src/metal_backend.mm)**：Objective-C++ 源码。编写了 Metal Pipeline、Compute Shader 的载入、Unified Memory 缓冲区管理，以及调用自定义 Shader 实现的矩阵计算。
-* **[build.zig](file:///Users/guangzong/Documents/zig_ml/build.zig)**：Zig 构建描述脚本。配置了 C 语言编译环境、Metal/Accelerate 系统框架链接及自动编译管线。
