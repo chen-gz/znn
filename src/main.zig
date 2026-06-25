@@ -21,77 +21,43 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
 
-    // 解析命令行参数，检查是否传入了 --large 开关
-    const args = try init.minimal.args.toSlice(arena);
-    var run_large = false;
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--large")) {
-            run_large = true;
-        }
-    }
-
     std.debug.print("Running on CPU (Accelerate CBLAS sgemm)...\n", .{});
 
-    // 初始化多线程池（用于加速需要并行的 CPU 算子，尽管本框架大部分高性能算子已交给 CBLAS/GPU，此设计依然提供了线程管理模板）
-    try autodiff.initThreadPool();
-    defer autodiff.deinitThreadPool();
-
     std.debug.print("Loading dataset...\n", .{});
-    var train_images = dataset.loadImages(io, arena, "data/train-images-idx3-ubyte") catch |err| {
-        std.debug.print("Failed to load training images: {}\n", .{err});
-        return err;
-    };
+    var train_images = try dataset.loadImages(io, arena, "data/train-images-idx3-ubyte");
     defer train_images.deinit(arena);
 
-    var train_labels = dataset.loadLabels(io, arena, "data/train-labels-idx1-ubyte") catch |err| {
-        std.debug.print("Failed to load training labels: {}\n", .{err});
-        return err;
-    };
+    var train_labels = try dataset.loadLabels(io, arena, "data/train-labels-idx1-ubyte");
     defer train_labels.deinit(arena);
 
-    var test_images = dataset.loadImages(io, arena, "data/t10k-images-idx3-ubyte") catch |err| {
-        std.debug.print("Failed to load test images: {}\n", .{err});
-        return err;
-    };
+    var test_images = try dataset.loadImages(io, arena, "data/t10k-images-idx3-ubyte");
     defer test_images.deinit(arena);
 
-    var test_labels = dataset.loadLabels(io, arena, "data/t10k-labels-idx1-ubyte") catch |err| {
-        std.debug.print("Failed to load test labels: {}\n", .{err});
-        return err;
-    };
+    var test_labels = try dataset.loadLabels(io, arena, "data/t10k-labels-idx1-ubyte");
     defer test_labels.deinit(arena);
 
     std.debug.print("Loaded {} training images, {} test images.\n", .{train_images.num_images, test_images.num_images});
 
-    const ni = 784; // 28 * 28 pixels
-    const no = 10; // 10 classes
+    const input_dim = train_images.rows * train_images.cols;
+    const num_classes = CLASS_NAMES.len;
 
-    if (run_large) {
-        std.debug.print("Initializing Large Model (4-layer MLP: 784 -> 2048 -> 2048 -> 1024 -> 10)...\n", .{});
-        var model = try nn.LargeNeuralNetwork.init(arena, ni, 2048, 2048, 1024, no, 42);
-        defer model.deinit();
-        try runTraining(nn.LargeMLP, &model.inner, arena, io, train_images, train_labels, test_images, test_labels, true);
-    } else {
-        std.debug.print("Initializing Standard Model (3-layer MLP: 784 -> 128 -> 64 -> 10)...\n", .{});
-        var model = try nn.NeuralNetwork.init(arena, ni, 128, 64, no, 42);
-        defer model.deinit();
-        try runTraining(nn.MLP, &model.inner, arena, io, train_images, train_labels, test_images, test_labels, false);
-    }
+    std.debug.print("Initializing Standard Model (3-layer MLP: 784 -> 128 -> 64 -> 10)...\n", .{});
+    var model = try nn.NeuralNetwork.init(arena, input_dim, 128, 64, num_classes, 42);
+    defer model.deinit();
+    try runTraining(&model, arena, io, train_images, train_labels, test_images, test_labels);
 }
 
 fn runTraining(
-    comptime T: type,
-    inner_model: *T,
+    model: anytype,
     arena: std.mem.Allocator,
     io: std.Io,
     train_images: dataset.ImageDataset,
     train_labels: dataset.LabelDataset,
     test_images: dataset.ImageDataset,
     test_labels: dataset.LabelDataset,
-    run_large: bool,
 ) !void {
-    const ni = 784; // 28 * 28 pixels
-    const no = 10; // 10 classes
+    const input_dim = train_images.rows * train_images.cols;
+    const num_classes = CLASS_NAMES.len;
     const batch_size = 64;
     const test_batch_size = 100;
     const epochs = 15;
@@ -110,17 +76,17 @@ fn runTraining(
     const random = prng.random();
 
     // Allocate batch buffers (we copy images into these contiguous buffers before wrapping as tensors)
-    var x_batch = try arena.alloc(f32, batch_size * ni);
+    var x_batch = try arena.alloc(f32, batch_size * input_dim);
     defer arena.free(x_batch);
     var y_batch = try arena.alloc(u8, batch_size);
     defer arena.free(y_batch);
 
-    var eval_x_batch = try arena.alloc(f32, test_batch_size * ni);
+    var eval_x_batch = try arena.alloc(f32, test_batch_size * input_dim);
     defer arena.free(eval_x_batch);
     var eval_y_batch = try arena.alloc(u8, test_batch_size);
     defer arena.free(eval_y_batch);
 
-    std.debug.print("Starting training (3-layer NN with dynamic autodiff, Large={})...\n", .{run_large});
+    std.debug.print("Starting training (3-layer NN with dynamic autodiff)...\n", .{});
 
     // 开始主循环（15 个 Epoch 的 Fashion MNIST 训练）
     for (0..epochs) |epoch| {
@@ -140,8 +106,8 @@ fn runTraining(
             for (0..batch_size) |j| {
                 const idx = train_indices[batch_start + j];
                 @memcpy(
-                    x_batch[j * ni .. (j + 1) * ni],
-                    train_images.data[idx * ni .. (idx + 1) * ni]
+                    x_batch[j * input_dim .. (j + 1) * input_dim],
+                    train_images.data[idx * input_dim .. (idx + 1) * input_dim]
                 );
                 y_batch[j] = train_labels.data[idx];
             }
@@ -152,11 +118,11 @@ fn runTraining(
             defer graph.deinit();
 
             // 将 Batch 的输入数据封装为计算图中的 Tensor 节点（注意输入数据 requires_grad = false）
-            const x_tensor = try graph.tensor(batch_size, ni, false);
+            const x_tensor = try graph.tensor(batch_size, input_dim, false);
             @memcpy(x_tensor.data, x_batch);
 
             // 执行前向传播构建动态计算图（类似于 PyTorch 的 model(x)）
-            const logits = try inner_model.forward(&graph, x_tensor);
+            const logits = try model.forward(&graph, x_tensor);
 
             // 损失函数：交叉熵损失节点，附带 Softmax 概率
             const loss = try graph.softmaxCrossEntropy(logits, y_batch);
@@ -164,19 +130,19 @@ fn runTraining(
             // 提取批次的 Loss 标量与准确率
             const batch_loss = loss.data[0];
             const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
-            const batch_acc = computeAccuracy(batch_size, no, probs, y_batch);
+            const batch_acc = computeAccuracy(batch_size, num_classes, probs, y_batch);
 
             epoch_loss += batch_loss;
             epoch_acc += batch_acc;
 
-            // 1. 在反向传播前，清空神经网络模型中持久化权重的梯度值 (w.grad = 0)
-            nn.zeroGradModel(inner_model);
+            // 1. Zero out gradients of the model (equivalent to optimizer.zero_grad() in PyTorch)
+            model.zeroGrad();
 
-            // 2. 触发反向传播，自 loss 节点开始，通过拓扑排序逆序逐个算子求导，填充各 Tensor 的 grad 梯度缓冲区
+            // 2. Compute gradients through backpropagation (equivalent to loss.backward() in PyTorch)
             try graph.backward(loss);
 
-            // 3. 执行权重更新：采用带 Momentum 动量的随机梯度下降（SGD）更新网络权重与偏置项
-            nn.updateWeightsModel(inner_model, lr, beta);
+            // 3. Update weights using SGD with momentum (equivalent to optimizer.step() in PyTorch)
+            model.updateWeights(lr, beta);
         }
 
         epoch_loss /= @as(f32, @floatFromInt(num_batches));
@@ -195,8 +161,8 @@ fn runTraining(
             for (0..test_batch_size) |j| {
                 const idx = batch_start + j;
                 @memcpy(
-                    eval_x_batch[j * ni .. (j + 1) * ni],
-                    test_images.data[idx * ni .. (idx + 1) * ni]
+                    eval_x_batch[j * input_dim .. (j + 1) * input_dim],
+                    test_images.data[idx * input_dim .. (idx + 1) * input_dim]
                 );
                 eval_y_batch[j] = test_labels.data[idx];
             }
@@ -204,16 +170,16 @@ fn runTraining(
             var graph = autodiff.Graph.init(arena);
             defer graph.deinit();
 
-            const x_tensor = try graph.tensor(test_batch_size, ni, false);
+            const x_tensor = try graph.tensor(test_batch_size, input_dim, false);
             @memcpy(x_tensor.data, eval_x_batch);
 
-            const logits = try inner_model.forward(&graph, x_tensor);
+            const logits = try model.forward(&graph, x_tensor);
 
             const loss = try graph.softmaxCrossEntropy(logits, eval_y_batch);
 
             test_loss += loss.data[0];
             const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
-            test_acc += computeAccuracy(test_batch_size, no, probs, eval_y_batch);
+            test_acc += computeAccuracy(test_batch_size, num_classes, probs, eval_y_batch);
         }
 
         test_loss /= @as(f32, @floatFromInt(num_test_batches));
@@ -237,7 +203,7 @@ fn runTraining(
 
     // Save model parameters
     std.debug.print("\nSaving trained model to 'model.bin'...\n", .{});
-    nn.saveModel(inner_model, io, "model.bin") catch |err| {
+    model.save(io, "model.bin") catch |err| {
         std.debug.print("Failed to save model: {}\n", .{err});
     };
 
@@ -246,23 +212,23 @@ fn runTraining(
     for (0..5) |i| {
         _ = i;
         const idx = random.intRangeLessThan(usize, 0, test_images.num_images);
-        const img_slice = test_images.data[idx * ni .. (idx + 1) * ni];
+        const img_slice = test_images.data[idx * input_dim .. (idx + 1) * input_dim];
         const actual_label = test_labels.data[idx];
 
         var graph = autodiff.Graph.init(arena);
         defer graph.deinit();
 
-        const x_tensor = try graph.tensor(1, ni, false);
+        const x_tensor = try graph.tensor(1, input_dim, false);
         @memcpy(x_tensor.data, img_slice);
 
-        const logits = try inner_model.forward(&graph, x_tensor);
+        const logits = try model.forward(&graph, x_tensor);
 
         const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
         const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
 
         var max_val = probs[0];
         var pred: usize = 0;
-        for (1..no) |j| {
+        for (1..num_classes) |j| {
             if (probs[j] > max_val) {
                 max_val = probs[j];
                 pred = j;
@@ -291,14 +257,14 @@ fn shuffle(random: std.Random, indices: []usize) void {
     }
 }
 
-fn computeAccuracy(B: usize, no: usize, a3: []const f32, y: []const u8) f32 {
+fn computeAccuracy(B: usize, num_classes: usize, a3: []const f32, y: []const u8) f32 {
     var correct: usize = 0;
     for (0..B) |i| {
         const label = y[i];
-        const a3_row = a3[i * no .. (i + 1) * no];
+        const a3_row = a3[i * num_classes .. (i + 1) * num_classes];
         var max_val = a3_row[0];
         var pred: usize = 0;
-        for (1..no) |j| {
+        for (1..num_classes) |j| {
             if (a3_row[j] > max_val) {
                 max_val = a3_row[j];
                 pred = j;
