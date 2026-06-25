@@ -16,48 +16,39 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Running on CPU (Accelerate CBLAS sgemm)...\n", .{});
 
     std.debug.print("Loading dataset...\n", .{});
-    var train_images = try dataset.loadImages(io, arena, "data/train-images-idx3-ubyte");
-    defer train_images.deinit(arena);
+    var train_dataset = try dataset.loadDataset(io, arena, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte");
+    defer train_dataset.deinit(arena);
 
-    var train_labels = try dataset.loadLabels(io, arena, "data/train-labels-idx1-ubyte");
-    defer train_labels.deinit(arena);
+    var test_dataset = try dataset.loadDataset(io, arena, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
+    defer test_dataset.deinit(arena);
 
-    var test_images = try dataset.loadImages(io, arena, "data/t10k-images-idx3-ubyte");
-    defer test_images.deinit(arena);
+    std.debug.print("Loaded {} training images, {} test images.\n", .{ train_dataset.images.num_images, test_dataset.images.num_images });
 
-    var test_labels = try dataset.loadLabels(io, arena, "data/t10k-labels-idx1-ubyte");
-    defer test_labels.deinit(arena);
-
-    std.debug.print("Loaded {} training images, {} test images.\n", .{ train_images.num_images, test_images.num_images });
-
-    const input_dim = train_images.rows * train_images.cols;
+    const input_dim = train_dataset.images.rows * train_dataset.images.cols;
     const num_classes = CLASS_NAMES.len;
 
     std.debug.print("Initializing Standard Model (3-layer MLP: 784 -> 128 -> 64 -> 10)...\n", .{});
     var model = try nn.NeuralNetwork.init(arena, input_dim, 128, 64, num_classes, 42);
     defer model.deinit();
-    try runTraining(&model, arena, io, train_images, train_labels, test_images, test_labels);
+    try runTraining(&model, arena, io, train_dataset, test_dataset);
 }
 
 fn runTraining(
     model: anytype,
     arena: std.mem.Allocator,
     io: std.Io,
-    train_images: dataset.ImageDataset,
-    train_labels: dataset.LabelDataset,
-    test_images: dataset.ImageDataset,
-    test_labels: dataset.LabelDataset,
+    train_dataset: dataset.Dataset,
+    test_dataset: dataset.Dataset,
 ) !void {
-    const input_dim = train_images.rows * train_images.cols;
-    const num_classes = CLASS_NAMES.len;
+    const input_dim = model.inner.fc1.weight.rows;
+    const num_classes = model.inner.fc3.weight.cols;
     const batch_size = 64;
-    const test_batch_size = 100;
     const epochs = 15;
     var lr: f32 = 0.05;
     const beta: f32 = 0.9; // SGD momentum factor
 
     // Indices for shuffling
-    const num_train = train_images.num_images;
+    const num_train = train_dataset.images.num_images;
     var train_indices = try arena.alloc(usize, num_train);
     defer arena.free(train_indices);
     for (0..num_train) |i| {
@@ -71,8 +62,7 @@ fn runTraining(
     var y_batch = try arena.alloc(u8, batch_size);
     defer arena.free(y_batch);
 
-    var eval_y_batch = try arena.alloc(u8, test_batch_size);
-    defer arena.free(eval_y_batch);
+
 
     std.debug.print("Starting training (3-layer NN with dynamic autodiff)...\n", .{});
 
@@ -103,9 +93,9 @@ fn runTraining(
                 const idx = train_indices[batch_start + j];
                 @memcpy(
                     x_tensor.data[j * input_dim .. (j + 1) * input_dim],
-                    train_images.data[idx * input_dim .. (idx + 1) * input_dim]
+                    train_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim]
                 );
-                y_batch[j] = train_labels.data[idx];
+                y_batch[j] = train_dataset.labels.data[idx];
             }
 
             // 执行前向传播构建动态计算图（类似于 PyTorch 的 model(x)）
@@ -136,40 +126,9 @@ fn runTraining(
         epoch_acc /= @as(f32, @floatFromInt(num_batches));
 
         // Evaluate on test dataset
-        var test_loss: f32 = 0.0;
-        var test_acc: f32 = 0.0;
-        const num_test = test_images.num_images;
-        const num_test_batches = num_test / test_batch_size;
-
-        for (0..num_test_batches) |b| {
-            const batch_start = b * test_batch_size;
-
-            var graph = autodiff.Graph.init(arena);
-            defer graph.deinit();
-
-            const x_tensor = try graph.tensor(test_batch_size, input_dim, false);
-
-            // Prepare batch directly into x_tensor.data
-            for (0..test_batch_size) |j| {
-                const idx = batch_start + j;
-                @memcpy(
-                    x_tensor.data[j * input_dim .. (j + 1) * input_dim],
-                    test_images.data[idx * input_dim .. (idx + 1) * input_dim]
-                );
-                eval_y_batch[j] = test_labels.data[idx];
-            }
-
-            const logits = try model.forward(&graph, x_tensor);
-
-            const loss = try graph.softmaxCrossEntropy(logits, eval_y_batch);
-
-            test_loss += loss.data[0];
-            const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
-            test_acc += computeAccuracy(test_batch_size, num_classes, probs, eval_y_batch);
-        }
-
-        test_loss /= @as(f32, @floatFromInt(num_test_batches));
-        test_acc /= @as(f32, @floatFromInt(num_test_batches));
+        const eval_res = try evaluateModel(model, arena, test_dataset);
+        const test_loss = eval_res.loss;
+        const test_acc = eval_res.acc;
 
         const elapsed_s = @as(f32, @floatFromInt(start_time.untilNow(io, .awake).toNanoseconds())) / 1_000_000_000.0;
 
@@ -197,9 +156,9 @@ fn runTraining(
     std.debug.print("\nSample Predictions from Test Set:\n", .{});
     for (0..5) |i| {
         _ = i;
-        const idx = random.intRangeLessThan(usize, 0, test_images.num_images);
-        const img_slice = test_images.data[idx * input_dim .. (idx + 1) * input_dim];
-        const actual_label = test_labels.data[idx];
+        const idx = random.intRangeLessThan(usize, 0, test_dataset.images.num_images);
+        const img_slice = test_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim];
+        const actual_label = test_dataset.labels.data[idx];
 
         var graph = autodiff.Graph.init(arena);
         defer graph.deinit();
@@ -261,4 +220,59 @@ fn computeAccuracy(B: usize, num_classes: usize, a3: []const f32, y: []const u8)
         }
     }
     return @as(f32, @floatFromInt(correct)) / @as(f32, @floatFromInt(B));
+}
+
+const EvalResult = struct {
+    loss: f32,
+    acc: f32,
+};
+
+fn evaluateModel(
+    model: anytype,
+    arena: std.mem.Allocator,
+    test_dataset: dataset.Dataset,
+) !EvalResult {
+    const input_dim = model.inner.fc1.weight.rows;
+    const num_classes = model.inner.fc3.weight.cols;
+    const test_batch_size = 100;
+    const num_test = test_dataset.images.num_images;
+    const num_test_batches = num_test / test_batch_size;
+
+    var eval_y_batch = try arena.alloc(u8, test_batch_size);
+    defer arena.free(eval_y_batch);
+
+    var test_loss: f32 = 0.0;
+    var test_acc: f32 = 0.0;
+
+    for (0..num_test_batches) |b| {
+        const batch_start = b * test_batch_size;
+
+        var graph = autodiff.Graph.init(arena);
+        defer graph.deinit();
+
+        const x_tensor = try graph.tensor(test_batch_size, input_dim, false);
+
+        // Prepare batch directly into x_tensor.data
+        for (0..test_batch_size) |j| {
+            const idx = batch_start + j;
+            @memcpy(
+                x_tensor.data[j * input_dim .. (j + 1) * input_dim],
+                test_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim]
+            );
+            eval_y_batch[j] = test_dataset.labels.data[idx];
+        }
+
+        const logits = try model.forward(&graph, x_tensor);
+
+        const loss = try graph.softmaxCrossEntropy(logits, eval_y_batch);
+
+        test_loss += loss.data[0];
+        const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
+        test_acc += computeAccuracy(test_batch_size, num_classes, probs, eval_y_batch);
+    }
+
+    return EvalResult{
+        .loss = test_loss / @as(f32, @floatFromInt(num_test_batches)),
+        .acc = test_acc / @as(f32, @floatFromInt(num_test_batches)),
+    };
 }
