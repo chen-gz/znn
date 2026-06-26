@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
     var model = try nn.NeuralNetwork.init(arena, input_dim, 128, 64, num_classes, 42);
     defer model.deinit();
     try runTraining(&model, arena, io, train_dataset, test_dataset);
+    try printPredictions(&model, arena, test_dataset, 5);
 }
 
 fn runTraining(
@@ -40,8 +41,8 @@ fn runTraining(
     train_dataset: dataset.Dataset,
     test_dataset: dataset.Dataset,
 ) !void {
-    const input_dim = model.inner.fc1.weight.rows;
-    const num_classes = model.inner.fc3.weight.cols;
+    const input_dim = model.inner.fc1.weight.shape.dims[0];
+    const num_classes = model.inner.fc3.weight.shape.dims[1];
     const batch_size = 64;
     const epochs = 15;
     var lr: f32 = 0.05;
@@ -139,43 +140,6 @@ fn runTraining(
     model.save(io, "model.bin") catch |err| {
         std.debug.print("Failed to save model: {}\n", .{err});
     };
-
-    // Print sample predictions
-    std.debug.print("\nSample Predictions from Test Set:\n", .{});
-    for (0..5) |idx| {
-        const img_slice = test_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim];
-        const actual_label = test_dataset.labels.data[idx];
-
-        var graph = autodiff.Graph.init(arena);
-        defer graph.deinit();
-
-        const x_tensor = try graph.tensor(1, input_dim, false);
-        @memcpy(x_tensor.data, img_slice);
-
-        const logits = try model.forward(&graph, x_tensor);
-
-        const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
-        const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
-
-        var max_val = probs[0];
-        var pred: usize = 0;
-        for (1..num_classes) |j| {
-            if (probs[j] > max_val) {
-                max_val = probs[j];
-                pred = j;
-            }
-        }
-
-        const is_correct = (pred == actual_label);
-        const status = if (is_correct) "✅ CORRECT" else "❌ INCORRECT";
-        std.debug.print("Sample #{d:5}: Pred: {s} ({d:.2}%) | Actual: {s} | {s}\n", .{
-            idx,
-            CLASS_NAMES[pred],
-            max_val * 100.0,
-            CLASS_NAMES[actual_label],
-            status,
-        });
-    }
 }
 
 fn computeAccuracy(B: usize, num_classes: usize, a3: []const f32, y: []const u8) f32 {
@@ -208,8 +172,8 @@ fn evaluateModel(
     arena: std.mem.Allocator,
     test_dataset: dataset.Dataset,
 ) !EvalResult {
-    const input_dim = model.inner.fc1.weight.rows;
-    const num_classes = model.inner.fc3.weight.cols;
+    const input_dim = model.inner.fc1.weight.shape.dims[0];
+    const num_classes = model.inner.fc3.weight.shape.dims[1];
     const test_batch_size = 100;
 
     var test_loader = try dataset.DataLoader.init(arena, test_dataset, test_batch_size, .{
@@ -250,4 +214,50 @@ fn evaluateModel(
         .loss = test_loss / @as(f32, @floatFromInt(batch_count)),
         .acc = test_acc / @as(f32, @floatFromInt(batch_count)),
     };
+}
+
+fn printPredictions(
+    model: anytype,
+    arena: std.mem.Allocator,
+    test_dataset: dataset.Dataset,
+    count: usize,
+) !void {
+    const input_dim = model.inner.fc1.weight.shape.dims[0];
+    const num_classes = model.inner.fc3.weight.shape.dims[1];
+
+    std.debug.print("\nSample Predictions from Test Set:\n", .{});
+    for (0..count) |idx| {
+        const img_slice = test_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim];
+        const actual_label = test_dataset.labels.data[idx];
+
+        var graph = autodiff.Graph.init(arena);
+        defer graph.deinit();
+
+        const x_tensor = try graph.tensor(1, input_dim, false);
+        @memcpy(x_tensor.data, img_slice);
+
+        const logits = try model.forward(&graph, x_tensor);
+
+        const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
+        const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
+
+        var max_val = probs[0];
+        var pred: usize = 0;
+        for (1..num_classes) |j| {
+            if (probs[j] > max_val) {
+                max_val = probs[j];
+                pred = j;
+            }
+        }
+
+        const is_correct = (pred == actual_label);
+        const status = if (is_correct) "✅ CORRECT" else "❌ INCORRECT";
+        std.debug.print("Sample #{d:5}: Pred: {s} ({d:.2}%) | Actual: {s} | {s}\n", .{
+            idx,
+            CLASS_NAMES[pred],
+            max_val * 100.0,
+            CLASS_NAMES[actual_label],
+            status,
+        });
+    }
 }
