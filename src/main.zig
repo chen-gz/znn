@@ -47,38 +47,36 @@ fn runTraining(
     var lr: f32 = 0.05;
     const beta: f32 = 0.9; // SGD momentum factor
 
-    // Indices for shuffling
-    const num_train = train_dataset.images.num_images;
-    var train_indices = try arena.alloc(usize, num_train);
-    defer arena.free(train_indices);
-    for (0..num_train) |i| {
-        train_indices[i] = i;
-    }
-
-    var prng = std.Random.DefaultPrng.init(1337);
-    const random = prng.random();
+    var train_loader = try dataset.DataLoader.init(arena, train_dataset, batch_size, .{
+        .shuffle = true,
+        .seed = 1337,
+        .drop_last = true,
+    });
+    defer train_loader.deinit(arena);
 
     // Allocate label batch buffers (since images are wrapped directly into Tensors, we only need buffers for targets)
-    var y_batch = try arena.alloc(u8, batch_size);
+    const y_batch = try arena.alloc(u8, batch_size);
     defer arena.free(y_batch);
-
-
 
     std.debug.print("Starting training (3-layer NN with dynamic autodiff)...\n", .{});
 
     // 开始主循环（15 个 Epoch 的 Fashion MNIST 训练）
     for (0..epochs) |epoch| {
-        const start_time = std.Io.Clock.awake.now(io);
+        var epoch_label_buf: [32]u8 = undefined;
+        const epoch_label = try std.fmt.bufPrint(&epoch_label_buf, "Epoch {d:2}/{d:2}", .{ epoch + 1, epochs });
+        const timer = zig_ml.ProfileBlock.start(epoch_label);
+        defer timer.end();
 
-        // 随机打乱训练数据集的索引顺序
-        shuffle(random, train_indices);
+        // Reset loader at start of epoch (this will shuffle)
+        train_loader.reset();
 
         var epoch_loss: f32 = 0.0;
         var epoch_acc: f32 = 0.0;
-        const num_batches = num_train / batch_size; // 丢弃最后一个非整 Batch
+        var num_batches: usize = 0;
 
-        for (0..num_batches) |b| {
-            const batch_start = b * batch_size;
+        while (true) {
+            const actual_batch_size = train_loader.peekNextBatchSize();
+            if (actual_batch_size == 0) break;
 
             // 关键：初始化一个新的、生命周期处于当前 batch 内的局部计算图。
             // 使用 Arena 分配器，当前 batch 结束后通过 `defer graph.deinit()` 一次性自动释放所有中间层 Tensor 内存。
@@ -86,31 +84,24 @@ fn runTraining(
             defer graph.deinit();
 
             // 将 Batch 的输入数据直接封装为计算图中的 Tensor 节点并分配内存（注意输入数据 requires_grad = false）
-            const x_tensor = try graph.tensor(batch_size, input_dim, false);
-
-            // 从数据集直接抓取并拼接一个 Batch 的输入数据到 x_tensor.data 和目标标签
-            for (0..batch_size) |j| {
-                const idx = train_indices[batch_start + j];
-                @memcpy(
-                    x_tensor.data[j * input_dim .. (j + 1) * input_dim],
-                    train_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim]
-                );
-                y_batch[j] = train_dataset.labels.data[idx];
-            }
+            const x_tensor = try graph.tensor(actual_batch_size, input_dim, false);
+            _ = train_loader.nextInto(x_tensor.data, y_batch);
+            const targets = y_batch[0..actual_batch_size];
 
             // 执行前向传播构建动态计算图（类似于 PyTorch 的 model(x)）
             const logits = try model.forward(&graph, x_tensor);
 
             // 损失函数：交叉熵损失节点，附带 Softmax 概率
-            const loss = try graph.softmaxCrossEntropy(logits, y_batch);
+            const loss = try graph.softmaxCrossEntropy(logits, targets);
 
             // 提取批次的 Loss 标量与准确率
             const batch_loss = loss.data[0];
             const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
-            const batch_acc = computeAccuracy(batch_size, num_classes, probs, y_batch);
+            const batch_acc = computeAccuracy(actual_batch_size, num_classes, probs, targets);
 
             epoch_loss += batch_loss;
             epoch_acc += batch_acc;
+            num_batches += 1;
 
             // 1. Zero out gradients of the model (equivalent to optimizer.zero_grad() in PyTorch)
             model.zeroGrad();
@@ -130,16 +121,13 @@ fn runTraining(
         const test_loss = eval_res.loss;
         const test_acc = eval_res.acc;
 
-        const elapsed_s = @as(f32, @floatFromInt(start_time.untilNow(io, .awake).toNanoseconds())) / 1_000_000_000.0;
-
-        std.debug.print("Epoch {d:2}/{d:2} | Train Loss: {d:.4} | Train Acc: {d:.2}% | Test Loss: {d:.4} | Test Acc: {d:.2}% | Time: {d:.2}s\n", .{
+        std.debug.print("Epoch {d:2}/{d:2} | Train Loss: {d:.4} | Train Acc: {d:.2}% | Test Loss: {d:.4} | Test Acc: {d:.2}% | ", .{
             epoch + 1,
             epochs,
             epoch_loss,
             epoch_acc * 100.0,
             test_loss,
             test_acc * 100.0,
-            elapsed_s,
         });
 
         // Learning rate decay
@@ -154,9 +142,7 @@ fn runTraining(
 
     // Print sample predictions
     std.debug.print("\nSample Predictions from Test Set:\n", .{});
-    for (0..5) |i| {
-        _ = i;
-        const idx = random.intRangeLessThan(usize, 0, test_dataset.images.num_images);
+    for (0..5) |idx| {
         const img_slice = test_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim];
         const actual_label = test_dataset.labels.data[idx];
 
@@ -189,16 +175,6 @@ fn runTraining(
             CLASS_NAMES[actual_label],
             status,
         });
-    }
-}
-
-fn shuffle(random: std.Random, indices: []usize) void {
-    var i: usize = indices.len - 1;
-    while (i > 0) : (i -= 1) {
-        const j = random.intRangeLessThan(usize, 0, i + 1);
-        const temp = indices[i];
-        indices[i] = indices[j];
-        indices[j] = temp;
     }
 }
 
@@ -235,44 +211,43 @@ fn evaluateModel(
     const input_dim = model.inner.fc1.weight.rows;
     const num_classes = model.inner.fc3.weight.cols;
     const test_batch_size = 100;
-    const num_test = test_dataset.images.num_images;
-    const num_test_batches = num_test / test_batch_size;
 
-    var eval_y_batch = try arena.alloc(u8, test_batch_size);
+    var test_loader = try dataset.DataLoader.init(arena, test_dataset, test_batch_size, .{
+        .shuffle = false,
+        .drop_last = false,
+    });
+    defer test_loader.deinit(arena);
+
+    const eval_y_batch = try arena.alloc(u8, test_batch_size);
     defer arena.free(eval_y_batch);
 
     var test_loss: f32 = 0.0;
     var test_acc: f32 = 0.0;
+    var batch_count: usize = 0;
 
-    for (0..num_test_batches) |b| {
-        const batch_start = b * test_batch_size;
+    while (true) {
+        const actual_batch_size = test_loader.peekNextBatchSize();
+        if (actual_batch_size == 0) break;
 
         var graph = autodiff.Graph.init(arena);
         defer graph.deinit();
 
-        const x_tensor = try graph.tensor(test_batch_size, input_dim, false);
-
-        // Prepare batch directly into x_tensor.data
-        for (0..test_batch_size) |j| {
-            const idx = batch_start + j;
-            @memcpy(
-                x_tensor.data[j * input_dim .. (j + 1) * input_dim],
-                test_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim]
-            );
-            eval_y_batch[j] = test_dataset.labels.data[idx];
-        }
+        const x_tensor = try graph.tensor(actual_batch_size, input_dim, false);
+        _ = test_loader.nextInto(x_tensor.data, eval_y_batch);
+        const targets = eval_y_batch[0..actual_batch_size];
 
         const logits = try model.forward(&graph, x_tensor);
 
-        const loss = try graph.softmaxCrossEntropy(logits, eval_y_batch);
+        const loss = try graph.softmaxCrossEntropy(logits, targets);
 
         test_loss += loss.data[0];
         const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
-        test_acc += computeAccuracy(test_batch_size, num_classes, probs, eval_y_batch);
+        test_acc += computeAccuracy(actual_batch_size, num_classes, probs, targets);
+        batch_count += 1;
     }
 
     return EvalResult{
-        .loss = test_loss / @as(f32, @floatFromInt(num_test_batches)),
-        .acc = test_acc / @as(f32, @floatFromInt(num_test_batches)),
+        .loss = test_loss / @as(f32, @floatFromInt(batch_count)),
+        .acc = test_acc / @as(f32, @floatFromInt(batch_count)),
     };
 }

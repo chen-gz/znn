@@ -113,4 +113,9 @@ test "ScopeTimer utility" {
     try std.testing.expect(elapsed > 0);
 }
 
+test {
+    const std = @import("std");
+    std.testing.refAllDecls(@This());
+}
+
 
