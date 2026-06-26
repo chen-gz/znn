@@ -380,11 +380,13 @@ fn normalRandom(random: std.Random) f32 {
 
 fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: usize, requires_grad: bool) !*autodiff.Tensor {
     const t = try allocator.create(autodiff.Tensor);
+    const shape = autodiff.Shape.init(&.{rows, cols});
+    const strides = autodiff.computeContiguousStrides(shape);
     t.* = autodiff.Tensor{
         .data = try allocator.alloc(f32, rows * cols),
         .grad = if (requires_grad) try allocator.alloc(f32, rows * cols) else &.{},
-        .rows = rows,
-        .cols = cols,
+        .shape = shape,
+        .strides = strides,
         .requires_grad = requires_grad,
         .creator = null,
     };

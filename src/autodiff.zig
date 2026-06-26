@@ -2,13 +2,64 @@ const std = @import("std");
 const c = @import("cblas.zig");
 
 
+pub const Shape = struct {
+    dims: [8]usize,
+    len: usize,
+
+    pub fn init(slice: []const usize) Shape {
+        var self = Shape{
+            .dims = [_]usize{0} ** 8,
+            .len = slice.len,
+        };
+        for (slice, 0..) |dim, i| {
+            if (i >= 8) break;
+            self.dims[i] = dim;
+        }
+        return self;
+    }
+
+    pub fn eq(self: Shape, other: Shape) bool {
+        if (self.len != other.len) return false;
+        for (0..self.len) |i| {
+            if (self.dims[i] != other.dims[i]) return false;
+        }
+        return true;
+    }
+};
+
+pub fn computeContiguousStrides(shape: Shape) Shape {
+    var strides = Shape{
+        .dims = [_]usize{0} ** 8,
+        .len = shape.len,
+    };
+    if (shape.len == 0) return strides;
+
+    var s: usize = 1;
+    var i: usize = shape.len - 1;
+    while (true) {
+        strides.dims[i] = s;
+        s *= shape.dims[i];
+        if (i == 0) break;
+        i -= 1;
+    }
+    return strides;
+}
+
+pub fn transposeShape(shape: Shape, dim0: usize, dim1: usize) Shape {
+    var new_shape = shape;
+    const tmp = new_shape.dims[dim0];
+    new_shape.dims[dim0] = new_shape.dims[dim1];
+    new_shape.dims[dim1] = tmp;
+    return new_shape;
+}
+
 // 张量（Tensor）结构体：自动微分引擎的核心数据单元
 // 封装了前向传播数据数据流和反向传播的梯度数据流
 pub const Tensor = struct {
     data: []f32,          // 前向传播的数据缓冲区（行优先存储的一维切片）
     grad: []f32,          // 反向传播的梯度缓冲区（与 data 形状一致，不需梯度的节点可为空）
-    rows: usize,          // 矩阵的行数
-    cols: usize,          // 矩阵的列数
+    shape: Shape,         // 逻辑形状
+    strides: Shape,       // 各维度的跨度步长
     requires_grad: bool,  // 是否需要求梯度（如模型参数为 true，输入数据为 false）
     creator: ?*Op,        // 产生此张量的算子节点（前向图中的父节点，用于追踪计算路径）
 
@@ -18,6 +69,79 @@ pub const Tensor = struct {
             @memset(self.grad, 0.0);
         }
     }
+
+    // 获取多维索引对应的扁平化索引
+    pub fn getFlatIndex(self: Tensor, indices: []const usize) usize {
+        std.debug.assert(indices.len == self.shape.len);
+        var flat_idx: usize = 0;
+        for (indices, 0..) |idx, i| {
+            std.debug.assert(idx < self.shape.dims[i]);
+            flat_idx += idx * self.strides.dims[i];
+        }
+        return flat_idx;
+    }
+
+    // 获取特定多维索引处的值
+    pub fn get(self: Tensor, indices: []const usize) f32 {
+        return self.data[self.getFlatIndex(indices)];
+    }
+
+    // 设置特定多维索引处的值
+    pub fn set(self: *Tensor, indices: []const usize, val: f32) void {
+        self.data[self.getFlatIndex(indices)] = val;
+    }
+
+    // 获取特定多维索引处的梯度值
+    pub fn getGrad(self: Tensor, indices: []const usize) f32 {
+        std.debug.assert(self.requires_grad);
+        return self.grad[self.getFlatIndex(indices)];
+    }
+
+    // 设置特定多维索引处的梯度值
+    pub fn setGrad(self: *Tensor, indices: []const usize, val: f32) void {
+        std.debug.assert(self.requires_grad);
+        self.grad[self.getFlatIndex(indices)] = val;
+    }
+
+    // 美化输出 N 维 Tensor 的多维表示
+    pub fn print(self: Tensor) void {
+        self.printND(0, 0);
+        std.debug.print("\n", .{});
+    }
+
+    fn printND(self: Tensor, dim: usize, offset: usize) void {
+        if (self.shape.len == 0) {
+            std.debug.print("{d:.4}", .{self.data[offset]});
+            return;
+        }
+        if (dim == self.shape.len - 1) {
+            std.debug.print("[", .{});
+            const size = self.shape.dims[dim];
+            const stride = self.strides.dims[dim];
+            for (0..size) |i| {
+                std.debug.print("{d:.4}", .{self.data[offset + i * stride]});
+                if (i < size - 1) {
+                    std.debug.print(", ", .{});
+                }
+            }
+            std.debug.print("]", .{});
+            return;
+        }
+
+        std.debug.print("[", .{});
+        const size = self.shape.dims[dim];
+        const stride = self.strides.dims[dim];
+        for (0..size) |i| {
+            self.printND(dim + 1, offset + i * stride);
+            if (i < size - 1) {
+                std.debug.print(",\n", .{});
+                for (0..dim + 1) |_| {
+                    std.debug.print(" ", .{});
+                }
+            }
+        }
+        std.debug.print("]", .{});
+    }
 };
 
 // 支持的算子类型枚举
@@ -26,6 +150,8 @@ pub const OpType = enum {
     AddBias,             // 偏置项加法（广播机制）
     Relu,                // 激活函数 ReLU
     SoftmaxCrossEntropy, // 损失函数：结合了 Softmax 与交叉熵（数值稳定性更好）
+    Reshape,             // 形状变换
+    Transpose,           // 维度转置
 };
 
 // 各算子反向传播所需的上下文信息（如 Softmax 的概率输出与 Target 类别）
@@ -36,6 +162,11 @@ pub const OpContext = union(enum) {
     SoftmaxCrossEntropy: struct {
         probs: []f32,
         targets: []const u8,
+    },
+    Reshape: void,
+    Transpose: struct {
+        dim0: usize,
+        dim1: usize,
     },
 };
 
@@ -57,9 +188,9 @@ pub const Op = struct {
                 const A = self.inputs[0]; // 形状为 M x K
                 const B = self.inputs[1]; // 形状为 K x N
                 const C = self.outputs[0]; // 形状为 M x N
-                const M = A.rows;
-                const K = A.cols;
-                const N = B.cols;
+                const M = A.shape.dims[0];
+                const K = A.shape.dims[1];
+                const N = B.shape.dims[1];
 
                 // 1. 计算对左乘矩阵 A 的梯度: dA += dC * B^T
                 // 数学原理: d(A * B)/dA = dC * B^T，形状为 (M x N) * (N x K) -> M x K
@@ -108,8 +239,8 @@ pub const Op = struct {
                 const A = self.inputs[0];
                 const bias = self.inputs[1];
                 const C = self.outputs[0];
-                const M = A.rows;
-                const N = A.cols;
+                const M = A.shape.dims[0];
+                const N = A.shape.dims[1];
 
                 // AddBias 反向传播：
                 // 1. 关于输入 A 的梯度为 dC，按元素累加到 A.grad
@@ -146,8 +277,8 @@ pub const Op = struct {
             },
             .SoftmaxCrossEntropy => {
                 const logits = self.inputs[0];
-                const M = logits.rows;
-                const N = logits.cols;
+                const M = logits.shape.dims[0];
+                const N = logits.shape.dims[1];
                 const ctx = &self.context.SoftmaxCrossEntropy;
 
                 // 平均梯度缩放因子 (1 / batch_size)
@@ -162,6 +293,44 @@ pub const Op = struct {
                     const dLogits_row = logits.grad[i * N .. (i + 1) * N];
                     for (0..N) |j| {
                         dLogits_row[j] += scale * (p_row[j] - (if (j == label) @as(f32, 1.0) else 0.0));
+                    }
+                }
+            },
+            .Reshape => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                if (A.requires_grad) {
+                    for (C.grad, 0..) |g, i| {
+                        A.grad[i] += g;
+                    }
+                }
+            },
+            .Transpose => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                if (A.requires_grad) {
+                    const ctx = self.context.Transpose;
+                    const strides_trans = transposeShape(A.strides, ctx.dim0, ctx.dim1);
+
+                    var indices = [_]usize{0} ** 8;
+                    const len = C.shape.len;
+                    const total_size = C.data.len;
+                    for (0..total_size) |dest_flat_idx| {
+                        var src_flat_idx: usize = 0;
+                        for (0..len) |d| {
+                            src_flat_idx += indices[d] * strides_trans.dims[d];
+                        }
+                        A.grad[src_flat_idx] += C.grad[dest_flat_idx];
+
+                        var d: usize = len;
+                        while (d > 0) {
+                            d -= 1;
+                            indices[d] += 1;
+                            if (indices[d] < C.shape.dims[d]) {
+                                break;
+                            }
+                            indices[d] = 0;
+                        }
                     }
                 }
             },
@@ -196,13 +365,26 @@ pub const Graph = struct {
 
     // 在计算图中创建并注册一个新的张量节点
     pub fn tensor(self: *Graph, rows: usize, cols: usize, requires_grad: bool) !*Tensor {
+        return self.tensorND(&.{rows, cols}, requires_grad);
+    }
+
+    // 在计算图中创建并注册一个新的 N 维张量节点
+    pub fn tensorND(self: *Graph, shape_slice: []const usize, requires_grad: bool) !*Tensor {
         const allocator = self.arena.allocator();
         const t = try allocator.create(Tensor);
+        const shape = Shape.init(shape_slice);
+        const strides = computeContiguousStrides(shape);
+
+        var total_size: usize = 1;
+        for (shape_slice) |dim| {
+            total_size *= dim;
+        }
+
         t.* = Tensor{
-            .data = try allocator.alloc(f32, rows * cols),
-            .grad = if (requires_grad) try allocator.alloc(f32, rows * cols) else &.{},
-            .rows = rows,
-            .cols = cols,
+            .data = try allocator.alloc(f32, total_size),
+            .grad = if (requires_grad) try allocator.alloc(f32, total_size) else &.{},
+            .shape = shape,
+            .strides = strides,
             .requires_grad = requires_grad,
             .creator = null,
         };
@@ -214,14 +396,145 @@ pub const Graph = struct {
         return t;
     }
 
+    // 形状变换算子前向传播
+    pub fn reshape(self: *Graph, A: *Tensor, new_shape_slice: []const usize) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try allocator.create(Tensor);
+        const shape = Shape.init(new_shape_slice);
+        const strides = computeContiguousStrides(shape);
+
+        var old_total: usize = 1;
+        for (0..A.shape.len) |i| {
+            old_total *= A.shape.dims[i];
+        }
+        var new_total: usize = 1;
+        for (new_shape_slice) |dim| {
+            new_total *= dim;
+        }
+        std.debug.assert(old_total == new_total);
+
+        C.* = Tensor{
+            .data = A.data, // 共享前向数据
+            .grad = if (A.requires_grad) try allocator.alloc(f32, new_total) else &.{},
+            .shape = shape,
+            .strides = strides,
+            .requires_grad = A.requires_grad,
+            .creator = null,
+        };
+        if (A.requires_grad) {
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        if (A.requires_grad) {
+            const inputs = try allocator.alloc(*Tensor, 1);
+            inputs[0] = A;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = C;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .Reshape,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .Reshape = {} },
+            };
+            C.creator = o;
+            try self.ops.append(self.backing_allocator, o);
+        }
+
+        return C;
+    }
+
+    // 维度转置算子前向传播：交换 dim0 和 dim1
+    pub fn transposeND(self: *Graph, A: *Tensor, dim0: usize, dim1: usize) !*Tensor {
+        std.debug.assert(dim0 < A.shape.len);
+        std.debug.assert(dim1 < A.shape.len);
+
+        const allocator = self.arena.allocator();
+        const C = try allocator.create(Tensor);
+
+        const shape_trans = transposeShape(A.shape, dim0, dim1);
+        const strides_trans = transposeShape(A.strides, dim0, dim1);
+
+        // C 作为物理上连续的输出 Tensor
+        const C_shape = shape_trans;
+        const C_strides = computeContiguousStrides(C_shape);
+
+        var total_size: usize = 1;
+        for (C_shape.dims[0..C_shape.len]) |dim| {
+            total_size *= dim;
+        }
+
+        C.* = Tensor{
+            .data = try allocator.alloc(f32, total_size),
+            .grad = if (A.requires_grad) try allocator.alloc(f32, total_size) else &.{},
+            .shape = C_shape,
+            .strides = C_strides,
+            .requires_grad = A.requires_grad,
+            .creator = null,
+        };
+        if (A.requires_grad) {
+            @memset(C.grad, 0.0);
+        }
+
+        // 物理上把转置后的数据拷贝到连续的 C 中
+        var indices = [_]usize{0} ** 8;
+        const len = C_shape.len;
+        for (0..total_size) |dest_flat_idx| {
+            var src_flat_idx: usize = 0;
+            for (0..len) |d| {
+                src_flat_idx += indices[d] * strides_trans.dims[d];
+            }
+            C.data[dest_flat_idx] = A.data[src_flat_idx];
+
+            // 递增索引
+            var d: usize = len;
+            while (d > 0) {
+                d -= 1;
+                indices[d] += 1;
+                if (indices[d] < C_shape.dims[d]) {
+                    break;
+                }
+                indices[d] = 0;
+            }
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        if (A.requires_grad) {
+            const inputs = try allocator.alloc(*Tensor, 1);
+            inputs[0] = A;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = C;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .Transpose,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{
+                    .Transpose = .{
+                        .dim0 = dim0,
+                        .dim1 = dim1,
+                    },
+                },
+            };
+            C.creator = o;
+            try self.ops.append(self.backing_allocator, o);
+        }
+
+        return C;
+    }
+
     // 矩阵乘法算子前向传播：C = A * B
     pub fn matmul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+        const M = A.shape.dims[0];
+        const K = A.shape.dims[1];
+        const N = B.shape.dims[1];
         // 创建输出张量 C。若 A 或 B 任意一个需要梯度，则 C 也需要梯度以完成链式反向传播
-        const C = try self.tensor(A.rows, B.cols, A.requires_grad or B.requires_grad);
-
-        const M = A.rows;
-        const K = A.cols;
-        const N = B.cols;
+        const C = try self.tensor(M, N, A.requires_grad or B.requires_grad);
 
         // 调用 CPU macOS Accelerate CBLAS 计算
         c.cblas_sgemm(
@@ -264,10 +577,9 @@ pub const Graph = struct {
 
     // 偏置相加算子前向传播：C = A + bias (按行广播相加)
     pub fn addBias(self: *Graph, A: *Tensor, bias: *Tensor) !*Tensor {
-        const C = try self.tensor(A.rows, A.cols, A.requires_grad or bias.requires_grad);
-
-        const M = A.rows;
-        const N = A.cols;
+        const M = A.shape.dims[0];
+        const N = A.shape.dims[1];
+        const C = try self.tensor(M, N, A.requires_grad or bias.requires_grad);
 
         // 偏置向量形状为 1 x N，按行广播复制相加到每一行
         for (0..M) |i| {
@@ -300,7 +612,9 @@ pub const Graph = struct {
 
     // 激活函数 ReLU 前向传播：C = max(0, A)
     pub fn relu(self: *Graph, A: *Tensor) !*Tensor {
-        const C = try self.tensor(A.rows, A.cols, A.requires_grad);
+        const M = A.shape.dims[0];
+        const N = A.shape.dims[1];
+        const C = try self.tensor(M, N, A.requires_grad);
 
         const total = A.data.len;
         for (0..total) |i| {
@@ -331,8 +645,8 @@ pub const Graph = struct {
     pub fn softmaxCrossEntropy(self: *Graph, logits: *Tensor, targets: []const u8) !*Tensor {
         const loss = try self.tensor(1, 1, logits.requires_grad);
 
-        const B = logits.rows;
-        const N = logits.cols;
+        const B = logits.shape.dims[0];
+        const N = logits.shape.dims[1];
         const allocator = self.arena.allocator();
         const probs = try allocator.alloc(f32, B * N);
 

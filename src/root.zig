@@ -113,6 +113,65 @@ test "ScopeTimer utility" {
     try std.testing.expect(elapsed > 0);
 }
 
+test "Tensor ND reshape and transpose autograd" {
+    const std = @import("std");
+
+    const arena = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    // Create a 2x3 tensor
+    const A = try graph.tensorND(&.{2, 3}, true);
+    A.data[0] = 1.0; A.data[1] = 2.0; A.data[2] = 3.0;
+    A.data[3] = 4.0; A.data[4] = 5.0; A.data[5] = 6.0;
+
+    // Test print
+    std.debug.print("\nTesting print function for 2x3 tensor:\n", .{});
+    A.print();
+
+    // Transpose it to 3x2
+    const B = try graph.transposeND(A, 0, 1);
+    try std.testing.expectEqualSlices(usize, &.{3, 2}, B.shape.dims[0..B.shape.len]);
+    try std.testing.expectEqual(@as(f32, 1.0), B.data[0]); // A[0,0]
+    try std.testing.expectEqual(@as(f32, 4.0), B.data[1]); // A[1,0]
+    try std.testing.expectEqual(@as(f32, 2.0), B.data[2]); // A[0,1]
+    try std.testing.expectEqual(@as(f32, 5.0), B.data[3]); // A[1,1]
+
+    std.debug.print("Testing print function for transposed 3x2 tensor:\n", .{});
+    B.print();
+
+    // Reshape it to 1x6
+    const C = try graph.reshape(B, &.{1, 6});
+    try std.testing.expectEqualSlices(usize, &.{1, 6}, C.shape.dims[0..C.shape.len]);
+
+    std.debug.print("Testing print function for reshaped 1x6 tensor:\n", .{});
+    C.print();
+
+    // Let's set some gradients in C.grad and backward
+    C.grad[0] = 10.0;
+    C.grad[1] = 20.0;
+    C.grad[2] = 30.0;
+    C.grad[3] = 40.0;
+    C.grad[4] = 50.0;
+    C.grad[5] = 60.0;
+
+    // Run backward on C (usually we call graph.backward(loss), but here we manually backward C's creator)
+    if (C.creator) |op| {
+        try op.backward();
+    }
+    if (B.creator) |op| {
+        try op.backward();
+    }
+
+    // Check A.grad
+    try std.testing.expectEqual(@as(f32, 10.0), A.grad[0]); // A[0,0]
+    try std.testing.expectEqual(@as(f32, 30.0), A.grad[1]); // A[0,1]
+    try std.testing.expectEqual(@as(f32, 50.0), A.grad[2]); // A[0,2]
+    try std.testing.expectEqual(@as(f32, 20.0), A.grad[3]); // A[1,0]
+    try std.testing.expectEqual(@as(f32, 40.0), A.grad[4]); // A[1,1]
+    try std.testing.expectEqual(@as(f32, 60.0), A.grad[5]); // A[1,2]
+}
+
 test {
     const std = @import("std");
     std.testing.refAllDecls(@This());
