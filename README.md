@@ -1,67 +1,74 @@
-# Zig ML (Educational): 极简 Zig 深度学习教学项目
+# Zig ML (Educational): Minimal Deep Learning Library in Zig
 
-本项目是一个为教学目的设计的、使用 **Zig 0.16.0** 从零实现的三层前馈神经网络（MLP）框架，用于 Fashion MNIST 图像分类。
+This project is a minimal, educational 3-layer Feedforward Neural Network (MLP) library built entirely from scratch in **Zig 0.16.0** for Fashion MNIST image classification.
 
-它非常适合作为学习以下内容的实战案例：
-1. **自动微分原理**：理解动态逆向自动微分引擎（Dynamic Autodiff）的运行方式。
-2. **Zig 语言实战**：学习 Zig 的内存分配（Allocator）、所有权托管与编译期反射等语法特性。
-3. **C 语言互操作**：掌握如何在 Zig 中直接链接并调用底层的系统 C 语言库（CBLAS/AMX 矩阵加速）。
-
----
-
-## 🚀 核心教学特性
-
-1. **从零实现动态自动微分引擎 (Dynamic Autodiff)**：
-   * 支持 `MatMul`（矩阵乘法）、`AddBias`（偏置相加）、`ReLU`（激活函数）和 `SoftmaxCrossEntropy`（损失函数结合）等核心算子的求导逻辑。
-   * 采用 **DFS 拓扑排序** 算法，自动寻找并构建反向传播求导链条。
-   * 使用 **ArenaAllocator** 托管计算图生命周期，每次 Batch 结束后一键释放所有求导中间层的 Tensor 节点内存，展示了 Zig 极简而安全的内存管理技巧。
-
-2. **精巧的仿 PyTorch 式 API (PyTorch-like Wrapper)**：
-   * 提供了高可读性的前向接口：`logits = try model.forward(&graph, x)`。
-   * 通过 Zig 的编译期反射（`comptime`），实现了一个轻量级的 `Module` 包装器，自动路由和实现模型的参数初始化、梯度清零 (`zeroGrad`)、梯度更新 (`updateWeights`) 和模型的二进制存取 (`save` & `load`)。
-
-3. **极致简单的 CPU 矩阵乘法加速 (CBLAS sgemm)**：
-   * 摒弃了复杂的 GPU (Metal/MLX) 依赖和多线程调度逻辑（移除了不必要的 ThreadPool）。
-   * 直接通过 macOS 的 `Accelerate` 框架链接系统 CBLAS 库，底层自动使用 Apple Silicon 的 AMX 协处理器执行单线程矩阵乘法，性能卓越且代码高度简化。
-
-4. **100% 纯 Zig & 零第三方包依赖**：
-   * 独立运行二进制文件，除了 macOS 自带的 `Accelerate` CBLAS 动态库外，无任何第三方包依赖。
+It serves as a clean, production-grade reference for:
+1. **Autograd Mechanics**: Understanding how dynamic backward automatic differentiation engines construct computation graphs and compute gradients.
+2. **Zig Systems Programming**: Utilizing Zig's memory allocators, type reflection, memory safety, and `comptime` compile-time meta-programming.
+3. **C Interoperability**: Directly binding and executing high-performance system-level C libraries (macOS Accelerate CBLAS / Apple Silicon AMX coprocessor) from Zig.
 
 ---
 
-## 📂 项目结构说明
+## 🚀 Key Features
 
-* **[src/main.zig](file:///Users/guangzong/Documents/zig_ml/src/main.zig)**：框架的教学执行入口。负责加载数据集、构建标准模型、运行 Epoch 训练循环，并展示最终的预测结果与模型保存。
-* **[src/autodiff.zig](file:///Users/guangzong/Documents/zig_ml/src/autodiff.zig)**：核心自动微分引擎实现。定义了张量节点（`Tensor`）、计算图结构（`Graph`）及其算子反向传播机制。
-* **[src/nn.zig](file:///Users/guangzong/Documents/zig_ml/src/nn.zig)**：神经网络层定义。包括标准 MLP 的三层模型结构设计、Kaiming (He) 参数初始化、带有 Momentum 动量的 SGD 权重更新机制、以及 `Module` 包装器。
-* **[src/cblas.zig](file:///Users/guangzong/Documents/zig_ml/src/cblas.zig)**：系统 C 语言加速库接口绑定，声明了 CBLAS 矩阵乘法接口。
-* **[src/dataset.zig](file:///Users/guangzong/Documents/zig_ml/src/dataset.zig)**：自定义的 Fashion MNIST idx 格式文件二进制解析器。
-* **[src/root.zig](file:///Users/guangzong/Documents/zig_ml/src/root.zig)**：项目的导出根模块以及存放基础编译期单元测试的地方。
-* **[build.zig](file:///Users/guangzong/Documents/zig_ml/build.zig)**：Zig 构建描述脚本。配置了 C 语言编译环境与 macOS Accelerate 系统框架链接。
+1. **N-Dimensional Tensor Library**:
+   * Supports arbitrary-dimensional tensors with native logical `Shape` and contiguous layouts computed via `strides`.
+   * Custom multi-dimensional accessors: `get`, `set`, `getGrad`, and `setGrad` with automatic stride mapping.
+   * Recursive, nested pretty-printing of N-dimensional structures (similar to NumPy or PyTorch's default representation).
+   * Fully-featured `reshape` (zero-copy forward) and `transposeND` (physical transposition to contiguous layout) operators with complete backpropagation support.
+   * Zero legacy matrix field overhead (no `rows` and `cols` fields on `Tensor`; dimensions are indexed directly from `shape`).
+
+2. **Dynamic Autodiff Engine**:
+   * Automatic backward propagation using depth-first search (DFS) topological sorting to build computation dependencies.
+   * Core operators implemented: `MatMul`, `AddBias`, `ReLU`, `SoftmaxCrossEntropy`, `Reshape`, and `Transpose`.
+   * Advanced memory recycling using `ArenaAllocator` to allocate intermediate tensor values and gradients per batch and release them in a single batch-level deallocation.
+
+3. **Elegant PyTorch-like API**:
+   * High-readability forward propagation interface: `logits = try model.forward(&graph, x_tensor)`.
+   * Compile-time reflection (`comptime`) to automatically manage parameter lifetime, model serialization (`save` / `load`), SGD momentum updates (`updateWeights`), and gradient flushing (`zeroGrad`).
+
+4. **Accelerated CPU Math**:
+   * Integrates macOS `Accelerate` CBLAS library to execute single-threaded matrix operations on Apple Silicon's AMX coprocessor.
+   * Avoids unnecessary complexity of thread pools and GPU scheduling, yielding exceptional runtime efficiency and minimal code foot-print.
+
+5. **100% Pure Zig & Zero Dependencies**:
+   * Builds into a completely self-contained binary. No python virtualenv, heavy PyTorch wheels, or third-party packages required.
 
 ---
 
-## 🛠️ 编译与运行
+## 📂 Codebase Directory Structure
 
-### 1. 准备数据集
-在项目根目录下创建 `data/` 文件夹，并下载/解压 [Fashion MNIST 数据集](https://github.com/zalandoresearch/fashion-mnist) 的 idx 二进制文件：
+* **[src/main.zig](src/main.zig)**: Execution entrypoint. Responsible for dataset loading, neural network initialization, model training loops, performance profiling, and test set inference.
+* **[src/autodiff.zig](src/autodiff.zig)**: Core Automatic Differentiation. Defines the `Shape`, `Tensor` and `Graph` structs, operators, and their backward/gradient calculation routines.
+* **[src/nn.zig](src/nn.zig)**: Neural Network Modules. Implements the 3-layer MLP model architecture, Kaiming (He) weight initialization, SGD with Momentum, and meta-programmed `Module` wrapping.
+* **[src/cblas.zig](src/cblas.zig)**: System CBLAS C-bindings.
+* **[src/dataset.zig](src/dataset.zig)**: Custom binary parser for Fashion MNIST IDX format files.
+* **[src/root.zig](src/root.zig)**: Module exports and compile-time unit tests.
+* **[build.zig](build.zig)**: Compilation build script detailing target configurations, Accelerate framework linking, and test runner tasks.
+
+---
+
+## 🛠️ Build and Execution
+
+### 1. Download Dataset
+Create a `data/` directory in the project root and download/extract the [Fashion MNIST IDX format files](https://github.com/zalandoresearch/fashion-mnist):
 * `train-images-idx3-ubyte`
 * `train-labels-idx1-ubyte`
 * `t10k-images-idx3-ubyte`
 * `t10k-labels-idx1-ubyte`
 
-### 2. 编译并运行
-运行命令行：
+### 2. Compile and Run Model Training
+Run the training pipeline in high-performance Release mode:
 ```bash
-# 运行高性能 Release 模式进行模型训练
+# Run training in optimized ReleaseFast mode
 zig build run -Doptimize=ReleaseFast
 
-# 运行 Debug 模式（含完整运行时安全与越界检查）
+# Run training in Debug mode with full runtime safety checks
 zig build run
 ```
 
-### 3. 运行单元测试
+### 3. Run Unit Tests
+Execute the test suites containing autograd, reshape, transpose, and dataset parser validation:
 ```bash
-# 运行项目自带的单元测试
 zig build test
 ```
