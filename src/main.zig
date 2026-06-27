@@ -140,7 +140,29 @@ fn runTraining(
     model.save(io, "model.bin") catch |err| {
         std.debug.print("Failed to save model: {}\n", .{err});
     };
+
+    // Load and verify the saved model
+    std.debug.print("Verifying model load from 'model.bin'...\n", .{});
+    var loaded_model = try nn.NeuralNetwork.init(arena, input_dim, 128, 64, num_classes, 123);
+    defer loaded_model.deinit();
+    try loaded_model.load(io, "model.bin");
+
+    // Check weights
+    inline for (@typeInfo(@TypeOf(model.inner)).@"struct".fields) |field| {
+        if (field.type == nn.Linear) {
+            const orig_layer = @field(model.inner, field.name);
+            const load_layer = @field(loaded_model.inner, field.name);
+            for (orig_layer.weight.data, 0..) |w, i| {
+                std.debug.assert(w == load_layer.weight.data[i]);
+            }
+            for (orig_layer.bias.data, 0..) |b, i| {
+                std.debug.assert(b == load_layer.bias.data[i]);
+            }
+        }
+    }
+    std.debug.print("Verification SUCCESS: Saved and loaded weights are identical!\n", .{});
 }
+
 
 fn computeAccuracy(B: usize, num_classes: usize, a3: []const f32, y: []const u8) f32 {
     var correct: usize = 0;
