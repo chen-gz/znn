@@ -1,12 +1,15 @@
 const std = @import("std");
 const autodiff = @import("autodiff.zig");
+const tensor = @import("tensor.zig");
+const Tensor = tensor.Tensor;
+const Shape = tensor.Shape;
 
 // ============================================================================
 // 1. PyTorch-like Linear (全连接/线性层) 模块定义
 // ============================================================================
 pub const Linear = struct {
-    weight: *autodiff.Tensor,   // 权重矩阵
-    bias: *autodiff.Tensor,     // 偏置向量
+    weight: *Tensor,   // 权重矩阵
+    bias: *Tensor,     // 偏置向量
     v_weight: []f32,            // 权重动量缓存
     v_bias: []f32,              // 偏置动量缓存
 
@@ -58,7 +61,7 @@ pub const Linear = struct {
     }
 
     // 实现前向计算链路：Y = X * W + b
-    pub fn forward(self: Linear, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+    pub fn forward(self: Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const z = try graph.matmul(x, self.weight);
         return try graph.addBias(z, self.bias);
     }
@@ -75,7 +78,7 @@ pub fn deinitModel(model: anytype, allocator: std.mem.Allocator) void {
     inline for (info.@"struct".fields) |field| {
         if (field.type == Linear) {
             @field(model, field.name).deinit(allocator);
-        } else if (field.type == *autodiff.Tensor) {
+        } else if (field.type == *Tensor) {
             freePersistentTensor(allocator, @field(model, field.name));
         } else if (field.type == []f32) {
             allocator.free(@field(model, field.name));
@@ -90,7 +93,7 @@ pub fn zeroGradModel(model: anytype) void {
     inline for (info.@"struct".fields) |field| {
         if (field.type == Linear) {
             @field(model, field.name).zeroGrad();
-        } else if (field.type == *autodiff.Tensor) {
+        } else if (field.type == *Tensor) {
             @field(model, field.name).zeroGrad();
         }
     }
@@ -103,7 +106,7 @@ pub fn updateWeightsModel(model: anytype, lr: f32, beta: f32) void {
     inline for (info.@"struct".fields) |field| {
         if (field.type == Linear) {
             @field(model, field.name).updateWeights(lr, beta);
-        } else if (field.type == *autodiff.Tensor) {
+        } else if (field.type == *Tensor) {
             const v_name = "v_" ++ field.name;
             if (@hasField(T, v_name)) {
                 updateLayerWeights(
@@ -135,7 +138,7 @@ pub fn saveModel(model: anytype, io: std.Io, file_path: []const u8) !void {
             const layer = @field(model, field.name);
             try writer.writeAll(std.mem.sliceAsBytes(layer.weight.data));
             try writer.writeAll(std.mem.sliceAsBytes(layer.bias.data));
-        } else if (field.type == *autodiff.Tensor) {
+        } else if (field.type == *Tensor) {
             try writer.writeAll(std.mem.sliceAsBytes(@field(model, field.name).data));
         }
     }
@@ -159,7 +162,7 @@ pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8) !void {
             const layer = @field(model, field.name);
             try reader.readSliceAll(std.mem.sliceAsBytes(layer.weight.data));
             try reader.readSliceAll(std.mem.sliceAsBytes(layer.bias.data));
-        } else if (field.type == *autodiff.Tensor) {
+        } else if (field.type == *Tensor) {
             try reader.readSliceAll(std.mem.sliceAsBytes(@field(model, field.name).data));
         }
     }
@@ -209,7 +212,7 @@ pub fn Module(comptime T: type) type {
         }
 
         // 自动托管前向传播：将接口直接路由到具体实现的 forward 函数
-        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
             return try self.inner.forward(graph, x);
         }
     };
@@ -246,7 +249,7 @@ pub const MLP = struct {
     }
 
     // 用户只需专注定义前向传播逻辑
-    pub fn forward(self: *const MLP, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+    pub fn forward(self: *const MLP, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const x1 = try self.fc1.forward(graph, x);
         const a1 = try graph.relu(x1);
 
@@ -294,7 +297,7 @@ pub const LargeMLP = struct {
         };
     }
 
-    pub fn forward(self: *const LargeMLP, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+    pub fn forward(self: *const LargeMLP, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const x1 = try self.fc1.forward(graph, x);
         const a1 = try graph.relu(x1);
 
@@ -342,7 +345,7 @@ pub fn LargeModule(comptime T: type) type {
             try loadModel(&self.inner, io, file_path);
         }
 
-        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
             return try self.inner.forward(graph, x);
         }
     };
@@ -378,11 +381,11 @@ fn normalRandom(random: std.Random) f32 {
     return @sqrt(-2.0 * @log(u_1)) * @cos(2.0 * std.math.pi * u_2);
 }
 
-fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: usize, requires_grad: bool) !*autodiff.Tensor {
-    const t = try allocator.create(autodiff.Tensor);
-    const shape = autodiff.Shape.init(&.{rows, cols});
-    const strides = autodiff.computeContiguousStrides(shape);
-    t.* = autodiff.Tensor{
+fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: usize, requires_grad: bool) !*Tensor {
+    const t = try allocator.create(Tensor);
+    const shape = Shape.init(&.{rows, cols});
+    const strides = tensor.computeContiguousStrides(shape);
+    t.* = Tensor{
         .data = try allocator.alloc(f32, rows * cols),
         .grad = if (requires_grad) try allocator.alloc(f32, rows * cols) else &.{},
         .shape = shape,
@@ -397,7 +400,7 @@ fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: usize
     return t;
 }
 
-fn freePersistentTensor(allocator: std.mem.Allocator, t: *autodiff.Tensor) void {
+fn freePersistentTensor(allocator: std.mem.Allocator, t: *Tensor) void {
     allocator.free(t.data);
     if (t.requires_grad) {
         allocator.free(t.grad);
