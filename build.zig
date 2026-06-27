@@ -37,7 +37,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .link_libc = true,
     });
-    mod.linkFramework("Accelerate", .{});
+    if (target.result.os.tag == .macos) {
+        mod.linkFramework("Accelerate", .{});
+    }
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -82,7 +84,9 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const exe_mod = exe.root_module;
-    exe_mod.linkFramework("Accelerate", .{});
+    if (target.result.os.tag == .macos) {
+        exe_mod.linkFramework("Accelerate", .{});
+    }
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
