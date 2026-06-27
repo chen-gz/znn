@@ -241,4 +241,16 @@ test {
     std.testing.refAllDecls(@This());
 }
 
+test "json testing" {
+    const std = @import("std");
+    const json_str = "{\"a\": 123}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_str, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("a").?.integer == 123);
+}
+
+
+
+
+
 
