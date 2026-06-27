@@ -232,6 +232,41 @@ pub const Graph = struct {
         return self.tensorND(&.{rows, cols}, requires_grad);
     }
 
+    // 创建并注册一个带初始数据的二维张量节点
+    pub fn tensorWithData(self: *Graph, rows: usize, cols: usize, initial_data: []const f32, requires_grad: bool) !*Tensor {
+        return self.tensorNDWithData(&.{rows, cols}, initial_data, requires_grad);
+    }
+
+    // 创建并注册一个带初始数据的多维张量节点
+    pub fn tensorNDWithData(self: *Graph, shape_slice: []const usize, initial_data: []const f32, requires_grad: bool) !*Tensor {
+        const t = try self.tensorND(shape_slice, requires_grad);
+        std.debug.assert(t.data.len == initial_data.len);
+        @memcpy(t.data, initial_data);
+        return t;
+    }
+
+    // NumPy-like API: zeros
+    pub fn zeros(self: *Graph, shape_slice: []const usize, requires_grad: bool) !*Tensor {
+        return self.tensorND(shape_slice, requires_grad);
+    }
+
+    // NumPy-like API: ones
+    pub fn ones(self: *Graph, shape_slice: []const usize, requires_grad: bool) !*Tensor {
+        const t = try self.tensorND(shape_slice, requires_grad);
+        @memset(t.data, 1.0);
+        return t;
+    }
+
+    // NumPy-like API: array
+    pub fn array(self: *Graph, shape_slice: []const usize, initial_data: []const f32, requires_grad: bool) !*Tensor {
+        return self.tensorNDWithData(shape_slice, initial_data, requires_grad);
+    }
+
+    // NumPy-like API: transpose alias
+    pub fn transpose(self: *Graph, A: *Tensor, dim0: usize, dim1: usize) !*Tensor {
+        return self.transposeND(A, dim0, dim1);
+    }
+
     // 在计算图中创建并注册一个新的 N 维张量节点
     pub fn tensorND(self: *Graph, shape_slice: []const usize, requires_grad: bool) !*Tensor {
         const allocator = self.arena.allocator();
