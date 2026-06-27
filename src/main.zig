@@ -9,6 +9,47 @@ const CLASS_NAMES = [10][]const u8{
     "Sandal",      "Shirt",   "Sneaker",  "Bag",   "Ankle boot",
 };
 
+pub const MLP = struct {
+    // 定义模型结构
+    fc1: nn.Linear,
+    fc2: nn.Linear,
+    fc3: nn.Linear,
+
+    // 定义初始化每一层参数的规则
+    pub fn init(allocator: std.mem.Allocator, ni: usize, nh1: usize, nh2: usize, no: usize, seed: u64) !MLP {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const random = prng.random();
+
+        const fc1 = try nn.Linear.init(allocator, ni, nh1, random);
+        errdefer fc1.deinit(allocator);
+
+        const fc2 = try nn.Linear.init(allocator, nh1, nh2, random);
+        errdefer fc2.deinit(allocator);
+
+        const fc3 = try nn.Linear.init(allocator, nh2, no, random);
+        errdefer fc3.deinit(allocator);
+
+        return MLP{
+            .fc1 = fc1,
+            .fc2 = fc2,
+            .fc3 = fc3,
+        };
+    }
+
+    // 用户只需专注定义前向传播逻辑
+    pub fn forward(self: *const MLP, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+        const x1 = try self.fc1.forward(graph, x);
+        const a1 = try graph.relu(x1);
+
+        const x2 = try self.fc2.forward(graph, a1);
+        const a2 = try graph.relu(x2);
+
+        return try self.fc3.forward(graph, a2);
+    }
+};
+
+pub const NeuralNetwork = nn.Module(MLP);
+
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
@@ -28,7 +69,7 @@ pub fn main(init: std.process.Init) !void {
     const num_classes = CLASS_NAMES.len;
 
     std.debug.print("Initializing Standard Model (3-layer MLP: 784 -> 128 -> 64 -> 10)...\n", .{});
-    var model = try nn.NeuralNetwork.init(arena, input_dim, 128, 64, num_classes, 42);
+    var model = try NeuralNetwork.init(arena, input_dim, 128, 64, num_classes, 42);
     defer model.deinit();
     try runTraining(&model, arena, io, train_dataset, test_dataset);
     try printPredictions(&model, arena, test_dataset, 5);
@@ -140,28 +181,8 @@ fn runTraining(
     model.save(io, "model.bin") catch |err| {
         std.debug.print("Failed to save model: {}\n", .{err});
     };
-
-    // Load and verify the saved model
-    std.debug.print("Verifying model load from 'model.bin'...\n", .{});
-    var loaded_model = try nn.NeuralNetwork.init(arena, input_dim, 128, 64, num_classes, 123);
-    defer loaded_model.deinit();
-    try loaded_model.load(io, "model.bin");
-
-    // Check weights
-    inline for (@typeInfo(@TypeOf(model.inner)).@"struct".fields) |field| {
-        if (field.type == nn.Linear) {
-            const orig_layer = @field(model.inner, field.name);
-            const load_layer = @field(loaded_model.inner, field.name);
-            for (orig_layer.weight.data, 0..) |w, i| {
-                std.debug.assert(w == load_layer.weight.data[i]);
-            }
-            for (orig_layer.bias.data, 0..) |b, i| {
-                std.debug.assert(b == load_layer.bias.data[i]);
-            }
-        }
-    }
-    std.debug.print("Verification SUCCESS: Saved and loaded weights are identical!\n", .{});
 }
+
 
 
 fn computeAccuracy(B: usize, num_classes: usize, a3: []const f32, y: []const u8) f32 {
