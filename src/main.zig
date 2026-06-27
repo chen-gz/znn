@@ -16,17 +16,17 @@ pub const MLP = struct {
     fc3: nn.Linear,
 
     // 定义初始化每一层参数的规则
-    pub fn init(allocator: std.mem.Allocator, ni: usize, nh1: usize, nh2: usize, no: usize, seed: u64) !MLP {
+    pub fn init(allocator: std.mem.Allocator, seed: u64) !MLP {
         var prng = std.Random.DefaultPrng.init(seed);
         const random = prng.random();
 
-        const fc1 = try nn.Linear.init(allocator, ni, nh1, random);
+        const fc1 = try nn.Linear.init(allocator, 784, 128, random);
         errdefer fc1.deinit(allocator);
 
-        const fc2 = try nn.Linear.init(allocator, nh1, nh2, random);
+        const fc2 = try nn.Linear.init(allocator, 128, 64, random);
         errdefer fc2.deinit(allocator);
 
-        const fc3 = try nn.Linear.init(allocator, nh2, no, random);
+        const fc3 = try nn.Linear.init(allocator, 64, 10, random);
         errdefer fc3.deinit(allocator);
 
         return MLP{
@@ -65,11 +65,8 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("Loaded {} training images, {} test images.\n", .{ train_dataset.images.num_images, test_dataset.images.num_images });
 
-    const input_dim = train_dataset.images.rows * train_dataset.images.cols;
-    const num_classes = CLASS_NAMES.len;
-
     std.debug.print("Initializing Standard Model (3-layer MLP: 784 -> 128 -> 64 -> 10)...\n", .{});
-    var model = try NeuralNetwork.init(arena, input_dim, 128, 64, num_classes, 42);
+    var model = NeuralNetwork.init(arena, try MLP.init(arena, 42));
     defer model.deinit();
     try runTraining(&model, arena, io, train_dataset, test_dataset);
     try printPredictions(&model, arena, test_dataset, 5);

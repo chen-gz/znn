@@ -328,11 +328,11 @@ pub fn Module(comptime T: type) type {
 
         const Self = @This();
 
-        // 自动托管模型的初始化，并将参数转发给内部具体模型结构体的 init 方法
-        pub fn init(allocator: std.mem.Allocator, ni: usize, nh1: usize, nh2: usize, no: usize, seed: u64) !Self {
+        // 自动托管模型的初始化，接收已初始化的具体模型实例
+        pub fn init(allocator: std.mem.Allocator, inner: T) Self {
             return Self{
                 .allocator = allocator,
-                .inner = try T.init(allocator, ni, nh1, nh2, no, seed),
+                .inner = inner,
             };
         }
 
