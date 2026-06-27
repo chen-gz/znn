@@ -142,3 +142,169 @@ pub const Tensor = struct {
         std.debug.print("]", .{});
     }
 };
+
+// ============================================================================
+// NumPy-like raw tensor creation APIs (independent of Graph)
+// ============================================================================
+
+pub fn array(allocator: std.mem.Allocator, shape_slice: []const usize, initial_data: []const f32) !*Tensor {
+    const t = try allocator.create(Tensor);
+    const shape = Shape.init(shape_slice);
+    const strides = computeContiguousStrides(shape);
+    var total_size: usize = 1;
+    for (shape_slice) |dim| {
+        total_size *= dim;
+    }
+    std.debug.assert(total_size == initial_data.len);
+
+    t.* = Tensor{
+        .data = try allocator.alloc(f32, total_size),
+        .grad = &.{},
+        .shape = shape,
+        .strides = strides,
+        .requires_grad = false,
+        .creator = null,
+    };
+    @memcpy(t.data, initial_data);
+    return t;
+}
+
+pub fn zeros(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
+    const t = try allocator.create(Tensor);
+    const shape = Shape.init(shape_slice);
+    const strides = computeContiguousStrides(shape);
+    var total_size: usize = 1;
+    for (shape_slice) |dim| {
+        total_size *= dim;
+    }
+
+    t.* = Tensor{
+        .data = try allocator.alloc(f32, total_size),
+        .grad = &.{},
+        .shape = shape,
+        .strides = strides,
+        .requires_grad = false,
+        .creator = null,
+    };
+    @memset(t.data, 0.0);
+    return t;
+}
+
+pub fn ones(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
+    const t = try allocator.create(Tensor);
+    const shape = Shape.init(shape_slice);
+    const strides = computeContiguousStrides(shape);
+    var total_size: usize = 1;
+    for (shape_slice) |dim| {
+        total_size *= dim;
+    }
+
+    t.* = Tensor{
+        .data = try allocator.alloc(f32, total_size),
+        .grad = &.{},
+        .shape = shape,
+        .strides = strides,
+        .requires_grad = false,
+        .creator = null,
+    };
+    @memset(t.data, 1.0);
+    return t;
+}
+
+pub fn free(allocator: std.mem.Allocator, t: *Tensor) void {
+    allocator.free(t.data);
+    if (t.requires_grad and t.grad.len > 0) {
+        allocator.free(t.grad);
+    }
+    allocator.destroy(t);
+}
+
+test "Shape and strides helpers" {
+    // Test Shape init & eq
+    const s1 = Shape.init(&.{2, 3, 4});
+    try std.testing.expectEqual(@as(usize, 3), s1.len);
+    try std.testing.expectEqual(@as(usize, 2), s1.dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), s1.dims[1]);
+    try std.testing.expectEqual(@as(usize, 4), s1.dims[2]);
+
+    const s2 = Shape.init(&.{2, 3, 4});
+    try std.testing.expect(s1.eq(s2));
+
+    const s3 = Shape.init(&.{2, 3, 5});
+    try std.testing.expect(!s1.eq(s3));
+
+    // Test computeContiguousStrides
+    const strides1 = computeContiguousStrides(s1);
+    try std.testing.expectEqual(@as(usize, 12), strides1.dims[0]);
+    try std.testing.expectEqual(@as(usize, 4), strides1.dims[1]);
+    try std.testing.expectEqual(@as(usize, 1), strides1.dims[2]);
+
+    // Test transposeShape
+    const s_trans = transposeShape(s1, 0, 1);
+    try std.testing.expectEqual(@as(usize, 3), s_trans.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), s_trans.dims[1]);
+    try std.testing.expectEqual(@as(usize, 4), s_trans.dims[2]);
+}
+
+test "Tensor indexing and gradient operations" {
+    const allocator = std.testing.allocator;
+    const shape = Shape.init(&.{2, 3});
+    const strides = computeContiguousStrides(shape);
+
+    const data = try allocator.alloc(f32, 6);
+    defer allocator.free(data);
+    const grad = try allocator.alloc(f32, 6);
+    defer allocator.free(grad);
+
+    var t = Tensor{
+        .data = data,
+        .grad = grad,
+        .shape = shape,
+        .strides = strides,
+        .requires_grad = true,
+        .creator = null,
+    };
+
+    // Test indexing
+    t.set(&.{0, 0}, 1.0);
+    t.set(&.{0, 1}, 2.0);
+    t.set(&.{0, 2}, 3.0);
+    t.set(&.{1, 0}, 4.0);
+    t.set(&.{1, 1}, 5.0);
+    t.set(&.{1, 2}, 6.0);
+
+    try std.testing.expectEqual(@as(f32, 1.0), t.get(&.{0, 0}));
+    try std.testing.expectEqual(@as(f32, 6.0), t.get(&.{1, 2}));
+    try std.testing.expectEqual(@as(usize, 5), t.getFlatIndex(&.{1, 2}));
+
+    // Test grad operations
+    t.setGrad(&.{0, 1}, 10.0);
+    try std.testing.expectEqual(@as(f32, 10.0), t.getGrad(&.{0, 1}));
+
+    t.zeroGrad();
+    try std.testing.expectEqual(@as(f32, 0.0), t.getGrad(&.{0, 1}));
+}
+
+test "NumPy-like raw tensor creation" {
+    const allocator = std.testing.allocator;
+
+    // Test array creation
+    const t_arr = try array(allocator, &.{2, 3}, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer free(allocator, t_arr);
+    try std.testing.expectEqual(@as(f32, 1.0), t_arr.get(&.{0, 0}));
+    try std.testing.expectEqual(@as(f32, 6.0), t_arr.get(&.{1, 2}));
+
+    // Test zeros creation
+    const t_zeros = try zeros(allocator, &.{2, 2});
+    defer free(allocator, t_zeros);
+    try std.testing.expectEqual(@as(f32, 0.0), t_zeros.get(&.{0, 0}));
+    try std.testing.expectEqual(@as(f32, 0.0), t_zeros.get(&.{1, 1}));
+
+    // Test ones creation
+    const t_ones = try ones(allocator, &.{3, 1});
+    defer free(allocator, t_ones);
+    try std.testing.expectEqual(@as(f32, 1.0), t_ones.get(&.{0, 0}));
+    try std.testing.expectEqual(@as(f32, 1.0), t_ones.get(&.{2, 0}));
+}
+
+

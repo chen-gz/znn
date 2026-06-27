@@ -174,6 +174,68 @@ test "Tensor ND reshape and transpose autograd" {
     try std.testing.expectEqual(@as(f32, 60.0), A.grad[5]); // A[1,2]
 }
 
+test "Tensor matrix multiplication and bias addition autograd example" {
+    const std = @import("std");
+
+    const arena = std.testing.allocator;
+    // 1. Initialize the computation graph
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    // 2. Create input tensor A (2x3) and weight B (3x2)
+    // A represents a batch of 2 samples with 3 features each
+    const A = try graph.array(&.{2, 3}, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 }, true);
+
+    // B represents weights mapping 3 features to 2 outputs
+    const B = try graph.array(&.{3, 2}, &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 }, true);
+
+    // 3. Matrix Multiplication: C = A * B (resulting in 2x2)
+    const C = try graph.matmul(A, B);
+    try std.testing.expectEqualSlices(usize, &.{2, 2}, C.shape.dims[0..C.shape.len]);
+
+    // Verify C values:
+    // C[0, 0] = 1.0*0.1 + 2.0*0.3 + 3.0*0.5 = 2.2
+    // C[0, 1] = 1.0*0.2 + 2.0*0.4 + 3.0*0.6 = 2.8
+    // C[1, 0] = 4.0*0.1 + 5.0*0.3 + 6.0*0.5 = 4.9
+    // C[1, 1] = 4.0*0.2 + 5.0*0.4 + 6.0*0.6 = 6.4
+    try std.testing.expectApproxEqAbs(@as(f32, 2.2), C.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.8), C.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.9), C.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.4), C.data[3], 1e-5);
+
+    // 4. Bias Addition: D = C + bias (1x2 bias broadcasted to 2x2 C)
+    const bias = try graph.array(&.{1, 2}, &[_]f32{ 0.5, 1.0 }, true);
+
+    const D = try graph.addBias(C, bias);
+    try std.testing.expectEqualSlices(usize, &.{2, 2}, D.shape.dims[0..D.shape.len]);
+
+    // D[0, 0] = C[0, 0] + bias[0] = 2.2 + 0.5 = 2.7
+    // D[0, 1] = C[0, 1] + bias[1] = 2.8 + 1.0 = 3.8
+    // D[1, 0] = C[1, 0] + bias[0] = 4.9 + 0.5 = 5.4
+    // D[1, 1] = C[1, 1] + bias[1] = 6.4 + 1.0 = 7.4
+    try std.testing.expectApproxEqAbs(@as(f32, 2.7), D.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.8), D.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.4), D.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 7.4), D.data[3], 1e-5);
+
+    // 5. Backpropagation: compute gradients dD/dA, dD/dB, dD/dbias
+    @memset(D.grad, 1.0);
+
+    try graph.backward(D);
+
+    // Verify bias gradient: dD/dbias = sum over rows of D.grad
+    try std.testing.expectEqual(@as(f32, 2.0), bias.grad[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), bias.grad[1]);
+
+    // Verify weight gradient: dD/dB = A^T * D.grad
+    try std.testing.expectEqual(@as(f32, 5.0), B.grad[0]);
+    try std.testing.expectEqual(@as(f32, 5.0), B.grad[1]);
+    try std.testing.expectEqual(@as(f32, 7.0), B.grad[2]);
+
+    // Verify input gradient: dD/dA = D.grad * B^T
+    try std.testing.expectApproxEqAbs(@as(f32, 0.3), A.grad[0], 1e-5);
+}
+
 test {
     const std = @import("std");
     std.testing.refAllDecls(@This());
