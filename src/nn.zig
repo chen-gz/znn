@@ -61,9 +61,13 @@ pub const Linear = struct {
     }
 
     // 实现前向计算链路：Y = X * W + b
-    pub fn forward(self: Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const z = try graph.matmul(x, self.weight);
-        return try graph.addBias(z, self.bias);
+    pub fn forward(self: Linear, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const z = try x.matmul(self.weight, allocator, graph);
+        if (graph == null) {
+            defer tensor.free(allocator, z);
+            return try z.addBias(self.bias, allocator, null);
+        }
+        return try z.addBias(self.bias, allocator, graph);
     }
 };
 
@@ -362,8 +366,8 @@ pub fn Module(comptime T: type) type {
         }
 
         // 自动托管前向传播：将接口直接路由到具体实现的 forward 函数
-        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-            return try self.inner.forward(graph, x);
+        pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+            return try self.inner.forward(allocator, graph, x);
         }
     };
 }
