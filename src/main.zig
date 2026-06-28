@@ -37,14 +37,28 @@ pub const MLP = struct {
     }
 
     // 用户只需专注定义前向传播逻辑
-    pub fn forward(self: *const MLP, graph: *autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
-        const x1 = try self.fc1.forward(graph, x);
-        const a1 = try graph.relu(x1);
+    pub fn forward(self: *const MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+        if (graph == null) {
+            // Eager 模式：使用局部 ArenaAllocator 自动管理中间临时 Tensor 内存，避免频繁手写 defer free
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+            const arena_allocator = arena.allocator();
 
-        const x2 = try self.fc2.forward(graph, a1);
-        const a2 = try graph.relu(x2);
+            const x1 = try self.fc1.forward(arena_allocator, null, x);
+            const a1 = try x1.relu(arena_allocator, null);
+            const x2 = try self.fc2.forward(arena_allocator, null, a1);
+            const a2 = try x2.relu(arena_allocator, null);
+            const out_arena = try self.fc3.forward(arena_allocator, null, a2);
 
-        return try self.fc3.forward(graph, a2);
+            // 将最终结果克隆到外部的 allocator 中返回，出作用域后局部 arena 内的临时变量会被一并释放
+            return try zig_ml.tensor.array(allocator, out_arena.shape.dims[0..out_arena.shape.len], out_arena.data);
+        }
+        
+        const x1 = try self.fc1.forward(allocator, graph, x);
+        const a1 = try x1.relu(allocator, graph);
+        const x2 = try self.fc2.forward(allocator, graph, a1);
+        const a2 = try x2.relu(allocator, graph);
+        return try self.fc3.forward(allocator, graph, a2);
     }
 };
 
@@ -128,7 +142,7 @@ fn runTraining(
             const targets = y_batch[0..actual_batch_size];
 
             // 执行前向传播构建动态计算图（类似于 PyTorch 的 model(x)）
-            const logits = try model.forward(&graph, x_tensor);
+            const logits = try model.forward(arena, &graph, x_tensor);
 
             // 损失函数：交叉熵损失节点，附带 Softmax 概率
             const loss = try graph.softmaxCrossEntropy(logits, targets);
@@ -240,7 +254,7 @@ fn evaluateModel(
         _ = test_loader.nextInto(x_tensor.data, eval_y_batch);
         const targets = eval_y_batch[0..actual_batch_size];
 
-        const logits = try model.forward(&graph, x_tensor);
+        const logits = try model.forward(arena, &graph, x_tensor);
 
         const loss = try graph.softmaxCrossEntropy(logits, targets);
 
@@ -276,7 +290,7 @@ fn printPredictions(
         const x_tensor = try graph.tensor(1, input_dim, false);
         @memcpy(x_tensor.data, img_slice);
 
-        const logits = try model.forward(&graph, x_tensor);
+        const logits = try model.forward(arena, &graph, x_tensor);
 
         const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
         const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
