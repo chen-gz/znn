@@ -3,22 +3,30 @@ const autodiff = @import("autodiff.zig");
 const Op = autodiff.Op;
 const c = @import("cblas.zig");
 
-pub const Shape = struct {
-    dims: [8]usize,
-    len: usize,
+// ============================================================================
+// 1. 维度与形状控制（Shape & Strides Meta-data）
+// ============================================================================
 
+/// 多维张量的形状描述体（Shape）
+/// 为避免动态内存分配带来的开销，本框架采用静态数组 `[8]usize` 存储各维度大小，最多支持 8 维张量。
+pub const Shape = struct {
+    dims: [8]usize, // 存储每一维度大小的静态数组，未使用的维度默认为 0
+    len: usize,     // 张量的维度个数（Rank，例如 2D 矩阵的 Rank 为 2）
+
+    /// 根据动态传入的切片初始化静态 Shape 结构体
     pub fn init(slice: []const usize) Shape {
         var self = Shape{
             .dims = [_]usize{0} ** 8,
             .len = slice.len,
         };
         for (slice, 0..) |dim, i| {
-            if (i >= 8) break;
+            if (i >= 8) break; // 超过 8 维截断
             self.dims[i] = dim;
         }
         return self;
     }
 
+    /// 校验两个 Shape 是否完全相等（维度个数及每一维大小都匹配）
     pub fn eq(self: Shape, other: Shape) bool {
         if (self.len != other.len) return false;
         for (0..self.len) |i| {
@@ -28,6 +36,14 @@ pub const Shape = struct {
     }
 };
 
+/// 计算行优先（Row-Major）布局下的连续跨度（Contiguous Strides）
+/// 数学原理：
+/// 假设张量逻辑形状为 [D_0, D_1, ..., D_{n-1}]，对应的行优先连续跨度为 [S_0, S_1, ..., S_{n-1}]。
+/// 则任一多维索引 [i_0, i_1, ..., i_{n-1}] 在一维物理缓冲区中的扁平索引偏移计算公式为：
+///     FlatIndex = sum_{k=0}^{n-1} (i_k * S_k)
+/// 其中跨度递推公式为：
+///     S_{n-1} = 1
+///     S_k     = S_{k+1} * D_{k+1}  (0 <= k < n-1)
 pub fn computeContiguousStrides(shape: Shape) Shape {
     var strides = Shape{
         .dims = [_]usize{0} ** 8,
@@ -46,6 +62,7 @@ pub fn computeContiguousStrides(shape: Shape) Shape {
     return strides;
 }
 
+/// 交换指定维度的形状（通常在转置算子中配合 strides 交换实现快速视图变换）
 pub fn transposeShape(shape: Shape, dim0: usize, dim1: usize) Shape {
     var new_shape = shape;
     const tmp = new_shape.dims[dim0];
@@ -54,14 +71,19 @@ pub fn transposeShape(shape: Shape, dim0: usize, dim1: usize) Shape {
     return new_shape;
 }
 
-// 张量（Tensor）结构体：物理数据与元数据
+// ============================================================================
+// 2. 张量（Tensor）核心定义与元数据
+// ============================================================================
+
+/// 张量（Tensor）结构体：承载机器学习网络中所有物理数据与流转拓扑信息
 pub const Tensor = struct {
     data: []f32,          // 前向传播的数据缓冲区（行优先存储的一维切片）
     grad: []f32,          // 反向传播的梯度缓冲区（与 data 形状一致，不需梯度的节点可为空）
     shape: Shape,         // 逻辑形状
-    strides: Shape,       // 各维度的跨度步长
+    strides: Shape,       // 各维度的跨度步长（用于非连续张量及快速视图映射）
     requires_grad: bool,  // 是否需要求梯度（如模型参数为 true，输入数据为 false）
     creator: ?*Op,        // 产生此张量的算子节点（前向图中的父节点，用于追踪计算路径）
+
 
     // 将梯度缓冲区全部清零，通常在每个 batch 反向传播前调用
     pub fn zeroGrad(self: *Tensor) void {
@@ -310,6 +332,78 @@ pub const Tensor = struct {
         }
         return C;
     }
+
+    pub fn argmax(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+        std.debug.assert(dim < self.shape.len);
+        const M = self.shape.dims[0];
+        const N = self.shape.dims[1];
+
+        if (dim == 1) {
+            const C = try zeros(allocator, &.{M, 1});
+            for (0..M) |i| {
+                var max_val = self.data[i * N];
+                var max_idx: usize = 0;
+                for (1..N) |j| {
+                    const val = self.data[i * N + j];
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = j;
+                    }
+                }
+                C.data[i] = @as(f32, @floatFromInt(max_idx));
+            }
+            return C;
+        } else if (dim == 0) {
+            const C = try zeros(allocator, &.{1, N});
+            for (0..N) |j| {
+                var max_val = self.data[j];
+                var max_idx: usize = 0;
+                for (1..M) |i| {
+                    const val = self.data[i * N + j];
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = i;
+                    }
+                }
+                C.data[j] = @as(f32, @floatFromInt(max_idx));
+            }
+            return C;
+        } else {
+            return error.UnsupportedDimension;
+        }
+    }
+
+    pub fn max(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+        std.debug.assert(dim < self.shape.len);
+        const M = self.shape.dims[0];
+        const N = self.shape.dims[1];
+
+        if (dim == 1) {
+            const C = try zeros(allocator, &.{M, 1});
+            for (0..M) |i| {
+                var max_val = self.data[i * N];
+                for (1..N) |j| {
+                    const val = self.data[i * N + j];
+                    if (val > max_val) max_val = val;
+                }
+                C.data[i] = max_val;
+            }
+            return C;
+        } else if (dim == 0) {
+            const C = try zeros(allocator, &.{1, N});
+            for (0..N) |j| {
+                var max_val = self.data[j];
+                for (1..M) |i| {
+                    const val = self.data[i * N + j];
+                    if (val > max_val) max_val = val;
+                }
+                C.data[j] = max_val;
+            }
+            return C;
+        } else {
+            return error.UnsupportedDimension;
+        }
+    }
 };
 
 
@@ -554,6 +648,40 @@ test "Direct tensor operations (eager and graph)" {
         try std.testing.expectEqualSlices(usize, &.{4, 1}, G.shape.dims[0..G.shape.len]);
     }
 }
+
+test "Tensor argmax and max reductions" {
+    const allocator = std.testing.allocator;
+
+    const A = try array(allocator, &.{2, 3}, &[_]f32{ 1.0, 5.0, 3.0, 9.0, 2.0, 6.0 });
+    defer free(allocator, A);
+
+    // Test argmax along dim 1
+    const idx1 = try A.argmax(1, allocator);
+    defer free(allocator, idx1);
+    try std.testing.expectEqual(@as(f32, 1.0), idx1.get(&.{0, 0}));
+    try std.testing.expectEqual(@as(f32, 0.0), idx1.get(&.{1, 0}));
+
+    // Test max along dim 1
+    const val1 = try A.max(1, allocator);
+    defer free(allocator, val1);
+    try std.testing.expectEqual(@as(f32, 5.0), val1.get(&.{0, 0}));
+    try std.testing.expectEqual(@as(f32, 9.0), val1.get(&.{1, 0}));
+
+    // Test argmax along dim 0
+    const idx0 = try A.argmax(0, allocator);
+    defer free(allocator, idx0);
+    try std.testing.expectEqual(@as(f32, 1.0), idx0.get(&.{0, 0}));
+    try std.testing.expectEqual(@as(f32, 0.0), idx0.get(&.{0, 1}));
+    try std.testing.expectEqual(@as(f32, 1.0), idx0.get(&.{0, 2}));
+
+    // Test max along dim 0
+    const val0 = try A.max(0, allocator);
+    defer free(allocator, val0);
+    try std.testing.expectEqual(@as(f32, 9.0), val0.get(&.{0, 0}));
+    try std.testing.expectEqual(@as(f32, 5.0), val0.get(&.{0, 1}));
+    try std.testing.expectEqual(@as(f32, 6.0), val0.get(&.{0, 2}));
+}
+
 
 
 

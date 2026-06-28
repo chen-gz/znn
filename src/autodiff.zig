@@ -48,6 +48,18 @@ pub const Op = struct {
     // 执行该算子的反向传播计算，更新其输入节点的梯度
     pub fn backward(self: *Op) !void {
         switch (self.op_type) {
+            // ====================================================================
+            // 1. 矩阵乘法反向传播 (MatMul Backward)
+            // ====================================================================
+            // 前向公式: C = A * B，其中 A (M x K), B (K x N), C (M x N)
+            // 数学推导:
+            // 设损失标量为 L，我们拥有对输出的梯度 dC = ∂L/∂C (M x N)。
+            // 根据矩阵微积分链式法则：
+            //   1. 对左输入 A 的导数: dA = ∂L/∂A = dC * B^T
+            //      维度匹配: (M x N) * (N x K) -> (M x K)
+            //   2. 对右输入 B 的导数: dB = ∂L/∂B = A^T * dC
+            //      维度匹配: (K x M) * (M x N) -> (K x N)
+            // 注意: 在深度学习中，梯度是累加的 (+=)，所以我们传入 beta = 1.0 给 cblas_sgemm。
             .MatMul => {
                 const A = self.inputs[0]; // 形状为 M x K
                 const B = self.inputs[1]; // 形状为 K x N
@@ -57,7 +69,6 @@ pub const Op = struct {
                 const N = B.shape.dims[1];
 
                 // 1. 计算对左乘矩阵 A 的梯度: dA += dC * B^T
-                // 数学原理: d(A * B)/dA = dC * B^T，形状为 (M x N) * (N x K) -> M x K
                 if (A.requires_grad) {
                     // 使用 CPU Apple Accelerate (AMX) sgemm 矩阵乘法
                     c.cblas_sgemm(
@@ -79,7 +90,6 @@ pub const Op = struct {
                 }
 
                 // 2. 计算对右乘矩阵 B 的梯度: dB += A^T * dC
-                // 数学原理: d(A * B)/dB = A^T * dC，形状为 (K x M) * (M x N) -> K x N
                 if (B.requires_grad) {
                     c.cblas_sgemm(
                         c.CblasRowMajor,
@@ -99,6 +109,16 @@ pub const Op = struct {
                     );
                 }
             },
+            // ====================================================================
+            // 2. 偏置项加法反向传播 (AddBias Backward)
+            // ====================================================================
+            // 前向公式: C[i, j] = A[i, j] + bias[j]，其中 A (M x N), bias (1 x N), C (M x N)
+            // 数学推导:
+            //   1. 对输入 A 的偏导数: ∂L/∂A[i, j] = ∂L/∂C[i, j]
+            //      因此 dA += dC (逐元素直接累加)。
+            //   2. 对偏置 bias 的偏导数: ∂L/∂bias[j] = sum_{i=0}^{M-1} (∂L/∂C[i, j])
+            //      这是因为偏置项在行维度 (批量样本维度) 进行了广播复制。
+            //      因此对偏置的梯度为对输出梯度 dC 在第 0 维（行）上的降维累加和。
             .AddBias => {
                 const A = self.inputs[0];
                 const bias = self.inputs[1];
@@ -106,11 +126,6 @@ pub const Op = struct {
                 const M = A.shape.dims[0];
                 const N = A.shape.dims[1];
 
-                // AddBias 反向传播：
-                // 1. 关于输入 A 的梯度为 dC，按元素累加到 A.grad
-                // 2. 关于偏置 bias (1 x N) 的梯度为 dC 按行累加（降维累加）：
-                //    bias_grad[j] = sum_{i=0..M-1} dC[i, j]
-                // 保持单线程处理，避免多线程调度和同步造成的开销
                 for (0..N) |n| {
                     var bias_sum: f32 = 0.0;
                     for (0..M) |m| {
@@ -125,13 +140,18 @@ pub const Op = struct {
                     }
                 }
             },
+            // ====================================================================
+            // 3. ReLU 激活函数反向传播 (ReLU Backward)
+            // ====================================================================
+            // 前向公式: C = max(0, A)，逐元素操作
+            // 数学推导:
+            //   对于每个元素：
+            //   若 A[i] > 0，则该点斜率为 1.0 -> dA[i] += dC[i]
+            //   若 A[i] <= 0，则该点斜率为 0.0 -> dA[i] += 0.0
             .Relu => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
 
-                // ReLU 反向传播：
-                // 如果前向值 A.data[i] > 0，则梯度原样传递：dA[i] += dC[i]
-                // 如果前向值 A.data[i] <= 0，则梯度置为 0
                 if (A.requires_grad) {
                     const total = A.data.len;
                     for (0..total) |i| {
@@ -139,18 +159,26 @@ pub const Op = struct {
                     }
                 }
             },
+            // ====================================================================
+            // 4. Softmax + Cross Entropy 损失函数反向传播 (SoftmaxCrossEntropy Backward)
+            // ====================================================================
+            // 前向公式:
+            //   设输入的 Logits 矩阵为 X (M x N)，真实分类为 label (M x 1)。
+            //   对于第 i 行样本，先算 Softmax 概率：probs[i, j] = e^{X[i, j]} / sum_k(e^{X[i, k]})
+            //   再算平均交叉熵损失：L = -1/M * sum_i( ln(probs[i, label_i]) )
+            // 数学推导:
+            //   将 Softmax 和 CrossEntropy 结合后，对输入 Logits X[i, j] 的偏导数具有极佳的数值稳定性：
+            //     ∂L/∂X[i, j] = (probs[i, j] - Indicator(j == label_i)) / M
+            //   其中 Indicator 在当前类别 j 等于真实类别 label_i 时为 1.0，否则为 0.0。
+            //   最后除以样本数 M 得到平均样本梯度。
             .SoftmaxCrossEntropy => {
                 const logits = self.inputs[0];
                 const M = logits.shape.dims[0];
                 const N = logits.shape.dims[1];
                 const ctx = &self.context.SoftmaxCrossEntropy;
 
-                // 平均梯度缩放因子 (1 / batch_size)
                 const scale = 1.0 / @as(f32, @floatFromInt(M));
 
-                // SoftmaxCrossEntropy 反向传播：
-                // 针对输入 Logits 的梯度公式：dLogits[i, j] = (probs[i, j] - target_indicator) / batch_size
-                // 其中 target_indicator 在 j == target 时为 1.0，否则为 0.0
                 for (0..M) |i| {
                     const label = ctx.targets[i];
                     const p_row = ctx.probs[i * N .. (i + 1) * N];
@@ -160,6 +188,13 @@ pub const Op = struct {
                     }
                 }
             },
+            // ====================================================================
+            // 5. 形状变换反向传播 (Reshape Backward)
+            // ====================================================================
+            // 前向公式: C = reshape(A)，仅改变形状元数据，不修改物理排列
+            // 数学推导:
+            //   Reshape 没有数学上的参数变换，因此其梯度传递就是将输出梯度 dC
+            //   以一维平铺形式直接拷回/累加到输入 A 的梯度 dA 缓冲区中。
             .Reshape => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
@@ -169,6 +204,14 @@ pub const Op = struct {
                     }
                 }
             },
+            // ====================================================================
+            // 6. 维度转置反向传播 (Transpose Backward)
+            // ====================================================================
+            // 前向公式: C = transpose(A, dim0, dim1)
+            // 数学推导:
+            //   转置算子物理上改变了元素的读取索引。
+            //   因此反向传播时，必须通过转置后的 stride 步长定位到 A.grad 中的物理偏移位置，
+            //   并将 C.grad 中连续排列的梯度累加进去。
             .Transpose => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];

@@ -3,6 +3,7 @@ const zig_ml = @import("zig_ml");
 const dataset = zig_ml.dataset;
 const nn = zig_ml.nn;
 const autodiff = zig_ml.autodiff;
+const tensor = zig_ml.tensor;
 
 const CLASS_NAMES = [10][]const u8{
     "T-shirt/top", "Trouser", "Pullover", "Dress", "Coat",
@@ -37,7 +38,7 @@ pub const MLP = struct {
     }
 
     // 用户只需专注定义前向传播逻辑
-    pub fn forward(self: *const MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *autodiff.Tensor) !*autodiff.Tensor {
+    pub fn forward(self: *const MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
         if (graph == null) {
             // Eager 模式：使用局部 ArenaAllocator 自动管理中间临时 Tensor 内存，避免频繁手写 defer free
             var arena = std.heap.ArenaAllocator.init(allocator);
@@ -53,7 +54,7 @@ pub const MLP = struct {
             // 将最终结果克隆到外部的 allocator 中返回，出作用域后局部 arena 内的临时变量会被一并释放
             return try zig_ml.tensor.array(allocator, out_arena.shape.dims[0..out_arena.shape.len], out_arena.data);
         }
-        
+
         const x1 = try self.fc1.forward(allocator, graph, x);
         const a1 = try x1.relu(allocator, graph);
         const x2 = try self.fc2.forward(allocator, graph, a1);
@@ -94,7 +95,6 @@ fn runTraining(
     test_dataset: dataset.Dataset,
 ) !void {
     const input_dim = model.inner.fc1.weight.shape.dims[0];
-    const num_classes = model.inner.fc3.weight.shape.dims[1];
     const batch_size = 64;
     const epochs = 15;
     var lr: f32 = 0.05;
@@ -149,8 +149,7 @@ fn runTraining(
 
             // 提取批次的 Loss 标量与准确率
             const batch_loss = loss.data[0];
-            const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
-            const batch_acc = computeAccuracy(actual_batch_size, num_classes, probs, targets);
+            const batch_acc = try computeAccuracy(logits, targets, arena);
 
             epoch_loss += batch_loss;
             epoch_acc += batch_acc;
@@ -194,26 +193,18 @@ fn runTraining(
     };
 }
 
+fn computeAccuracy(logits: *tensor.Tensor, y: []const u8, allocator: std.mem.Allocator) !f32 {
+    const preds = try logits.argmax(1, allocator);
+    defer zig_ml.tensor.free(allocator, preds);
 
-
-fn computeAccuracy(B: usize, num_classes: usize, a3: []const f32, y: []const u8) f32 {
     var correct: usize = 0;
-    for (0..B) |i| {
-        const label = y[i];
-        const a3_row = a3[i * num_classes .. (i + 1) * num_classes];
-        var max_val = a3_row[0];
-        var pred: usize = 0;
-        for (1..num_classes) |j| {
-            if (a3_row[j] > max_val) {
-                max_val = a3_row[j];
-                pred = j;
-            }
-        }
-        if (pred == label) {
+    for (preds.data, 0..) |pred_float, i| {
+        const pred = @as(usize, @intFromFloat(pred_float));
+        if (pred == y[i]) {
             correct += 1;
         }
     }
-    return @as(f32, @floatFromInt(correct)) / @as(f32, @floatFromInt(B));
+    return @as(f32, @floatFromInt(correct)) / @as(f32, @floatFromInt(preds.data.len));
 }
 
 const EvalResult = struct {
@@ -227,7 +218,6 @@ fn evaluateModel(
     test_dataset: dataset.Dataset,
 ) !EvalResult {
     const input_dim = model.inner.fc1.weight.shape.dims[0];
-    const num_classes = model.inner.fc3.weight.shape.dims[1];
     const test_batch_size = 100;
 
     var test_loader = try dataset.DataLoader.init(arena, test_dataset, test_batch_size, .{
@@ -259,8 +249,7 @@ fn evaluateModel(
         const loss = try graph.softmaxCrossEntropy(logits, targets);
 
         test_loss += loss.data[0];
-        const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
-        test_acc += computeAccuracy(actual_batch_size, num_classes, probs, targets);
+        test_acc += try computeAccuracy(logits, targets, arena);
         batch_count += 1;
     }
 
@@ -277,7 +266,6 @@ fn printPredictions(
     count: usize,
 ) !void {
     const input_dim = model.inner.fc1.weight.shape.dims[0];
-    const num_classes = model.inner.fc3.weight.shape.dims[1];
 
     std.debug.print("\nSample Predictions from Test Set:\n", .{});
     for (0..count) |idx| {
@@ -293,16 +281,10 @@ fn printPredictions(
         const logits = try model.forward(arena, &graph, x_tensor);
 
         const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
+        const preds = try logits.argmax(1, arena);
+        const pred = @as(usize, @intFromFloat(preds.data[0]));
         const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
-
-        var max_val = probs[0];
-        var pred: usize = 0;
-        for (1..num_classes) |j| {
-            if (probs[j] > max_val) {
-                max_val = probs[j];
-                pred = j;
-            }
-        }
+        const max_val = probs[pred];
 
         const is_correct = (pred == actual_label);
         const status = if (is_correct) "✅ CORRECT" else "❌ INCORRECT";
