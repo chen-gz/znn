@@ -326,135 +326,73 @@ pub const Graph = struct {
 
         try self.tensors.append(self.backing_allocator, C);
 
-        if (A.requires_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
 
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Reshape,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Reshape = {} },
-            };
-            C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
-        }
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Reshape,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .Reshape = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
 
         return C;
     }
 
     // 维度转置算子前向传播：交换 dim0 和 dim1
     pub fn transposeND(self: *Graph, A: *Tensor, dim0: usize, dim1: usize) !*Tensor {
-        std.debug.assert(dim0 < A.shape.len);
-        std.debug.assert(dim1 < A.shape.len);
-
         const allocator = self.arena.allocator();
-        const C = try allocator.create(Tensor);
+        const C = try A.transpose(dim0, dim1, allocator, null);
 
-        const shape_trans = transposeShape(A.shape, dim0, dim1);
-        const strides_trans = transposeShape(A.strides, dim0, dim1);
-
-        // C 作为物理上连续的输出 Tensor
-        const C_shape = shape_trans;
-        const C_strides = computeContiguousStrides(C_shape);
-
-        var total_size: usize = 1;
-        for (C_shape.dims[0..C_shape.len]) |dim| {
-            total_size *= dim;
-        }
-
-        C.* = Tensor{
-            .data = try allocator.alloc(f32, total_size),
-            .grad = if (A.requires_grad) try allocator.alloc(f32, total_size) else &.{},
-            .shape = C_shape,
-            .strides = C_strides,
-            .requires_grad = A.requires_grad,
-            .creator = null,
-        };
-        if (A.requires_grad) {
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
             @memset(C.grad, 0.0);
-        }
-
-        // 物理上把转置后的数据拷贝到连续的 C 中
-        var indices = [_]usize{0} ** 8;
-        const len = C_shape.len;
-        for (0..total_size) |dest_flat_idx| {
-            var src_flat_idx: usize = 0;
-            for (0..len) |d| {
-                src_flat_idx += indices[d] * strides_trans.dims[d];
-            }
-            C.data[dest_flat_idx] = A.data[src_flat_idx];
-
-            // 递增索引
-            var d: usize = len;
-            while (d > 0) {
-                d -= 1;
-                indices[d] += 1;
-                if (indices[d] < C_shape.dims[d]) {
-                    break;
-                }
-                indices[d] = 0;
-            }
         }
 
         try self.tensors.append(self.backing_allocator, C);
 
-        if (A.requires_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
 
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Transpose,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{
-                    .Transpose = .{
-                        .dim0 = dim0,
-                        .dim1 = dim1,
-                    },
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Transpose,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{
+                .Transpose = .{
+                    .dim0 = dim0,
+                    .dim1 = dim1,
                 },
-            };
-            C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
-        }
+            },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
 
         return C;
     }
 
     // 矩阵乘法算子前向传播：C = A * B
     pub fn matmul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
-        const M = A.shape.dims[0];
-        const K = A.shape.dims[1];
-        const N = B.shape.dims[1];
-        // 创建输出张量 C。若 A 或 B 任意一个需要梯度，则 C 也需要梯度以完成链式反向传播
-        const C = try self.tensor(M, N, A.requires_grad or B.requires_grad);
-
-        // 调用 CPU macOS Accelerate CBLAS 计算
-        c.cblas_sgemm(
-            c.CblasRowMajor,
-            c.CblasNoTrans, // A 不转置
-            c.CblasNoTrans, // B 不转置
-            @intCast(M),
-            @intCast(N),
-            @intCast(K),
-            1.0,            // alpha = 1.0
-            A.data.ptr,
-            @intCast(K),
-            B.data.ptr,
-            @intCast(N),
-            0.0,            // beta = 0.0（不覆盖/不累加）
-            C.data.ptr,
-            @intCast(N),
-        );
-
-        // 构建并保存当前算子节点以构成计算图的依赖链
         const allocator = self.arena.allocator();
+        const C = try A.matmul(B, allocator, null);
+
+        C.requires_grad = A.requires_grad or B.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
         const inputs = try allocator.alloc(*Tensor, 2);
         inputs[0] = A;
         inputs[1] = B;
@@ -476,20 +414,17 @@ pub const Graph = struct {
 
     // 偏置相加算子前向传播：C = A + bias (按行广播相加)
     pub fn addBias(self: *Graph, A: *Tensor, bias: *Tensor) !*Tensor {
-        const M = A.shape.dims[0];
-        const N = A.shape.dims[1];
-        const C = try self.tensor(M, N, A.requires_grad or bias.requires_grad);
+        const allocator = self.arena.allocator();
+        const C = try A.addBias(bias, allocator, null);
 
-        // 偏置向量形状为 1 x N，按行广播复制相加到每一行
-        for (0..M) |i| {
-            const a_row = A.data[i * N .. (i + 1) * N];
-            const c_row = C.data[i * N .. (i + 1) * N];
-            for (0..N) |j| {
-                c_row[j] = a_row[j] + bias.data[j];
-            }
+        C.requires_grad = A.requires_grad or bias.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
         }
 
-        const allocator = self.arena.allocator();
+        try self.tensors.append(self.backing_allocator, C);
+
         const inputs = try allocator.alloc(*Tensor, 2);
         inputs[0] = A;
         inputs[1] = bias;
@@ -511,16 +446,17 @@ pub const Graph = struct {
 
     // 激活函数 ReLU 前向传播：C = max(0, A)
     pub fn relu(self: *Graph, A: *Tensor) !*Tensor {
-        const M = A.shape.dims[0];
-        const N = A.shape.dims[1];
-        const C = try self.tensor(M, N, A.requires_grad);
+        const allocator = self.arena.allocator();
+        const C = try A.relu(allocator, null);
 
-        const total = A.data.len;
-        for (0..total) |i| {
-            C.data[i] = if (A.data[i] > 0.0) A.data[i] else 0.0;
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
         }
 
-        const allocator = self.arena.allocator();
+        try self.tensors.append(self.backing_allocator, C);
+
         const inputs = try allocator.alloc(*Tensor, 1);
         inputs[0] = A;
         const outputs = try allocator.alloc(*Tensor, 1);

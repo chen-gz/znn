@@ -1,6 +1,7 @@
 const std = @import("std");
 const autodiff = @import("autodiff.zig");
 const Op = autodiff.Op;
+const c = @import("cblas.zig");
 
 pub const Shape = struct {
     dims: [8]usize,
@@ -141,7 +142,176 @@ pub const Tensor = struct {
         }
         std.debug.print("]", .{});
     }
+
+    // ============================================================================
+    // Direct tensor operations (eager or graph-backed)
+    // ============================================================================
+    pub fn matmul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.matmul(self, other);
+        }
+        const M = self.shape.dims[0];
+        const K = self.shape.dims[1];
+        const N = other.shape.dims[1];
+        const C = try zeros(allocator, &.{M, N});
+        c.cblas_sgemm(
+            c.CblasRowMajor,
+            c.CblasNoTrans,
+            c.CblasNoTrans,
+            @intCast(M),
+            @intCast(N),
+            @intCast(K),
+            1.0,
+            self.data.ptr,
+            @intCast(K),
+            other.data.ptr,
+            @intCast(N),
+            0.0,
+            C.data.ptr,
+            @intCast(N),
+        );
+        return C;
+    }
+
+    pub fn addBias(self: *Tensor, bias: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.addBias(self, bias);
+        }
+        const M = self.shape.dims[0];
+        const N = self.shape.dims[1];
+        const C = try zeros(allocator, &.{M, N});
+        for (0..M) |i| {
+            const a_row = self.data[i * N .. (i + 1) * N];
+            const c_row = C.data[i * N .. (i + 1) * N];
+            for (0..N) |j| {
+                c_row[j] = a_row[j] + bias.data[j];
+            }
+        }
+        return C;
+    }
+
+    pub fn relu(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.relu(self);
+        }
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        const total = self.data.len;
+        for (0..total) |i| {
+            C.data[i] = if (self.data[i] > 0.0) self.data[i] else 0.0;
+        }
+        return C;
+    }
+
+    pub fn softmaxCrossEntropy(self: *Tensor, targets: []const u8, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.softmaxCrossEntropy(self, targets);
+        }
+        const loss = try zeros(allocator, &.{1, 1});
+        const B = self.shape.dims[0];
+        const N = self.shape.dims[1];
+
+        var loss_sum: f32 = 0.0;
+        for (0..B) |i| {
+            const logits_row = self.data[i * N .. (i + 1) * N];
+            var max_val = logits_row[0];
+            for (logits_row[1..]) |val| {
+                if (val > max_val) max_val = val;
+            }
+
+            var sum: f32 = 0.0;
+            for (logits_row) |val| {
+                sum += @exp(val - max_val);
+            }
+
+            const label = targets[i];
+            const prob = @exp(logits_row[label] - max_val) / sum;
+            const clipped = @max(prob, 1e-15);
+            loss_sum += -@log(clipped);
+        }
+        loss.data[0] = loss_sum / @as(f32, @floatFromInt(B));
+        return loss;
+    }
+
+    pub fn reshape(self: *Tensor, new_shape_slice: []const usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.reshape(self, new_shape_slice);
+        }
+        const shape = Shape.init(new_shape_slice);
+        const strides = computeContiguousStrides(shape);
+        var old_total: usize = 1;
+        for (0..self.shape.len) |i| {
+            old_total *= self.shape.dims[i];
+        }
+        var new_total: usize = 1;
+        for (new_shape_slice) |dim| {
+            new_total *= dim;
+        }
+        std.debug.assert(old_total == new_total);
+
+        const C = try allocator.create(Tensor);
+        C.* = Tensor{
+            .data = try allocator.alloc(f32, new_total),
+            .grad = &.{},
+            .shape = shape,
+            .strides = strides,
+            .requires_grad = false,
+            .creator = null,
+        };
+        @memcpy(C.data, self.data);
+        return C;
+    }
+
+    pub fn transpose(self: *Tensor, dim0: usize, dim1: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.transposeND(self, dim0, dim1);
+        }
+        std.debug.assert(dim0 < self.shape.len);
+        std.debug.assert(dim1 < self.shape.len);
+
+        const shape_trans = transposeShape(self.shape, dim0, dim1);
+        const strides_trans = transposeShape(self.strides, dim0, dim1);
+
+        const C_shape = shape_trans;
+        const C_strides = computeContiguousStrides(C_shape);
+
+        var total_size: usize = 1;
+        for (C_shape.dims[0..C_shape.len]) |dim| {
+            total_size *= dim;
+        }
+
+        const C = try allocator.create(Tensor);
+        C.* = Tensor{
+            .data = try allocator.alloc(f32, total_size),
+            .grad = &.{},
+            .shape = C_shape,
+            .strides = C_strides,
+            .requires_grad = false,
+            .creator = null,
+        };
+
+        var indices = [_]usize{0} ** 8;
+        const len = C_shape.len;
+        for (0..total_size) |dest_flat_idx| {
+            var src_flat_idx: usize = 0;
+            for (0..len) |d| {
+                src_flat_idx += indices[d] * strides_trans.dims[d];
+            }
+            C.data[dest_flat_idx] = self.data[src_flat_idx];
+
+            var d: usize = len;
+            while (d > 0) {
+                d -= 1;
+                indices[d] += 1;
+                if (indices[d] < C_shape.dims[d]) {
+                    break;
+                }
+                indices[d] = 0;
+            }
+        }
+        return C;
+    }
 };
+
 
 // ============================================================================
 // NumPy-like raw tensor creation APIs (independent of Graph)
@@ -306,5 +476,84 @@ test "NumPy-like raw tensor creation" {
     try std.testing.expectEqual(@as(f32, 1.0), t_ones.get(&.{0, 0}));
     try std.testing.expectEqual(@as(f32, 1.0), t_ones.get(&.{2, 0}));
 }
+
+test "Direct tensor operations (eager and graph)" {
+    const allocator = std.testing.allocator;
+
+    // Eager Mode Test
+    {
+        const A = try array(allocator, &.{2, 3}, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+        defer free(allocator, A);
+        const B = try array(allocator, &.{3, 2}, &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 });
+        defer free(allocator, B);
+
+        // Matmul
+        const C = try A.matmul(B, allocator, null);
+        defer free(allocator, C);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.2), C.get(&.{0, 0}), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 6.4), C.get(&.{1, 1}), 1e-5);
+
+        // AddBias
+        const bias = try array(allocator, &.{1, 2}, &[_]f32{ 0.5, 1.0 });
+        defer free(allocator, bias);
+        const D = try C.addBias(bias, allocator, null);
+        defer free(allocator, D);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.7), D.get(&.{0, 0}), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 7.4), D.get(&.{1, 1}), 1e-5);
+
+        // Relu
+        const E = try D.relu(allocator, null);
+        defer free(allocator, E);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.7), E.get(&.{0, 0}), 1e-5);
+
+        // SoftmaxCrossEntropy
+        const loss = try E.softmaxCrossEntropy(&[2]u8{ 0, 1 }, allocator, null);
+        defer free(allocator, loss);
+        try std.testing.expect(loss.get(&.{0, 0}) > 0.0);
+
+        // Reshape
+        const F = try E.reshape(&.{1, 4}, allocator, null);
+        defer free(allocator, F);
+        try std.testing.expectEqualSlices(usize, &.{1, 4}, F.shape.dims[0..F.shape.len]);
+
+        // Transpose
+        const G = try F.transpose(0, 1, allocator, null);
+        defer free(allocator, G);
+        try std.testing.expectEqualSlices(usize, &.{4, 1}, G.shape.dims[0..G.shape.len]);
+    }
+
+    // Graph Mode Test
+    {
+        var graph = autodiff.Graph.init(allocator);
+        defer graph.deinit();
+
+        const A = try graph.array(&.{2, 3}, &[_]f32{ 1, 2, 3, 4, 5, 6 }, true);
+        const B = try graph.array(&.{3, 2}, &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 }, true);
+
+        // Matmul
+        const C = try A.matmul(B, allocator, &graph);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.2), C.get(&.{0, 0}), 1e-5);
+
+        // AddBias
+        const bias = try graph.array(&.{1, 2}, &[_]f32{ 0.5, 1.0 }, true);
+        const D = try C.addBias(bias, allocator, &graph);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.7), D.get(&.{0, 0}), 1e-5);
+
+        // Relu
+        const E = try D.relu(allocator, &graph);
+
+        // SoftmaxCrossEntropy
+        const loss = try E.softmaxCrossEntropy(&[2]u8{ 0, 1 }, allocator, &graph);
+        try std.testing.expect(loss.get(&.{0, 0}) > 0.0);
+
+        // Reshape
+        const F = try E.reshape(&.{1, 4}, allocator, &graph);
+
+        // Transpose
+        const G = try F.transpose(0, 1, allocator, &graph);
+        try std.testing.expectEqualSlices(usize, &.{4, 1}, G.shape.dims[0..G.shape.len]);
+    }
+}
+
 
 
