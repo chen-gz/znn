@@ -98,31 +98,26 @@ pub fn main(init: std.process.Init) !void {
     const true_w: f32 = 2.5;
     const true_b: f32 = -1.2;
 
-    var prng = std.Random.DefaultPrng.init(12345);
-    const random = prng.random();
+    // Set random seed globally for reproducibility (matches PyTorch's torch.manual_seed)
+    tensor.manualSeed(12345);
 
-    const x_raw = try allocator.alloc(f32, N);
-    defer allocator.free(x_raw);
-    const y_raw = try allocator.alloc(f32, N);
-    defer allocator.free(y_raw);
+    // NumPy-like data generation using our new Tensor vectorization APIs!
+    const x_tensor = (try tensor.rand(allocator, &.{ N, 1 })).mulScalar(4.0).addScalar(-2.0);
+    defer tensor.free(allocator, x_tensor);
 
-    for (0..N) |i| {
-        // Random x in [-2.0, 2.0]
-        const x_val = (random.float(f32) * 4.0) - 2.0;
-        // Small noise in [-0.05, 0.05]
-        const noise = (random.float(f32) * 0.1) - 0.05;
-        const y_val = true_w * x_val + true_b + noise;
+    const noise_tensor = (try tensor.rand(allocator, &.{ N, 1 })).mulScalar(0.1).addScalar(-0.05);
+    defer tensor.free(allocator, noise_tensor);
 
-        x_raw[i] = x_val;
-        y_raw[i] = y_val;
-    }
+    const y_tensor = (try x_tensor.clone(allocator)).mulScalar(true_w).addScalar(true_b);
+    defer tensor.free(allocator, y_tensor);
+    _ = try y_tensor.addTensor(noise_tensor);
 
     // 2. Solve using Gradient Descent
     std.debug.print("--- Running Gradient Descent ---\n", .{});
-    const gd_res = try solveGradientDescent(allocator, x_raw, y_raw, 0.05, 100);
+    const gd_res = try solveGradientDescent(allocator, x_tensor.data, y_tensor.data, 0.05, 100);
 
     // 3. Solve using Analytical Formula
-    const analytical_res = solveAnalytical(x_raw, y_raw);
+    const analytical_res = solveAnalytical(x_tensor.data, y_tensor.data);
 
     std.debug.print("\nTraining complete!\n", .{});
     std.debug.print("Final Learned Model (GD):   y = {d:.4} * x + {d:.4}\n", .{ gd_res.w, gd_res.b });
