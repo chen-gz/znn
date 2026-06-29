@@ -341,10 +341,10 @@ pub const Tensor = struct {
         if (dim == 1) {
             const C = try zeros(allocator, &.{M, 1});
             for (0..M) |i| {
-                var max_val = self.data[i * N];
+                var max_val = self.get(&.{i, 0});
                 var max_idx: usize = 0;
                 for (1..N) |j| {
-                    const val = self.data[i * N + j];
+                    const val = self.get(&.{i, j});
                     if (val > max_val) {
                         max_val = val;
                         max_idx = j;
@@ -356,10 +356,10 @@ pub const Tensor = struct {
         } else if (dim == 0) {
             const C = try zeros(allocator, &.{1, N});
             for (0..N) |j| {
-                var max_val = self.data[j];
+                var max_val = self.get(&.{0, j});
                 var max_idx: usize = 0;
                 for (1..M) |i| {
-                    const val = self.data[i * N + j];
+                    const val = self.get(&.{i, j});
                     if (val > max_val) {
                         max_val = val;
                         max_idx = i;
@@ -381,9 +381,9 @@ pub const Tensor = struct {
         if (dim == 1) {
             const C = try zeros(allocator, &.{M, 1});
             for (0..M) |i| {
-                var max_val = self.data[i * N];
+                var max_val = self.get(&.{i, 0});
                 for (1..N) |j| {
-                    const val = self.data[i * N + j];
+                    const val = self.get(&.{i, j});
                     if (val > max_val) max_val = val;
                 }
                 C.data[i] = max_val;
@@ -392,9 +392,9 @@ pub const Tensor = struct {
         } else if (dim == 0) {
             const C = try zeros(allocator, &.{1, N});
             for (0..N) |j| {
-                var max_val = self.data[j];
+                var max_val = self.get(&.{0, j});
                 for (1..M) |i| {
-                    const val = self.data[i * N + j];
+                    const val = self.get(&.{i, j});
                     if (val > max_val) max_val = val;
                 }
                 C.data[j] = max_val;

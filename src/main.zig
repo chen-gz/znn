@@ -281,10 +281,15 @@ fn printPredictions(
         const logits = try model.forward(arena, &graph, x_tensor);
 
         const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
-        const preds = try logits.argmax(1, arena);
-        const pred = @as(usize, @intFromFloat(preds.data[0]));
         const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
-        const max_val = probs[pred];
+        var max_val = probs[0];
+        var pred: usize = 0;
+        for (probs, 0..) |p, j| {
+            if (p > max_val) {
+                max_val = p;
+                pred = j;
+            }
+        }
 
         const is_correct = (pred == actual_label);
         const status = if (is_correct) "✅ CORRECT" else "❌ INCORRECT";
