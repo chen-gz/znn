@@ -333,6 +333,45 @@ pub const Tensor = struct {
         return C;
     }
 
+    pub fn clone(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
+        const t = try allocator.create(Tensor);
+        t.* = Tensor{
+            .data = try allocator.alloc(f32, self.data.len),
+            .grad = if (self.requires_grad) try allocator.alloc(f32, self.grad.len) else &.{},
+            .shape = self.shape,
+            .strides = self.strides,
+            .requires_grad = self.requires_grad,
+            .creator = self.creator,
+        };
+        @memcpy(t.data, self.data);
+        if (self.requires_grad) {
+            @memcpy(t.grad, self.grad);
+        }
+        return t;
+    }
+
+    pub fn mulScalar(self: *Tensor, val: f32) *Tensor {
+        for (self.data) |*item| {
+            item.* *= val;
+        }
+        return self;
+    }
+
+    pub fn addScalar(self: *Tensor, val: f32) *Tensor {
+        for (self.data) |*item| {
+            item.* += val;
+        }
+        return self;
+    }
+
+    pub fn addTensor(self: *Tensor, other: *Tensor) !*Tensor {
+        std.debug.assert(self.data.len == other.data.len);
+        for (self.data, other.data) |*item, other_val| {
+            item.* += other_val;
+        }
+        return self;
+    }
+
     pub fn argmax(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
         std.debug.assert(dim < self.shape.len);
         const M = self.shape.dims[0];
@@ -472,6 +511,21 @@ pub fn ones(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
         .creator = null,
     };
     @memset(t.data, 1.0);
+    return t;
+}
+
+var default_prng = std.Random.DefaultPrng.init(12345);
+
+pub fn manualSeed(seed: u64) void {
+    default_prng = std.Random.DefaultPrng.init(seed);
+}
+
+pub fn rand(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
+    const t = try zeros(allocator, shape_slice);
+    const random = default_prng.random();
+    for (t.data) |*val| {
+        val.* = random.float(f32);
+    }
     return t;
 }
 
