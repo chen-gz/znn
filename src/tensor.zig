@@ -682,6 +682,33 @@ test "Tensor argmax and max reductions" {
     try std.testing.expectEqual(@as(f32, 6.0), val0.get(&.{0, 2}));
 }
 
+test "Tensor MSE loss forward and backward" {
+    const allocator = std.testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var graph = autodiff.Graph.init(arena_allocator);
+    defer graph.deinit();
+
+    const y_pred = try graph.array(&.{2, 1}, &[_]f32{ 1.5, 2.5 }, true);
+    const y_true = try graph.array(&.{2, 1}, &[_]f32{ 1.0, 3.0 }, false);
+
+    const loss = try graph.mseLoss(y_pred, y_true);
+    // loss = 0.5 * ((1.5 - 1.0)^2 + (2.5 - 3.0)^2) = 0.5 * (0.25 + 0.25) = 0.25
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), loss.data[0], 1e-5);
+
+    try graph.backward(loss);
+
+    // grad of y_pred = 2/N * (y_pred - y_true) = 2/2 * (y_pred - y_true) = y_pred - y_true
+    // dy_pred_0 = 1.5 - 1.0 = 0.5
+    // dy_pred_1 = 2.5 - 3.0 = -0.5
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), y_pred.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.5), y_pred.grad[1], 1e-5);
+}
+
+
 
 
 

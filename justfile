@@ -2,9 +2,13 @@
 test:
     zig build test
 
-# Run the neural network training pipeline
+# Run the MLP Fashion MNIST training pipeline
 run:
     zig build run
+
+# Run the Linear Regression optimization demo
+run-lr:
+    zig build run-lr
 
 # Generate code coverage report using kcov
 coverage:
