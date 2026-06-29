@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
             // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/fashion_mnist.zig"),
             // Target and optimization levels must be explicitly wired in when
             // defining an executable or library (in the root module), and you
             // can also hardcode a specific target for an executable or library
@@ -94,12 +94,31 @@ pub fn build(b: *std.Build) void {
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
 
+    // Define Linear Regression binary target
+    const exe_lr = b.addExecutable(.{
+        .name = "linear_regression",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/linear_regression.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_lr_mod = exe_lr.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_lr_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_lr);
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
     // For a top level step to actually do something, it must depend on other
     // steps (e.g. a Run step, as we will see in a moment).
-    const run_step = b.step("run", "Run the app");
+    const run_step = b.step("run", "Run the MLP Fashion MNIST app");
 
     // This creates a RunArtifact step in the build graph. A RunArtifact step
     // invokes an executable compiled by Zig. Steps will only be executed by the
@@ -119,6 +138,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
+
+    // Run step for linear regression
+    const run_lr_step = b.step("run-lr", "Run the linear regression app");
+    const run_lr_cmd = b.addRunArtifact(exe_lr);
+    run_lr_step.dependOn(&run_lr_cmd.step);
+    run_lr_cmd.step.dependOn(b.getInstallStep());
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to

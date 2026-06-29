@@ -16,6 +16,7 @@ pub const OpType = enum {
     SoftmaxCrossEntropy, // 损失函数：结合了 Softmax 与交叉熵（数值稳定性更好）
     Reshape,             // 形状变换
     Transpose,           // 维度转置
+    MseLoss,             // 均方误差损失函数
 };
 
 // 各算子反向传播所需的上下文信息（如 Softmax 的概率输出与 Target 类别）
@@ -32,6 +33,7 @@ pub const OpContext = union(enum) {
         dim0: usize,
         dim1: usize,
     },
+    MseLoss: void,
 };
 
 
@@ -238,6 +240,24 @@ pub const Op = struct {
                             }
                             indices[d] = 0;
                         }
+                    }
+                }
+            },
+            .MseLoss => {
+                const A = self.inputs[0]; // y_pred
+                const B = self.inputs[1]; // y_true
+                const C = self.outputs[0]; // loss
+                const N = A.data.len;
+                const N_f = @as(f32, @floatFromInt(N));
+
+                if (A.requires_grad) {
+                    for (0..N) |i| {
+                        A.grad[i] += C.grad[0] * (2.0 / N_f) * (A.data[i] - B.data[i]);
+                    }
+                }
+                if (B.requires_grad) {
+                    for (0..N) |i| {
+                        B.grad[i] += C.grad[0] * (2.0 / N_f) * (B.data[i] - A.data[i]);
                     }
                 }
             },
@@ -585,6 +605,40 @@ pub const Graph = struct {
         return loss;
     }
 
+    // 均方误差 (MSE) 损失函数：C = 1/N * sum((y_pred - y_true)^2)
+    pub fn mseLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const loss = try self.tensor(1, 1, true); // 标量 loss，支持 requires_grad = true
+
+        const N = y_pred.data.len;
+        std.debug.assert(N == y_true.data.len);
+
+        var loss_sum: f32 = 0.0;
+        for (0..N) |i| {
+            const diff = y_pred.data[i] - y_true.data[i];
+            loss_sum += diff * diff;
+        }
+        loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
+
+        const inputs = try allocator.alloc(*Tensor, 2);
+        inputs[0] = y_pred;
+        inputs[1] = y_true;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = loss;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .MseLoss,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .MseLoss = {} },
+        };
+        loss.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return loss;
+    }
+
     // 执行计算图的反向传播
     pub fn backward(self: *Graph, loss_tensor: *Tensor) !void {
         const allocator = self.arena.allocator();
@@ -600,6 +654,28 @@ pub const Graph = struct {
         loss_tensor.grad[0] = 1.0;
 
         // 3. 按拓扑排序的逆序执行各算子的 backward 求导函数，由深至浅传导梯度
+        var i = sorted_list.items.len;
+        while (i > 0) {
+            i -= 1;
+            const node = sorted_list.items[i];
+            if (node.creator) |op| {
+                try op.backward();
+            }
+        }
+    }
+
+    // 执行计算图的反向传播，起点张量的梯度已被外部手动预填（常用于自定义损失函数如 MSE）
+    pub fn backwardWithGrad(self: *Graph, output_tensor: *Tensor) !void {
+        const allocator = self.arena.allocator();
+        var visited = std.AutoHashMap(*Tensor, void).init(allocator);
+        defer visited.deinit();
+        var sorted_list: std.ArrayList(*Tensor) = .empty;
+        defer sorted_list.deinit(allocator);
+
+        // 1. 对计算图进行拓扑排序
+        try self.topologicalSort(output_tensor, &visited, &sorted_list);
+
+        // 2. 按拓扑排序的逆序执行各算子的 backward 求导，由深至浅传导梯度
         var i = sorted_list.items.len;
         while (i > 0) {
             i -= 1;
