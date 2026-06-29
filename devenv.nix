@@ -20,6 +20,14 @@
   scripts.hello.exec = ''
     echo hello from $GREET
   '';
+  scripts.coverage.exec = ''
+    echo "Building tests..."
+    zig build test --summary none
+    echo "Running kcov..."
+    rm -rf ./coverage-report
+    kcov --include-path=./src ./coverage-report .zig-cache/o/*/test
+    echo "Coverage report generated at ./coverage-report/index.html"
+  '';
 
   # https://devenv.sh/basics/
   enterShell = ''
