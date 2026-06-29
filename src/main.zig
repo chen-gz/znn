@@ -297,3 +297,42 @@ fn printPredictions(
         });
     }
 }
+
+test "MLP model initialization and forward passes (Eager & Graph)" {
+    const allocator = std.testing.allocator;
+
+    var model = NeuralNetwork.init(allocator, try MLP.init(allocator, 42));
+    defer model.deinit();
+
+    const x_data = try allocator.alloc(f32, 2 * 784);
+    defer allocator.free(x_data);
+    @memset(x_data, 0.1);
+
+    // Test Eager Mode (graph == null)
+    {
+        const x_tensor = try tensor.array(allocator, &.{ 2, 784 }, x_data);
+        defer tensor.free(allocator, x_tensor);
+
+        const logits = try model.forward(allocator, null, x_tensor);
+        defer tensor.free(allocator, logits);
+
+        try std.testing.expectEqualSlices(usize, &.{ 2, 10 }, logits.shape.dims[0..logits.shape.len]);
+    }
+
+    // Test Graph Mode (graph != null)
+    {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const arena_allocator = arena.allocator();
+
+        var graph = autodiff.Graph.init(arena_allocator);
+        defer graph.deinit();
+
+        const x_tensor = try graph.tensor(2, 784, false);
+        @memcpy(x_tensor.data, x_data);
+
+        const logits = try model.forward(arena_allocator, &graph, x_tensor);
+
+        try std.testing.expectEqualSlices(usize, &.{ 2, 10 }, logits.shape.dims[0..logits.shape.len]);
+    }
+}
