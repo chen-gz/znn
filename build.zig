@@ -125,6 +125,7 @@ pub fn build(b: *std.Build) void {
     // set the releative field.
     const mod_tests = b.addTest(.{
         .root_module = mod,
+        .name = "root_tests",
     });
 
     // A run step that will run the test executable.
@@ -135,6 +136,7 @@ pub fn build(b: *std.Build) void {
     // hence why we have to create two separate ones.
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
+        .name = "exe_tests",
     });
 
     // A run step that will run the second test executable.
@@ -146,6 +148,12 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // Copy the test binaries to zig-out/bin/ so kcov can access them cleanly
+    const install_mod_tests = b.addInstallArtifact(mod_tests, .{});
+    const install_exe_tests = b.addInstallArtifact(exe_tests, .{});
+    test_step.dependOn(&install_mod_tests.step);
+    test_step.dependOn(&install_exe_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
