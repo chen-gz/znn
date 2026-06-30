@@ -212,6 +212,40 @@ pub const Tensor = struct {
         return C;
     }
 
+    pub fn mulScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.mulScalar(self, val);
+        }
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, s_val| {
+            c_val.* = s_val * val;
+        }
+        return C;
+    }
+
+    pub fn addScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.addScalar(self, val);
+        }
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, s_val| {
+            c_val.* = s_val + val;
+        }
+        return C;
+    }
+
+    pub fn add(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.add(self, other);
+        }
+        std.debug.assert(self.data.len == other.data.len);
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data, other.data) |*c_val, s_val, o_val| {
+            c_val.* = s_val + o_val;
+        }
+        return C;
+    }
+
     pub fn relu(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.relu(self);
@@ -350,21 +384,27 @@ pub const Tensor = struct {
         return t;
     }
 
-    pub fn mulScalar(self: *Tensor, val: f32) *Tensor {
+    pub fn mulScalar_(self: *Tensor, val: f32) *Tensor {
+        std.debug.assert(!self.requires_grad);
+        std.debug.assert(self.creator == null);
         for (self.data) |*item| {
             item.* *= val;
         }
         return self;
     }
 
-    pub fn addScalar(self: *Tensor, val: f32) *Tensor {
+    pub fn addScalar_(self: *Tensor, val: f32) *Tensor {
+        std.debug.assert(!self.requires_grad);
+        std.debug.assert(self.creator == null);
         for (self.data) |*item| {
             item.* += val;
         }
         return self;
     }
 
-    pub fn addTensor(self: *Tensor, other: *Tensor) !*Tensor {
+    pub fn add_(self: *Tensor, other: *Tensor) !*Tensor {
+        std.debug.assert(!self.requires_grad);
+        std.debug.assert(self.creator == null);
         std.debug.assert(self.data.len == other.data.len);
         for (self.data, other.data) |*item, other_val| {
             item.* += other_val;
@@ -442,6 +482,14 @@ pub const Tensor = struct {
         } else {
             return error.UnsupportedDimension;
         }
+    }
+
+    pub fn deinit(self: *Tensor, allocator: std.mem.Allocator) void {
+        allocator.free(self.data);
+        if (self.requires_grad and self.grad.len > 0) {
+            allocator.free(self.grad);
+        }
+        allocator.destroy(self);
     }
 };
 
@@ -530,11 +578,7 @@ pub fn rand(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
 }
 
 pub fn free(allocator: std.mem.Allocator, t: *Tensor) void {
-    allocator.free(t.data);
-    if (t.requires_grad and t.grad.len > 0) {
-        allocator.free(t.grad);
-    }
-    allocator.destroy(t);
+    t.deinit(allocator);
 }
 
 test "Shape and strides helpers" {
@@ -761,6 +805,55 @@ test "Tensor MSE loss forward and backward" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), y_pred.grad[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, -0.5), y_pred.grad[1], 1e-5);
 }
+
+test "Tensor mulScalar and add autograd" {
+    const allocator = std.testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var graph = autodiff.Graph.init(arena_allocator);
+    defer graph.deinit();
+
+    const A = try graph.array(&.{2, 2}, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, true);
+    const B = try graph.array(&.{2, 2}, &[_]f32{ 5.0, 6.0, 7.0, 8.0 }, true);
+
+    // C = A.mulScalar(2.0)
+    const C = try A.mulScalar(2.0, arena_allocator, &graph);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), C.get(&.{0, 0}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.0), C.get(&.{1, 1}), 1e-5);
+
+    // D = C + B
+    const D = try C.add(B, arena_allocator, &graph);
+    try std.testing.expectApproxEqAbs(@as(f32, 7.0), D.get(&.{0, 0}), 1e-5); // 2.0 + 5.0 = 7.0
+    try std.testing.expectApproxEqAbs(@as(f32, 16.0), D.get(&.{1, 1}), 1e-5); // 8.0 + 8.0 = 16.0
+
+    // E = D.addScalar(10.0)
+    const E = try D.addScalar(10.0, arena_allocator, &graph);
+    try std.testing.expectApproxEqAbs(@as(f32, 17.0), E.get(&.{0, 0}), 1e-5); // 7.0 + 10.0 = 17.0
+    try std.testing.expectApproxEqAbs(@as(f32, 26.0), E.get(&.{1, 1}), 1e-5); // 16.0 + 10.0 = 26.0
+
+    // Set gradients of E to 1.0 to backpropagate
+    for (E.grad) |*g| {
+        g.* = 1.0;
+    }
+
+    try graph.backward(E);
+
+    // Since E = D + 10, dE/dD = 1
+    // Since D = C + B, dD/dB = 1 => B.grad = 1.0
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), B.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), B.grad[3], 1e-5);
+
+    // Since E = D + 10, dE/dD = 1
+    // Since D = C + B, dD/dC = 1
+    // Since C = A * 2, dC/dA = 2
+    // By chain rule, dE/dA = 1 * 1 * 2 = 2.0 => A.grad = 2.0
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), A.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), A.grad[3], 1e-5);
+}
+
 
 
 

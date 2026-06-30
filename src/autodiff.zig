@@ -17,6 +17,9 @@ pub const OpType = enum {
     Reshape,             // 形状变换
     Transpose,           // 维度转置
     MseLoss,             // 均方误差损失函数
+    MulScalar,           // 标量乘法（张量缩放）
+    AddScalar,           // 标量加法
+    Add,                 // 张量逐元素加法
 };
 
 // 各算子反向传播所需的上下文信息（如 Softmax 的概率输出与 Target 类别）
@@ -34,6 +37,13 @@ pub const OpContext = union(enum) {
         dim1: usize,
     },
     MseLoss: void,
+    MulScalar: struct {
+        val: f32,
+    },
+    AddScalar: struct {
+        val: f32,
+    },
+    Add: void,
 };
 
 
@@ -258,6 +268,40 @@ pub const Op = struct {
                 if (B.requires_grad) {
                     for (0..N) |i| {
                         B.grad[i] += C.grad[0] * (2.0 / N_f) * (B.data[i] - A.data[i]);
+                    }
+                }
+            },
+            .MulScalar => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const val = self.context.MulScalar.val;
+                if (A.requires_grad) {
+                    for (0..A.data.len) |i| {
+                        A.grad[i] += C.grad[i] * val;
+                    }
+                }
+            },
+            .AddScalar => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                if (A.requires_grad) {
+                    for (0..A.data.len) |i| {
+                        A.grad[i] += C.grad[i];
+                    }
+                }
+            },
+            .Add => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+                if (A.requires_grad) {
+                    for (0..A.data.len) |i| {
+                        A.grad[i] += C.grad[i];
+                    }
+                }
+                if (B.requires_grad) {
+                    for (0..B.data.len) |i| {
+                        B.grad[i] += C.grad[i];
                     }
                 }
             },
@@ -637,6 +681,100 @@ pub const Graph = struct {
         try self.ops.append(self.backing_allocator, o);
 
         return loss;
+    }
+
+    // 标量乘法（缩放）：C = val * A
+    pub fn mulScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.mulScalar(val, allocator, null);
+
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .MulScalar,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .MulScalar = .{ .val = val } },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
+    // 标量加法：C = A + val
+    pub fn addScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.addScalar(val, allocator, null);
+
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .AddScalar,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .AddScalar = .{ .val = val } },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
+    // 逐元素张量加法：C = A + B
+    pub fn add(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.add(B, allocator, null);
+
+        C.requires_grad = A.requires_grad or B.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 2);
+        inputs[0] = A;
+        inputs[1] = B;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Add,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .Add = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
     }
 
     // 执行计算图的反向传播
