@@ -854,6 +854,56 @@ test "Tensor mulScalar and add autograd" {
     try std.testing.expectApproxEqAbs(@as(f32, 2.0), A.grad[3], 1e-5);
 }
 
+test "Tensor static graph forward and backward" {
+    const allocator = std.testing.allocator;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var graph = autodiff.Graph.init(arena_allocator);
+    defer graph.deinit();
+
+    // 1. Build the static graph template once
+    const A = try graph.array(&.{2, 2}, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, true);
+    const B = try graph.array(&.{2, 2}, &[_]f32{ 5.0, 6.0, 7.0, 8.0 }, true);
+    const C = try A.mulScalar(2.0, arena_allocator, &graph);
+    const D = try C.add(B, arena_allocator, &graph);
+
+    // 2. First Run: set inputs
+    A.data[0] = 1.0; A.data[1] = 2.0; A.data[2] = 3.0; A.data[3] = 4.0;
+    B.data[0] = 5.0; B.data[1] = 6.0; B.data[2] = 7.0; B.data[3] = 8.0;
+
+    // Execute forward pass
+    try graph.forward();
+    try std.testing.expectApproxEqAbs(@as(f32, 7.0), D.get(&.{0, 0}), 1e-5); // 2*1 + 5 = 7
+    try std.testing.expectApproxEqAbs(@as(f32, 16.0), D.get(&.{1, 1}), 1e-5); // 2*4 + 8 = 16
+
+    // Execute backward pass
+    graph.zeroGrad(); // Clear all gradients in the graph!
+    @memset(D.grad, 1.0);
+    try graph.backward(D);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), B.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), A.grad[0], 1e-5);
+
+    // 3. Second Run: change input data
+    A.data[0] = 10.0; A.data[1] = 20.0; A.data[2] = 30.0; A.data[3] = 40.0;
+    B.data[0] = 100.0; B.data[1] = 200.0; B.data[2] = 300.0; B.data[3] = 400.0;
+
+    // Recompute forward pass on the exact same graph structure!
+    try graph.forward();
+    try std.testing.expectApproxEqAbs(@as(f32, 120.0), D.get(&.{0, 0}), 1e-5); // 2*10 + 100 = 120
+    try std.testing.expectApproxEqAbs(@as(f32, 480.0), D.get(&.{1, 1}), 1e-5); // 2*40 + 400 = 480
+
+    // Recompute backward pass
+    graph.zeroGrad(); // Clear gradients again!
+    @memset(D.grad, 1.0);
+    try graph.backward(D);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), B.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), A.grad[0], 1e-5);
+}
+
+
 
 
 
