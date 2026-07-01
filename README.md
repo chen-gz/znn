@@ -38,10 +38,12 @@ It serves as a clean, production-grade reference for:
 
 ## 📂 Codebase Directory Structure
 
-* **[src/main.zig](src/main.zig)**: Execution entrypoint. Responsible for dataset loading, neural network initialization, model training loops, performance profiling, and test set inference.
-* **[src/autodiff.zig](src/autodiff.zig)**: Core Automatic Differentiation. Defines the `Shape`, `Tensor` and `Graph` structs, operators, and their backward/gradient calculation routines.
-* **[src/nn.zig](src/nn.zig)**: Neural Network Modules. Implements the 3-layer MLP model architecture, Kaiming (He) weight initialization, SGD with Momentum, and meta-programmed `Module` wrapping.
-* **[src/cblas.zig](src/cblas.zig)**: System CBLAS C-bindings.
+* **[src/fashion_mnist.zig](src/fashion_mnist.zig)**: 3-layer Feedforward Neural Network (MLP) binary target. Responsible for dataset loading, training loops, evaluation, and test predictions.
+* **[src/linear_regression.zig](src/linear_regression.zig)**: Linear regression binary target. Compares OLS analytical closed-form solution with iterative autograd-based gradient descent.
+* **[src/tensor.zig](src/tensor.zig)**: N-Dimensional Tensor library. Implements shape, logical strides, memory layout mapping, and vectorized math.
+* **[src/autodiff.zig](src/autodiff.zig)**: Core Automatic Differentiation engine. Implements the dynamic computation `Graph`, `Node`, operators, and DFS topological sorting.
+* **[src/nn.zig](src/nn.zig)**: Neural Network Modules. Implements the `Linear` module, activation functions, and `Module` wrapper for comptime reflection parameter management.
+* **[src/cblas.zig](src/cblas.zig)**: System CBLAS C-bindings for macOS Accelerate framework matrix operations.
 * **[src/dataset.zig](src/dataset.zig)**: Custom binary parser for Fashion MNIST IDX format files.
 * **[src/root.zig](src/root.zig)**: Module exports and compile-time unit tests.
 * **[build.zig](build.zig)**: Compilation build script detailing target configurations, Accelerate framework linking, and test runner tasks.
@@ -57,7 +59,13 @@ Create a `data/` directory in the project root and download/extract the [Fashion
 * `t10k-images-idx3-ubyte`
 * `t10k-labels-idx1-ubyte`
 
-### 2. Compile and Run Model Training
+### 2. Compile and Run Linear Regression
+Run the simple 1D linear regression example (analytical vs autograd GD):
+```bash
+zig build run-lr
+```
+
+### 3. Compile and Run Neural Network Model Training
 Run the training pipeline in high-performance Release mode:
 ```bash
 # Run training in optimized ReleaseFast mode
@@ -67,7 +75,7 @@ zig build run -Doptimize=ReleaseFast
 zig build run
 ```
 
-### 3. Run Unit Tests
+### 4. Run Unit Tests
 Execute the test suites containing autograd, reshape, transpose, and dataset parser validation:
 ```bash
 zig build test

@@ -57,6 +57,116 @@ pub const Op = struct {
     outputs: []*Tensor,     // 输出张量数组
     context: OpContext,     // 算子特有的运行时上下文数据
 
+    // 重新执行该算子的前向计算，根据最新输入更新输出张量的数据
+    pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
+        switch (self.op_type) {
+            .MatMul => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+                const temp = try A.matmul(B, allocator, null);
+                defer tensor.free(allocator, temp);
+                @memcpy(C.data, temp.data);
+            },
+            .AddBias => {
+                const A = self.inputs[0];
+                const bias = self.inputs[1];
+                const C = self.outputs[0];
+                const temp = try A.addBias(bias, allocator, null);
+                defer tensor.free(allocator, temp);
+                @memcpy(C.data, temp.data);
+            },
+            .Relu => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                for (C.data, A.data) |*c_val, a_val| {
+                    c_val.* = if (a_val > 0.0) a_val else 0.0;
+                }
+            },
+            .SoftmaxCrossEntropy => {
+                const logits = self.inputs[0];
+                const loss = self.outputs[0];
+                const targets = self.context.SoftmaxCrossEntropy.targets;
+                const probs = self.context.SoftmaxCrossEntropy.probs;
+
+                const B_size = logits.shape.dims[0];
+                const D = logits.shape.dims[1];
+                var loss_sum: f32 = 0.0;
+
+                for (0..B_size) |i| {
+                    const row = logits.data[i * D .. (i + 1) * D];
+                    var max_val = row[0];
+                    for (row) |val| {
+                        if (val > max_val) max_val = val;
+                    }
+                    var sum: f32 = 0.0;
+                    const row_probs = probs[i * D .. (i + 1) * D];
+                    for (0..D) |j| {
+                        const e = @exp(row[j] - max_val);
+                        row_probs[j] = e;
+                        sum += e;
+                    }
+                    for (0..D) |j| {
+                        row_probs[j] /= sum;
+                    }
+                    const target_idx = targets[i];
+                    const prob = row_probs[target_idx];
+                    const clipped = @max(prob, 1e-15);
+                    loss_sum += -@log(clipped);
+                }
+                loss.data[0] = loss_sum / @as(f32, @floatFromInt(B_size));
+            },
+            .Reshape => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                @memcpy(C.data, A.data);
+            },
+            .Transpose => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const temp = try A.transpose(self.context.Transpose.dim0, self.context.Transpose.dim1, allocator, null);
+                defer tensor.free(allocator, temp);
+                @memcpy(C.data, temp.data);
+            },
+            .MseLoss => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+                const N = A.data.len;
+                var loss_sum: f32 = 0.0;
+                for (0..N) |i| {
+                    const diff = A.data[i] - B.data[i];
+                    loss_sum += diff * diff;
+                }
+                C.data[0] = loss_sum / @as(f32, @floatFromInt(N));
+            },
+            .MulScalar => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const val = self.context.MulScalar.val;
+                for (C.data, A.data) |*c_val, a_val| {
+                    c_val.* = a_val * val;
+                }
+            },
+            .AddScalar => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const val = self.context.AddScalar.val;
+                for (C.data, A.data) |*c_val, a_val| {
+                    c_val.* = a_val + val;
+                }
+            },
+            .Add => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+                for (C.data, A.data, B.data) |*c_val, a_val, b_val| {
+                    c_val.* = a_val + b_val;
+                }
+            },
+        }
+    }
+
     // 执行该算子的反向传播计算，更新其输入节点的梯度
     pub fn backward(self: *Op) !void {
         switch (self.op_type) {
@@ -835,5 +945,19 @@ pub const Graph = struct {
             }
         }
         try list.append(self.arena.allocator(), node);
+    }
+
+    // 运行计算图的前向传播，根据输入更新所有算子节点的值
+    pub fn forward(self: *Graph) !void {
+        for (self.ops.items) |op| {
+            try op.forward(self.backing_allocator);
+        }
+    }
+
+    // 将计算图中所有注册张量的梯度清零
+    pub fn zeroGrad(self: *Graph) void {
+        for (self.tensors.items) |t| {
+            t.zeroGrad();
+        }
     }
 };
