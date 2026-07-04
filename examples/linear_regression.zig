@@ -1,5 +1,5 @@
 const std = @import("std");
-const zig_ml = @import("root.zig");
+const zig_ml = @import("zig_ml");
 const tensor = zig_ml.tensor;
 const autodiff = zig_ml.autodiff;
 

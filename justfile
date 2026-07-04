@@ -10,6 +10,10 @@ run:
 run-lr:
     zig build run-lr
 
+# Run the CNN Fashion MNIST training pipeline
+run-cnn:
+    zig build run-cnn
+
 # Generate code coverage report using kcov
 coverage:
     #!/usr/bin/env bash
