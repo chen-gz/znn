@@ -71,6 +71,72 @@ pub const Linear = struct {
     }
 };
 
+pub const Conv2D = struct {
+    weight: *Tensor,
+    bias: *Tensor,
+    v_weight: []f32,
+    v_bias: []f32,
+
+    pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random: std.Random) !Conv2D {
+        const weight_size = out_channels * in_channels * kernel_size * kernel_size;
+        const bias_size = out_channels;
+
+        const weight = try createPersistentTensor(allocator, out_channels, in_channels * kernel_size * kernel_size, true);
+        errdefer freePersistentTensor(allocator, weight);
+        // Correct the shape of Conv2D weight to [out_channels, in_channels, kernel_size, kernel_size]
+        weight.shape = Shape.init(&.{out_channels, in_channels, kernel_size, kernel_size});
+        weight.strides = tensor.computeContiguousStrides(weight.shape);
+
+        const bias = try createPersistentTensor(allocator, 1, out_channels, true);
+        errdefer freePersistentTensor(allocator, bias);
+        bias.shape = Shape.init(&.{out_channels});
+        bias.strides = tensor.computeContiguousStrides(bias.shape);
+
+        const v_weight = try allocator.alloc(f32, weight_size);
+        errdefer allocator.free(v_weight);
+        const v_bias = try allocator.alloc(f32, bias_size);
+        errdefer allocator.free(v_bias);
+
+        @memset(v_weight, 0.0);
+        @memset(v_bias, 0.0);
+
+        const fan_in = in_channels * kernel_size * kernel_size;
+        initializeWeights(random, weight.data, fan_in);
+        @memset(bias.data, 0.0);
+
+        return Conv2D{
+            .weight = weight,
+            .bias = bias,
+            .v_weight = v_weight,
+            .v_bias = v_bias,
+        };
+    }
+
+    pub fn deinit(self: Conv2D, allocator: std.mem.Allocator) void {
+        freePersistentTensor(allocator, self.weight);
+        freePersistentTensor(allocator, self.bias);
+        allocator.free(self.v_weight);
+        allocator.free(self.v_bias);
+    }
+
+    pub fn zeroGrad(self: Conv2D) void {
+        self.weight.zeroGrad();
+        self.bias.zeroGrad();
+    }
+
+    pub fn updateWeights(self: Conv2D, lr: f32, beta: f32) void {
+        updateLayerWeights(self.weight.data, self.weight.grad, self.v_weight, lr, beta);
+        updateLayerWeights(self.bias.data, self.bias.grad, self.v_bias, lr, beta);
+    }
+
+    pub fn forward(self: Conv2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph == null) {
+            return try x.conv2d(self.weight, self.bias, allocator, null);
+        }
+        return try graph.?.conv2d(x, self.weight, self.bias);
+    }
+};
+
 // ============================================================================
 // 2. Comptime 编译期反射函数（用于底层递归扫描，由 Module 包装器调用）
 // ============================================================================
@@ -80,7 +146,7 @@ pub fn deinitModel(model: anytype, allocator: std.mem.Allocator) void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
     inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear) {
+        if (field.type == Linear or field.type == Conv2D) {
             @field(model, field.name).deinit(allocator);
         } else if (field.type == *Tensor) {
             freePersistentTensor(allocator, @field(model, field.name));
@@ -95,7 +161,7 @@ pub fn zeroGradModel(model: anytype) void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
     inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear) {
+        if (field.type == Linear or field.type == Conv2D) {
             @field(model, field.name).zeroGrad();
         } else if (field.type == *Tensor) {
             @field(model, field.name).zeroGrad();
@@ -108,7 +174,7 @@ pub fn updateWeightsModel(model: anytype, lr: f32, beta: f32) void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
     inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear) {
+        if (field.type == Linear or field.type == Conv2D) {
             @field(model, field.name).updateWeights(lr, beta);
         } else if (field.type == *Tensor) {
             const v_name = "v_" ++ field.name;
@@ -141,7 +207,7 @@ pub fn saveModel(model: anytype, io: std.Io, file_path: []const u8, allocator: s
     var offset: usize = 0;
 
     inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear) {
+        if (field.type == Linear or field.type == Conv2D) {
             const layer = @field(model, field.name);
             // weight
             if (!first) try json_buf.appendSlice(allocator, ",") else first = false;
@@ -176,7 +242,7 @@ pub fn saveModel(model: anytype, io: std.Io, file_path: []const u8, allocator: s
 
     // 4. 顺序写入张量二进制权重数据
     inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear) {
+        if (field.type == Linear or field.type == Conv2D) {
             const layer = @field(model, field.name);
             try writer.writeAll(std.mem.sliceAsBytes(layer.weight.data));
             try writer.writeAll(std.mem.sliceAsBytes(layer.bias.data));
@@ -238,7 +304,7 @@ pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8, allocator: s
     // 4. 顺序还原每一个 Tensor 字段
     var current_offset: usize = 0;
     inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear) {
+        if (field.type == Linear or field.type == Conv2D) {
             const layer = @field(model, field.name);
             try loadTensorData(reader, meta_obj, field.name ++ ".weight", layer.weight, &current_offset);
             try loadTensorData(reader, meta_obj, field.name ++ ".bias", layer.bias, &current_offset);

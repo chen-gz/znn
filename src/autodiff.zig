@@ -20,6 +20,8 @@ pub const OpType = enum {
     MulScalar,           // 标量乘法（张量缩放）
     AddScalar,           // 标量加法
     Add,                 // 张量逐元素加法
+    Conv2D,              // 二维卷积
+    MaxPool2D,           // 二维最大池化
 };
 
 // 各算子反向传播所需的上下文信息（如 Softmax 的概率输出与 Target 类别）
@@ -44,6 +46,11 @@ pub const OpContext = union(enum) {
         val: f32,
     },
     Add: void,
+    Conv2D: void,
+    MaxPool2D: struct {
+        pool_size: usize,
+        stride: usize,
+    },
 };
 
 
@@ -163,6 +170,24 @@ pub const Op = struct {
                 for (C.data, A.data, B.data) |*c_val, a_val, b_val| {
                     c_val.* = a_val + b_val;
                 }
+            },
+            .Conv2D => {
+                const A = self.inputs[0];
+                const W = self.inputs[1];
+                const C = self.outputs[0];
+                const bias = if (self.inputs.len > 2) self.inputs[2] else null;
+                const temp = try A.conv2d(W, bias, allocator, null);
+                defer tensor.free(allocator, temp);
+                @memcpy(C.data, temp.data);
+            },
+            .MaxPool2D => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const pool_size = self.context.MaxPool2D.pool_size;
+                const stride = self.context.MaxPool2D.stride;
+                const temp = try A.maxpool2d(pool_size, stride, allocator, null);
+                defer tensor.free(allocator, temp);
+                @memcpy(C.data, temp.data);
             },
         }
     }
@@ -412,6 +437,131 @@ pub const Op = struct {
                 if (B.requires_grad) {
                     for (0..B.data.len) |i| {
                         B.grad[i] += C.grad[i];
+                    }
+                }
+            },
+            .Conv2D => {
+                const A = self.inputs[0];
+                const W = self.inputs[1];
+                const C = self.outputs[0];
+                const N = A.shape.dims[0];
+                const C_in = A.shape.dims[1];
+                const C_out = W.shape.dims[0];
+                const KH = W.shape.dims[2];
+                const KW = W.shape.dims[3];
+                const H_out = C.shape.dims[2];
+                const W_out = C.shape.dims[3];
+
+                const s_n = A.strides.dims[0];
+                const s_c = A.strides.dims[1];
+                const s_h = A.strides.dims[2];
+                const s_w = A.strides.dims[3];
+
+                const w_co = W.strides.dims[0];
+                const w_ci = W.strides.dims[1];
+                const w_kh = W.strides.dims[2];
+                const w_kw = W.strides.dims[3];
+
+                const o_n = C.strides.dims[0];
+                const o_c = C.strides.dims[1];
+                const o_h = C.strides.dims[2];
+                const o_w = C.strides.dims[3];
+
+                for (0..N) |n| {
+                    for (0..C_out) |co| {
+                        for (0..H_out) |h| {
+                            for (0..W_out) |w| {
+                                const grad_val = C.grad[n * o_n + co * o_c + h * o_h + w * o_w];
+                                if (grad_val == 0.0) continue;
+
+                                // Bias gradient
+                                if (self.inputs.len > 2) {
+                                    const bias = self.inputs[2];
+                                    if (bias.requires_grad) {
+                                        bias.grad[co] += grad_val;
+                                    }
+                                }
+
+                                for (0..C_in) |ci| {
+                                    for (0..KH) |kh| {
+                                        for (0..KW) |kw| {
+                                            const ih = h + kh;
+                                            const iw = w + kw;
+
+                                            // Weight gradient: dW += dC * A
+                                            if (W.requires_grad) {
+                                                const input_val = A.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
+                                                W.grad[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw] += grad_val * input_val;
+                                            }
+
+                                            // Input gradient: dA += dC * W
+                                            if (A.requires_grad) {
+                                                const weight_val = W.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
+                                                A.grad[n * s_n + ci * s_c + ih * s_h + iw * s_w] += grad_val * weight_val;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            .MaxPool2D => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const N = A.shape.dims[0];
+                const C_ch = A.shape.dims[1];
+                const H = A.shape.dims[2];
+                const W = A.shape.dims[3];
+                const H_out = C.shape.dims[2];
+                const W_out = C.shape.dims[3];
+
+                const pool_size = self.context.MaxPool2D.pool_size;
+                const stride = self.context.MaxPool2D.stride;
+
+                const s_n = A.strides.dims[0];
+                const s_c = A.strides.dims[1];
+                const s_h = A.strides.dims[2];
+                const s_w = A.strides.dims[3];
+
+                const o_n = C.strides.dims[0];
+                const o_c = C.strides.dims[1];
+                const o_h = C.strides.dims[2];
+                const o_w = C.strides.dims[3];
+
+                if (A.requires_grad) {
+                    for (0..N) |n| {
+                        for (0..C_ch) |c_| {
+                            for (0..H_out) |h| {
+                                for (0..W_out) |w| {
+                                    const grad_val = C.grad[n * o_n + c_ * o_c + h * o_h + w * o_w];
+                                    if (grad_val == 0.0) continue;
+
+                                    // Find where the max was
+                                    var max_val = A.data[n * s_n + c_ * s_c + (h * stride) * s_h + (w * stride) * s_w];
+                                    var max_h = h * stride;
+                                    var max_w = w * stride;
+
+                                    for (0..pool_size) |ph| {
+                                        for (0..pool_size) |pw| {
+                                            const ih = h * stride + ph;
+                                            const iw = w * stride + pw;
+                                            if (ih < H and iw < W) {
+                                                const val = A.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
+                                                if (val > max_val) {
+                                                    max_val = val;
+                                                    max_h = ih;
+                                                    max_w = iw;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // Route gradient to max_h, max_w
+                                    A.grad[n * s_n + c_ * s_c + max_h * s_h + max_w * s_w] += grad_val;
+                                }
+                            }
+                        }
                     }
                 }
             },
@@ -880,6 +1030,71 @@ pub const Graph = struct {
             .inputs = inputs,
             .outputs = outputs,
             .context = .{ .Add = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
+    pub fn conv2d(self: *Graph, A: *Tensor, weight: *Tensor, bias: ?*Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.conv2d(weight, bias, allocator, null);
+
+        C.requires_grad = A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad);
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const num_inputs: usize = if (bias != null) 3 else 2;
+        const inputs = try allocator.alloc(*Tensor, num_inputs);
+        inputs[0] = A;
+        inputs[1] = weight;
+        if (bias) |b| {
+            inputs[2] = b;
+        }
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Conv2D,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .Conv2D = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
+    pub fn maxpool2d(self: *Graph, A: *Tensor, pool_size: usize, stride: usize) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.maxpool2d(pool_size, stride, allocator, null);
+
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .MaxPool2D,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .MaxPool2D = .{ .pool_size = pool_size, .stride = stride } },
         };
         C.creator = o;
         try self.ops.append(self.backing_allocator, o);

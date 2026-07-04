@@ -236,6 +236,84 @@ test "Tensor matrix multiplication and bias addition autograd example" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.3), A.grad[0], 1e-5);
 }
 
+test "Conv2D autograd" {
+    const std = @import("std");
+    const arena = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const A = try graph.array(&.{ 1, 1, 3, 3 }, &[_]f32{
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+        7.0, 8.0, 9.0,
+    }, true);
+
+    const W = try graph.array(&.{ 1, 1, 2, 2 }, &[_]f32{
+        1.0, 0.0,
+        0.0, 1.0,
+    }, true);
+
+    const bias = try graph.array(&.{1}, &[_]f32{0.5}, true);
+
+    const C = try graph.conv2d(A, W, bias);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2, 2 }, C.shape.dims[0..C.shape.len]);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 6.5), C.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.5), C.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 12.5), C.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 14.5), C.data[3], 1e-5);
+
+    @memset(C.grad, 1.0);
+    try graph.backward(C);
+
+    // Verify bias grad
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), bias.grad[0], 1e-5);
+
+    // Verify weight grad
+    try std.testing.expectApproxEqAbs(@as(f32, 12.0), W.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 16.0), W.grad[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 24.0), W.grad[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 28.0), W.grad[3], 1e-5);
+
+    // Verify input grad
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[0], 1e-5); // A[0,0]
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[1], 1e-5); // A[0,1]
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), A.grad[2], 1e-5); // A[0,2]
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[3], 1e-5); // A[1,0]
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), A.grad[4], 1e-5); // A[1,1]
+}
+
+test "MaxPool2D autograd" {
+    const std = @import("std");
+    const arena = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const A = try graph.array(&.{ 1, 1, 4, 4 }, &[_]f32{
+        1.0, 2.0, 5.0, 3.0,
+        4.0, 3.0, 0.0, 2.0,
+        8.0, 7.0, 1.0, 2.0,
+        6.0, 5.0, 3.0, 4.0,
+    }, true);
+
+    const C = try graph.maxpool2d(A, 2, 2);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2, 2 }, C.shape.dims[0..C.shape.len]);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), C.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), C.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.0), C.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), C.data[3], 1e-5);
+
+    @memset(C.grad, 1.0);
+    try graph.backward(C);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[4], 1e-5); // A[1,0] (4.0)
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[2], 1e-5); // A[0,2] (5.0)
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[8], 1e-5); // A[2,0] (8.0)
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[15], 1e-5); // A[3,3] (4.0)
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), A.grad[0], 1e-5);  // A[0,0]
+}
+
 test {
     const std = @import("std");
     std.testing.refAllDecls(@This());

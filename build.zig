@@ -63,7 +63,7 @@ pub fn build(b: *std.Build) void {
             // b.createModule defines a new module just like b.addModule but,
             // unlike b.addModule, it does not expose the module to consumers of
             // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("src/fashion_mnist.zig"),
+            .root_source_file = b.path("examples/fashion_mnist.zig"),
             // Target and optimization levels must be explicitly wired in when
             // defining an executable or library (in the root module), and you
             // can also hardcode a specific target for an executable or library
@@ -98,7 +98,7 @@ pub fn build(b: *std.Build) void {
     const exe_lr = b.addExecutable(.{
         .name = "linear_regression",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/linear_regression.zig"),
+            .root_source_file = b.path("examples/linear_regression.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
@@ -112,6 +112,25 @@ pub fn build(b: *std.Build) void {
         exe_lr_mod.linkFramework("Accelerate", .{});
     }
     b.installArtifact(exe_lr);
+
+    // Define CNN binary target
+    const exe_cnn = b.addExecutable(.{
+        .name = "cnn",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/cnn.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_cnn_mod = exe_cnn.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_cnn_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_cnn);
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
@@ -145,6 +164,12 @@ pub fn build(b: *std.Build) void {
     run_lr_step.dependOn(&run_lr_cmd.step);
     run_lr_cmd.step.dependOn(b.getInstallStep());
 
+    // Run step for CNN
+    const run_cnn_step = b.step("run-cnn", "Run the CNN Fashion MNIST app");
+    const run_cnn_cmd = b.addRunArtifact(exe_cnn);
+    run_cnn_step.dependOn(&run_cnn_cmd.step);
+    run_cnn_cmd.step.dependOn(b.getInstallStep());
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
@@ -167,18 +192,27 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const cnn_tests = b.addTest(.{
+        .root_module = exe_cnn.root_module,
+        .name = "cnn_tests",
+    });
+    const run_cnn_tests = b.addRunArtifact(cnn_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_cnn_tests.step);
 
     // Copy the test binaries to zig-out/bin/ so kcov can access them cleanly
     const install_mod_tests = b.addInstallArtifact(mod_tests, .{});
     const install_exe_tests = b.addInstallArtifact(exe_tests, .{});
+    const install_cnn_tests = b.addInstallArtifact(cnn_tests, .{});
     test_step.dependOn(&install_mod_tests.step);
     test_step.dependOn(&install_exe_tests.step);
+    test_step.dependOn(&install_cnn_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

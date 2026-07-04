@@ -367,6 +367,120 @@ pub const Tensor = struct {
         return C;
     }
 
+    pub fn conv2d(self: *Tensor, weight: *Tensor, bias: ?*Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.conv2d(self, weight, bias);
+        }
+        std.debug.assert(self.shape.len == 4);
+        std.debug.assert(weight.shape.len == 4);
+        const N = self.shape.dims[0];
+        const C_in = self.shape.dims[1];
+        const H = self.shape.dims[2];
+        const W = self.shape.dims[3];
+
+        const C_out = weight.shape.dims[0];
+        std.debug.assert(weight.shape.dims[1] == C_in);
+        const KH = weight.shape.dims[2];
+        const KW = weight.shape.dims[3];
+
+        if (bias) |b| {
+            std.debug.assert(b.shape.len == 1);
+            std.debug.assert(b.shape.dims[0] == C_out);
+        }
+
+        const H_out = H - KH + 1;
+        const W_out = W - KW + 1;
+
+        const out = try zeros(allocator, &.{ N, C_out, H_out, W_out });
+
+        const s_n = self.strides.dims[0];
+        const s_c = self.strides.dims[1];
+        const s_h = self.strides.dims[2];
+        const s_w = self.strides.dims[3];
+
+        const w_co = weight.strides.dims[0];
+        const w_ci = weight.strides.dims[1];
+        const w_kh = weight.strides.dims[2];
+        const w_kw = weight.strides.dims[3];
+
+        const o_n = out.strides.dims[0];
+        const o_c = out.strides.dims[1];
+        const o_h = out.strides.dims[2];
+        const o_w = out.strides.dims[3];
+
+        for (0..N) |n| {
+            for (0..C_out) |co| {
+                const b_val = if (bias) |b| b.data[co] else 0.0;
+                for (0..H_out) |h| {
+                    for (0..W_out) |w| {
+                        var sum: f32 = b_val;
+                        for (0..C_in) |ci| {
+                            for (0..KH) |kh| {
+                                for (0..KW) |kw| {
+                                    const input_val = self.data[n * s_n + ci * s_c + (h + kh) * s_h + (w + kw) * s_w];
+                                    const weight_val = weight.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
+                                    sum += input_val * weight_val;
+                                }
+                            }
+                        }
+                        out.data[n * o_n + co * o_c + h * o_h + w * o_w] = sum;
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
+    pub fn maxpool2d(self: *Tensor, pool_size: usize, stride: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.maxpool2d(self, pool_size, stride);
+        }
+        std.debug.assert(self.shape.len == 4);
+        const N = self.shape.dims[0];
+        const C = self.shape.dims[1];
+        const H = self.shape.dims[2];
+        const W = self.shape.dims[3];
+
+        const H_out = H / stride;
+        const W_out = W / stride;
+
+        const out = try zeros(allocator, &.{ N, C, H_out, W_out });
+
+        const s_n = self.strides.dims[0];
+        const s_c = self.strides.dims[1];
+        const s_h = self.strides.dims[2];
+        const s_w = self.strides.dims[3];
+
+        const o_n = out.strides.dims[0];
+        const o_c = out.strides.dims[1];
+        const o_h = out.strides.dims[2];
+        const o_w = out.strides.dims[3];
+
+        for (0..N) |n| {
+            for (0..C) |c_| {
+                for (0..H_out) |h| {
+                    for (0..W_out) |w| {
+                        var max_val = self.data[n * s_n + c_ * s_c + (h * stride) * s_h + (w * stride) * s_w];
+                        for (0..pool_size) |ph| {
+                            for (0..pool_size) |pw| {
+                                const ih = h * stride + ph;
+                                const iw = w * stride + pw;
+                                if (ih < H and iw < W) {
+                                    const val = self.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
+                                    if (val > max_val) {
+                                        max_val = val;
+                                    }
+                                }
+                            }
+                        }
+                        out.data[n * o_n + c_ * o_c + h * o_h + w * o_w] = max_val;
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
     pub fn clone(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
         const t = try allocator.create(Tensor);
         t.* = Tensor{

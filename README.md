@@ -38,11 +38,12 @@ It serves as a clean, production-grade reference for:
 
 ## 📂 Codebase Directory Structure
 
-* **[src/fashion_mnist.zig](src/fashion_mnist.zig)**: 3-layer Feedforward Neural Network (MLP) binary target. Responsible for dataset loading, training loops, evaluation, and test predictions.
-* **[src/linear_regression.zig](src/linear_regression.zig)**: Linear regression binary target. Compares OLS analytical closed-form solution with iterative autograd-based gradient descent.
+* **[examples/cnn.zig](examples/cnn.zig)**: 2D Convolutional Neural Network (CNN) binary target using Conv2D, MaxPool2D, and Linear layers for Fashion MNIST image classification.
+* **[examples/fashion_mnist.zig](examples/fashion_mnist.zig)**: 3-layer Feedforward Neural Network (MLP) binary target. Responsible for dataset loading, training loops, evaluation, and test predictions.
+* **[examples/linear_regression.zig](examples/linear_regression.zig)**: Linear regression binary target. Compares OLS analytical closed-form solution with iterative autograd-based gradient descent.
 * **[src/tensor.zig](src/tensor.zig)**: N-Dimensional Tensor library. Implements shape, logical strides, memory layout mapping, and vectorized math.
 * **[src/autodiff.zig](src/autodiff.zig)**: Core Automatic Differentiation engine. Implements the dynamic computation `Graph`, `Node`, operators, and DFS topological sorting.
-* **[src/nn.zig](src/nn.zig)**: Neural Network Modules. Implements the `Linear` module, activation functions, and `Module` wrapper for comptime reflection parameter management.
+* **[src/nn.zig](src/nn.zig)**: Neural Network Modules. Implements the `Linear` and `Conv2D` modules, activation functions, and `Module` wrapper for comptime reflection parameter management.
 * **[src/cblas.zig](src/cblas.zig)**: System CBLAS C-bindings for macOS Accelerate framework matrix operations.
 * **[src/dataset.zig](src/dataset.zig)**: Custom binary parser for Fashion MNIST IDX format files.
 * **[src/root.zig](src/root.zig)**: Module exports and compile-time unit tests.
@@ -65,7 +66,7 @@ Run the simple 1D linear regression example (analytical vs autograd GD):
 zig build run-lr
 ```
 
-### 3. Compile and Run Neural Network Model Training
+### 3. Compile and Run Neural Network Model Training (MLP)
 Run the training pipeline in high-performance Release mode:
 ```bash
 # Run training in optimized ReleaseFast mode
@@ -75,7 +76,14 @@ zig build run -Doptimize=ReleaseFast
 zig build run
 ```
 
-### 4. Run Unit Tests
+### 4. Compile and Run CNN Model Training
+Run the CNN model training pipeline (Conv2D + MaxPool2D + ReLU + Linear):
+```bash
+# Run CNN training
+zig build run-cnn
+```
+
+### 5. Run Unit Tests
 Execute the test suites containing autograd, reshape, transpose, and dataset parser validation:
 ```bash
 zig build test
