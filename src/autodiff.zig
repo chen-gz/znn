@@ -66,22 +66,45 @@ pub const Op = struct {
 
     // 重新执行该算子的前向计算，根据最新输入更新输出张量的数据
     pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
+        _ = allocator;
         switch (self.op_type) {
             .MatMul => {
                 const A = self.inputs[0];
                 const B = self.inputs[1];
                 const C = self.outputs[0];
-                const temp = try A.matmul(B, allocator, null);
-                defer tensor.free(allocator, temp);
-                @memcpy(C.data, temp.data);
+                const M = A.shape.dims[0];
+                const K = A.shape.dims[1];
+                const N = B.shape.dims[1];
+                c.cblas_sgemm(
+                    c.CblasRowMajor,
+                    c.CblasNoTrans,
+                    c.CblasNoTrans,
+                    @intCast(M),
+                    @intCast(N),
+                    @intCast(K),
+                    1.0,
+                    A.data.ptr,
+                    @intCast(K),
+                    B.data.ptr,
+                    @intCast(N),
+                    0.0,
+                    C.data.ptr,
+                    @intCast(N),
+                );
             },
             .AddBias => {
                 const A = self.inputs[0];
                 const bias = self.inputs[1];
                 const C = self.outputs[0];
-                const temp = try A.addBias(bias, allocator, null);
-                defer tensor.free(allocator, temp);
-                @memcpy(C.data, temp.data);
+                const M = A.shape.dims[0];
+                const N = A.shape.dims[1];
+                for (0..M) |i| {
+                    const a_row = A.data[i * N .. (i + 1) * N];
+                    const c_row = C.data[i * N .. (i + 1) * N];
+                    for (0..N) |j| {
+                        c_row[j] = a_row[j] + bias.data[j];
+                    }
+                }
             },
             .Relu => {
                 const A = self.inputs[0];
@@ -124,16 +147,35 @@ pub const Op = struct {
                 loss.data[0] = loss_sum / @as(f32, @floatFromInt(B_size));
             },
             .Reshape => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                @memcpy(C.data, A.data);
+                // A.data and C.data point to the same memory buffer (aliased).
+                // Do not use @memcpy as it panics on overlapping identical memory.
             },
             .Transpose => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
-                const temp = try A.transpose(self.context.Transpose.dim0, self.context.Transpose.dim1, allocator, null);
-                defer tensor.free(allocator, temp);
-                @memcpy(C.data, temp.data);
+                const ctx = self.context.Transpose;
+                const strides_trans = transposeShape(A.strides, ctx.dim0, ctx.dim1);
+
+                var indices = [_]usize{0} ** 8;
+                const len = C.shape.len;
+                const total_size = C.data.len;
+                for (0..total_size) |dest_flat_idx| {
+                    var src_flat_idx: usize = 0;
+                    for (0..len) |d| {
+                        src_flat_idx += indices[d] * strides_trans.dims[d];
+                    }
+                    C.data[dest_flat_idx] = A.data[src_flat_idx];
+
+                    var d: usize = len;
+                    while (d > 0) {
+                        d -= 1;
+                        indices[d] += 1;
+                        if (indices[d] < C.shape.dims[d]) {
+                            break;
+                        }
+                        indices[d] = 0;
+                    }
+                }
             },
             .MseLoss => {
                 const A = self.inputs[0];
@@ -176,18 +218,96 @@ pub const Op = struct {
                 const W = self.inputs[1];
                 const C = self.outputs[0];
                 const bias = if (self.inputs.len > 2) self.inputs[2] else null;
-                const temp = try A.conv2d(W, bias, allocator, null);
-                defer tensor.free(allocator, temp);
-                @memcpy(C.data, temp.data);
+                
+                const N = A.shape.dims[0];
+                const C_in = A.shape.dims[1];
+                const C_out = W.shape.dims[0];
+                const KH = W.shape.dims[2];
+                const KW = W.shape.dims[3];
+                const H_out = C.shape.dims[2];
+                const W_out = C.shape.dims[3];
+
+                const s_n = A.strides.dims[0];
+                const s_c = A.strides.dims[1];
+                const s_h = A.strides.dims[2];
+                const s_w = A.strides.dims[3];
+
+                const w_co = W.strides.dims[0];
+                const w_ci = W.strides.dims[1];
+                const w_kh = W.strides.dims[2];
+                const w_kw = W.strides.dims[3];
+
+                const o_n = C.strides.dims[0];
+                const o_c = C.strides.dims[1];
+                const o_h = C.strides.dims[2];
+                const o_w = C.strides.dims[3];
+
+                for (0..N) |n| {
+                    for (0..C_out) |co| {
+                        const b_val = if (bias) |b| b.data[co] else 0.0;
+                        for (0..H_out) |h| {
+                            for (0..W_out) |w| {
+                                var sum: f32 = b_val;
+                                for (0..C_in) |ci| {
+                                    for (0..KH) |kh| {
+                                        for (0..KW) |kw| {
+                                            const input_val = A.data[n * s_n + ci * s_c + (h + kh) * s_h + (w + kw) * s_w];
+                                            const weight_val = W.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
+                                            sum += input_val * weight_val;
+                                        }
+                                    }
+                                }
+                                C.data[n * o_n + co * o_c + h * o_h + w * o_w] = sum;
+                            }
+                        }
+                    }
+                }
             },
             .MaxPool2D => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
                 const pool_size = self.context.MaxPool2D.pool_size;
                 const stride = self.context.MaxPool2D.stride;
-                const temp = try A.maxpool2d(pool_size, stride, allocator, null);
-                defer tensor.free(allocator, temp);
-                @memcpy(C.data, temp.data);
+                
+                const N = A.shape.dims[0];
+                const C_ch = A.shape.dims[1];
+                const H = A.shape.dims[2];
+                const W = A.shape.dims[3];
+                const H_out = C.shape.dims[2];
+                const W_out = C.shape.dims[3];
+
+                const s_n = A.strides.dims[0];
+                const s_c = A.strides.dims[1];
+                const s_h = A.strides.dims[2];
+                const s_w = A.strides.dims[3];
+
+                const o_n = C.strides.dims[0];
+                const o_c = C.strides.dims[1];
+                const o_h = C.strides.dims[2];
+                const o_w = C.strides.dims[3];
+
+                for (0..N) |n| {
+                    for (0..C_ch) |c_| {
+                        for (0..H_out) |h| {
+                            for (0..W_out) |w| {
+                                var max_val = A.data[n * s_n + c_ * s_c + (h * stride) * s_h + (w * stride) * s_w];
+                                for (0..pool_size) |ph| {
+                                    for (0..pool_size) |pw| {
+                                        const ih = h * stride + ph;
+                                        const iw = w * stride + pw;
+                                        if (ih < H and iw < W) {
+                                            const val = A.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
+                                            if (val > max_val) {
+                                                max_val = val;
+                                            }
+                                        }
+                                    }
+                                }
+                                C.data[n * o_n + c_ * o_c + h * o_h + w * o_w] = max_val;
+                            }
+                        }
+                    }
+                }
             },
         }
     }
