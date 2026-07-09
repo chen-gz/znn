@@ -22,6 +22,10 @@ pub const OpType = enum {
     Add,                 // 张量逐元素加法
     Conv2D,              // 二维卷积
     MaxPool2D,           // 二维最大池化
+    Softmax,             // Standalone Softmax
+    RmsNorm,             // RMSNorm
+    BatchMatMul,         // Batched Matrix Multiplication
+    Embedding,           // Embedding Lookup
 };
 
 // 各算子反向传播所需的上下文信息（如 Softmax 的概率输出与 Target 类别）
@@ -51,6 +55,12 @@ pub const OpContext = union(enum) {
         pool_size: usize,
         stride: usize,
     },
+    Softmax: void,
+    RmsNorm: struct {
+        eps: f32,
+    },
+    BatchMatMul: void,
+    Embedding: void,
 };
 
 
@@ -306,6 +316,125 @@ pub const Op = struct {
                                 C.data[n * o_n + c_ * o_c + h * o_h + w * o_w] = max_val;
                             }
                         }
+                    }
+                }
+            },
+            .Softmax => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const D = A.shape.dims[A.shape.len - 1];
+                const M = A.data.len / D;
+
+                for (0..M) |i| {
+                    const row_in = A.data[i * D .. (i + 1) * D];
+                    const row_out = C.data[i * D .. (i + 1) * D];
+
+                    var max_val = row_in[0];
+                    for (row_in[1..]) |val| {
+                        if (val > max_val) max_val = val;
+                    }
+
+                    var sum: f32 = 0.0;
+                    for (row_in, row_out) |val, *p| {
+                        const exp_val = @exp(val - max_val);
+                        p.* = exp_val;
+                        sum += exp_val;
+                    }
+
+                    for (row_out) |*p| {
+                        p.* /= sum;
+                    }
+                }
+            },
+            .RmsNorm => {
+                const X = self.inputs[0];
+                const G = self.inputs[1];
+                const Y = self.outputs[0];
+                const eps = self.context.RmsNorm.eps;
+                const D = X.shape.dims[X.shape.len - 1];
+                const M = X.data.len / D;
+
+                for (0..M) |i| {
+                    const row_in = X.data[i * D .. (i + 1) * D];
+                    const row_out = Y.data[i * D .. (i + 1) * D];
+
+                    var sum_x2: f32 = 0.0;
+                    for (row_in) |val| {
+                        sum_x2 += val * val;
+                    }
+                    const rms = @sqrt(sum_x2 / @as(f32, @floatFromInt(D)) + eps);
+
+                    for (row_in, row_out, G.data) |x_val, *y_val, g_val| {
+                        y_val.* = x_val / rms * g_val;
+                    }
+                }
+            },
+            .BatchMatMul => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+
+                std.debug.assert(A.shape.len == 4);
+                std.debug.assert(B.shape.len == 4);
+                std.debug.assert(C.shape.len == 4);
+
+                const batch_size = A.shape.dims[0];
+                const num_heads = A.shape.dims[1];
+                const M = A.shape.dims[2];
+                const K = A.shape.dims[3];
+                const N = B.shape.dims[3];
+
+                const sA_b = A.strides.dims[0];
+                const sA_h = A.strides.dims[1];
+                const sB_b = B.strides.dims[0];
+                const sB_h = B.strides.dims[1];
+                const sC_b = C.strides.dims[0];
+                const sC_h = C.strides.dims[1];
+
+                for (0..batch_size) |b| {
+                    for (0..num_heads) |h| {
+                        const ptrA = A.data.ptr + b * sA_b + h * sA_h;
+                        const ptrB = B.data.ptr + b * sB_b + h * sB_h;
+                        const ptrC = C.data.ptr + b * sC_b + h * sC_h;
+
+                        c.cblas_sgemm(
+                            c.CblasRowMajor,
+                            c.CblasNoTrans,
+                            c.CblasNoTrans,
+                            @intCast(M),
+                            @intCast(N),
+                            @intCast(K),
+                            1.0,
+                            ptrA,
+                            @intCast(K),
+                            ptrB,
+                            @intCast(N),
+                            0.0,
+                            ptrC,
+                            @intCast(N),
+                        );
+                    }
+                }
+            },
+            .Embedding => {
+                const W = self.inputs[0];
+                const X = self.inputs[1];
+                const Y = self.outputs[0];
+
+                const B = X.shape.dims[0];
+                const T = X.shape.dims[1];
+                const D = W.shape.dims[1];
+                const VocabSize = W.shape.dims[0];
+
+                for (0..B) |b| {
+                    for (0..T) |t| {
+                        const idx_f = X.data[b * T + t];
+                        const idx = @as(usize, @intFromFloat(idx_f));
+                        std.debug.assert(idx < VocabSize);
+
+                        const w_row = W.data[idx * D .. (idx + 1) * D];
+                        const y_row = Y.data[(b * T + t) * D .. (b * T + t + 1) * D];
+                        @memcpy(y_row, w_row);
                     }
                 }
             },
@@ -680,6 +809,160 @@ pub const Op = struct {
                                     // Route gradient to max_h, max_w
                                     A.grad[n * s_n + c_ * s_c + max_h * s_h + max_w * s_w] += grad_val;
                                 }
+                            }
+                        }
+                    }
+                }
+            },
+            .Softmax => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const D = A.shape.dims[A.shape.len - 1];
+                const M = A.data.len / D;
+
+                if (A.requires_grad) {
+                    for (0..M) |i| {
+                        const row_out = C.data[i * D .. (i + 1) * D];
+                        const row_grad_out = C.grad[i * D .. (i + 1) * D];
+                        const row_grad_in = A.grad[i * D .. (i + 1) * D];
+
+                        var sum_dy_y: f32 = 0.0;
+                        for (row_grad_out, row_out) |dy, y| {
+                            sum_dy_y += dy * y;
+                        }
+
+                        for (row_grad_in, row_out, row_grad_out) |*da, y, dy| {
+                            da.* += y * (dy - sum_dy_y);
+                        }
+                    }
+                }
+            },
+            .RmsNorm => {
+                const X = self.inputs[0];
+                const G = self.inputs[1];
+                const Y = self.outputs[0];
+                const eps = self.context.RmsNorm.eps;
+                const D = X.shape.dims[X.shape.len - 1];
+                const M = X.data.len / D;
+
+                for (0..M) |i| {
+                    const row_in = X.data[i * D .. (i + 1) * D];
+                    const row_grad_out = Y.grad[i * D .. (i + 1) * D];
+
+                    var sum_x2: f32 = 0.0;
+                    for (row_in) |val| {
+                        sum_x2 += val * val;
+                    }
+                    const scale = 1.0 / @sqrt(sum_x2 / @as(f32, @floatFromInt(D)) + eps);
+
+                    if (G.requires_grad) {
+                        for (0..D) |j| {
+                            G.grad[j] += row_grad_out[j] * row_in[j] * scale;
+                        }
+                    }
+
+                    if (X.requires_grad) {
+                        const row_grad_in = X.grad[i * D .. (i + 1) * D];
+
+                        var sum_dy_g_x: f32 = 0.0;
+                        for (0..D) |j| {
+                            sum_dy_g_x += row_grad_out[j] * G.data[j] * row_in[j];
+                        }
+
+                        for (0..D) |j| {
+                            const term1 = G.data[j] * row_grad_out[j];
+                            const term2 = row_in[j] * scale * scale * sum_dy_g_x / @as(f32, @floatFromInt(D));
+                            row_grad_in[j] += scale * (term1 - term2);
+                        }
+                    }
+                }
+            },
+            .BatchMatMul => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+
+                const batch_size = A.shape.dims[0];
+                const num_heads = A.shape.dims[1];
+                const M = A.shape.dims[2];
+                const K = A.shape.dims[3];
+                const N = B.shape.dims[3];
+
+                const sA_b = A.strides.dims[0];
+                const sA_h = A.strides.dims[1];
+                const sB_b = B.strides.dims[0];
+                const sB_h = B.strides.dims[1];
+                const sC_b = C.strides.dims[0];
+                const sC_h = C.strides.dims[1];
+
+                for (0..batch_size) |b| {
+                    for (0..num_heads) |h| {
+                        const ptrA = A.data.ptr + b * sA_b + h * sA_h;
+                        const ptrB = B.data.ptr + b * sB_b + h * sB_h;
+                        const ptrdC = C.grad.ptr + b * sC_b + h * sC_h;
+
+                        if (A.requires_grad) {
+                            const ptrdA = A.grad.ptr + b * sA_b + h * sA_h;
+                            c.cblas_sgemm(
+                                c.CblasRowMajor,
+                                c.CblasNoTrans,
+                                c.CblasTrans,
+                                @intCast(M),
+                                @intCast(K),
+                                @intCast(N),
+                                1.0,
+                                ptrdC,
+                                @intCast(N),
+                                ptrB,
+                                @intCast(N),
+                                1.0,
+                                ptrdA,
+                                @intCast(K),
+                            );
+                        }
+
+                        if (B.requires_grad) {
+                            const ptrdB = B.grad.ptr + b * sB_b + h * sB_h;
+                            c.cblas_sgemm(
+                                c.CblasRowMajor,
+                                c.CblasTrans,
+                                c.CblasNoTrans,
+                                @intCast(K),
+                                @intCast(N),
+                                @intCast(M),
+                                1.0,
+                                ptrA,
+                                @intCast(K),
+                                ptrdC,
+                                @intCast(N),
+                                1.0,
+                                ptrdB,
+                                @intCast(N),
+                            );
+                        }
+                    }
+                }
+            },
+            .Embedding => {
+                const W = self.inputs[0];
+                const X = self.inputs[1];
+                const Y = self.outputs[0];
+
+                const B = X.shape.dims[0];
+                const T = X.shape.dims[1];
+                const D = W.shape.dims[1];
+
+                if (W.requires_grad) {
+                    for (0..B) |b| {
+                        for (0..T) |t| {
+                            const idx_f = X.data[b * T + t];
+                            const idx = @as(usize, @intFromFloat(idx_f));
+
+                            const w_grad_row = W.grad[idx * D .. (idx + 1) * D];
+                            const y_grad_row = Y.grad[(b * T + t) * D .. (b * T + t + 1) * D];
+
+                            for (w_grad_row, y_grad_row) |*wg, yg| {
+                                wg.* += yg;
                             }
                         }
                     }
@@ -1220,6 +1503,129 @@ pub const Graph = struct {
         try self.ops.append(self.backing_allocator, o);
 
         return C;
+    }
+
+    pub fn softmax(self: *Graph, A: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.softmax(allocator, null);
+
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Softmax,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .Softmax = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
+    pub fn rmsNorm(self: *Graph, X: *Tensor, G: *Tensor, eps: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const Y = try X.rmsNorm(G, eps, allocator, null);
+
+        Y.requires_grad = X.requires_grad or G.requires_grad;
+        if (Y.requires_grad) {
+            Y.grad = try allocator.alloc(f32, Y.data.len);
+            @memset(Y.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, Y);
+
+        const inputs = try allocator.alloc(*Tensor, 2);
+        inputs[0] = X;
+        inputs[1] = G;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = Y;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .RmsNorm,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .RmsNorm = .{ .eps = eps } },
+        };
+        Y.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return Y;
+    }
+
+    pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.batchMatMul(B, allocator, null);
+
+        C.requires_grad = A.requires_grad or B.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 2);
+        inputs[0] = A;
+        inputs[1] = B;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .BatchMatMul,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .BatchMatMul = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
+    pub fn embedding(self: *Graph, W: *Tensor, X: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const Y = try W.embedding(X, allocator, null);
+
+        Y.requires_grad = W.requires_grad;
+        if (Y.requires_grad) {
+            Y.grad = try allocator.alloc(f32, Y.data.len);
+            @memset(Y.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, Y);
+
+        const inputs = try allocator.alloc(*Tensor, 2);
+        inputs[0] = W;
+        inputs[1] = X;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = Y;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Embedding,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .Embedding = {} },
+        };
+        Y.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return Y;
     }
 
     // 执行计算图的反向传播

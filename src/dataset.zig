@@ -20,13 +20,13 @@ pub const LabelDataset = struct {
     }
 };
 
-pub fn loadImages(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8) !ImageDataset {
-    const cwd = std.Io.Dir.cwd();
-    var file = try cwd.openFile(io, file_path, .{});
-    defer file.close(io);
+pub fn loadImages(allocator: std.mem.Allocator, file_path: []const u8) !ImageDataset {
+    const cwd = std.fs.cwd();
+    var file = try cwd.openFile(file_path, .{});
+    defer file.close();
 
     var file_buf: [65536]u8 = undefined;
-    var file_reader = file.reader(io, &file_buf);
+    var file_reader = file.reader(&file_buf);
     const reader = &file_reader.interface;
 
     var temp_4: [4]u8 = undefined;
@@ -70,13 +70,13 @@ pub fn loadImages(io: std.Io, allocator: std.mem.Allocator, file_path: []const u
     };
 }
 
-pub fn loadLabels(io: std.Io, allocator: std.mem.Allocator, file_path: []const u8) !LabelDataset {
-    const cwd = std.Io.Dir.cwd();
-    var file = try cwd.openFile(io, file_path, .{});
-    defer file.close(io);
+pub fn loadLabels(allocator: std.mem.Allocator, file_path: []const u8) !LabelDataset {
+    const cwd = std.fs.cwd();
+    var file = try cwd.openFile(file_path, .{});
+    defer file.close();
 
     var file_buf: [65536]u8 = undefined;
-    var file_reader = file.reader(io, &file_buf);
+    var file_reader = file.reader(&file_buf);
     const reader = &file_reader.interface;
 
     var temp_4: [4]u8 = undefined;
@@ -111,11 +111,11 @@ pub const Dataset = struct {
     }
 };
 
-pub fn loadDataset(io: std.Io, allocator: std.mem.Allocator, images_path: []const u8, labels_path: []const u8) !Dataset {
-    var images = try loadImages(io, allocator, images_path);
+pub fn loadDataset(allocator: std.mem.Allocator, images_path: []const u8, labels_path: []const u8) !Dataset {
+    var images = try loadImages(allocator, images_path);
     errdefer images.deinit(allocator);
 
-    var labels = try loadLabels(io, allocator, labels_path);
+    var labels = try loadLabels(allocator, labels_path);
     errdefer labels.deinit(allocator);
 
     return Dataset{
