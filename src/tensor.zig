@@ -481,6 +481,137 @@ pub const Tensor = struct {
         return out;
     }
 
+    pub fn softmax(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.softmax(self);
+        }
+        const D = self.shape.dims[self.shape.len - 1];
+        const M = self.data.len / D;
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+
+        for (0..M) |i| {
+            const row_in = self.data[i * D .. (i + 1) * D];
+            const row_out = C.data[i * D .. (i + 1) * D];
+
+            var max_val = row_in[0];
+            for (row_in[1..]) |val| {
+                if (val > max_val) max_val = val;
+            }
+
+            var sum: f32 = 0.0;
+            for (row_in, row_out) |val, *p| {
+                const exp_val = @exp(val - max_val);
+                p.* = exp_val;
+                sum += exp_val;
+            }
+
+            for (row_out) |*p| {
+                p.* /= sum;
+            }
+        }
+        return C;
+    }
+
+    pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.rmsNorm(self, G, eps);
+        }
+        const D = self.shape.dims[self.shape.len - 1];
+        const M = self.data.len / D;
+        const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+
+        for (0..M) |i| {
+            const row_in = self.data[i * D .. (i + 1) * D];
+            const row_out = Y.data[i * D .. (i + 1) * D];
+
+            var sum_x2: f32 = 0.0;
+            for (row_in) |val| {
+                sum_x2 += val * val;
+            }
+            const rms = @sqrt(sum_x2 / @as(f32, @floatFromInt(D)) + eps);
+
+            for (row_in, row_out, G.data) |x_val, *y_val, g_val| {
+                y_val.* = x_val / rms * g_val;
+            }
+        }
+        return Y;
+    }
+
+    pub fn batchMatMul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.batchMatMul(self, other);
+        }
+        std.debug.assert(self.shape.len == 4);
+        std.debug.assert(other.shape.len == 4);
+
+        const batch_size = self.shape.dims[0];
+        const num_heads = self.shape.dims[1];
+        const M = self.shape.dims[2];
+        const K = self.shape.dims[3];
+        const N = other.shape.dims[3];
+
+        const C = try zeros(allocator, &.{ batch_size, num_heads, M, N });
+
+        const sA_b = self.strides.dims[0];
+        const sA_h = self.strides.dims[1];
+        const sB_b = other.strides.dims[0];
+        const sB_h = other.strides.dims[1];
+        const sC_b = C.strides.dims[0];
+        const sC_h = C.strides.dims[1];
+
+        for (0..batch_size) |b| {
+            for (0..num_heads) |h| {
+                const ptrA = self.data.ptr + b * sA_b + h * sA_h;
+                const ptrB = other.data.ptr + b * sB_b + h * sB_h;
+                const ptrC = C.data.ptr + b * sC_b + h * sC_h;
+
+                c.cblas_sgemm(
+                    c.CblasRowMajor,
+                    c.CblasNoTrans,
+                    c.CblasNoTrans,
+                    @intCast(M),
+                    @intCast(N),
+                    @intCast(K),
+                    1.0,
+                    ptrA,
+                    @intCast(K),
+                    ptrB,
+                    @intCast(N),
+                    0.0,
+                    ptrC,
+                    @intCast(N),
+                );
+            }
+        }
+        return C;
+    }
+
+    pub fn embedding(self: *Tensor, indices: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.embedding(self, indices);
+        }
+        const B = indices.shape.dims[0];
+        const T = indices.shape.dims[1];
+        const D = self.shape.dims[1];
+        const VocabSize = self.shape.dims[0];
+
+        const Y = try zeros(allocator, &.{ B, T, D });
+
+        for (0..B) |b| {
+            for (0..T) |t| {
+                const idx_f = indices.data[b * T + t];
+                const idx = @as(usize, @intFromFloat(idx_f));
+                std.debug.assert(idx < VocabSize);
+
+                const w_row = self.data[idx * D .. (idx + 1) * D];
+                const y_row = Y.data[(b * T + t) * D .. (b * T + t + 1) * D];
+                @memcpy(y_row, w_row);
+            }
+        }
+        return Y;
+    }
+
+
     pub fn clone(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
         const t = try allocator.create(Tensor);
         t.* = Tensor{
@@ -1016,6 +1147,229 @@ test "Tensor static graph forward and backward" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), B.grad[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 2.0), A.grad[0], 1e-5);
 }
+
+test "Softmax forward and backward" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var graph = autodiff.Graph.init(arena_allocator);
+    defer graph.deinit();
+
+    // Input shape [2, 3]
+    const X = try graph.array(&.{2, 3}, &[_]f32{
+        1.0, 2.0, 3.0,
+        1.0, 1.0, 1.0,
+    }, true);
+
+    const Y = try X.softmax(arena_allocator, &graph);
+
+    try graph.forward();
+
+    // Check forward
+    // Row 0: exp(1), exp(2), exp(3) -> sum = 2.718 + 7.389 + 20.085 = 30.192
+    // exp(1)/sum = 0.0900, exp(2)/sum = 0.2447, exp(3)/sum = 0.6652
+    try std.testing.expectApproxEqAbs(@as(f32, 0.09003057), Y.get(&.{0, 0}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.24472847), Y.get(&.{0, 1}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.66524096), Y.get(&.{0, 2}), 1e-5);
+    // Row 1: exp(1), exp(1), exp(1) -> 1/3, 1/3, 1/3
+    try std.testing.expectApproxEqAbs(@as(f32, 0.33333333), Y.get(&.{1, 0}), 1e-5);
+
+    // Backward
+    graph.zeroGrad();
+    @memset(Y.grad, 1.0); // dL/dY = 1.0
+    // dX_i = Y_i * (dY_i - sum_j dY_j Y_j)
+    // Since dY_j = 1.0, sum_j dY_j Y_j = sum_j Y_j = 1.0 (since softmax sums to 1)
+    // So dX_i = Y_i * (1.0 - 1.0) = 0.0
+    try graph.backward(Y);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), X.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), X.grad[5], 1e-5);
+
+    // Try another grad
+    graph.zeroGrad();
+    Y.grad[0] = 1.0;
+    Y.grad[1] = 0.0;
+    Y.grad[2] = 0.0;
+    // Row 0: sum_dy_y = 1.0 * Y_0 = Y_0
+    // dX_0 = Y_0 * (1.0 - Y_0) = Y_0 * (1 - Y_0)
+    // dX_1 = Y_1 * (0.0 - Y_0) = - Y_1 * Y_0
+    // dX_2 = Y_2 * (0.0 - Y_0) = - Y_2 * Y_0
+    try graph.backward(Y);
+    const y0 = Y.get(&.{0, 0});
+    const y1 = Y.get(&.{0, 1});
+    try std.testing.expectApproxEqAbs(y0 * (1.0 - y0), X.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(-y1 * y0, X.grad[1], 1e-5);
+}
+
+test "RMSNorm forward and backward" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var graph = autodiff.Graph.init(arena_allocator);
+    defer graph.deinit();
+
+    const X = try graph.array(&.{2, 3}, &[_]f32{
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+    }, true);
+    const G = try graph.array(&.{3}, &[_]f32{ 1.0, 2.0, 3.0 }, true);
+
+    const Y = try X.rmsNorm(G, 1e-5, arena_allocator, &graph);
+
+    try graph.forward();
+
+    // Row 0: mean(x^2) = (1+4+9)/3 = 14/3 = 4.666666
+    // rms = sqrt(4.666666) = 2.1602468
+    // Y_0 = 1 / rms * 1 = 0.46291
+    // Y_1 = 2 / rms * 2 = 1.85164
+    // Y_2 = 3 / rms * 3 = 4.16619
+    try std.testing.expectApproxEqAbs(@as(f32, 0.46291), Y.get(&.{0, 0}), 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.85164), Y.get(&.{0, 1}), 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.16619), Y.get(&.{0, 2}), 1e-4);
+
+    // Backward
+    graph.zeroGrad();
+    @memset(Y.grad, 1.0);
+    try graph.backward(Y);
+
+    // We can verify gradients numerically or just check they are non-zero and reasonable.
+    // Let's verify G.grad: dG_j = sum_i (dY_i * X_i * scale)
+    // Row 0 scale = 1/2.1602468 = 0.46291
+    // Row 1: mean(x^2) = (16+25+36)/3 = 77/3 = 25.6666
+    // Row 1 scale = 1/sqrt(25.6666) = 1/5.066228 = 0.197385
+    // dG_0 = 1.0 * 1.0 * 0.46291 + 1.0 * 4.0 * 0.197385 = 0.46291 + 0.78954 = 1.25245
+    try std.testing.expectApproxEqAbs(@as(f32, 1.25245), G.grad[0], 1e-4);
+}
+
+test "Embedding forward and backward" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var graph = autodiff.Graph.init(arena_allocator);
+    defer graph.deinit();
+
+    const W = try graph.array(&.{3, 4}, &[_]f32{
+        0.1, 0.2, 0.3, 0.4,
+        1.1, 1.2, 1.3, 1.4,
+        2.1, 2.2, 2.3, 2.4,
+    }, true);
+
+    const X = try graph.array(&.{2, 2}, &[_]f32{
+        0.0, 2.0,
+        1.0, 0.0,
+    }, false);
+
+    const Y = try W.embedding(X, arena_allocator, &graph);
+
+    try graph.forward();
+
+    // Check forward
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), Y.get(&.{0, 0, 0}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.3), Y.get(&.{0, 1, 2}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.4), Y.get(&.{1, 0, 3}), 1e-5);
+
+    // Backward
+    graph.zeroGrad();
+    @memset(Y.grad, 1.0);
+    try graph.backward(Y);
+
+    // W.grad should accumulate gradients
+    // X has:
+    // (0,0) -> 0.0
+    // (0,1) -> 2.0
+    // (1,0) -> 1.0
+    // (1,1) -> 0.0
+    // So row 0 of W is selected twice, row 1 once, row 2 once.
+    // Since dY is all 1.0, W.grad row 0 should be 2.0, row 1 should be 1.0, row 2 should be 1.0.
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), W.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), W.grad[4], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), W.grad[8], 1e-5);
+}
+
+test "BatchMatMul forward and backward" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var graph = autodiff.Graph.init(arena_allocator);
+    defer graph.deinit();
+
+    // Shape [2, 2, 2, 3]
+    const A = try graph.array(&.{2, 2, 2, 3}, &[_]f32{
+        // batch 0, head 0
+        1, 2, 3,
+        4, 5, 6,
+        // batch 0, head 1
+        1, 1, 1,
+        2, 2, 2,
+        // batch 1, head 0
+        0, 1, 0,
+        1, 0, 1,
+        // batch 1, head 1
+        2, 0, 2,
+        0, 2, 0,
+    }, true);
+
+    // Shape [2, 2, 3, 2]
+    const B = try graph.array(&.{2, 2, 3, 2}, &[_]f32{
+        // batch 0, head 0
+        1, 0,
+        0, 1,
+        1, 1,
+        // batch 0, head 1
+        2, 2,
+        2, 2,
+        2, 2,
+        // batch 1, head 0
+        1, 2,
+        3, 4,
+        5, 6,
+        // batch 1, head 1
+        1, 1,
+        1, 1,
+        1, 1,
+    }, true);
+
+    const C = try A.batchMatMul(B, arena_allocator, &graph);
+
+    try graph.forward();
+
+    // Check forward
+    // Batch 0, Head 0:
+    // [1, 2, 3]   [1, 0]   [4, 5]
+    // [4, 5, 6] * [0, 1] = [10, 11]
+    //             [1, 1]
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), C.get(&.{0, 0, 0, 0}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), C.get(&.{0, 0, 0, 1}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), C.get(&.{0, 0, 1, 0}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 11.0), C.get(&.{0, 0, 1, 1}), 1e-5);
+
+    // Backward
+    graph.zeroGrad();
+    @memset(C.grad, 1.0);
+    try graph.backward(C);
+
+    // We can verify some gradients.
+    // dA = dC * B^T
+    // For Batch 0, Head 0:
+    // dC_slice = [1, 1]
+    //            [1, 1]
+    // B_slice^T = [1, 0, 1]
+    //             [0, 1, 1]
+    // dA_slice = dC_slice * B_slice^T = [1, 1, 2]
+    //                                   [1, 1, 2]
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), A.grad[2], 1e-5);
+}
+
+
+
 
 
 

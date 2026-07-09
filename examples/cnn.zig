@@ -99,17 +99,22 @@ pub const CNN = struct {
 
 pub const NeuralNetwork = nn.Module(CNN);
 
-pub fn main(init: std.process.Init) !void {
-    const arena = init.arena.allocator();
-    const io = init.io;
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
     std.debug.print("Running CNN example on CPU...\n", .{});
 
     std.debug.print("Loading dataset...\n", .{});
-    var train_dataset = try dataset.loadDataset(io, arena, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte");
+    var train_dataset = try dataset.loadDataset(arena, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte");
     defer train_dataset.deinit(arena);
 
-    var test_dataset = try dataset.loadDataset(io, arena, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
+    var test_dataset = try dataset.loadDataset(arena, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
     defer test_dataset.deinit(arena);
 
     std.debug.print("Loaded {} training images, {} test images.\n", .{ train_dataset.images.num_images, test_dataset.images.num_images });
@@ -118,14 +123,13 @@ pub fn main(init: std.process.Init) !void {
     var model = NeuralNetwork.init(arena, try CNN.init(arena, 42));
     defer model.deinit();
 
-    try runTraining(&model, arena, io, train_dataset, test_dataset);
+    try runTraining(&model, arena, train_dataset, test_dataset);
     try printPredictions(&model, arena, test_dataset, 5);
 }
 
 fn runTraining(
     model: anytype,
     arena: std.mem.Allocator,
-    io: std.Io,
     train_dataset: dataset.Dataset,
     test_dataset: dataset.Dataset,
 ) !void {
@@ -214,7 +218,7 @@ fn runTraining(
     }
 
     std.debug.print("\nSaving trained CNN model to 'cnn_model.bin'...\n", .{});
-    model.save(io, "cnn_model.bin") catch |err| {
+    model.save("cnn_model.bin") catch |err| {
         std.debug.print("Failed to save model: {}\n", .{err});
     };
 }

@@ -86,8 +86,10 @@ pub fn solveGradientDescent(
     return FitResult{ .w = w_data[0], .b = b_data[0] };
 }
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
     std.debug.print("=========================================\n", .{});
     std.debug.print("Linear Regression using Autodiff Engine\n", .{});

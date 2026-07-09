@@ -132,6 +132,102 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(exe_cnn);
 
+    // Define Transformer Embedding example binary
+    const exe_emb = b.addExecutable(.{
+        .name = "transformer_embedding",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/transformer_embedding.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_emb_mod = exe_emb.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_emb_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_emb);
+
+    const run_emb_step = b.step("run-emb", "Run the Transformer Embedding example");
+    const run_emb_cmd = b.addRunArtifact(exe_emb);
+    run_emb_step.dependOn(&run_emb_cmd.step);
+    run_emb_cmd.step.dependOn(b.getInstallStep());
+
+    // Define Transformer Attention example binary
+    const exe_att = b.addExecutable(.{
+        .name = "transformer_attention",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/transformer_attention.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_att_mod = exe_att.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_att_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_att);
+
+    const run_att_step = b.step("run-att", "Run the Transformer Attention example");
+    const run_att_cmd = b.addRunArtifact(exe_att);
+    run_att_step.dependOn(&run_att_cmd.step);
+    run_att_cmd.step.dependOn(b.getInstallStep());
+
+    // Define Transformer Block example binary
+    const exe_block = b.addExecutable(.{
+        .name = "transformer_block",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/transformer_block.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_block_mod = exe_block.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_block_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_block);
+
+    const run_block_step = b.step("run-block", "Run the Transformer Block example");
+    const run_block_cmd = b.addRunArtifact(exe_block);
+    run_block_step.dependOn(&run_block_cmd.step);
+    run_block_cmd.step.dependOn(b.getInstallStep());
+
+    // Define Transformer GPT example binary
+    const exe_gpt = b.addExecutable(.{
+        .name = "transformer_gpt",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/transformer_gpt.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_gpt_mod = exe_gpt.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_gpt_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_gpt);
+
+    const run_gpt_step = b.step("run-gpt", "Run the Transformer GPT example");
+    const run_gpt_cmd = b.addRunArtifact(exe_gpt);
+    run_gpt_step.dependOn(&run_gpt_cmd.step);
+    run_gpt_cmd.step.dependOn(b.getInstallStep());
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.

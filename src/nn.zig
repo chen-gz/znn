@@ -137,46 +137,57 @@ pub const Conv2D = struct {
     }
 };
 
-// ============================================================================
-// 2. Comptime 编译期反射函数（用于底层递归扫描，由 Module 包装器调用）
-// ============================================================================
-
-// 自动扫描结构体，调用子层（如 Linear）的 deinit 或释放对应的 Tensor 和 Slice 字段
 pub fn deinitModel(model: anytype, allocator: std.mem.Allocator) void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
     inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear or field.type == Conv2D) {
-            @field(model, field.name).deinit(allocator);
-        } else if (field.type == *Tensor) {
+        const FieldType = field.type;
+        const field_info = @typeInfo(FieldType);
+        if (FieldType == *Tensor) {
             freePersistentTensor(allocator, @field(model, field.name));
-        } else if (field.type == []f32) {
+        } else if (FieldType == []f32) {
             allocator.free(@field(model, field.name));
+        } else if (field_info == .@"struct") {
+            deinitModel(&@field(model, field.name), allocator);
+        } else if (field_info == .@"array") {
+            const elem_info = @typeInfo(field_info.@"array".child);
+            if (elem_info == .@"struct") {
+                for (&@field(model, field.name)) |*item| {
+                    deinitModel(item, allocator);
+                }
+            }
         }
     }
 }
 
-// 自动扫描结构体中的子层或 Tensor，并将它们的梯度统一清零
 pub fn zeroGradModel(model: anytype) void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
     inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear or field.type == Conv2D) {
+        const FieldType = field.type;
+        const field_info = @typeInfo(FieldType);
+        if (FieldType == *Tensor) {
             @field(model, field.name).zeroGrad();
-        } else if (field.type == *Tensor) {
-            @field(model, field.name).zeroGrad();
+        } else if (field_info == .@"struct") {
+            zeroGradModel(&@field(model, field.name));
+        } else if (field_info == .@"array") {
+            const elem_info = @typeInfo(field_info.@"array".child);
+            if (elem_info == .@"struct") {
+                for (&@field(model, field.name)) |*item| {
+                    zeroGradModel(item);
+                }
+            }
         }
     }
 }
 
-// 自动扫描子层并进行参数梯度更新
 pub fn updateWeightsModel(model: anytype, lr: f32, beta: f32) void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
     inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear or field.type == Conv2D) {
-            @field(model, field.name).updateWeights(lr, beta);
-        } else if (field.type == *Tensor) {
+        const FieldType = field.type;
+        const field_info = @typeInfo(FieldType);
+        if (FieldType == *Tensor) {
             const v_name = "v_" ++ field.name;
             if (@hasField(T, v_name)) {
                 updateLayerWeights(
@@ -187,70 +198,17 @@ pub fn updateWeightsModel(model: anytype, lr: f32, beta: f32) void {
                     beta,
                 );
             }
+        } else if (field_info == .@"struct") {
+            updateWeightsModel(&@field(model, field.name), lr, beta);
+        } else if (field_info == .@"array") {
+            const elem_info = @typeInfo(field_info.@"array".child);
+            if (elem_info == .@"struct") {
+                for (&@field(model, field.name)) |*item| {
+                    updateWeightsModel(item, lr, beta);
+                }
+            }
         }
     }
-}
-
-// 自动扫描子层并使用 Safetensors 格式将所有持久化参数二进制数据写入磁盘
-pub fn saveModel(model: anytype, io: std.Io, file_path: []const u8, allocator: std.mem.Allocator) !void {
-    const T = @TypeOf(model.*);
-    const info = @typeInfo(T);
-    const cwd = std.Io.Dir.cwd();
-    var file = try cwd.createFile(io, file_path, .{});
-    defer file.close(io);
-
-    // 1. 构建 JSON header
-    var json_buf: std.ArrayList(u8) = .empty;
-    defer json_buf.deinit(allocator);
-    try json_buf.appendSlice(allocator, "{");
-    var first = true;
-    var offset: usize = 0;
-
-    inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear or field.type == Conv2D) {
-            const layer = @field(model, field.name);
-            // weight
-            if (!first) try json_buf.appendSlice(allocator, ",") else first = false;
-            try writeTensorEntry(&json_buf, allocator, field.name ++ ".weight", layer.weight, &offset);
-            // bias
-            try json_buf.appendSlice(allocator, ",");
-            try writeTensorEntry(&json_buf, allocator, field.name ++ ".bias", layer.bias, &offset);
-        } else if (field.type == *Tensor) {
-            const t = @field(model, field.name);
-            if (!first) try json_buf.appendSlice(allocator, ",") else first = false;
-            try writeTensorEntry(&json_buf, allocator, field.name, t, &offset);
-        }
-    }
-    try json_buf.appendSlice(allocator, "}");
-
-    // 2. 对齐 JSON 头部长度至 8 字节的倍数（Safetensors 标准）
-    const header_len_unpadded = json_buf.items.len;
-    const padding = (8 - (header_len_unpadded % 8)) % 8;
-    for (0..padding) |_| {
-        try json_buf.append(allocator, ' ');
-    }
-    const final_header_len = json_buf.items.len;
-
-    // 3. 写入 8 字节 of header 长度（小端序 u64）和 header json 字节
-    var buf: [65536]u8 = undefined;
-    var file_writer = file.writer(io, &buf);
-    const writer = &file_writer.interface;
-
-    const header_len_u64 = @as(u64, final_header_len);
-    try writer.writeAll(std.mem.asBytes(&header_len_u64));
-    try writer.writeAll(json_buf.items);
-
-    // 4. 顺序写入张量二进制权重数据
-    inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear or field.type == Conv2D) {
-            const layer = @field(model, field.name);
-            try writer.writeAll(std.mem.sliceAsBytes(layer.weight.data));
-            try writer.writeAll(std.mem.sliceAsBytes(layer.bias.data));
-        } else if (field.type == *Tensor) {
-            try writer.writeAll(std.mem.sliceAsBytes(@field(model, field.name).data));
-        }
-    }
-    try file_writer.flush();
 }
 
 fn writeTensorEntry(
@@ -273,16 +231,174 @@ fn writeTensorEntry(
     try json_buf.print(allocator, "],\"data_offsets\":[{},{}]}}", .{ start, end });
 }
 
-// 从磁盘中二进制还原所有子层参数数据（使用 Safetensors 格式）
-pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8, allocator: std.mem.Allocator) !void {
+fn writeModelTensors(
+    model: anytype,
+    json_buf: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    offset: *usize,
+    first: *bool,
+    prefix: []const u8,
+) anyerror!void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
-    const cwd = std.Io.Dir.cwd();
-    var file = try cwd.openFile(io, file_path, .{});
-    defer file.close(io);
+    inline for (info.@"struct".fields) |field| {
+        const FieldType = field.type;
+        const field_info = @typeInfo(FieldType);
+        if (FieldType == *Tensor) {
+            var name: std.ArrayList(u8) = .empty;
+            defer name.deinit(allocator);
+            if (prefix.len > 0) {
+                try name.appendSlice(allocator, prefix);
+                try name.appendSlice(allocator, ".");
+            }
+            try name.appendSlice(allocator, field.name);
+
+            if (!first.*) try json_buf.appendSlice(allocator, ",") else first.* = false;
+            try writeTensorEntry(json_buf, allocator, name.items, @field(model, field.name), offset);
+        } else if (field_info == .@"struct") {
+            var next_prefix: std.ArrayList(u8) = .empty;
+            defer next_prefix.deinit(allocator);
+            if (prefix.len > 0) {
+                try next_prefix.appendSlice(allocator, prefix);
+                try next_prefix.appendSlice(allocator, ".");
+            }
+            try next_prefix.appendSlice(allocator, field.name);
+            try writeModelTensors(&@field(model, field.name), json_buf, allocator, offset, first, next_prefix.items);
+        } else if (field_info == .@"array") {
+            const elem_info = @typeInfo(field_info.@"array".child);
+            if (elem_info == .@"struct") {
+                for (&@field(model, field.name), 0..) |*item, idx| {
+                    var next_prefix: std.ArrayList(u8) = .empty;
+                    defer next_prefix.deinit(allocator);
+                    if (prefix.len > 0) {
+                        try next_prefix.appendSlice(allocator, prefix);
+                        try next_prefix.appendSlice(allocator, ".");
+                    }
+                    try next_prefix.print(allocator, "{s}.{d}", .{ field.name, idx });
+                    try writeModelTensors(item, json_buf, allocator, offset, first, next_prefix.items);
+                }
+            }
+        }
+    }
+}
+
+fn writeModelData(
+    model: anytype,
+    writer: anytype,
+) anyerror!void {
+    const T = @TypeOf(model.*);
+    const info = @typeInfo(T);
+    inline for (info.@"struct".fields) |field| {
+        const FieldType = field.type;
+        const field_info = @typeInfo(FieldType);
+        if (FieldType == *Tensor) {
+            try writer.writeAll(std.mem.sliceAsBytes(@field(model, field.name).data));
+        } else if (field_info == .@"struct") {
+            try writeModelData(&@field(model, field.name), writer);
+        } else if (field_info == .@"array") {
+            const elem_info = @typeInfo(field_info.@"array".child);
+            if (elem_info == .@"struct") {
+                for (&@field(model, field.name)) |*item| {
+                    try writeModelData(item, writer);
+                }
+            }
+        }
+    }
+}
+
+pub fn saveModel(model: anytype, file_path: []const u8, allocator: std.mem.Allocator) !void {
+    const cwd = std.fs.cwd();
+    var file = try cwd.createFile(file_path, .{});
+    defer file.close();
+
+    // 1. 构建 JSON header
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(allocator);
+    try json_buf.appendSlice(allocator, "{");
+    var first = true;
+    var offset: usize = 0;
+
+    try writeModelTensors(model, &json_buf, allocator, &offset, &first, "");
+    try json_buf.appendSlice(allocator, "}");
+
+    // 2. 对齐 JSON 头部长度至 8 字节的倍数（Safetensors 标准）
+    const header_len_unpadded = json_buf.items.len;
+    const padding = (8 - (header_len_unpadded % 8)) % 8;
+    for (0..padding) |_| {
+        try json_buf.append(allocator, ' ');
+    }
+    const final_header_len = json_buf.items.len;
+
+    // 3. 写入 8 字节 of header 长度（小端序 u64）和 header json 字节
+    var buf: [65536]u8 = undefined;
+    var file_writer = file.writer(&buf);
+    const writer = &file_writer.interface;
+
+    const header_len_u64 = @as(u64, final_header_len);
+    try writer.writeAll(std.mem.asBytes(&header_len_u64));
+    try writer.writeAll(json_buf.items);
+
+    // 4. 顺序写入张量二进制权重数据
+    try writeModelData(model, writer);
+    try writer.flush();
+}
+
+fn loadModelTensors(
+    model: anytype,
+    reader: anytype,
+    meta_obj: anytype,
+    current_offset: *usize,
+    allocator: std.mem.Allocator,
+    prefix: []const u8,
+) anyerror!void {
+    const T = @TypeOf(model.*);
+    const info = @typeInfo(T);
+    inline for (info.@"struct".fields) |field| {
+        const FieldType = field.type;
+        const field_info = @typeInfo(FieldType);
+        if (FieldType == *Tensor) {
+            var name: std.ArrayList(u8) = .empty;
+            defer name.deinit(allocator);
+            if (prefix.len > 0) {
+                try name.appendSlice(allocator, prefix);
+                try name.appendSlice(allocator, ".");
+            }
+            try name.appendSlice(allocator, field.name);
+            try loadTensorData(reader, meta_obj, name.items, @field(model, field.name), current_offset);
+        } else if (field_info == .@"struct") {
+            var next_prefix: std.ArrayList(u8) = .empty;
+            defer next_prefix.deinit(allocator);
+            if (prefix.len > 0) {
+                try next_prefix.appendSlice(allocator, prefix);
+                try next_prefix.appendSlice(allocator, ".");
+            }
+            try next_prefix.appendSlice(allocator, field.name);
+            try loadModelTensors(&@field(model, field.name), reader, meta_obj, current_offset, allocator, next_prefix.items);
+        } else if (field_info == .@"array") {
+            const elem_info = @typeInfo(field_info.@"array".child);
+            if (elem_info == .@"struct") {
+                for (&@field(model, field.name), 0..) |*item, idx| {
+                    var next_prefix: std.ArrayList(u8) = .empty;
+                    defer next_prefix.deinit(allocator);
+                    if (prefix.len > 0) {
+                        try next_prefix.appendSlice(allocator, prefix);
+                        try next_prefix.appendSlice(allocator, ".");
+                    }
+                    try next_prefix.print(allocator, "{s}.{d}", .{ field.name, idx });
+                    try loadModelTensors(item, reader, meta_obj, current_offset, allocator, next_prefix.items);
+                }
+            }
+        }
+    }
+}
+
+pub fn loadModel(model: anytype, file_path: []const u8, allocator: std.mem.Allocator) !void {
+    const cwd = std.fs.cwd();
+    var file = try cwd.openFile(file_path, .{});
+    defer file.close();
 
     var buf: [65536]u8 = undefined;
-    var file_reader = file.reader(io, &buf);
+    var file_reader = file.reader(&buf);
     const reader = &file_reader.interface;
 
     // 1. 读取 8 字节 header 长度
@@ -303,16 +419,7 @@ pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8, allocator: s
 
     // 4. 顺序还原每一个 Tensor 字段
     var current_offset: usize = 0;
-    inline for (info.@"struct".fields) |field| {
-        if (field.type == Linear or field.type == Conv2D) {
-            const layer = @field(model, field.name);
-            try loadTensorData(reader, meta_obj, field.name ++ ".weight", layer.weight, &current_offset);
-            try loadTensorData(reader, meta_obj, field.name ++ ".bias", layer.bias, &current_offset);
-        } else if (field.type == *Tensor) {
-            const t = @field(model, field.name);
-            try loadTensorData(reader, meta_obj, field.name, t, &current_offset);
-        }
-    }
+    try loadModelTensors(model, reader, meta_obj, &current_offset, allocator, "");
 }
 
 fn loadTensorData(
@@ -422,13 +529,13 @@ pub fn Module(comptime T: type) type {
         }
 
         // 自动托管 save
-        pub fn save(self: *const Self, io: std.Io, file_path: []const u8) !void {
-            try saveModel(&self.inner, io, file_path, self.allocator);
+        pub fn save(self: *const Self, file_path: []const u8) !void {
+            try saveModel(&self.inner, file_path, self.allocator);
         }
 
         // 自动托管 load
-        pub fn load(self: *Self, io: std.Io, file_path: []const u8) !void {
-            try loadModel(&self.inner, io, file_path, self.allocator);
+        pub fn load(self: *Self, file_path: []const u8) !void {
+            try loadModel(&self.inner, file_path, self.allocator);
         }
 
         // 自动托管前向传播：将接口直接路由到具体实现的 forward 函数
@@ -437,6 +544,564 @@ pub fn Module(comptime T: type) type {
         }
     };
 }
+
+pub const Embedding = struct {
+    weight: *Tensor,
+    v_weight: []f32,
+
+    pub fn init(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize, random: std.Random) !Embedding {
+        const weight = try createPersistentTensor(allocator, vocab_size, embedding_dim, true);
+        errdefer freePersistentTensor(allocator, weight);
+
+        const v_weight = try allocator.alloc(f32, vocab_size * embedding_dim);
+        errdefer allocator.free(v_weight);
+        @memset(v_weight, 0.0);
+
+        initializeWeights(random, weight.data, embedding_dim);
+
+        return Embedding{
+            .weight = weight,
+            .v_weight = v_weight,
+        };
+    }
+
+    pub fn deinit(self: Embedding, allocator: std.mem.Allocator) void {
+        freePersistentTensor(allocator, self.weight);
+        allocator.free(self.v_weight);
+    }
+
+    pub fn zeroGrad(self: Embedding) void {
+        self.weight.zeroGrad();
+    }
+
+    pub fn updateWeights(self: Embedding, lr: f32, beta: f32) void {
+        updateLayerWeights(self.weight.data, self.weight.grad, self.v_weight, lr, beta);
+    }
+
+    pub fn forward(self: Embedding, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        return try self.weight.embedding(x, allocator, graph);
+    }
+};
+
+pub const RMSNorm = struct {
+    weight: *Tensor,
+    v_weight: []f32,
+    eps: f32,
+
+    pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !RMSNorm {
+        const weight = try createPersistentTensor(allocator, 1, dim, true);
+        errdefer freePersistentTensor(allocator, weight);
+        @memset(weight.data, 1.0);
+
+        weight.shape = Shape.init(&.{dim});
+        weight.strides = tensor.computeContiguousStrides(weight.shape);
+
+        const v_weight = try allocator.alloc(f32, dim);
+        errdefer allocator.free(v_weight);
+        @memset(v_weight, 0.0);
+
+        return RMSNorm{
+            .weight = weight,
+            .v_weight = v_weight,
+            .eps = eps,
+        };
+    }
+
+    pub fn deinit(self: RMSNorm, allocator: std.mem.Allocator) void {
+        freePersistentTensor(allocator, self.weight);
+        allocator.free(self.v_weight);
+    }
+
+    pub fn zeroGrad(self: RMSNorm) void {
+        self.weight.zeroGrad();
+    }
+
+    pub fn updateWeights(self: RMSNorm, lr: f32, beta: f32) void {
+        updateLayerWeights(self.weight.data, self.weight.grad, self.v_weight, lr, beta);
+    }
+
+    pub fn forward(self: RMSNorm, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        return try x.rmsNorm(self.weight, self.eps, allocator, graph);
+    }
+};
+
+pub const MLP = struct {
+    c_fc: Linear,
+    c_proj: Linear,
+
+    pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize, random: std.Random) !MLP {
+        const c_fc = try Linear.init(allocator, dim, hidden_dim, random);
+        errdefer c_fc.deinit(allocator);
+        const c_proj = try Linear.init(allocator, hidden_dim, dim, random);
+        errdefer c_proj.deinit(allocator);
+
+        return MLP{
+            .c_fc = c_fc,
+            .c_proj = c_proj,
+        };
+    }
+
+    pub fn deinit(self: MLP, allocator: std.mem.Allocator) void {
+        self.c_fc.deinit(allocator);
+        self.c_proj.deinit(allocator);
+    }
+
+    pub fn zeroGrad(self: MLP) void {
+        self.c_fc.zeroGrad();
+        self.c_proj.zeroGrad();
+    }
+
+    pub fn updateWeights(self: MLP, lr: f32, beta: f32) void {
+        self.c_fc.updateWeights(lr, beta);
+        self.c_proj.updateWeights(lr, beta);
+    }
+
+    pub fn forward(self: MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const old_shape = x.shape;
+        const is_3d = (old_shape.len == 3);
+        var x_2d = x;
+        if (is_3d) {
+            const B = old_shape.dims[0];
+            const T = old_shape.dims[1];
+            const D = old_shape.dims[2];
+            if (graph) |g| {
+                x_2d = try g.reshape(x, &.{ B * T, D });
+            } else {
+                x_2d = try x.reshape(&.{ B * T, D }, allocator, null);
+            }
+        }
+        defer {
+            if (is_3d and graph == null) {
+                tensor.free(allocator, x_2d);
+            }
+        }
+
+        const h1 = try self.c_fc.forward(allocator, graph, x_2d);
+        defer if (graph == null) tensor.free(allocator, h1);
+
+        const a1 = if (graph) |g| try g.relu(h1) else try h1.relu(allocator, null);
+        defer if (graph == null) tensor.free(allocator, a1);
+
+        const h2 = try self.c_proj.forward(allocator, graph, a1);
+
+        if (is_3d) {
+            const B = old_shape.dims[0];
+            const T = old_shape.dims[1];
+            const D = old_shape.dims[2];
+            if (graph) |g| {
+                return try g.reshape(h2, &.{ B, T, D });
+            } else {
+                defer tensor.free(allocator, h2);
+                return try h2.reshape(&.{ B, T, D }, allocator, null);
+            }
+        }
+        return h2;
+    }
+};
+
+pub const CausalSelfAttention = struct {
+    q_attn: Linear,
+    k_attn: Linear,
+    v_attn: Linear,
+    c_proj: Linear,
+    n_head: usize,
+    n_embd: usize,
+
+    pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !CausalSelfAttention {
+        const q_attn = try Linear.init(allocator, n_embd, n_embd, random);
+        errdefer q_attn.deinit(allocator);
+        const k_attn = try Linear.init(allocator, n_embd, n_embd, random);
+        errdefer k_attn.deinit(allocator);
+        const v_attn = try Linear.init(allocator, n_embd, n_embd, random);
+        errdefer v_attn.deinit(allocator);
+        const c_proj = try Linear.init(allocator, n_embd, n_embd, random);
+        errdefer c_proj.deinit(allocator);
+
+        return CausalSelfAttention{
+            .q_attn = q_attn,
+            .k_attn = k_attn,
+            .v_attn = v_attn,
+            .c_proj = c_proj,
+            .n_head = n_head,
+            .n_embd = n_embd,
+        };
+    }
+
+    pub fn deinit(self: CausalSelfAttention, allocator: std.mem.Allocator) void {
+        self.q_attn.deinit(allocator);
+        self.k_attn.deinit(allocator);
+        self.v_attn.deinit(allocator);
+        self.c_proj.deinit(allocator);
+    }
+
+    pub fn zeroGrad(self: CausalSelfAttention) void {
+        self.q_attn.zeroGrad();
+        self.k_attn.zeroGrad();
+        self.v_attn.zeroGrad();
+        self.c_proj.zeroGrad();
+    }
+
+    pub fn updateWeights(self: CausalSelfAttention, lr: f32, beta: f32) void {
+        self.q_attn.updateWeights(lr, beta);
+        self.k_attn.updateWeights(lr, beta);
+        self.v_attn.updateWeights(lr, beta);
+        self.c_proj.updateWeights(lr, beta);
+    }
+
+    pub fn forward(self: CausalSelfAttention, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const B = x.shape.dims[0];
+        const T = x.shape.dims[1];
+        const C = x.shape.dims[2];
+        const nh = self.n_head;
+        const hs = C / nh;
+
+        var x_2d = x;
+        if (graph) |g| {
+            x_2d = try g.reshape(x, &.{ B * T, C });
+        } else {
+            x_2d = try x.reshape(&.{ B * T, C }, allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, x_2d);
+
+        const q_2d = try self.q_attn.forward(allocator, graph, x_2d);
+        defer if (graph == null) tensor.free(allocator, q_2d);
+        const k_2d = try self.k_attn.forward(allocator, graph, x_2d);
+        defer if (graph == null) tensor.free(allocator, k_2d);
+        const v_2d = try self.v_attn.forward(allocator, graph, x_2d);
+        defer if (graph == null) tensor.free(allocator, v_2d);
+
+        var q_4d = q_2d;
+        var k_4d = k_2d;
+        var v_4d = v_2d;
+        if (graph) |g| {
+            q_4d = try g.reshape(q_2d, &.{ B, T, nh, hs });
+            k_4d = try g.reshape(k_2d, &.{ B, T, nh, hs });
+            v_4d = try g.reshape(v_2d, &.{ B, T, nh, hs });
+        } else {
+            q_4d = try q_2d.reshape(&.{ B, T, nh, hs }, allocator, null);
+            k_4d = try k_2d.reshape(&.{ B, T, nh, hs }, allocator, null);
+            v_4d = try v_2d.reshape(&.{ B, T, nh, hs }, allocator, null);
+        }
+        defer if (graph == null) {
+            tensor.free(allocator, q_4d);
+            tensor.free(allocator, k_4d);
+            tensor.free(allocator, v_4d);
+        };
+
+        var q = q_4d;
+        var k = k_4d;
+        var v = v_4d;
+        if (graph) |g| {
+            q = try g.transposeND(q_4d, 1, 2);
+            k = try g.transposeND(k_4d, 1, 2);
+            v = try g.transposeND(v_4d, 1, 2);
+        } else {
+            q = try q_4d.transpose(1, 2, allocator, null);
+            k = try k_4d.transpose(1, 2, allocator, null);
+            v = try v_4d.transpose(1, 2, allocator, null);
+        }
+        defer if (graph == null) {
+            tensor.free(allocator, q);
+            tensor.free(allocator, k);
+            tensor.free(allocator, v);
+        };
+
+        var k_t = k;
+        if (graph) |g| {
+            k_t = try g.transposeND(k, 2, 3);
+        } else {
+            k_t = try k.transpose(2, 3, allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, k_t);
+
+        var att = q;
+        if (graph) |g| {
+            att = try g.batchMatMul(q, k_t);
+        } else {
+            att = try q.batchMatMul(k_t, allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, att);
+
+        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hs)));
+        var att_scaled = att;
+        if (graph) |g| {
+            att_scaled = try g.mulScalar(att, scale);
+        } else {
+            att_scaled = try att.mulScalar(scale, allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, att_scaled);
+
+        const mask_data = try allocator.alloc(f32, B * nh * T * T);
+        defer allocator.free(mask_data);
+        @memset(mask_data, 0.0);
+        for (0..B) |b| {
+            for (0..nh) |h| {
+                for (0..T) |i| {
+                    for (0..T) |j| {
+                        if (j > i) {
+                            mask_data[((b * nh + h) * T + i) * T + j] = -1e9;
+                        }
+                    }
+                }
+            }
+        }
+        const mask = try tensor.array(allocator, &.{ B, nh, T, T }, mask_data);
+        defer tensor.free(allocator, mask);
+
+        var mask_node = mask;
+        if (graph) |g| {
+            mask_node = try g.tensorNDWithData(&.{ B, nh, T, T }, mask_data, false);
+        }
+
+        var att_masked = att_scaled;
+        if (graph) |g| {
+            att_masked = try g.add(att_scaled, mask_node);
+        } else {
+            att_masked = try att_scaled.add(mask, allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, att_masked);
+
+        var att_sm = att_masked;
+        if (graph) |g| {
+            att_sm = try g.softmax(att_masked);
+        } else {
+            att_sm = try att_masked.softmax(allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, att_sm);
+
+        var y_4d = att_sm;
+        if (graph) |g| {
+            y_4d = try g.batchMatMul(att_sm, v);
+        } else {
+            y_4d = try att_sm.batchMatMul(v, allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, y_4d);
+
+        var y_trans = y_4d;
+        if (graph) |g| {
+            y_trans = try g.transposeND(y_4d, 1, 2);
+        } else {
+            y_trans = try y_4d.transpose(1, 2, allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, y_trans);
+
+        var y_3d = y_trans;
+        if (graph) |g| {
+            y_3d = try g.reshape(y_trans, &.{ B, T, C });
+        } else {
+            y_3d = try y_trans.reshape(&.{ B, T, C }, allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, y_3d);
+
+        var y_2d = y_3d;
+        if (graph) |g| {
+            y_2d = try g.reshape(y_3d, &.{ B * T, C });
+        } else {
+            y_2d = try y_3d.reshape(&.{ B * T, C }, allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, y_2d);
+
+        const out_2d = try self.c_proj.forward(allocator, graph, y_2d);
+        defer if (graph == null) tensor.free(allocator, out_2d);
+
+        if (graph) |g| {
+            return try g.reshape(out_2d, &.{ B, T, C });
+        } else {
+            return try out_2d.reshape(&.{ B, T, C }, allocator, null);
+        }
+    }
+};
+
+pub const TransformerBlock = struct {
+    ln_1: RMSNorm,
+    attn: CausalSelfAttention,
+    ln_2: RMSNorm,
+    mlp: MLP,
+
+    pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !TransformerBlock {
+        const ln_1 = try RMSNorm.init(allocator, n_embd, 1e-5);
+        errdefer ln_1.deinit(allocator);
+        const attn = try CausalSelfAttention.init(allocator, n_embd, n_head, random);
+        errdefer attn.deinit(allocator);
+        const ln_2 = try RMSNorm.init(allocator, n_embd, 1e-5);
+        errdefer ln_2.deinit(allocator);
+        const mlp = try MLP.init(allocator, n_embd, 4 * n_embd, random);
+        errdefer mlp.deinit(allocator);
+
+        return TransformerBlock{
+            .ln_1 = ln_1,
+            .attn = attn,
+            .ln_2 = ln_2,
+            .mlp = mlp,
+        };
+    }
+
+    pub fn deinit(self: TransformerBlock, allocator: std.mem.Allocator) void {
+        self.ln_1.deinit(allocator);
+        self.attn.deinit(allocator);
+        self.ln_2.deinit(allocator);
+        self.mlp.deinit(allocator);
+    }
+
+    pub fn zeroGrad(self: TransformerBlock) void {
+        self.ln_1.zeroGrad();
+        self.attn.zeroGrad();
+        self.ln_2.zeroGrad();
+        self.mlp.zeroGrad();
+    }
+
+    pub fn updateWeights(self: TransformerBlock, lr: f32, beta: f32) void {
+        self.ln_1.updateWeights(lr, beta);
+        self.attn.updateWeights(lr, beta);
+        self.ln_2.updateWeights(lr, beta);
+        self.mlp.updateWeights(lr, beta);
+    }
+
+    pub fn forward(self: TransformerBlock, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const x_norm1 = try self.ln_1.forward(allocator, graph, x);
+        defer if (graph == null) tensor.free(allocator, x_norm1);
+
+        const x_attn = try self.attn.forward(allocator, graph, x_norm1);
+        defer if (graph == null) tensor.free(allocator, x_attn);
+
+        const x1 = if (graph) |g| try g.add(x, x_attn) else try x.add(x_attn, allocator, null);
+        defer if (graph == null) tensor.free(allocator, x1);
+
+        const x_norm2 = try self.ln_2.forward(allocator, graph, x1);
+        defer if (graph == null) tensor.free(allocator, x_norm2);
+
+        const x_mlp = try self.mlp.forward(allocator, graph, x_norm2);
+        defer if (graph == null) tensor.free(allocator, x_mlp);
+
+        if (graph) |g| {
+            return try g.add(x1, x_mlp);
+        } else {
+            return try x1.add(x_mlp, allocator, null);
+        }
+    }
+};
+
+pub const GPTConfig = struct {
+    vocab_size: usize,
+    block_size: usize,
+    n_embd: usize,
+    n_head: usize,
+    n_layer: usize,
+};
+
+pub fn GPT(comptime config: GPTConfig) type {
+    return struct {
+        wte: Embedding,
+        wpe: Embedding,
+        h: [config.n_layer]TransformerBlock,
+        ln_f: RMSNorm,
+        lm_head: Linear,
+
+        const Self = @This();
+
+        pub fn init(allocator: std.mem.Allocator, random: std.Random) !Self {
+            const wte = try Embedding.init(allocator, config.vocab_size, config.n_embd, random);
+            errdefer wte.deinit(allocator);
+            const wpe = try Embedding.init(allocator, config.block_size, config.n_embd, random);
+            errdefer wpe.deinit(allocator);
+
+            var h: [config.n_layer]TransformerBlock = undefined;
+            var i: usize = 0;
+            errdefer {
+                for (0..i) |j| {
+                    h[j].deinit(allocator);
+                }
+            }
+            while (i < config.n_layer) : (i += 1) {
+                h[i] = try TransformerBlock.init(allocator, config.n_embd, config.n_head, random);
+            }
+
+            const ln_f = try RMSNorm.init(allocator, config.n_embd, 1e-5);
+            errdefer ln_f.deinit(allocator);
+
+            const lm_head = try Linear.init(allocator, config.n_embd, config.vocab_size, random);
+            errdefer lm_head.deinit(allocator);
+
+            return Self{
+                .wte = wte,
+                .wpe = wpe,
+                .h = h,
+                .ln_f = ln_f,
+                .lm_head = lm_head,
+            };
+        }
+
+        pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+            const B = x.shape.dims[0];
+            const T = x.shape.dims[1];
+
+            const tok_emb = try self.wte.forward(allocator, graph, x);
+            defer if (graph == null) tensor.free(allocator, tok_emb);
+
+            const pos_data = try allocator.alloc(f32, B * T);
+            defer allocator.free(pos_data);
+            for (0..B) |b| {
+                for (0..T) |t| {
+                    pos_data[b * T + t] = @as(f32, @floatFromInt(t));
+                }
+            }
+            const pos_tensor = try tensor.array(allocator, &.{ B, T }, pos_data);
+            defer tensor.free(allocator, pos_tensor);
+
+            var pos_node = pos_tensor;
+            if (graph) |g| {
+                pos_node = try g.tensorNDWithData(&.{ B, T }, pos_data, false);
+            }
+
+            const pos_emb = try self.wpe.forward(allocator, graph, pos_node);
+            defer if (graph == null) tensor.free(allocator, pos_emb);
+
+            var h_x = tok_emb;
+            if (graph) |g| {
+                h_x = try g.add(tok_emb, pos_emb);
+            } else {
+                h_x = try tok_emb.add(pos_emb, allocator, null);
+            }
+            defer if (graph == null) tensor.free(allocator, h_x);
+
+            var current_h = h_x;
+            if (graph == null) {
+                current_h = try h_x.clone(allocator);
+            }
+            inline for (0..config.n_layer) |i| {
+                const next_h = try self.h[i].forward(allocator, graph, current_h);
+                if (graph == null) {
+                    tensor.free(allocator, current_h);
+                    current_h = next_h;
+                } else {
+                    current_h = next_h;
+                }
+            }
+
+            const ln_x = try self.ln_f.forward(allocator, graph, current_h);
+            defer if (graph == null) tensor.free(allocator, ln_x);
+            if (graph == null) tensor.free(allocator, current_h);
+
+            var ln_x_2d = ln_x;
+            if (graph) |g| {
+                ln_x_2d = try g.reshape(ln_x, &.{ B * T, config.n_embd });
+            } else {
+                ln_x_2d = try ln_x.reshape(&.{ B * T, config.n_embd }, allocator, null);
+            }
+            defer if (graph == null) tensor.free(allocator, ln_x_2d);
+
+            const logits_2d = try self.lm_head.forward(allocator, graph, ln_x_2d);
+            defer if (graph == null) tensor.free(allocator, logits_2d);
+
+            if (graph) |g| {
+                return try g.reshape(logits_2d, &.{ B, T, config.vocab_size });
+            } else {
+                return try logits_2d.reshape(&.{ B, T, config.vocab_size }, allocator, null);
+            }
+        }
+    };
+}
+
 
 
 
@@ -497,3 +1162,270 @@ fn freePersistentTensor(allocator: std.mem.Allocator, t: *Tensor) void {
     }
     allocator.destroy(t);
 }
+
+test "Embedding Module" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    var emb = try Embedding.init(arena, 10, 4, random);
+    defer emb.deinit(arena);
+
+    var x = try createPersistentTensor(arena, 2, 3, false);
+    defer freePersistentTensor(arena, x);
+    x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
+    x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
+
+    const y_eager = try emb.forward(arena, null, x);
+    defer tensor.free(arena, y_eager);
+    try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
+}
+
+test "Embedding Module Graph Mode" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    var emb = try Embedding.init(arena, 10, 4, random);
+    defer emb.deinit(arena);
+
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const x = try graph.tensorND(&.{2, 3}, false);
+    x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
+    x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
+
+    const y = try emb.forward(arena, &graph, x);
+    try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y.shape.dims[0..y.shape.len]);
+
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    for (0..6) |i| {
+        for (0..4) |j| {
+            try std.testing.expectEqual(@as(f32, 1.0), emb.weight.grad[i * 4 + j]);
+        }
+    }
+    for (6..10) |i| {
+        for (0..4) |j| {
+            try std.testing.expectEqual(@as(f32, 0.0), emb.weight.grad[i * 4 + j]);
+        }
+    }
+}
+
+test "RMSNorm Module" {
+    const arena = std.testing.allocator;
+    var norm = try RMSNorm.init(arena, 4, 1e-5);
+    defer norm.deinit(arena);
+
+    var x = try createPersistentTensor(arena, 2, 4, false);
+    defer freePersistentTensor(arena, x);
+    x.data[0] = 1.0; x.data[1] = 2.0; x.data[2] = 3.0; x.data[3] = 4.0;
+    x.data[4] = 5.0; x.data[5] = 6.0; x.data[6] = 7.0; x.data[7] = 8.0;
+
+    const y_eager = try norm.forward(arena, null, x);
+    defer tensor.free(arena, y_eager);
+    try std.testing.expectEqualSlices(usize, &.{2, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
+
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const x_node = try graph.tensorND(&.{2, 4}, true);
+    @memcpy(x_node.data, x.data);
+
+    const y = try norm.forward(arena, &graph, x_node);
+    try std.testing.expectEqualSlices(usize, &.{2, 4}, y.shape.dims[0..y.shape.len]);
+
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var norm_g_grad_sum: f32 = 0.0;
+    for (norm.weight.grad) |g| norm_g_grad_sum += @abs(g);
+    try std.testing.expect(norm_g_grad_sum > 0.0);
+
+    var x_grad_sum: f32 = 0.0;
+    for (x_node.grad) |g| x_grad_sum += @abs(g);
+    try std.testing.expect(x_grad_sum > 0.0);
+}
+
+test "MLP Module" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    var mlp = try MLP.init(arena, 4, 8, random);
+    defer mlp.deinit(arena);
+
+    const x_3d = try arena.create(Tensor);
+    const shape = Shape.init(&.{2, 3, 4});
+    x_3d.* = Tensor{
+        .data = try arena.alloc(f32, 24),
+        .grad = &.{},
+        .shape = shape,
+        .strides = tensor.computeContiguousStrides(shape),
+        .requires_grad = false,
+        .creator = null,
+    };
+    defer {
+        arena.free(x_3d.data);
+        arena.destroy(x_3d);
+    }
+    for (x_3d.data, 0..) |*val, i| {
+        val.* = @as(f32, @floatFromInt(i)) * 0.1;
+    }
+
+    const y_eager = try mlp.forward(arena, null, x_3d);
+    defer tensor.free(arena, y_eager);
+    try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
+
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const x_node = try graph.tensorND(&.{2, 3, 4}, true);
+    @memcpy(x_node.data, x_3d.data);
+
+    const y = try mlp.forward(arena, &graph, x_node);
+    try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y.shape.dims[0..y.shape.len]);
+
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var w1_grad_sum: f32 = 0.0;
+    for (mlp.c_fc.weight.grad) |g| w1_grad_sum += @abs(g);
+    try std.testing.expect(w1_grad_sum > 0.0);
+}
+
+test "CausalSelfAttention Module" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    var attn = try CausalSelfAttention.init(arena, 8, 2, random);
+    defer attn.deinit(arena);
+
+    const x_3d = try arena.create(Tensor);
+    const shape = Shape.init(&.{2, 3, 8});
+    x_3d.* = Tensor{
+        .data = try arena.alloc(f32, 48),
+        .grad = &.{},
+        .shape = shape,
+        .strides = tensor.computeContiguousStrides(shape),
+        .requires_grad = false,
+        .creator = null,
+    };
+    defer {
+        arena.free(x_3d.data);
+        arena.destroy(x_3d);
+    }
+    for (x_3d.data, 0..) |*val, i| {
+        val.* = @as(f32, @floatFromInt(i)) * 0.1;
+    }
+
+    const y_eager = try attn.forward(arena, null, x_3d);
+    defer tensor.free(arena, y_eager);
+    try std.testing.expectEqualSlices(usize, &.{2, 3, 8}, y_eager.shape.dims[0..y_eager.shape.len]);
+
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const x_node = try graph.tensorND(&.{2, 3, 8}, true);
+    @memcpy(x_node.data, x_3d.data);
+
+    const y = try attn.forward(arena, &graph, x_node);
+    try std.testing.expectEqualSlices(usize, &.{2, 3, 8}, y.shape.dims[0..y.shape.len]);
+
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var q_grad_sum: f32 = 0.0;
+    for (attn.q_attn.weight.grad) |g| q_grad_sum += @abs(g);
+    try std.testing.expect(q_grad_sum > 0.0);
+}
+
+test "GPT Module" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    const config = GPTConfig{
+        .vocab_size = 10,
+        .block_size = 5,
+        .n_embd = 8,
+        .n_head = 2,
+        .n_layer = 2,
+    };
+
+    var gpt = try GPT(config).init(arena, random);
+    defer deinitModel(&gpt, arena);
+
+    const x = try arena.create(Tensor);
+    const shape = Shape.init(&.{2, 3});
+    x.* = Tensor{
+        .data = try arena.alloc(f32, 6),
+        .grad = &.{},
+        .shape = shape,
+        .strides = tensor.computeContiguousStrides(shape),
+        .requires_grad = false,
+        .creator = null,
+    };
+    defer {
+        arena.free(x.data);
+        arena.destroy(x);
+    }
+    x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
+    x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
+
+    const y_eager = try gpt.forward(arena, null, x);
+    defer tensor.free(arena, y_eager);
+    try std.testing.expectEqualSlices(usize, &.{2, 3, 10}, y_eager.shape.dims[0..y_eager.shape.len]);
+
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const x_node = try graph.tensorND(&.{2, 3}, false);
+    @memcpy(x_node.data, x.data);
+
+    const y = try gpt.forward(arena, &graph, x_node);
+    try std.testing.expectEqualSlices(usize, &.{2, 3, 10}, y.shape.dims[0..y.shape.len]);
+
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var wte_grad_sum: f32 = 0.0;
+    for (gpt.wte.weight.grad) |g| wte_grad_sum += @abs(g);
+    try std.testing.expect(wte_grad_sum > 0.0);
+}
+
+test "GPT Module Save and Load" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    const config = GPTConfig{
+        .vocab_size = 10,
+        .block_size = 5,
+        .n_embd = 8,
+        .n_head = 2,
+        .n_layer = 2,
+    };
+
+    var gpt = try GPT(config).init(arena, random);
+    defer deinitModel(&gpt, arena);
+
+    try saveModel(&gpt, "test_gpt_model.safetensors", arena);
+    defer {
+        std.fs.cwd().deleteFile("test_gpt_model.safetensors") catch {};
+    }
+
+    var gpt2 = try GPT(config).init(arena, random);
+    defer deinitModel(&gpt2, arena);
+
+    try loadModel(&gpt2, "test_gpt_model.safetensors", arena);
+
+    for (gpt.wte.weight.data, gpt2.wte.weight.data) |w1, w2| {
+        try std.testing.expectEqual(w1, w2);
+    }
+}
+
+
