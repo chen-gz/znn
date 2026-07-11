@@ -3,6 +3,8 @@ const autodiff = @import("autodiff.zig");
 const Op = autodiff.Op;
 const c = @import("cblas.zig");
 
+extern fn erff(x: f32) f32;
+
 // ============================================================================
 // 1. 维度与形状控制（Shape & Strides Meta-data）
 // ============================================================================
@@ -254,6 +256,21 @@ pub const Tensor = struct {
         const total = self.data.len;
         for (0..total) |i| {
             C.data[i] = if (self.data[i] > 0.0) self.data[i] else 0.0;
+        }
+        return C;
+    }
+
+    pub fn gelu(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.gelu(self);
+        }
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        const total = self.data.len;
+        const sqrt_2: f32 = @sqrt(@as(f32, 2.0));
+        for (0..total) |i| {
+            const x = self.data[i];
+            const erf_val = erff(x / sqrt_2);
+            C.data[i] = 0.5 * x * (1.0 + erf_val);
         }
         return C;
     }
@@ -1366,6 +1383,34 @@ test "BatchMatMul forward and backward" {
     //                                   [1, 1, 2]
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 2.0), A.grad[2], 1e-5);
+}
+
+test "GELU forward and backward" {
+    const arena_allocator = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena_allocator);
+    defer graph.deinit();
+
+    const A = try graph.tensorNDWithData(&.{2, 2}, &.{ -1.0, 0.0, 1.0, 2.0 }, true);
+    const C = try A.gelu(arena_allocator, &graph);
+
+    try graph.forward();
+
+    // Check forward
+    try std.testing.expectApproxEqAbs(@as(f32, -0.158655), C.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), C.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.841345), C.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.954500), C.data[3], 1e-5);
+
+    // Backward
+    graph.zeroGrad();
+    @memset(C.grad, 1.0);
+    try graph.backward(C);
+
+    // Check gradients
+    try std.testing.expectApproxEqAbs(@as(f32, -0.083316), A.grad[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), A.grad[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.083316), A.grad[2], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.085232), A.grad[3], 1e-4);
 }
 
 
