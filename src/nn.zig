@@ -981,6 +981,79 @@ pub const TransformerBlock = struct {
     }
 };
 
+pub fn TransformerDecoder(comptime n_layer: usize) type {
+    return struct {
+        h: [n_layer]TransformerBlock,
+        ln_f: RMSNorm,
+
+        const Self = @This();
+
+        pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !Self {
+            var h: [n_layer]TransformerBlock = undefined;
+            var i: usize = 0;
+            errdefer {
+                for (0..i) |j| {
+                    h[j].deinit(allocator);
+                }
+            }
+            while (i < n_layer) : (i += 1) {
+                h[i] = try TransformerBlock.init(allocator, n_embd, n_head, random);
+            }
+
+            const ln_f = try RMSNorm.init(allocator, n_embd, 1e-5);
+            errdefer {
+                for (0..n_layer) |j| {
+                    h[j].deinit(allocator);
+                }
+                ln_f.deinit(allocator);
+            }
+
+            return Self{
+                .h = h,
+                .ln_f = ln_f,
+            };
+        }
+
+        pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
+            for (self.h) |layer| {
+                layer.deinit(allocator);
+            }
+            self.ln_f.deinit(allocator);
+        }
+
+        pub fn zeroGrad(self: Self) void {
+            for (self.h) |layer| {
+                layer.zeroGrad();
+            }
+            self.ln_f.zeroGrad();
+        }
+
+        pub fn updateWeights(self: Self, lr: f32, beta: f32) void {
+            for (self.h) |layer| {
+                layer.updateWeights(lr, beta);
+            }
+            self.ln_f.updateWeights(lr, beta);
+        }
+
+        pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+            var current_x = x;
+            for (self.h) |layer| {
+                const next_x = try layer.forward(allocator, graph, current_x);
+                if (graph == null and current_x != x) {
+                    tensor.free(allocator, current_x);
+                }
+                current_x = next_x;
+            }
+
+            const out = try self.ln_f.forward(allocator, graph, current_x);
+            if (graph == null and current_x != x) {
+                tensor.free(allocator, current_x);
+            }
+            return out;
+        }
+    };
+}
+
 pub const GPTConfig = struct {
     vocab_size: usize,
     block_size: usize,
@@ -993,8 +1066,7 @@ pub fn GPT(comptime config: GPTConfig) type {
     return struct {
         wte: Embedding,
         wpe: Embedding,
-        h: [config.n_layer]TransformerBlock,
-        ln_f: RMSNorm,
+        decoder: TransformerDecoder(config.n_layer),
         lm_head: Linear,
 
         const Self = @This();
@@ -1005,28 +1077,25 @@ pub fn GPT(comptime config: GPTConfig) type {
             const wpe = try Embedding.init(allocator, config.block_size, config.n_embd, random);
             errdefer wpe.deinit(allocator);
 
-            var h: [config.n_layer]TransformerBlock = undefined;
-            var i: usize = 0;
+            const decoder = try TransformerDecoder(config.n_layer).init(allocator, config.n_embd, config.n_head, random);
             errdefer {
-                for (0..i) |j| {
-                    h[j].deinit(allocator);
-                }
+                wte.deinit(allocator);
+                wpe.deinit(allocator);
+                decoder.deinit(allocator);
             }
-            while (i < config.n_layer) : (i += 1) {
-                h[i] = try TransformerBlock.init(allocator, config.n_embd, config.n_head, random);
-            }
-
-            const ln_f = try RMSNorm.init(allocator, config.n_embd, 1e-5);
-            errdefer ln_f.deinit(allocator);
 
             const lm_head = try Linear.init(allocator, config.n_embd, config.vocab_size, random);
-            errdefer lm_head.deinit(allocator);
+            errdefer {
+                wte.deinit(allocator);
+                wpe.deinit(allocator);
+                decoder.deinit(allocator);
+                lm_head.deinit(allocator);
+            }
 
             return Self{
                 .wte = wte,
                 .wpe = wpe,
-                .h = h,
-                .ln_f = ln_f,
+                .decoder = decoder,
                 .lm_head = lm_head,
             };
         }
@@ -1064,29 +1133,14 @@ pub fn GPT(comptime config: GPTConfig) type {
             }
             defer if (graph == null) tensor.free(allocator, h_x);
 
-            var current_h = h_x;
-            if (graph == null) {
-                current_h = try h_x.clone(allocator);
-            }
-            inline for (0..config.n_layer) |i| {
-                const next_h = try self.h[i].forward(allocator, graph, current_h);
-                if (graph == null) {
-                    tensor.free(allocator, current_h);
-                    current_h = next_h;
-                } else {
-                    current_h = next_h;
-                }
-            }
+            const decoder_out = try self.decoder.forward(allocator, graph, h_x);
+            defer if (graph == null) tensor.free(allocator, decoder_out);
 
-            const ln_x = try self.ln_f.forward(allocator, graph, current_h);
-            defer if (graph == null) tensor.free(allocator, ln_x);
-            if (graph == null) tensor.free(allocator, current_h);
-
-            var ln_x_2d = ln_x;
+            var ln_x_2d = decoder_out;
             if (graph) |g| {
-                ln_x_2d = try g.reshape(ln_x, &.{ B * T, config.n_embd });
+                ln_x_2d = try g.reshape(decoder_out, &.{ B * T, config.n_embd });
             } else {
-                ln_x_2d = try ln_x.reshape(&.{ B * T, config.n_embd }, allocator, null);
+                ln_x_2d = try decoder_out.reshape(&.{ B * T, config.n_embd }, allocator, null);
             }
             defer if (graph == null) tensor.free(allocator, ln_x_2d);
 

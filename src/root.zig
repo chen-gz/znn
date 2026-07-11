@@ -27,6 +27,7 @@ pub fn measureTime(comptime func: anytype, args: anytype) !struct {
 test "basic imports and struct definitions" {
     const std = @import("std");
     try std.testing.expect(@TypeOf(nn.Linear) == type);
+    try std.testing.expect(@TypeOf(nn.TransformerDecoder) == fn(comptime usize) type);
     try std.testing.expect(@TypeOf(autodiff.Tensor) == type);
     try std.testing.expect(@TypeOf(tensor.Tensor) == type);
 }
