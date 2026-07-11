@@ -306,10 +306,10 @@ fn writeModelData(
     }
 }
 
-pub fn saveModel(model: anytype, file_path: []const u8, allocator: std.mem.Allocator) !void {
-    const cwd = std.fs.cwd();
-    var file = try cwd.createFile(file_path, .{});
-    defer file.close();
+pub fn saveModel(model: anytype, io: std.Io, file_path: []const u8, allocator: std.mem.Allocator) !void {
+    const cwd = std.Io.Dir.cwd();
+    var file = try cwd.createFile(io, file_path, .{});
+    defer file.close(io);
 
     // 1. 构建 JSON header
     var json_buf: std.ArrayList(u8) = .empty;
@@ -331,7 +331,7 @@ pub fn saveModel(model: anytype, file_path: []const u8, allocator: std.mem.Alloc
 
     // 3. 写入 8 字节 of header 长度（小端序 u64）和 header json 字节
     var buf: [65536]u8 = undefined;
-    var file_writer = file.writer(&buf);
+    var file_writer = file.writer(io, &buf);
     const writer = &file_writer.interface;
 
     const header_len_u64 = @as(u64, final_header_len);
@@ -392,13 +392,13 @@ fn loadModelTensors(
     }
 }
 
-pub fn loadModel(model: anytype, file_path: []const u8, allocator: std.mem.Allocator) !void {
-    const cwd = std.fs.cwd();
-    var file = try cwd.openFile(file_path, .{});
-    defer file.close();
+pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8, allocator: std.mem.Allocator) !void {
+    const cwd = std.Io.Dir.cwd();
+    var file = try cwd.openFile(io, file_path, .{});
+    defer file.close(io);
 
     var buf: [65536]u8 = undefined;
-    var file_reader = file.reader(&buf);
+    var file_reader = file.reader(io, &buf);
     const reader = &file_reader.interface;
 
     // 1. 读取 8 字节 header 长度
@@ -529,13 +529,13 @@ pub fn Module(comptime T: type) type {
         }
 
         // 自动托管 save
-        pub fn save(self: *const Self, file_path: []const u8) !void {
-            try saveModel(&self.inner, file_path, self.allocator);
+        pub fn save(self: *const Self, io: std.Io, file_path: []const u8) !void {
+            try saveModel(&self.inner, io, file_path, self.allocator);
         }
 
         // 自动托管 load
-        pub fn load(self: *Self, file_path: []const u8) !void {
-            try loadModel(&self.inner, file_path, self.allocator);
+        pub fn load(self: *Self, io: std.Io, file_path: []const u8) !void {
+            try loadModel(&self.inner, io, file_path, self.allocator);
         }
 
         // 自动托管前向传播：将接口直接路由到具体实现的 forward 函数
@@ -679,7 +679,7 @@ pub const MLP = struct {
         const h1 = try self.c_fc.forward(allocator, graph, x_2d);
         defer if (graph == null) tensor.free(allocator, h1);
 
-        const a1 = if (graph) |g| try g.relu(h1) else try h1.relu(allocator, null);
+        const a1 = if (graph) |g| try g.gelu(h1) else try h1.gelu(allocator, null);
         defer if (graph == null) tensor.free(allocator, a1);
 
         const h2 = try self.c_proj.forward(allocator, graph, a1);
@@ -1413,15 +1413,15 @@ test "GPT Module Save and Load" {
     var gpt = try GPT(config).init(arena, random);
     defer deinitModel(&gpt, arena);
 
-    try saveModel(&gpt, "test_gpt_model.safetensors", arena);
+    try saveModel(&gpt, std.testing.io, "test_gpt_model.safetensors", arena);
     defer {
-        std.fs.cwd().deleteFile("test_gpt_model.safetensors") catch {};
+        std.Io.Dir.cwd().deleteFile(std.testing.io, "test_gpt_model.safetensors") catch {};
     }
 
     var gpt2 = try GPT(config).init(arena, random);
     defer deinitModel(&gpt2, arena);
 
-    try loadModel(&gpt2, "test_gpt_model.safetensors", arena);
+    try loadModel(&gpt2, std.testing.io, "test_gpt_model.safetensors", arena);
 
     for (gpt.wte.weight.data, gpt2.wte.weight.data) |w1, w2| {
         try std.testing.expectEqual(w1, w2);

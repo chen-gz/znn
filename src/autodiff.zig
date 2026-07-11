@@ -2,6 +2,8 @@ const std = @import("std");
 const c = @import("cblas.zig");
 const tensor = @import("tensor.zig");
 
+extern fn erff(x: f32) f32;
+
 pub const Tensor = tensor.Tensor;
 pub const Shape = tensor.Shape;
 pub const computeContiguousStrides = tensor.computeContiguousStrides;
@@ -13,6 +15,7 @@ pub const OpType = enum {
     MatMul,              // 矩阵乘法
     AddBias,             // 偏置项加法（广播机制）
     Relu,                // 激活函数 ReLU
+    Gelu,                // 激活函数 GELU
     SoftmaxCrossEntropy, // 损失函数：结合了 Softmax 与交叉熵（数值稳定性更好）
     Reshape,             // 形状变换
     Transpose,           // 维度转置
@@ -33,6 +36,7 @@ pub const OpContext = union(enum) {
     MatMul: void,
     AddBias: void,
     Relu: void,
+    Gelu: void,
     SoftmaxCrossEntropy: struct {
         probs: []f32,
         targets: []const u8,
@@ -121,6 +125,15 @@ pub const Op = struct {
                 const C = self.outputs[0];
                 for (C.data, A.data) |*c_val, a_val| {
                     c_val.* = if (a_val > 0.0) a_val else 0.0;
+                }
+            },
+            .Gelu => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const sqrt_2 = @sqrt(@as(f32, 2.0));
+                for (C.data, A.data) |*c_val, a_val| {
+                    const erf_val = erff(a_val / sqrt_2);
+                    c_val.* = 0.5 * a_val * (1.0 + erf_val);
                 }
             },
             .SoftmaxCrossEntropy => {
@@ -552,6 +565,31 @@ pub const Op = struct {
                     const total = A.data.len;
                     for (0..total) |i| {
                         A.grad[i] += if (A.data[i] > 0.0) C.grad[i] else 0.0;
+                    }
+                }
+            },
+            // ====================================================================
+            // 3.5. GELU 激活函数反向传播 (GELU Backward)
+            // ====================================================================
+            // 前向公式: C = 0.5 * A * (1 + erf(A / sqrt(2)))
+            // 数学推导:
+            //   dC/dA = 0.5 * (1 + erf(A / sqrt(2))) + A * (1 / sqrt(2 * pi)) * e^{-A^2 / 2}
+            //   dA[i] += dC[i] * (dC/dA)
+            .Gelu => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+
+                if (A.requires_grad) {
+                    const total = A.data.len;
+                    const sqrt_2 = @sqrt(@as(f32, 2.0));
+                    const inv_sqrt_2pi = 1.0 / @sqrt(@as(f32, 2.0 * std.math.pi));
+                    for (0..total) |i| {
+                        const x = A.data[i];
+                        const erf_val = erff(x / sqrt_2);
+                        const cdf = 0.5 * (1.0 + erf_val);
+                        const pdf = inv_sqrt_2pi * @exp(-0.5 * x * x);
+                        const deriv = cdf + x * pdf;
+                        A.grad[i] += C.grad[i] * deriv;
                     }
                 }
             },
@@ -1238,6 +1276,36 @@ pub const Graph = struct {
             .inputs = inputs,
             .outputs = outputs,
             .context = .{ .Relu = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
+    pub fn gelu(self: *Graph, A: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.gelu(allocator, null);
+
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Gelu,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .Gelu = {} },
         };
         C.creator = o;
         try self.ops.append(self.backing_allocator, o);
