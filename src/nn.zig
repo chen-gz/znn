@@ -545,10 +545,18 @@ pub fn Module(comptime T: type) type {
     };
 }
 
+/// 嵌入层 (Embedding Layer)
+/// 用于将离散的 Token ID（例如整数索引）映射为连续的低维稠密向量。
+/// 在数学上，这等价于使用 One-hot 编码与权重矩阵相乘，而在实现上通过高效的查找表 (Lookup Table) 实现。
+/// 
+/// 权重形状：[vocab_size, embedding_dim]
 pub const Embedding = struct {
-    weight: *Tensor,
-    v_weight: []f32,
+    weight: *Tensor,        // 嵌入层权重矩阵表 (Shape: [vocab_size, embedding_dim])
+    v_weight: []f32,        // 用于动量 SGD 的动量缓存空间
 
+    /// 初始化嵌入层
+    /// vocab_size: 词表大小（可索引的最大整数范围）
+    /// embedding_dim: 映射出的隐藏嵌入维度大小
     pub fn init(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize, random: std.Random) !Embedding {
         const weight = try createPersistentTensor(allocator, vocab_size, embedding_dim, true);
         errdefer freePersistentTensor(allocator, weight);
@@ -557,6 +565,7 @@ pub const Embedding = struct {
         errdefer allocator.free(v_weight);
         @memset(v_weight, 0.0);
 
+        // 使用正态分布 He/Kaiming 随机数初始化权重表
         initializeWeights(random, weight.data, embedding_dim);
 
         return Embedding{
@@ -565,37 +574,58 @@ pub const Embedding = struct {
         };
     }
 
+    /// 释放层内所有关联的 Tensor 内存资源
     pub fn deinit(self: Embedding, allocator: std.mem.Allocator) void {
         freePersistentTensor(allocator, self.weight);
         allocator.free(self.v_weight);
     }
 
+    /// 清空权重对应的梯度
     pub fn zeroGrad(self: Embedding) void {
         self.weight.zeroGrad();
     }
 
+    /// 更新参数权重值
     pub fn updateWeights(self: Embedding, lr: f32, beta: f32) void {
         updateLayerWeights(self.weight.data, self.weight.grad, self.v_weight, lr, beta);
     }
 
+    /// 查找映射前向传播
+    /// 输入 x 为包含 Token ID 的任意维度 Tensor，输出形状为 x.shape + [embedding_dim]
     pub fn forward(self: Embedding, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
         return try self.weight.embedding(x, allocator, graph);
     }
 };
 
+/// Root Mean Square Layer Normalization (RMSNorm) 层
+/// 相比于传统的 LayerNorm，RMSNorm 移除了平移均值（mean centering）的步骤，
+/// 仅根据隐藏特征的均方根进行缩放，不仅能够保证与 LayerNorm 相当甚至更好的效果，
+/// 还能减少约 7%-50% 的计算开销。
+/// 
+/// 数学公式：
+/// \text{RMS}(x) = \sqrt{\frac{1}{d} \sum_{i=1}^d x_i^2 + \epsilon}
+/// \text{RMSNorm}(x)_i = \frac{x_i}{\text{RMS}(x)} \gamma_i
+/// 其中 \gamma 为可学习的缩放因子（对应结构体中的 weight 属性）。
 pub const RMSNorm = struct {
-    weight: *Tensor,
-    v_weight: []f32,
-    eps: f32,
+    weight: *Tensor,        // 可学习的缩放因子 gamma (Shape: [dim])
+    v_weight: []f32,        // 缩放因子的动量缓存 (SGD with Momentum 优化器使用)
+    eps: f32,               // 均方根分母防止除以 0 的极小常数 (epsilon)
 
+    /// 初始化 RMSNorm 层
+    /// dim: 隐藏特征的维度大小
+    /// eps: 防止分母为 0 的微小偏差值（通常为 1e-5）
     pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !RMSNorm {
+        // 创建持久化的 Tensor 并在内存中申请空间，包含梯度
         const weight = try createPersistentTensor(allocator, 1, dim, true);
         errdefer freePersistentTensor(allocator, weight);
+        // 初始化缩放因子为 1.0
         @memset(weight.data, 1.0);
 
+        // 设置形状和步长为 1D [dim]
         weight.shape = Shape.init(&.{dim});
         weight.strides = tensor.computeContiguousStrides(weight.shape);
 
+        // 分配 SGD 动量缓存空间并清零
         const v_weight = try allocator.alloc(f32, dim);
         errdefer allocator.free(v_weight);
         @memset(v_weight, 0.0);
@@ -607,28 +637,45 @@ pub const RMSNorm = struct {
         };
     }
 
+    /// 释放 RMSNorm 占用的所有系统和显存资源
     pub fn deinit(self: RMSNorm, allocator: std.mem.Allocator) void {
         freePersistentTensor(allocator, self.weight);
         allocator.free(self.v_weight);
     }
 
+    /// 将权重的梯度清零，用于下一次反向传播
     pub fn zeroGrad(self: RMSNorm) void {
         self.weight.zeroGrad();
     }
 
+    /// 使用带动量的 SGD 更新本层的缩放因子权重
     pub fn updateWeights(self: RMSNorm, lr: f32, beta: f32) void {
         updateLayerWeights(self.weight.data, self.weight.grad, self.v_weight, lr, beta);
     }
 
+    /// 执行 RMSNorm 的前向传播过程
+    /// 支持 Eager (无图) 模式与 Graph (计算图自动微分) 模式
     pub fn forward(self: RMSNorm, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
         return try x.rmsNorm(self.weight, self.eps, allocator, graph);
     }
 };
 
+/// 多层感知机 (MLP) / 前馈网络 (Feed-forward Network) 模块
+/// Transformer 架构中的重要组件，紧跟在 Self-Attention 之后，
+/// 用于在每个 Token 位置上独立地进行非线性特征投影与融合。
+/// 
+/// 数学公式：
+/// \text{MLP}(x) = \text{GELU}(x W_1 + b_1) W_2 + b_2
+/// 结构：
+/// Linear(dim -> hidden_dim) -> GELU 激活函数 -> Linear(hidden_dim -> dim)
+/// 其中 hidden_dim 通常设置为 4 * dim。
 pub const MLP = struct {
-    c_fc: Linear,
-    c_proj: Linear,
+    c_fc: Linear,           // 升维投影层 (dim -> hidden_dim)
+    c_proj: Linear,         // 降维投影层 (hidden_dim -> dim)
 
+    /// 初始化 MLP 模块
+    /// dim: 输入与输出隐藏维度
+    /// hidden_dim: 中间隐藏维度 (一般为 4 * dim)
     pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize, random: std.Random) !MLP {
         const c_fc = try Linear.init(allocator, dim, hidden_dim, random);
         errdefer c_fc.deinit(allocator);
@@ -641,25 +688,32 @@ pub const MLP = struct {
         };
     }
 
+    /// 释放子层的所有内存资源
     pub fn deinit(self: MLP, allocator: std.mem.Allocator) void {
         self.c_fc.deinit(allocator);
         self.c_proj.deinit(allocator);
     }
 
+    /// 子层梯度全部清零
     pub fn zeroGrad(self: MLP) void {
         self.c_fc.zeroGrad();
         self.c_proj.zeroGrad();
     }
 
+    /// 更新子层权重值
     pub fn updateWeights(self: MLP, lr: f32, beta: f32) void {
         self.c_fc.updateWeights(lr, beta);
         self.c_proj.updateWeights(lr, beta);
     }
 
+    /// 前向传播逻辑
+    /// 支持输入 2D Tensor [B*T, D] 或 3D Tensor [B, T, D]
     pub fn forward(self: MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
+        
+        // 1. 如果输入是 3D [B, T, D]，则将其打平为 2D [B*T, D] 以满足 Linear 矩阵乘法的输入规范
         if (is_3d) {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
@@ -671,19 +725,24 @@ pub const MLP = struct {
             }
         }
         defer {
+            // Eager 模式下需要释放临时 reshape 生成的 Tensor 内存
             if (is_3d and graph == null) {
                 tensor.free(allocator, x_2d);
             }
         }
 
+        // 2. 升维映射: [B*T, D] -> [B*T, hidden_dim]
         const h1 = try self.c_fc.forward(allocator, graph, x_2d);
         defer if (graph == null) tensor.free(allocator, h1);
 
+        // 3. GELU 激活函数引入非线性
         const a1 = if (graph) |g| try g.gelu(h1) else try h1.gelu(allocator, null);
         defer if (graph == null) tensor.free(allocator, a1);
 
+        // 4. 降维投射回原始特征维度: [B*T, hidden_dim] -> [B*T, D]
         const h2 = try self.c_proj.forward(allocator, graph, a1);
 
+        // 5. 如果输入原本是 3D，需要将输出再重新恢复成 3D 形状: [B, T, D]
         if (is_3d) {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
@@ -699,14 +758,29 @@ pub const MLP = struct {
     }
 };
 
+/// 因果自注意力机制 (Causal Self-Attention / Masked Multi-Head Attention)
+/// Transformer 的核心机制，负责建模序列中不同位置的依赖关系。
+/// 
+/// 数学公式：
+/// Q = X W_q, \quad K = X W_k, \quad V = X W_v
+/// \text{Attention}(Q, K, V) = \text{Softmax}\left(\frac{Q K^T}{\sqrt{d_k}} + M\right) V
+/// \text{Output} = \text{Attention}(Q, K, V) W_p
+/// 其中 M 是因果掩码矩阵，上三角（未来位置）元素为 -\infty，其余为 0。
+/// 
+/// 包含以下关键设计：
+/// 1. 多头注意力 (Multi-Head)：将特征通道划分为 nh 个头，让模型在多个不同的投影子空间内并行关注信息。
+/// 2. 因果掩码 (Causal Mask)：通过加上上三角矩阵（值为 -inf），阻止当前位置关注未来的位置，确保自回归生成时的因果律。
 pub const CausalSelfAttention = struct {
-    q_attn: Linear,
-    k_attn: Linear,
-    v_attn: Linear,
-    c_proj: Linear,
-    n_head: usize,
-    n_embd: usize,
+    q_attn: Linear,         // Query 线性投影层
+    k_attn: Linear,         // Key 线性投影层
+    v_attn: Linear,         // Value 线性投影层
+    c_proj: Linear,         // 最终的多头输出融合与投影层 (c_proj)
+    n_head: usize,          // 注意力头数 (n_head)
+    n_embd: usize,          // 嵌入维度 (n_embd)
 
+    /// 初始化因果自注意力层
+    /// n_embd: 隐藏嵌入维度，必须能被 n_head 整除
+    /// n_head: 注意力头数
     pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !CausalSelfAttention {
         const q_attn = try Linear.init(allocator, n_embd, n_embd, random);
         errdefer q_attn.deinit(allocator);
@@ -727,6 +801,7 @@ pub const CausalSelfAttention = struct {
         };
     }
 
+    /// 释放所有线性投射子层的内存资源
     pub fn deinit(self: CausalSelfAttention, allocator: std.mem.Allocator) void {
         self.q_attn.deinit(allocator);
         self.k_attn.deinit(allocator);
@@ -734,6 +809,7 @@ pub const CausalSelfAttention = struct {
         self.c_proj.deinit(allocator);
     }
 
+    /// 所有线性投射子层的梯度清零
     pub fn zeroGrad(self: CausalSelfAttention) void {
         self.q_attn.zeroGrad();
         self.k_attn.zeroGrad();
@@ -741,6 +817,7 @@ pub const CausalSelfAttention = struct {
         self.c_proj.zeroGrad();
     }
 
+    /// 更新所有线性投射子层的参数权重
     pub fn updateWeights(self: CausalSelfAttention, lr: f32, beta: f32) void {
         self.q_attn.updateWeights(lr, beta);
         self.k_attn.updateWeights(lr, beta);
@@ -748,13 +825,17 @@ pub const CausalSelfAttention = struct {
         self.c_proj.updateWeights(lr, beta);
     }
 
+    /// 前向注意力计算流程
+    /// 输入 x 的形状必须为 3D: [B, T, C]
+    /// 其中 B 为批次大小 (Batch Size)，T 为时间步长度 (Sequence Length)，C 为通道特征维数 (n_embd)
     pub fn forward(self: CausalSelfAttention, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
         const B = x.shape.dims[0];
         const T = x.shape.dims[1];
         const C = x.shape.dims[2];
         const nh = self.n_head;
-        const hs = C / nh;
+        const hs = C / nh; // 每个注意力头的维度大小 (head size)
 
+        // 1. 将 3D 输入 [B, T, C] 展平为 2D [B*T, C] 便于做常规的线性矩阵映射
         var x_2d = x;
         if (graph) |g| {
             x_2d = try g.reshape(x, &.{ B * T, C });
@@ -763,6 +844,8 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, x_2d);
 
+        // 2. 投影计算 Query, Key, Value
+        // 输出形状均为 [B*T, C]
         const q_2d = try self.q_attn.forward(allocator, graph, x_2d);
         defer if (graph == null) tensor.free(allocator, q_2d);
         const k_2d = try self.k_attn.forward(allocator, graph, x_2d);
@@ -770,6 +853,7 @@ pub const CausalSelfAttention = struct {
         const v_2d = try self.v_attn.forward(allocator, graph, x_2d);
         defer if (graph == null) tensor.free(allocator, v_2d);
 
+        // 3. 将投影后的数据重新塑形为 4D 多头结构: [B*T, C] -> [B, T, nh, hs]
         var q_4d = q_2d;
         var k_4d = k_2d;
         var v_4d = v_2d;
@@ -788,6 +872,8 @@ pub const CausalSelfAttention = struct {
             tensor.free(allocator, v_4d);
         };
 
+        // 4. 转置特征轴，使得“注意力头数 nh”维度排在前部以进行 Batch 矩阵乘法
+        // 转置变化: [B, T, nh, hs] -> [B, nh, T, hs]
         var q = q_4d;
         var k = k_4d;
         var v = v_4d;
@@ -806,6 +892,7 @@ pub const CausalSelfAttention = struct {
             tensor.free(allocator, v);
         };
 
+        // 5. 转置 Key 用于计算点积注意力: [B, nh, T, hs] -> [B, nh, hs, T]
         var k_t = k;
         if (graph) |g| {
             k_t = try g.transposeND(k, 2, 3);
@@ -814,6 +901,8 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, k_t);
 
+        // 6. 计算注意力原始得分: Q * K^T
+        // 输出矩阵形状: [B, nh, T, hs] * [B, nh, hs, T] -> [B, nh, T, T]
         var att = q;
         if (graph) |g| {
             att = try g.batchMatMul(q, k_t);
@@ -822,6 +911,7 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, att);
 
+        // 7. 缩放得分，除以 sqrt(head_size) 避免梯度消失/爆炸: score = (Q * K^T) / sqrt(hs)
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hs)));
         var att_scaled = att;
         if (graph) |g| {
@@ -831,6 +921,8 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, att_scaled);
 
+        // 8. 构造因果掩码 (Causal Mask) 矩阵
+        // 该矩阵只包含 0 和 -1e9。上三角（未来位置 j > 当前位置 i）部分全部填充 -1e9。
         const mask_data = try allocator.alloc(f32, B * nh * T * T);
         defer allocator.free(mask_data);
         @memset(mask_data, 0.0);
@@ -853,6 +945,8 @@ pub const CausalSelfAttention = struct {
             mask_node = try g.tensorNDWithData(&.{ B, nh, T, T }, mask_data, false);
         }
 
+        // 9. 将掩码加上注意力得分: score + mask
+        // 未来时刻对应的得分将变为极小值 (-1e9)，进而在 Softmax 后权重归零。
         var att_masked = att_scaled;
         if (graph) |g| {
             att_masked = try g.add(att_scaled, mask_node);
@@ -861,6 +955,7 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, att_masked);
 
+        // 10. Softmax 归一化，得到归一化的注意力概率分布图: [B, nh, T, T]
         var att_sm = att_masked;
         if (graph) |g| {
             att_sm = try g.softmax(att_masked);
@@ -869,6 +964,8 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, att_sm);
 
+        // 11. 用注意力权重与 Value 相乘: weight * V
+        // 形状变化: [B, nh, T, T] * [B, nh, T, hs] -> [B, nh, T, hs]
         var y_4d = att_sm;
         if (graph) |g| {
             y_4d = try g.batchMatMul(att_sm, v);
@@ -877,6 +974,8 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, y_4d);
 
+        // 12. 将多头的输出转置回去，重新展平拼接成单头向量表示
+        // 转置: [B, nh, T, hs] -> [B, T, nh, hs]
         var y_trans = y_4d;
         if (graph) |g| {
             y_trans = try g.transposeND(y_4d, 1, 2);
@@ -885,6 +984,7 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, y_trans);
 
+        // 整合形状为 3D: [B, T, nh * hs] = [B, T, C]
         var y_3d = y_trans;
         if (graph) |g| {
             y_3d = try g.reshape(y_trans, &.{ B, T, C });
@@ -893,6 +993,8 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, y_3d);
 
+        // 13. 将输出展平为 2D，以便穿过最后的输出投影线性层 (c_proj)
+        // 重塑: [B, T, C] -> [B*T, C]
         var y_2d = y_3d;
         if (graph) |g| {
             y_2d = try g.reshape(y_3d, &.{ B * T, C });
@@ -901,9 +1003,11 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, y_2d);
 
+        // 投影输出映射: [B*T, C] -> [B*T, C]
         const out_2d = try self.c_proj.forward(allocator, graph, y_2d);
         defer if (graph == null) tensor.free(allocator, out_2d);
 
+        // 14. 恢复并输出最终的 3D 表示: [B, T, C]
         if (graph) |g| {
             return try g.reshape(out_2d, &.{ B, T, C });
         } else {
@@ -912,12 +1016,25 @@ pub const CausalSelfAttention = struct {
     }
 };
 
+/// Transformer 编码器/解码器 Block 模块 (Transformer Block)
+/// 采用 Pre-LN (Layer Normalization Pre-activation) 架构进行组装：
+/// 1. x_norm1 = RMSNorm(x)
+/// 2. x_attn = SelfAttention(x_norm1)
+/// 3. x1 = x + x_attn  (第一层残差连接)
+/// 4. x_norm2 = RMSNorm(x1)
+/// 5. x_mlp = MLP(x_norm2)
+/// 6. out = x1 + x_mlp (第二层残差连接)
+/// 
+/// 相比于 Post-LN，Pre-LN 可以在初始化阶段使梯度更直接地传导到低层网络，从而支持训练极深的网络。
 pub const TransformerBlock = struct {
-    ln_1: RMSNorm,
-    attn: CausalSelfAttention,
-    ln_2: RMSNorm,
-    mlp: MLP,
+    ln_1: RMSNorm,          // 第一层归一化层，在 Attention 计算前执行
+    attn: CausalSelfAttention, // 因果自注意力机制层
+    ln_2: RMSNorm,          // 第二层归一化层，在 MLP 计算前执行
+    mlp: MLP,               // 前馈多层感知机层
 
+    /// 初始化 Transformer 块
+    /// n_embd: 隐藏特征特征维度
+    /// n_head: 注意力头数
     pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !TransformerBlock {
         const ln_1 = try RMSNorm.init(allocator, n_embd, 1e-5);
         errdefer ln_1.deinit(allocator);
@@ -936,6 +1053,7 @@ pub const TransformerBlock = struct {
         };
     }
 
+    /// 释放所有内部子层的资源
     pub fn deinit(self: TransformerBlock, allocator: std.mem.Allocator) void {
         self.ln_1.deinit(allocator);
         self.attn.deinit(allocator);
@@ -943,6 +1061,7 @@ pub const TransformerBlock = struct {
         self.mlp.deinit(allocator);
     }
 
+    /// 块内所有子层的梯度清零
     pub fn zeroGrad(self: TransformerBlock) void {
         self.ln_1.zeroGrad();
         self.attn.zeroGrad();
@@ -950,6 +1069,7 @@ pub const TransformerBlock = struct {
         self.mlp.zeroGrad();
     }
 
+    /// 更新块内所有子层的权重参数
     pub fn updateWeights(self: TransformerBlock, lr: f32, beta: f32) void {
         self.ln_1.updateWeights(lr, beta);
         self.attn.updateWeights(lr, beta);
@@ -957,22 +1077,27 @@ pub const TransformerBlock = struct {
         self.mlp.updateWeights(lr, beta);
     }
 
+    /// 前向传播流程：x -> Block(x) -> out
     pub fn forward(self: TransformerBlock, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        // 1. 第一条支路: RMSNorm -> Attention
         const x_norm1 = try self.ln_1.forward(allocator, graph, x);
         defer if (graph == null) tensor.free(allocator, x_norm1);
 
         const x_attn = try self.attn.forward(allocator, graph, x_norm1);
         defer if (graph == null) tensor.free(allocator, x_attn);
 
+        // 2. 第一条残差混合: x1 = x + Attention(RMSNorm(x))
         const x1 = if (graph) |g| try g.add(x, x_attn) else try x.add(x_attn, allocator, null);
         defer if (graph == null) tensor.free(allocator, x1);
 
+        // 3. 第二条支路: RMSNorm -> MLP
         const x_norm2 = try self.ln_2.forward(allocator, graph, x1);
         defer if (graph == null) tensor.free(allocator, x_norm2);
 
         const x_mlp = try self.mlp.forward(allocator, graph, x_norm2);
         defer if (graph == null) tensor.free(allocator, x_mlp);
 
+        // 4. 第二条残差混合: out = x1 + MLP(RMSNorm(x1))
         if (graph) |g| {
             return try g.add(x1, x_mlp);
         } else {
@@ -981,13 +1106,18 @@ pub const TransformerBlock = struct {
     }
 };
 
+/// 堆叠多层 Transformer 块的解码器主干网络 (Transformer Decoder)
+/// 类似于 PyTorch 的 nn.TransformerDecoder。
+/// 它接收输入特征，依次串联通过 n_layer 个 TransformerBlock，
+/// 并在最末端使用一个 RMSNorm 进行最终的标准化，用作整个 Decoder 骨架的输出。
 pub fn TransformerDecoder(comptime n_layer: usize) type {
     return struct {
-        h: [n_layer]TransformerBlock,
-        ln_f: RMSNorm,
+        h: [n_layer]TransformerBlock, // 堆叠的 Blocks 数组
+        ln_f: RMSNorm,                // 骨架最末端用于规范化的归一化层
 
         const Self = @This();
 
+        /// 初始化整个解码器组件
         pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !Self {
             var h: [n_layer]TransformerBlock = undefined;
             var i: usize = 0;
@@ -996,10 +1126,12 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
                     h[j].deinit(allocator);
                 }
             }
+            // 循环初始化每一层 TransformerBlock
             while (i < n_layer) : (i += 1) {
                 h[i] = try TransformerBlock.init(allocator, n_embd, n_head, random);
             }
 
+            // 初始化最后的层归一化层
             const ln_f = try RMSNorm.init(allocator, n_embd, 1e-5);
             errdefer {
                 for (0..n_layer) |j| {
@@ -1014,6 +1146,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             };
         }
 
+        /// 释放整个骨架层及各 Block 的内存
         pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
             for (self.h) |layer| {
                 layer.deinit(allocator);
@@ -1021,6 +1154,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             self.ln_f.deinit(allocator);
         }
 
+        /// 将所有 Block 和最末端 Norm 层的梯度全部清零
         pub fn zeroGrad(self: Self) void {
             for (self.h) |layer| {
                 layer.zeroGrad();
@@ -1028,6 +1162,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             self.ln_f.zeroGrad();
         }
 
+        /// 触发所有子 Block 的梯度更新
         pub fn updateWeights(self: Self, lr: f32, beta: f32) void {
             for (self.h) |layer| {
                 layer.updateWeights(lr, beta);
@@ -1035,16 +1170,20 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             self.ln_f.updateWeights(lr, beta);
         }
 
+        /// 解码器主干网络的前向传播流程
         pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
             var current_x = x;
+            // 依次贯穿每一层 Block
             for (self.h) |layer| {
                 const next_x = try layer.forward(allocator, graph, current_x);
+                // 释放 Eager 模式下的中间隐特征 Tensor 内存，避免泄漏
                 if (graph == null and current_x != x) {
                     tensor.free(allocator, current_x);
                 }
                 current_x = next_x;
             }
 
+            // 执行最后一层 RMSNorm 映射输出
             const out = try self.ln_f.forward(allocator, graph, current_x);
             if (graph == null and current_x != x) {
                 tensor.free(allocator, current_x);
@@ -1054,29 +1193,46 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
     };
 }
 
+/// GPT 模型配置结构体
 pub const GPTConfig = struct {
-    vocab_size: usize,
-    block_size: usize,
-    n_embd: usize,
-    n_head: usize,
-    n_layer: usize,
+    vocab_size: usize,      // 词表大小 (Vocab Size)，决定输入和输出层的映射维度
+    block_size: usize,      // 最大上下文长度/时间步长度 (Context Length / Block Size)
+    n_embd: usize,          // 隐藏特征嵌入维度 (Embedding Dimension)
+    n_head: usize,          // 多头注意力头数 (Attention Heads)
+    n_layer: usize,         // Transformer 块堆叠的层数 (Number of Decoder Layers)
 };
 
+/// 泛型 GPT 模型定义函数
+/// 接收一个 comptime 的 `GPTConfig` 配置，返回一个对应的 GPT 模型结构体类型。
+/// 
+/// 结构设计：
+/// 1. 输入层：
+///    * `token_embedding`: 将 Token ID 转换为嵌入向量。
+///    * `position_embedding`: 学习一个位置表向量，将其与 Token 嵌入相加。
+/// 2. 解码器主架 (`decoder`)：
+///    * 包含 `n_layer` 层 `TransformerBlock` 残差堆栈与最终层归一化层 `ln_f`。
+/// 3. 输出层 (`lm_head`)：
+///    * 线性层，用于将特征层映射为词表中每个 Token 的概率未归一化对数 (Logits)。
 pub fn GPT(comptime config: GPTConfig) type {
     return struct {
-        token_embedding: Embedding,
-        position_embedding: Embedding,
-        decoder: TransformerDecoder(config.n_layer),
-        lm_head: Linear,
+        token_embedding: Embedding,                 // Token 嵌入层
+        position_embedding: Embedding,              // 位置嵌入层
+        decoder: TransformerDecoder(config.n_layer),// 堆叠的解码器层与最终归一化层
+        lm_head: Linear,                            // 最终输出概率的线性分类投影头
 
         const Self = @This();
 
+        /// 初始化 GPT 模型中的所有网络层权重
         pub fn init(allocator: std.mem.Allocator, random: std.Random) !Self {
+            // 初始化 Token 嵌入矩阵 [vocab_size, n_embd]
             const token_embedding = try Embedding.init(allocator, config.vocab_size, config.n_embd, random);
             errdefer token_embedding.deinit(allocator);
+            
+            // 初始化位置嵌入矩阵 [block_size, n_embd]
             const position_embedding = try Embedding.init(allocator, config.block_size, config.n_embd, random);
             errdefer position_embedding.deinit(allocator);
 
+            // 初始化 Decoder 主干网络
             const decoder = try TransformerDecoder(config.n_layer).init(allocator, config.n_embd, config.n_head, random);
             errdefer {
                 token_embedding.deinit(allocator);
@@ -1084,6 +1240,7 @@ pub fn GPT(comptime config: GPTConfig) type {
                 decoder.deinit(allocator);
             }
 
+            // 初始化输出映射分类头 [n_embd, vocab_size]
             const lm_head = try Linear.init(allocator, config.n_embd, config.vocab_size, random);
             errdefer {
                 token_embedding.deinit(allocator);
@@ -1100,13 +1257,18 @@ pub fn GPT(comptime config: GPTConfig) type {
             };
         }
 
+        /// 前向推理传播流程
+        /// 输入 x 为包含 Token ID 的 2D 整数 Tensor，形状为 [B, T]
+        /// 输出为未归一化的预测对数 (Logits)，形状为 3D: [B, T, vocab_size]
         pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
             const B = x.shape.dims[0];
             const T = x.shape.dims[1];
 
+            // 1. 获取 Token 嵌入向量: [B, T] -> [B, T, n_embd]
             const tok_emb = try self.token_embedding.forward(allocator, graph, x);
             defer if (graph == null) tensor.free(allocator, tok_emb);
 
+            // 2. 生成对应的时间/位置索引 [0, 1, 2, ... T-1]，并将其转换为 2D 位置 Tensor [B, T]
             const pos_data = try allocator.alloc(f32, B * T);
             defer allocator.free(pos_data);
             for (0..B) |b| {
@@ -1122,9 +1284,11 @@ pub fn GPT(comptime config: GPTConfig) type {
                 pos_node = try g.tensorNDWithData(&.{ B, T }, pos_data, false);
             }
 
+            // 3. 获取对应的 Learned 位置嵌入向量: [B, T] -> [B, T, n_embd]
             const pos_emb = try self.position_embedding.forward(allocator, graph, pos_node);
             defer if (graph == null) tensor.free(allocator, pos_emb);
 
+            // 4. 将 Token 嵌入和位置嵌入进行求和融合，作为初始隐藏输入: h = tok_emb + pos_emb
             var h_x = tok_emb;
             if (graph) |g| {
                 h_x = try g.add(tok_emb, pos_emb);
@@ -1133,9 +1297,12 @@ pub fn GPT(comptime config: GPTConfig) type {
             }
             defer if (graph == null) tensor.free(allocator, h_x);
 
+            // 5. 将混合后的输入送进层叠的 Decoder 主干网络中依次计算
+            // 输出形状保持为: [B, T, n_embd]
             const decoder_out = try self.decoder.forward(allocator, graph, h_x);
             defer if (graph == null) tensor.free(allocator, decoder_out);
 
+            // 6. 将输出展平为 2D，以便进行最终分类头的全连接投影计算: [B, T, n_embd] -> [B*T, n_embd]
             var ln_x_2d = decoder_out;
             if (graph) |g| {
                 ln_x_2d = try g.reshape(decoder_out, &.{ B * T, config.n_embd });
@@ -1144,9 +1311,11 @@ pub fn GPT(comptime config: GPTConfig) type {
             }
             defer if (graph == null) tensor.free(allocator, ln_x_2d);
 
+            // 7. 进行投影以获得词表空间未归一化的分类 Logits: [B*T, n_embd] -> [B*T, vocab_size]
             const logits_2d = try self.lm_head.forward(allocator, graph, ln_x_2d);
             defer if (graph == null) tensor.free(allocator, logits_2d);
 
+            // 8. 将形状重塑还原成 3D 形式返回: [B, T, vocab_size]
             if (graph) |g| {
                 return try g.reshape(logits_2d, &.{ B, T, config.vocab_size });
             } else {
