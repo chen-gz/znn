@@ -127,31 +127,40 @@ pub const Op = struct {
                     c_val.* = if (a_val > 0.0) a_val else 0.0;
                 }
             },
+            // 前向公式: GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
             .Gelu => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
                 const sqrt_2 = @sqrt(@as(f32, 2.0));
                 for (C.data, A.data) |*c_val, a_val| {
+                    // 使用标准库中的误差函数 erff 进行计算
                     const erf_val = erff(a_val / sqrt_2);
                     c_val.* = 0.5 * a_val * (1.0 + erf_val);
                 }
             },
+            // 前向公式:
+            // 1. Softmax 归一化概率: p_j = e^{x_j - max} / sum(e^{x_i - max})
+            // 2. 交叉熵损失计算: Loss = -1/B * sum( log(p_target) )
             .SoftmaxCrossEntropy => {
                 const logits = self.inputs[0];
                 const loss = self.outputs[0];
                 const targets = self.context.SoftmaxCrossEntropy.targets;
                 const probs = self.context.SoftmaxCrossEntropy.probs;
-
+ 
                 const B_size = logits.shape.dims[0];
                 const D = logits.shape.dims[1];
                 var loss_sum: f32 = 0.0;
-
+ 
                 for (0..B_size) |i| {
                     const row = logits.data[i * D .. (i + 1) * D];
+                    
+                    // 1) 寻找最大值 max_val 用于减法防止指数溢出 (Softmax 数值稳定性)
                     var max_val = row[0];
                     for (row) |val| {
                         if (val > max_val) max_val = val;
                     }
+                    
+                    // 2) 计算非归一化指数项 e^{x_j - max} 并求和
                     var sum: f32 = 0.0;
                     const row_probs = probs[i * D .. (i + 1) * D];
                     for (0..D) |j| {
@@ -159,14 +168,20 @@ pub const Op = struct {
                         row_probs[j] = e;
                         sum += e;
                     }
+                    
+                    // 3) 归一化计算概率
                     for (0..D) |j| {
                         row_probs[j] /= sum;
                     }
+                    
+                    // 4) 提取 Target 类别的预测概率计算负对数似然损失
                     const target_idx = targets[i];
                     const prob = row_probs[target_idx];
-                    const clipped = @max(prob, 1e-15);
+                    const clipped = @max(prob, 1e-15); // 防止 log(0)
                     loss_sum += -@log(clipped);
                 }
+                
+                // 5) 计算 Batch 范围内的均值 Loss
                 loss.data[0] = loss_sum / @as(f32, @floatFromInt(B_size));
             },
             .Reshape => {
