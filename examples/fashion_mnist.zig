@@ -104,8 +104,12 @@ fn runTraining(
     const input_dim = model.inner.fc1.weight.shape.dims[0];
     const batch_size = 64;
     const epochs = 15;
-    var lr: f32 = 0.05;
-    const beta: f32 = 0.9; // SGD momentum factor
+
+    var optimizer = try zig_ml.optim.SGDOptimizer.init(arena, model, .{
+        .lr = 0.05,
+        .momentum = 0.9,
+    });
+    defer optimizer.deinit();
 
     var train_loader = try dataset.DataLoader.init(arena, train_dataset, batch_size, .{
         .shuffle = true,
@@ -169,7 +173,7 @@ fn runTraining(
             try graph.backward(loss);
 
             // 3. Update weights using SGD with momentum (equivalent to optimizer.step() in PyTorch)
-            model.updateWeights(lr, beta);
+            optimizer.step();
         }
 
         epoch_loss /= @as(f32, @floatFromInt(num_batches));
@@ -190,7 +194,7 @@ fn runTraining(
         });
 
         // Learning rate decay
-        lr *= 0.90;
+        optimizer.lr *= 0.90;
     }
 
     // Save model parameters

@@ -88,3 +88,32 @@ Execute the test suites containing autograd, reshape, transpose, and dataset par
 ```bash
 zig build test
 ```
+
+---
+
+## 🗺️ Future Improvements & Roadmap
+
+To make `znn` a more complete and high-performance educational library, the following areas have been identified for improvement:
+
+1. **Decoupled Optimizer Framework (High Priority)**
+   * Currently, SGD with Momentum is hardcoded directly inside layer structures (e.g., `nn.Linear`). We plan to extract this state into a dedicated `Optimizer` abstraction.
+   * Add support for more optimizers, specifically **Adam** and **AdamW**, which are critical for training modern Transformer-based architectures efficiently.
+   * See [optimizer_design_plan.md](file:///usr/local/google/home/guangzong/.gemini/jetski/brain/c4a0dd41-6e44-4379-877d-925d1eae24d6/optimizer_design_plan.md) for the detailed design.
+
+2. **SIMD Vectorization for CPU Fallback Math**
+   * The fallback GEMM (`cblas_sgemm_fallback` in `src/cblas.zig`) is a naive, unoptimized $O(N^3)$ implementation.
+   * Optimize it using Zig's native `@Vector` types to enable SIMD acceleration on platforms like Linux and Windows without external dependencies.
+
+3. **External BLAS Support on Linux**
+   * Support linking to optimized C BLAS libraries (like OpenBLAS or Intel MKL) on Linux, matching the Accelerate framework integration on macOS.
+
+4. **GPU / WebGPU Acceleration**
+   * Integrate WebGPU or Vulkan compute shaders to allow compiling and running neural network training on GPUs from pure Zig.
+
+5. **More Core Operators & Layers**
+   * Add common neural network blocks: **BatchNorm2d**, **LayerNorm** (in addition to RMSNorm), **Dropout**, and average pooling.
+   * Implement additional loss functions like **MSELoss** and **BCEWithLogitsLoss**.
+
+6. **Comptime Shape Checking**
+   * Leverage Zig's `comptime` capabilities to validate tensor shapes and compile-time dimensions where possible, failing compilation early on incompatible matrix operations.
+

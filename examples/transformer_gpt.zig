@@ -35,6 +35,14 @@ pub fn main() !void {
     var model = GPTModel.init(allocator, try nn.GPT(config).init(allocator, random));
     defer model.deinit();
 
+    const lr: f32 = 0.01;
+
+    var optimizer = try zig_ml.optim.SGDOptimizer.init(allocator, &model, .{
+        .lr = lr,
+        .momentum = 0.9,
+    });
+    defer optimizer.deinit();
+
     // Prepare training data
     // Text: [0, 1, 2, 2, 3, 4, 0, 1, 2, 2, 3] (length 11)
     const data = [_]u8{ 0, 1, 2, 2, 3, 4, 0, 1, 2, 2, 3 };
@@ -67,7 +75,6 @@ pub fn main() !void {
     }
 
     const epochs = 100;
-    const lr: f32 = 0.01;
 
     std.debug.print("\nStarting training for {} epochs...\n", .{epochs});
     for (0..epochs) |epoch| {
@@ -86,7 +93,7 @@ pub fn main() !void {
 
         model.zeroGrad();
         try graph.backward(loss);
-        model.updateWeights(lr, 0.9); // SGD with momentum
+        optimizer.step();
 
         if ((epoch + 1) % 10 == 0 or epoch == 0) {
             std.debug.print("  Epoch {:3} | Loss: {d:.6}\n", .{ epoch + 1, loss.data[0] });

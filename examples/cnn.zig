@@ -139,8 +139,12 @@ fn runTraining(
     const input_dim = 784; // 28 * 28
     const batch_size = 64;
     const epochs = 3; // CNN is slower on CPU, so run for fewer epochs in example
-    var lr: f32 = 0.02;
-    const beta: f32 = 0.9; // SGD momentum
+
+    var optimizer = try zig_ml.optim.SGDOptimizer.init(arena, model, .{
+        .lr = 0.02,
+        .momentum = 0.9,
+    });
+    defer optimizer.deinit();
 
     var train_loader = try dataset.DataLoader.init(arena, train_dataset, batch_size, .{
         .shuffle = true,
@@ -189,7 +193,7 @@ fn runTraining(
 
             model.zeroGrad();
             try graph.backward(loss);
-            model.updateWeights(lr, beta);
+            optimizer.step();
 
             // Print batch progress every 100 batches
             if (num_batches % 100 == 0) {
@@ -217,7 +221,7 @@ fn runTraining(
             test_acc * 100.0,
         });
 
-        lr *= 0.90;
+        optimizer.lr *= 0.90;
     }
 
     std.debug.print("\nSaving trained CNN model to 'cnn_model.bin'...\n", .{});

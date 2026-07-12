@@ -2,6 +2,7 @@ pub const tensor = @import("tensor.zig");
 pub const nn = @import("nn.zig");
 pub const dataset = @import("dataset.zig");
 pub const autodiff = @import("autodiff.zig");
+pub const optim = @import("optim.zig");
 
 pub fn measureTime(comptime func: anytype, args: anytype) !struct {
     result: @TypeOf(@call(.auto, func, args)),
