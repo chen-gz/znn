@@ -1064,37 +1064,37 @@ pub const GPTConfig = struct {
 
 pub fn GPT(comptime config: GPTConfig) type {
     return struct {
-        wte: Embedding,
-        wpe: Embedding,
+        token_embedding: Embedding,
+        position_embedding: Embedding,
         decoder: TransformerDecoder(config.n_layer),
         lm_head: Linear,
 
         const Self = @This();
 
         pub fn init(allocator: std.mem.Allocator, random: std.Random) !Self {
-            const wte = try Embedding.init(allocator, config.vocab_size, config.n_embd, random);
-            errdefer wte.deinit(allocator);
-            const wpe = try Embedding.init(allocator, config.block_size, config.n_embd, random);
-            errdefer wpe.deinit(allocator);
+            const token_embedding = try Embedding.init(allocator, config.vocab_size, config.n_embd, random);
+            errdefer token_embedding.deinit(allocator);
+            const position_embedding = try Embedding.init(allocator, config.block_size, config.n_embd, random);
+            errdefer position_embedding.deinit(allocator);
 
             const decoder = try TransformerDecoder(config.n_layer).init(allocator, config.n_embd, config.n_head, random);
             errdefer {
-                wte.deinit(allocator);
-                wpe.deinit(allocator);
+                token_embedding.deinit(allocator);
+                position_embedding.deinit(allocator);
                 decoder.deinit(allocator);
             }
 
             const lm_head = try Linear.init(allocator, config.n_embd, config.vocab_size, random);
             errdefer {
-                wte.deinit(allocator);
-                wpe.deinit(allocator);
+                token_embedding.deinit(allocator);
+                position_embedding.deinit(allocator);
                 decoder.deinit(allocator);
                 lm_head.deinit(allocator);
             }
 
             return Self{
-                .wte = wte,
-                .wpe = wpe,
+                .token_embedding = token_embedding,
+                .position_embedding = position_embedding,
                 .decoder = decoder,
                 .lm_head = lm_head,
             };
@@ -1104,7 +1104,7 @@ pub fn GPT(comptime config: GPTConfig) type {
             const B = x.shape.dims[0];
             const T = x.shape.dims[1];
 
-            const tok_emb = try self.wte.forward(allocator, graph, x);
+            const tok_emb = try self.token_embedding.forward(allocator, graph, x);
             defer if (graph == null) tensor.free(allocator, tok_emb);
 
             const pos_data = try allocator.alloc(f32, B * T);
@@ -1122,7 +1122,7 @@ pub fn GPT(comptime config: GPTConfig) type {
                 pos_node = try g.tensorNDWithData(&.{ B, T }, pos_data, false);
             }
 
-            const pos_emb = try self.wpe.forward(allocator, graph, pos_node);
+            const pos_emb = try self.position_embedding.forward(allocator, graph, pos_node);
             defer if (graph == null) tensor.free(allocator, pos_emb);
 
             var h_x = tok_emb;
@@ -1446,9 +1446,9 @@ test "GPT Module" {
     @memset(y.grad, 1.0);
     try graph.backward(y);
 
-    var wte_grad_sum: f32 = 0.0;
-    for (gpt.wte.weight.grad) |g| wte_grad_sum += @abs(g);
-    try std.testing.expect(wte_grad_sum > 0.0);
+    var token_embedding_grad_sum: f32 = 0.0;
+    for (gpt.token_embedding.weight.grad) |g| token_embedding_grad_sum += @abs(g);
+    try std.testing.expect(token_embedding_grad_sum > 0.0);
 }
 
 test "GPT Module Save and Load" {
@@ -1477,7 +1477,7 @@ test "GPT Module Save and Load" {
 
     try loadModel(&gpt2, std.testing.io, "test_gpt_model.safetensors", arena);
 
-    for (gpt.wte.weight.data, gpt2.wte.weight.data) |w1, w2| {
+    for (gpt.token_embedding.weight.data, gpt2.token_embedding.weight.data) |w1, w2| {
         try std.testing.expectEqual(w1, w2);
     }
 }
