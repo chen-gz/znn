@@ -10,23 +10,13 @@ const Shape = tensor.Shape;
 pub const Linear = struct {
     weight: *Tensor,   // 权重矩阵
     bias: *Tensor,     // 偏置向量
-    v_weight: []f32,            // 权重动量缓存
-    v_bias: []f32,              // 偏置动量缓存
 
-    // 初始化一个线性层，自动生成对应的持久化 Tensor 和动量缓冲区，并进行 He 参数初始化
+    // 初始化一个线性层，自动生成对应的持久化 Tensor，并进行 He 参数初始化
     pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize, random: std.Random) !Linear {
         const weight = try createPersistentTensor(allocator, in_features, out_features, true);
         errdefer freePersistentTensor(allocator, weight);
         const bias = try createPersistentTensor(allocator, 1, out_features, true);
         errdefer freePersistentTensor(allocator, bias);
-
-        const v_weight = try allocator.alloc(f32, in_features * out_features);
-        errdefer allocator.free(v_weight);
-        const v_bias = try allocator.alloc(f32, out_features);
-        errdefer allocator.free(v_bias);
-
-        @memset(v_weight, 0.0);
-        @memset(v_bias, 0.0);
 
         // 使用 He (Kaiming) 归一化方法初始化权重，偏置设为 0
         initializeWeights(random, weight.data, in_features);
@@ -35,29 +25,19 @@ pub const Linear = struct {
         return Linear{
             .weight = weight,
             .bias = bias,
-            .v_weight = v_weight,
-            .v_bias = v_bias,
         };
     }
 
-    // 释放该层持有的所有持久化数据与动量缓存内存
+    // 释放该层持有的所有持久化数据内存
     pub fn deinit(self: Linear, allocator: std.mem.Allocator) void {
         freePersistentTensor(allocator, self.weight);
         freePersistentTensor(allocator, self.bias);
-        allocator.free(self.v_weight);
-        allocator.free(self.v_bias);
     }
 
     // 将本层的梯度设为 0
     pub fn zeroGrad(self: Linear) void {
         self.weight.zeroGrad();
         self.bias.zeroGrad();
-    }
-
-    // 利用带 Momentum 的 SGD 算法更新本层的权重和偏置值
-    pub fn updateWeights(self: Linear, lr: f32, beta: f32) void {
-        updateLayerWeights(self.weight.data, self.weight.grad, self.v_weight, lr, beta);
-        updateLayerWeights(self.bias.data, self.bias.grad, self.v_bias, lr, beta);
     }
 
     // 实现前向计算链路：Y = X * W + b
@@ -74,13 +54,8 @@ pub const Linear = struct {
 pub const Conv2D = struct {
     weight: *Tensor,
     bias: *Tensor,
-    v_weight: []f32,
-    v_bias: []f32,
 
     pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random: std.Random) !Conv2D {
-        const weight_size = out_channels * in_channels * kernel_size * kernel_size;
-        const bias_size = out_channels;
-
         const weight = try createPersistentTensor(allocator, out_channels, in_channels * kernel_size * kernel_size, true);
         errdefer freePersistentTensor(allocator, weight);
         // Correct the shape of Conv2D weight to [out_channels, in_channels, kernel_size, kernel_size]
@@ -92,14 +67,6 @@ pub const Conv2D = struct {
         bias.shape = Shape.init(&.{out_channels});
         bias.strides = tensor.computeContiguousStrides(bias.shape);
 
-        const v_weight = try allocator.alloc(f32, weight_size);
-        errdefer allocator.free(v_weight);
-        const v_bias = try allocator.alloc(f32, bias_size);
-        errdefer allocator.free(v_bias);
-
-        @memset(v_weight, 0.0);
-        @memset(v_bias, 0.0);
-
         const fan_in = in_channels * kernel_size * kernel_size;
         initializeWeights(random, weight.data, fan_in);
         @memset(bias.data, 0.0);
@@ -107,26 +74,17 @@ pub const Conv2D = struct {
         return Conv2D{
             .weight = weight,
             .bias = bias,
-            .v_weight = v_weight,
-            .v_bias = v_bias,
         };
     }
 
     pub fn deinit(self: Conv2D, allocator: std.mem.Allocator) void {
         freePersistentTensor(allocator, self.weight);
         freePersistentTensor(allocator, self.bias);
-        allocator.free(self.v_weight);
-        allocator.free(self.v_bias);
     }
 
     pub fn zeroGrad(self: Conv2D) void {
         self.weight.zeroGrad();
         self.bias.zeroGrad();
-    }
-
-    pub fn updateWeights(self: Conv2D, lr: f32, beta: f32) void {
-        updateLayerWeights(self.weight.data, self.weight.grad, self.v_weight, lr, beta);
-        updateLayerWeights(self.bias.data, self.bias.grad, self.v_bias, lr, beta);
     }
 
     pub fn forward(self: Conv2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
@@ -181,30 +139,31 @@ pub fn zeroGradModel(model: anytype) void {
     }
 }
 
-pub fn updateWeightsModel(model: anytype, lr: f32, beta: f32) void {
+pub fn collectParameters(model: anytype, allocator: std.mem.Allocator) ![]*Tensor {
+    var list: std.ArrayList(*Tensor) = .empty;
+    errdefer list.deinit(allocator);
+    try collectParametersInternal(model, &list, allocator);
+    return list.toOwnedSlice(allocator);
+}
+
+fn collectParametersInternal(model: anytype, list: *std.ArrayList(*Tensor), allocator: std.mem.Allocator) !void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
     inline for (info.@"struct".fields) |field| {
         const FieldType = field.type;
         const field_info = @typeInfo(FieldType);
         if (FieldType == *Tensor) {
-            const v_name = "v_" ++ field.name;
-            if (@hasField(T, v_name)) {
-                updateLayerWeights(
-                    @field(model, field.name).data,
-                    @field(model, field.name).grad,
-                    @field(model, v_name),
-                    lr,
-                    beta,
-                );
+            const tensor_ptr = @field(model, field.name);
+            if (tensor_ptr.requires_grad) {
+                try list.append(allocator, tensor_ptr);
             }
         } else if (field_info == .@"struct") {
-            updateWeightsModel(&@field(model, field.name), lr, beta);
+            try collectParametersInternal(&@field(model, field.name), list, allocator);
         } else if (field_info == .@"array") {
             const elem_info = @typeInfo(field_info.@"array".child);
             if (elem_info == .@"struct") {
                 for (&@field(model, field.name)) |*item| {
-                    updateWeightsModel(item, lr, beta);
+                    try collectParametersInternal(item, list, allocator);
                 }
             }
         }
@@ -523,10 +482,7 @@ pub fn Module(comptime T: type) type {
             zeroGradModel(&self.inner);
         }
 
-        // 自动托管 updateWeights
-        pub fn updateWeights(self: *Self, lr: f32, beta: f32) void {
-            updateWeightsModel(&self.inner, lr, beta);
-        }
+
 
         // 自动托管 save
         pub fn save(self: *const Self, io: std.Io, file_path: []const u8) !void {
@@ -552,7 +508,6 @@ pub fn Module(comptime T: type) type {
 /// 权重形状：[vocab_size, embedding_dim]
 pub const Embedding = struct {
     weight: *Tensor,        // 嵌入层权重矩阵表 (Shape: [vocab_size, embedding_dim])
-    v_weight: []f32,        // 用于动量 SGD 的动量缓存空间
 
     /// 初始化嵌入层
     /// vocab_size: 词表大小（可索引的最大整数范围）
@@ -561,33 +516,22 @@ pub const Embedding = struct {
         const weight = try createPersistentTensor(allocator, vocab_size, embedding_dim, true);
         errdefer freePersistentTensor(allocator, weight);
 
-        const v_weight = try allocator.alloc(f32, vocab_size * embedding_dim);
-        errdefer allocator.free(v_weight);
-        @memset(v_weight, 0.0);
-
         // 使用正态分布 He/Kaiming 随机数初始化权重表
         initializeWeights(random, weight.data, embedding_dim);
 
         return Embedding{
             .weight = weight,
-            .v_weight = v_weight,
         };
     }
 
     /// 释放层内所有关联的 Tensor 内存资源
     pub fn deinit(self: Embedding, allocator: std.mem.Allocator) void {
         freePersistentTensor(allocator, self.weight);
-        allocator.free(self.v_weight);
     }
 
     /// 清空权重对应的梯度
     pub fn zeroGrad(self: Embedding) void {
         self.weight.zeroGrad();
-    }
-
-    /// 更新参数权重值
-    pub fn updateWeights(self: Embedding, lr: f32, beta: f32) void {
-        updateLayerWeights(self.weight.data, self.weight.grad, self.v_weight, lr, beta);
     }
 
     /// 查找映射前向传播
@@ -608,7 +552,6 @@ pub const Embedding = struct {
 /// 其中 \gamma 为可学习的缩放因子（对应结构体中的 weight 属性）。
 pub const RMSNorm = struct {
     weight: *Tensor,        // 可学习的缩放因子 gamma (Shape: [dim])
-    v_weight: []f32,        // 缩放因子的动量缓存 (SGD with Momentum 优化器使用)
     eps: f32,               // 均方根分母防止除以 0 的极小常数 (epsilon)
 
     /// 初始化 RMSNorm 层
@@ -625,14 +568,8 @@ pub const RMSNorm = struct {
         weight.shape = Shape.init(&.{dim});
         weight.strides = tensor.computeContiguousStrides(weight.shape);
 
-        // 分配 SGD 动量缓存空间并清零
-        const v_weight = try allocator.alloc(f32, dim);
-        errdefer allocator.free(v_weight);
-        @memset(v_weight, 0.0);
-
         return RMSNorm{
             .weight = weight,
-            .v_weight = v_weight,
             .eps = eps,
         };
     }
@@ -640,17 +577,11 @@ pub const RMSNorm = struct {
     /// 释放 RMSNorm 占用的所有系统和显存资源
     pub fn deinit(self: RMSNorm, allocator: std.mem.Allocator) void {
         freePersistentTensor(allocator, self.weight);
-        allocator.free(self.v_weight);
     }
 
     /// 将权重的梯度清零，用于下一次反向传播
     pub fn zeroGrad(self: RMSNorm) void {
         self.weight.zeroGrad();
-    }
-
-    /// 使用带动量的 SGD 更新本层的缩放因子权重
-    pub fn updateWeights(self: RMSNorm, lr: f32, beta: f32) void {
-        updateLayerWeights(self.weight.data, self.weight.grad, self.v_weight, lr, beta);
     }
 
     /// 执行 RMSNorm 的前向传播过程
@@ -700,11 +631,7 @@ pub const MLP = struct {
         self.c_proj.zeroGrad();
     }
 
-    /// 更新子层权重值
-    pub fn updateWeights(self: MLP, lr: f32, beta: f32) void {
-        self.c_fc.updateWeights(lr, beta);
-        self.c_proj.updateWeights(lr, beta);
-    }
+
 
     /// 前向传播逻辑
     /// 支持输入 2D Tensor [B*T, D] 或 3D Tensor [B, T, D]
@@ -817,13 +744,7 @@ pub const CausalSelfAttention = struct {
         self.c_proj.zeroGrad();
     }
 
-    /// 更新所有线性投射子层的参数权重
-    pub fn updateWeights(self: CausalSelfAttention, lr: f32, beta: f32) void {
-        self.q_attn.updateWeights(lr, beta);
-        self.k_attn.updateWeights(lr, beta);
-        self.v_attn.updateWeights(lr, beta);
-        self.c_proj.updateWeights(lr, beta);
-    }
+
 
     /// 前向注意力计算流程
     /// 输入 x 的形状必须为 3D: [B, T, C]
@@ -1069,13 +990,7 @@ pub const TransformerBlock = struct {
         self.mlp.zeroGrad();
     }
 
-    /// 更新块内所有子层的权重参数
-    pub fn updateWeights(self: TransformerBlock, lr: f32, beta: f32) void {
-        self.ln_1.updateWeights(lr, beta);
-        self.attn.updateWeights(lr, beta);
-        self.ln_2.updateWeights(lr, beta);
-        self.mlp.updateWeights(lr, beta);
-    }
+
 
     /// 前向传播流程：x -> Block(x) -> out
     pub fn forward(self: TransformerBlock, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
@@ -1162,13 +1077,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             self.ln_f.zeroGrad();
         }
 
-        /// 触发所有子 Block 的梯度更新
-        pub fn updateWeights(self: Self, lr: f32, beta: f32) void {
-            for (self.h) |layer| {
-                layer.updateWeights(lr, beta);
-            }
-            self.ln_f.updateWeights(lr, beta);
-        }
+
 
         /// 解码器主干网络的前向传播流程
         pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
@@ -1336,12 +1245,7 @@ pub fn GPT(comptime config: GPTConfig) type {
 // 5. 底层数学与内存辅助函数
 // ============================================================================
 
-fn updateLayerWeights(w: []f32, dw: []const f32, v: []f32, lr: f32, beta: f32) void {
-    for (w, dw, v) |*weight, grad, *velocity| {
-        velocity.* = beta * velocity.* + lr * grad;
-        weight.* -= velocity.*;
-    }
-}
+
 
 fn initializeWeights(random: std.Random, w: []f32, fan_in: usize) void {
     const std_dev = @sqrt(2.0 / @as(f32, @floatFromInt(fan_in)));
