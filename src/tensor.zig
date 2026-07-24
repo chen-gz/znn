@@ -305,6 +305,38 @@ pub const Tensor = struct {
         return loss;
     }
 
+    pub fn sigmoid(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.sigmoid(self);
+        }
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        const total = self.data.len;
+        for (0..total) |i| {
+            C.data[i] = 1.0 / (1.0 + @exp(-self.data[i]));
+        }
+        return C;
+    }
+
+    pub fn sigmoidCrossEntropy(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.sigmoidCrossEntropy(self, targets);
+        }
+        const loss = try zeros(allocator, &.{1, 1});
+        const N = self.data.len;
+        std.debug.assert(N == targets.data.len);
+
+        var loss_sum: f32 = 0.0;
+        for (0..N) |i| {
+            const x = self.data[i];
+            const y = targets.data[i];
+            const max_val = @max(x, 0.0);
+            const abs_val = @abs(x);
+            loss_sum += max_val - x * y + @log(1.0 + @exp(-abs_val));
+        }
+        loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
+        return loss;
+    }
+
     pub fn reshape(self: *Tensor, new_shape_slice: []const usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.reshape(self, new_shape_slice);
@@ -1411,6 +1443,66 @@ test "GELU forward and backward" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), A.grad[1], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 1.083316), A.grad[2], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 1.085232), A.grad[3], 1e-4);
+}
+
+test "Sigmoid forward and backward" {
+    const arena_allocator = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena_allocator);
+    defer graph.deinit();
+
+    const A = try graph.tensorNDWithData(&.{2, 2}, &.{ -1.0, 0.0, 1.0, 2.0 }, true);
+    const C = try A.sigmoid(arena_allocator, &graph);
+
+    try graph.forward();
+
+    // Check forward: sigmoid(x) = 1 / (1 + exp(-x))
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0 / (1.0 + @exp(@as(f32, 1.0)))), C.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), C.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0 / (1.0 + @exp(@as(f32, -1.0)))), C.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0 / (1.0 + @exp(@as(f32, -2.0)))), C.data[3], 1e-5);
+
+    // Backward
+    graph.zeroGrad();
+    @memset(C.grad, 1.0);
+    try graph.backward(C);
+
+    // Check gradients: grad = C * (1 - C)
+    for (A.grad, C.data) |g_val, c_val| {
+        try std.testing.expectApproxEqAbs(c_val * (1.0 - c_val), g_val, 1e-5);
+    }
+}
+
+test "SigmoidCrossEntropy forward and backward" {
+    const arena_allocator = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena_allocator);
+    defer graph.deinit();
+
+    const logits = try graph.tensorNDWithData(&.{3}, &.{ -1.0, 0.0, 2.0 }, true);
+    const targets = try graph.tensorNDWithData(&.{3}, &.{ 0.0, 1.0, 1.0 }, false);
+    const loss = try logits.sigmoidCrossEntropy(targets, arena_allocator, &graph);
+
+    try graph.forward();
+
+    // Check forward
+    // x = -1, y = 0 -> loss = max(-1, 0) - 0 + log(1 + exp(-1)) = log(1 + e^-1) = log(1.367879) = 0.31326168
+    // x = 0, y = 1 -> loss = max(0, 0) - 0 + log(1 + exp(0)) = log(2) = 0.69314718
+    // x = 2, y = 1 -> loss = max(2, 0) - 2 + log(1 + exp(-2)) = log(1 + e^-2) = log(1.135335) = 0.126928
+    // mean loss = (0.31326168 + 0.69314718 + 0.126928) / 3 = 1.13333686 / 3 = 0.37777895
+    try std.testing.expectApproxEqAbs(@as(f32, 0.37777895), loss.data[0], 1e-5);
+
+    // Backward
+    graph.zeroGrad();
+    loss.grad[0] = 1.0;
+    try graph.backward(loss);
+
+    // Check gradients:
+    // grad = 1/3 * (sig(x) - y)
+    // x = -1, y = 0 -> grad = 1/3 * (1/(1+e) - 0) = 1/3 * 0.268941 = 0.089647
+    // x = 0, y = 1 -> grad = 1/3 * (0.5 - 1) = -1/6 = -0.166667
+    // x = 2, y = 1 -> grad = 1/3 * (1/(1+e^-2) - 1) = 1/3 * (0.880797 - 1) = -0.039734
+    try std.testing.expectApproxEqAbs(@as(f32, 0.089647), logits.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.166667), logits.grad[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.039734), logits.grad[2], 1e-5);
 }
 
 
