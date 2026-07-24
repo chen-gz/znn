@@ -113,6 +113,26 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(exe_lr);
 
+    // Define Logistic Regression binary target
+    const exe_logr = b.addExecutable(.{
+        .name = "logistic_regression",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/logistic_regression.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_logr_mod = exe_logr.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_logr_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_logr);
+
+
     // Define CNN binary target
     const exe_cnn = b.addExecutable(.{
         .name = "cnn",
@@ -259,6 +279,13 @@ pub fn build(b: *std.Build) void {
     const run_lr_cmd = b.addRunArtifact(exe_lr);
     run_lr_step.dependOn(&run_lr_cmd.step);
     run_lr_cmd.step.dependOn(b.getInstallStep());
+
+    // Run step for logistic regression
+    const run_logr_step = b.step("run-logr", "Run the logistic regression app");
+    const run_logr_cmd = b.addRunArtifact(exe_logr);
+    run_logr_step.dependOn(&run_logr_cmd.step);
+    run_logr_cmd.step.dependOn(b.getInstallStep());
+
 
     // Run step for CNN
     const run_cnn_step = b.step("run-cnn", "Run the CNN Fashion MNIST app");
