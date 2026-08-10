@@ -275,6 +275,109 @@ pub const Tensor = struct {
         return C;
     }
 
+    pub fn sigmoid(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.sigmoid(self);
+        }
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, a_val| {
+            if (a_val >= 0.0) {
+                c_val.* = 1.0 / (1.0 + @exp(-a_val));
+            } else {
+                const e = @exp(a_val);
+                c_val.* = e / (1.0 + e);
+            }
+        }
+        return C;
+    }
+
+    pub fn tanh(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.tanh(self);
+        }
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, a_val| {
+            c_val.* = std.math.tanh(a_val);
+        }
+        return C;
+    }
+
+    pub fn leakyRelu(self: *Tensor, alpha: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.leakyRelu(self, alpha);
+        }
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, a_val| {
+            c_val.* = if (a_val > 0.0) a_val else alpha * a_val;
+        }
+        return C;
+    }
+
+    pub fn bceWithLogitsLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.bceWithLogitsLoss(self, targets);
+        }
+        const loss = try zeros(allocator, &.{ 1, 1 });
+        const N = self.data.len;
+        std.debug.assert(N == targets.data.len);
+        var sum: f32 = 0.0;
+        for (0..N) |i| {
+            const x = self.data[i];
+            const y = targets.data[i];
+            const max_x = @max(x, 0.0);
+            const abs_x = @abs(x);
+            sum += max_x - x * y + @log(1.0 + @exp(-abs_x));
+        }
+        loss.data[0] = sum / @as(f32, @floatFromInt(N));
+        return loss;
+    }
+
+    pub fn bceLoss(self: *Tensor, targets: *Tensor, eps: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.bceLoss(self, targets, eps);
+        }
+        const loss = try zeros(allocator, &.{ 1, 1 });
+        const N = self.data.len;
+        std.debug.assert(N == targets.data.len);
+        var sum: f32 = 0.0;
+        for (0..N) |i| {
+            const p = self.data[i];
+            const y = targets.data[i];
+            const p_clip = @max(p, eps);
+            const one_minus_p_clip = @max(1.0 - p, eps);
+            sum += -(y * @log(p_clip) + (1.0 - y) * @log(one_minus_p_clip));
+        }
+        loss.data[0] = sum / @as(f32, @floatFromInt(N));
+        return loss;
+    }
+
+    pub fn fillNormal(self: *Tensor, random: std.Random, mean: f32, stddev: f32) void {
+        var i: usize = 0;
+        const len = self.data.len;
+        while (i < len) {
+            var u_1: f32 = random.float(f32);
+            while (u_1 == 0.0) {
+                u_1 = random.float(f32);
+            }
+            const u_2 = random.float(f32);
+            const z0 = @sqrt(-2.0 * @log(u_1)) * @cos(2.0 * std.math.pi * u_2);
+            self.data[i] = mean + z0 * stddev;
+            i += 1;
+            if (i < len) {
+                const z1 = @sqrt(-2.0 * @log(u_1)) * @sin(2.0 * std.math.pi * u_2);
+                self.data[i] = mean + z1 * stddev;
+                i += 1;
+            }
+        }
+    }
+
+    pub fn fillUniform(self: *Tensor, random: std.Random, min_val: f32, max_val: f32) void {
+        const range = max_val - min_val;
+        for (self.data) |*val| {
+            val.* = min_val + random.float(f32) * range;
+        }
+    }
+
     pub fn softmaxCrossEntropy(self: *Tensor, targets: []const u8, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.softmaxCrossEntropy(self, targets);
@@ -303,18 +406,6 @@ pub const Tensor = struct {
         }
         loss.data[0] = loss_sum / @as(f32, @floatFromInt(B));
         return loss;
-    }
-
-    pub fn sigmoid(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.sigmoid(self);
-        }
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        const total = self.data.len;
-        for (0..total) |i| {
-            C.data[i] = 1.0 / (1.0 + @exp(-self.data[i]));
-        }
-        return C;
     }
 
     pub fn sigmoidCrossEntropy(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {

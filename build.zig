@@ -248,6 +248,30 @@ pub fn build(b: *std.Build) void {
     run_gpt_step.dependOn(&run_gpt_cmd.step);
     run_gpt_cmd.step.dependOn(b.getInstallStep());
 
+    // Define GAN example binary
+    const exe_gan = b.addExecutable(.{
+        .name = "gan",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/gan.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_gan_mod = exe_gan.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_gan_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_gan);
+
+    const run_gan_step = b.step("run-gan", "Run the Generative Adversarial Network (GAN) example");
+    const run_gan_cmd = b.addRunArtifact(exe_gan);
+    run_gan_step.dependOn(&run_gan_cmd.step);
+    run_gan_cmd.step.dependOn(b.getInstallStep());
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.

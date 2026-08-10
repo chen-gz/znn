@@ -321,12 +321,86 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-test "json testing" {
+test "Sigmoid and Tanh autograd" {
     const std = @import("std");
-    const json_str = "{\"a\": 123}";
-    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_str, .{});
-    defer parsed.deinit();
-    try std.testing.expect(parsed.value.object.get("a").?.integer == 123);
+    const arena = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const A = try graph.array(&.{ 1, 2 }, &[_]f32{ 0.0, 2.0 }, true);
+
+    const sig = try graph.sigmoid(A);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), sig.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.880797), sig.data[1], 1e-5);
+
+    @memset(sig.grad, 1.0);
+    try graph.backward(sig);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), A.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1049935), A.grad[1], 1e-5);
+
+    const t = try graph.tanh(A);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), t.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.9640275), t.data[1], 1e-5);
+}
+
+test "LeakyReLU autograd" {
+    const std = @import("std");
+    const arena = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const A = try graph.array(&.{ 1, 2 }, &[_]f32{ -2.0, 3.0 }, true);
+    const C = try graph.leakyRelu(A, 0.2);
+
+    try std.testing.expectApproxEqAbs(@as(f32, -0.4), C.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), C.data[1], 1e-5);
+
+    @memset(C.grad, 1.0);
+    try graph.backward(C);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), A.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[1], 1e-5);
+}
+
+test "BCEWithLogitsLoss autograd" {
+    const std = @import("std");
+    const arena = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const logits = try graph.array(&.{ 1, 2 }, &[_]f32{ 0.0, 2.0 }, true);
+    const targets = try graph.array(&.{ 1, 2 }, &[_]f32{ 1.0, 0.0 }, false);
+
+    const loss = try graph.bceWithLogitsLoss(logits, targets);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.4100375), loss.data[0], 1e-4);
+
+    @memset(loss.grad, 1.0);
+    try graph.backward(loss);
+
+    try std.testing.expectApproxEqAbs(@as(f32, -0.25), logits.grad[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4403985), logits.grad[1], 1e-4);
+}
+
+test "AdamOptimizer model parameter updates" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    var prng = std.Random.DefaultPrng.init(42);
+    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    defer linear.deinit(allocator);
+
+    var opt = try nn.AdamOptimizer.init(allocator, &linear, 0.01, 0.9, 0.999, 1e-8);
+    defer opt.deinit();
+
+    linear.weight.grad[0] = 1.0;
+    linear.weight.grad[1] = -1.0;
+
+    const w0_before = linear.weight.data[0];
+    opt.step();
+    const w0_after = linear.weight.data[0];
+
+    try std.testing.expect(w0_after < w0_before);
 }
 
 

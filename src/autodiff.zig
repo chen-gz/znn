@@ -16,7 +16,12 @@ pub const OpType = enum {
     AddBias,             // 偏置项加法（广播机制）
     Relu,                // 激活函数 ReLU
     Gelu,                // 激活函数 GELU
+    Sigmoid,             // 激活函数 Sigmoid
+    Tanh,                // 激活函数 Tanh
+    LeakyRelu,           // 激活函数 LeakyReLU
     SoftmaxCrossEntropy, // 损失函数：结合了 Softmax 与交叉熵（数值稳定性更好）
+    BceWithLogitsLoss,   // 二元交叉熵带 Logits 损失函数
+    BceLoss,             // 二元交叉熵损失函数
     Reshape,             // 形状变换
     Transpose,           // 维度转置
     MseLoss,             // 均方误差损失函数
@@ -29,7 +34,6 @@ pub const OpType = enum {
     RmsNorm,             // RMSNorm
     BatchMatMul,         // Batched Matrix Multiplication
     Embedding,           // Embedding Lookup
-    Sigmoid,             // Sigmoid Activation
     SigmoidCrossEntropy, // Sigmoid Cross Entropy Loss (BCE with logits)
 };
 
@@ -39,9 +43,18 @@ pub const OpContext = union(enum) {
     AddBias: void,
     Relu: void,
     Gelu: void,
+    Sigmoid: void,
+    Tanh: void,
+    LeakyRelu: struct {
+        alpha: f32,
+    },
     SoftmaxCrossEntropy: struct {
         probs: []f32,
         targets: []const u8,
+    },
+    BceWithLogitsLoss: void,
+    BceLoss: struct {
+        eps: f32,
     },
     Reshape: void,
     Transpose: struct {
@@ -67,7 +80,6 @@ pub const OpContext = union(enum) {
     },
     BatchMatMul: void,
     Embedding: void,
-    Sigmoid: void,
     SigmoidCrossEntropy: void,
 };
 
@@ -142,6 +154,33 @@ pub const Op = struct {
                     c_val.* = 0.5 * a_val * (1.0 + erf_val);
                 }
             },
+            .Sigmoid => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                for (C.data, A.data) |*c_val, a_val| {
+                    if (a_val >= 0.0) {
+                        c_val.* = 1.0 / (1.0 + @exp(-a_val));
+                    } else {
+                        const e = @exp(a_val);
+                        c_val.* = e / (1.0 + e);
+                    }
+                }
+            },
+            .Tanh => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                for (C.data, A.data) |*c_val, a_val| {
+                    c_val.* = std.math.tanh(a_val);
+                }
+            },
+            .LeakyRelu => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const alpha = self.context.LeakyRelu.alpha;
+                for (C.data, A.data) |*c_val, a_val| {
+                    c_val.* = if (a_val > 0.0) a_val else alpha * a_val;
+                }
+            },
             // 前向公式:
             // 1. Softmax 归一化概率: p_j = e^{x_j - max} / sum(e^{x_i - max})
             // 2. 交叉熵损失计算: Loss = -1/B * sum( log(p_target) )
@@ -187,6 +226,39 @@ pub const Op = struct {
                 
                 // 5) 计算 Batch 范围内的均值 Loss
                 loss.data[0] = loss_sum / @as(f32, @floatFromInt(B_size));
+            },
+            .BceWithLogitsLoss, .SigmoidCrossEntropy => {
+                const logits = self.inputs[0];
+                const targets = self.inputs[1];
+                const loss = self.outputs[0];
+                const N = logits.data.len;
+                var loss_sum: f32 = 0.0;
+                for (0..N) |i| {
+                    const x = logits.data[i];
+                    const y = targets.data[i];
+                    const max_x = @max(x, 0.0);
+                    const abs_x = @abs(x);
+                    const l = max_x - x * y + @log(1.0 + @exp(-abs_x));
+                    loss_sum += l;
+                }
+                loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
+            },
+            .BceLoss => {
+                const probs = self.inputs[0];
+                const targets = self.inputs[1];
+                const loss = self.outputs[0];
+                const eps = self.context.BceLoss.eps;
+                const N = probs.data.len;
+                var loss_sum: f32 = 0.0;
+                for (0..N) |i| {
+                    const p = probs.data[i];
+                    const y = targets.data[i];
+                    const p_clip = @max(p, eps);
+                    const one_minus_p_clip = @max(1.0 - p, eps);
+                    const l = -(y * @log(p_clip) + (1.0 - y) * @log(one_minus_p_clip));
+                    loss_sum += l;
+                }
+                loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
             },
             .Reshape => {
                 // A.data and C.data point to the same memory buffer (aliased).
@@ -470,28 +542,6 @@ pub const Op = struct {
                     }
                 }
             },
-            .Sigmoid => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                for (C.data, A.data) |*c_val, a_val| {
-                    c_val.* = 1.0 / (1.0 + @exp(-a_val));
-                }
-            },
-            .SigmoidCrossEntropy => {
-                const logits = self.inputs[0];
-                const targets = self.inputs[1];
-                const loss = self.outputs[0];
-                const N = logits.data.len;
-                var loss_sum: f32 = 0.0;
-                for (0..N) |i| {
-                    const x = logits.data[i];
-                    const y = targets.data[i];
-                    const max_val = @max(x, 0.0);
-                    const abs_val = @abs(x);
-                    loss_sum += max_val - x * y + @log(1.0 + @exp(-abs_val));
-                }
-                loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
-            },
         }
     }
 
@@ -634,6 +684,35 @@ pub const Op = struct {
                     }
                 }
             },
+            .Sigmoid => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                if (A.requires_grad) {
+                    for (A.grad, C.grad, C.data) |*a_g, c_g, c_val| {
+                        a_g.* += c_g * c_val * (1.0 - c_val);
+                    }
+                }
+            },
+            .Tanh => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                if (A.requires_grad) {
+                    for (A.grad, C.grad, C.data) |*a_g, c_g, c_val| {
+                        a_g.* += c_g * (1.0 - c_val * c_val);
+                    }
+                }
+            },
+            .LeakyRelu => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const alpha = self.context.LeakyRelu.alpha;
+                if (A.requires_grad) {
+                    for (A.grad, C.grad, A.data) |*a_g, c_g, a_val| {
+                        const slope: f32 = if (a_val > 0.0) 1.0 else alpha;
+                        a_g.* += c_g * slope;
+                    }
+                }
+            },
             // ====================================================================
             // 4. Softmax + Cross Entropy 损失函数反向传播 (SoftmaxCrossEntropy Backward)
             // ====================================================================
@@ -660,6 +739,55 @@ pub const Op = struct {
                     const dLogits_row = logits.grad[i * N .. (i + 1) * N];
                     for (0..N) |j| {
                         dLogits_row[j] += scale * (p_row[j] - (if (j == label) @as(f32, 1.0) else 0.0));
+                    }
+                }
+            },
+            .BceWithLogitsLoss, .SigmoidCrossEntropy => {
+                const logits = self.inputs[0];
+                const targets = self.inputs[1];
+                const loss = self.outputs[0];
+                const dL = loss.grad[0];
+                const N = logits.data.len;
+                const scale = dL / @as(f32, @floatFromInt(N));
+
+                if (logits.requires_grad) {
+                    for (logits.grad, logits.data, targets.data) |*x_g, x_val, y_val| {
+                        const sig: f32 = if (x_val >= 0.0)
+                            1.0 / (1.0 + @exp(-x_val))
+                        else
+                            @exp(x_val) / (1.0 + @exp(x_val));
+                        x_g.* += scale * (sig - y_val);
+                    }
+                }
+                if (targets.requires_grad) {
+                    for (targets.grad, logits.data) |*y_g, x_val| {
+                        y_g.* += scale * (-x_val);
+                    }
+                }
+            },
+            .BceLoss => {
+                const probs = self.inputs[0];
+                const targets = self.inputs[1];
+                const loss = self.outputs[0];
+                const eps = self.context.BceLoss.eps;
+                const dL = loss.grad[0];
+                const N = probs.data.len;
+                const scale = dL / @as(f32, @floatFromInt(N));
+
+                if (probs.requires_grad) {
+                    for (probs.grad, probs.data, targets.data) |*p_g, p_val, y_val| {
+                        const p_clip = @max(p_val, eps);
+                        const one_minus_p_clip = @max(1.0 - p_val, eps);
+                        const grad_p = (p_val - y_val) / (p_clip * one_minus_p_clip);
+                        p_g.* += scale * grad_p;
+                    }
+                }
+                if (targets.requires_grad) {
+                    for (targets.grad, probs.data, targets.data) |*y_g, p_val, _| {
+                        const p_clip = @max(p_val, eps);
+                        const one_minus_p_clip = @max(1.0 - p_val, eps);
+                        const grad_y = -@log(p_clip) + @log(one_minus_p_clip);
+                        y_g.* += scale * grad_y;
                     }
                 }
             },
@@ -1047,38 +1175,6 @@ pub const Op = struct {
                     }
                 }
             },
-            .Sigmoid => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                if (A.requires_grad) {
-                    for (0..A.data.len) |i| {
-                        const y = C.data[i];
-                        A.grad[i] += C.grad[i] * y * (1.0 - y);
-                    }
-                }
-            },
-            .SigmoidCrossEntropy => {
-                const A = self.inputs[0]; // logits
-                const B = self.inputs[1]; // targets
-                const C = self.outputs[0]; // loss
-                const N = A.data.len;
-                const N_f = @as(f32, @floatFromInt(N));
-
-                if (A.requires_grad) {
-                    for (0..N) |i| {
-                        const x = A.data[i];
-                        const y = B.data[i];
-                        const sig = 1.0 / (1.0 + @exp(-x));
-                        A.grad[i] += C.grad[0] * (1.0 / N_f) * (sig - y);
-                    }
-                }
-                if (B.requires_grad) {
-                    for (0..N) |i| {
-                        const x = A.data[i];
-                        B.grad[i] += C.grad[0] * (1.0 / N_f) * (-x);
-                    }
-                }
-            },
         }
     }
 };
@@ -1386,6 +1482,96 @@ pub const Graph = struct {
         return C;
     }
 
+    pub fn sigmoid(self: *Graph, A: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.sigmoid(allocator, null);
+
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Sigmoid,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .Sigmoid = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
+    pub fn tanh(self: *Graph, A: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.tanh(allocator, null);
+
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Tanh,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .Tanh = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
+    pub fn leakyRelu(self: *Graph, A: *Tensor, alpha: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.leakyRelu(alpha, allocator, null);
+
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .LeakyRelu,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .LeakyRelu = .{ .alpha = alpha } },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
     // 损失函数 Softmax + Cross Entropy 结合前向传播
     // 在 logits 的行维度计算 Softmax 概率分布，并与 targets 分类标签计算交叉熵损失
     pub fn softmaxCrossEntropy(self: *Graph, logits: *Tensor, targets: []const u8) !*Tensor {
@@ -1487,33 +1673,7 @@ pub const Graph = struct {
         return loss;
     }
 
-    pub fn sigmoid(self: *Graph, A: *Tensor) !*Tensor {
-        const allocator = self.arena.allocator();
-        const C = try self.tensorND(A.shape.dims[0..A.shape.len], A.requires_grad);
-
-        for (C.data, A.data) |*c_val, a_val| {
-            c_val.* = 1.0 / (1.0 + @exp(-a_val));
-        }
-
-        const inputs = try allocator.alloc(*Tensor, 1);
-        inputs[0] = A;
-        const outputs = try allocator.alloc(*Tensor, 1);
-        outputs[0] = C;
-
-        const o = try allocator.create(Op);
-        o.* = Op{
-            .op_type = .Sigmoid,
-            .inputs = inputs,
-            .outputs = outputs,
-            .context = .{ .Sigmoid = {} },
-        };
-        C.creator = o;
-        try self.ops.append(self.backing_allocator, o);
-
-        return C;
-    }
-
-    pub fn sigmoidCrossEntropy(self: *Graph, logits: *Tensor, targets: *Tensor) !*Tensor {
+    pub fn bceWithLogitsLoss(self: *Graph, logits: *Tensor, targets: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const loss = try self.tensor(1, 1, logits.requires_grad or targets.requires_grad);
 
@@ -1524,9 +1684,10 @@ pub const Graph = struct {
         for (0..N) |i| {
             const x = logits.data[i];
             const y = targets.data[i];
-            const max_val = @max(x, 0.0);
-            const abs_val = @abs(x);
-            loss_sum += max_val - x * y + @log(1.0 + @exp(-abs_val));
+            const max_x = @max(x, 0.0);
+            const abs_x = @abs(x);
+            const l = max_x - x * y + @log(1.0 + @exp(-abs_x));
+            loss_sum += l;
         }
         loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
 
@@ -1538,10 +1699,10 @@ pub const Graph = struct {
 
         const o = try allocator.create(Op);
         o.* = Op{
-            .op_type = .SigmoidCrossEntropy,
+            .op_type = .BceWithLogitsLoss,
             .inputs = inputs,
             .outputs = outputs,
-            .context = .{ .SigmoidCrossEntropy = {} },
+            .context = .{ .BceWithLogitsLoss = {} },
         };
         loss.creator = o;
         try self.ops.append(self.backing_allocator, o);
@@ -1549,6 +1710,58 @@ pub const Graph = struct {
         return loss;
     }
 
+    pub fn sigmoidCrossEntropy(self: *Graph, logits: *Tensor, targets: *Tensor) !*Tensor {
+        return self.bceWithLogitsLoss(logits, targets);
+    }
+
+    pub fn bceLoss(self: *Graph, probs: *Tensor, targets: *Tensor, eps: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const loss = try self.tensor(1, 1, probs.requires_grad or targets.requires_grad);
+
+        const N = probs.data.len;
+        std.debug.assert(N == targets.data.len);
+
+        var loss_sum: f32 = 0.0;
+        for (0..N) |i| {
+            const p = probs.data[i];
+            const y = targets.data[i];
+            const p_clip = @max(p, eps);
+            const one_minus_p_clip = @max(1.0 - p, eps);
+            const l = -(y * @log(p_clip) + (1.0 - y) * @log(one_minus_p_clip));
+            loss_sum += l;
+        }
+        loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
+
+        const inputs = try allocator.alloc(*Tensor, 2);
+        inputs[0] = probs;
+        inputs[1] = targets;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = loss;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .BceLoss,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .BceLoss = .{ .eps = eps } },
+        };
+        loss.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return loss;
+    }
+
+    pub fn randomNormal(self: *Graph, shape_slice: []const usize, random: std.Random, mean: f32, stddev: f32, requires_grad: bool) !*Tensor {
+        const t = try self.tensorND(shape_slice, requires_grad);
+        t.fillNormal(random, mean, stddev);
+        return t;
+    }
+
+    pub fn randomUniform(self: *Graph, shape_slice: []const usize, random: std.Random, min: f32, max: f32, requires_grad: bool) !*Tensor {
+        const t = try self.tensorND(shape_slice, requires_grad);
+        t.fillUniform(random, min, max);
+        return t;
+    }
     // 标量乘法（缩放）：C = val * A
     pub fn mulScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
