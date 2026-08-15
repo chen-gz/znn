@@ -428,6 +428,19 @@ pub const Tensor = struct {
         return loss;
     }
 
+    pub fn l2Loss(self: *Tensor, lambda: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.l2Loss(self, lambda);
+        }
+        const loss = try zeros(allocator, &.{1, 1});
+        var sum_sq: f32 = 0.0;
+        for (self.data) |v| {
+            sum_sq += v * v;
+        }
+        loss.data[0] = 0.5 * lambda * sum_sq;
+        return loss;
+    }
+
     pub fn reshape(self: *Tensor, new_shape_slice: []const usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.reshape(self, new_shape_slice);
@@ -964,6 +977,157 @@ pub fn rand(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
 
 pub fn free(allocator: std.mem.Allocator, t: *Tensor) void {
     t.deinit(allocator);
+}
+
+/// Solves linear system A * x = b using Gauss-Jordan elimination with partial pivoting.
+/// A is an n x n row-major matrix slice, b is an n-element vector, out_x is an n-element output slice.
+pub fn solveLinearSystem(allocator: std.mem.Allocator, A_data: []const f32, b_data: []const f32, n: usize, out_x: []f32) !void {
+    std.debug.assert(A_data.len == n * n);
+    std.debug.assert(b_data.len == n);
+    std.debug.assert(out_x.len == n);
+
+    if (n == 0) return;
+    if (n == 1) {
+        if (@abs(A_data[0]) < 1e-12) return error.SingularMatrix;
+        out_x[0] = b_data[0] / A_data[0];
+        return;
+    }
+
+    // Augmented matrix [A | b] of dimensions n x (n + 1)
+    const cols = n + 1;
+    const aug = try allocator.alloc(f32, n * cols);
+    defer allocator.free(aug);
+
+    for (0..n) |i| {
+        for (0..n) |j| {
+            aug[i * cols + j] = A_data[i * n + j];
+        }
+        aug[i * cols + n] = b_data[i];
+    }
+
+    // Gauss-Jordan elimination with partial pivoting
+    for (0..n) |col| {
+        // Find pivot
+        var max_val: f32 = @abs(aug[col * cols + col]);
+        var pivot_row: usize = col;
+        for ((col + 1)..n) |r| {
+            const val = @abs(aug[r * cols + col]);
+            if (val > max_val) {
+                max_val = val;
+                pivot_row = r;
+            }
+        }
+
+        if (max_val < 1e-12) {
+            return error.SingularMatrix;
+        }
+
+        // Swap current row with pivot row
+        if (pivot_row != col) {
+            for (0..cols) |j| {
+                const tmp = aug[col * cols + j];
+                aug[col * cols + j] = aug[pivot_row * cols + j];
+                aug[pivot_row * cols + j] = tmp;
+            }
+        }
+
+        // Normalize pivot row
+        const pivot = aug[col * cols + col];
+        for (col..cols) |j| {
+            aug[col * cols + j] /= pivot;
+        }
+
+        // Eliminate column entries in other rows
+        for (0..n) |r| {
+            if (r == col) continue;
+            const factor = aug[r * cols + col];
+            if (factor == 0.0) continue;
+            for (col..cols) |j| {
+                aug[r * cols + j] -= factor * aug[col * cols + j];
+            }
+        }
+    }
+
+    // Extract solution
+    for (0..n) |i| {
+        out_x[i] = aug[i * cols + n];
+    }
+}
+
+/// Solves Ridge Regression analytically:
+/// min ||X*w + b*1 - y||_2^2 + lambda * ||w||_2^2
+/// Using centered formulation: w = (X_c^T * X_c + lambda * I)^(-1) * X_c^T * y_c
+/// b = mean(y) - sum(mean(x_j) * w_j)
+pub fn solveRidgeAnalytical(
+    allocator: std.mem.Allocator,
+    x: []const f32,
+    y: []const f32,
+    n_samples: usize,
+    n_features: usize,
+    lambda: f32,
+    out_w: []f32,
+    out_b: *f32,
+) !void {
+    std.debug.assert(x.len == n_samples * n_features);
+    std.debug.assert(y.len == n_samples);
+    std.debug.assert(out_w.len == n_features);
+
+    const N = n_samples;
+    const D = n_features;
+    const N_f = @as(f32, @floatFromInt(N));
+
+    // 1. Compute means
+    const mean_x = try allocator.alloc(f32, D);
+    defer allocator.free(mean_x);
+    @memset(mean_x, 0.0);
+
+    var sum_y: f32 = 0.0;
+    for (0..N) |i| {
+        sum_y += y[i];
+        for (0..D) |j| {
+            mean_x[j] += x[i * D + j];
+        }
+    }
+    const mean_y = sum_y / N_f;
+    for (0..D) |j| {
+        mean_x[j] /= N_f;
+    }
+
+    // 2. Build normal matrix M = X_c^T * X_c + lambda * I, and vector v = X_c^T * y_c
+    const M = try allocator.alloc(f32, D * D);
+    defer allocator.free(M);
+    @memset(M, 0.0);
+
+    const v = try allocator.alloc(f32, D);
+    defer allocator.free(v);
+    @memset(v, 0.0);
+
+    for (0..N) |i| {
+        const dy = y[i] - mean_y;
+        for (0..D) |j| {
+            const dx_j = x[i * D + j] - mean_x[j];
+            v[j] += dx_j * dy;
+            for (0..D) |k| {
+                const dx_k = x[i * D + k] - mean_x[k];
+                M[j * D + k] += dx_j * dx_k;
+            }
+        }
+    }
+
+    // Add L2 penalty lambda to the diagonal
+    for (0..D) |j| {
+        M[j * D + j] += lambda;
+    }
+
+    // 3. Solve M * w = v
+    try solveLinearSystem(allocator, M, v, D, out_w);
+
+    // 4. Compute intercept b = mean_y - w^T * mean_x
+    var dot_w_mean_x: f32 = 0.0;
+    for (0..D) |j| {
+        dot_w_mean_x += out_w[j] * mean_x[j];
+    }
+    out_b.* = mean_y - dot_w_mean_x;
 }
 
 test "Shape and strides helpers" {
