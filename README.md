@@ -41,6 +41,8 @@ It serves as a clean, production-grade reference for:
 * **[examples/cnn.zig](examples/cnn.zig)**: 2D Convolutional Neural Network (CNN) binary target using Conv2D, MaxPool2D, and Linear layers for Fashion MNIST image classification.
 * **[examples/fashion_mnist.zig](examples/fashion_mnist.zig)**: 3-layer Feedforward Neural Network (MLP) binary target. Responsible for dataset loading, training loops, evaluation, and test predictions.
 * **[examples/linear_regression.zig](examples/linear_regression.zig)**: Linear regression binary target. Compares OLS analytical closed-form solution with iterative autograd-based gradient descent.
+* **[examples/logistic_regression.zig](examples/logistic_regression.zig)**: Logistic regression binary classification target using Sigmoid and SigmoidCrossEntropy loss.
+* **[examples/ridge_regression.zig](examples/ridge_regression.zig)**: Ridge regression ($L_2$ regularization) binary target. Compares closed-form matrix solution with autograd gradient descent and demonstrates multicollinearity mitigation.
 * **[src/tensor.zig](src/tensor.zig)**: N-Dimensional Tensor library. Implements shape, logical strides, memory layout mapping, and vectorized math.
 * **[src/autodiff.zig](src/autodiff.zig)**: Core Automatic Differentiation engine. Implements the dynamic computation `Graph`, `Node`, operators, and DFS topological sorting.
 * **[src/nn.zig](src/nn.zig)**: Neural Network Modules. Implements the `Linear` and `Conv2D` modules, activation functions, and `Module` wrapper for comptime reflection parameter management.
@@ -60,10 +62,17 @@ Create a `data/` directory in the project root and download/extract the [Fashion
 * `t10k-images-idx3-ubyte`
 * `t10k-labels-idx1-ubyte`
 
-### 2. Compile and Run Linear Regression
-Run the simple 1D linear regression example (analytical vs autograd GD):
+### 2. Compile and Run Linear Regression & Ridge Regression
+Run the 1D linear regression or ridge regression example:
 ```bash
+# Linear regression (OLS vs autograd GD)
 zig build run-lr
+
+# Logistic regression (Sigmoid BCE)
+zig build run-logr
+
+# Ridge regression (L2 regularization, multicollinearity mitigation & Ridge trace)
+zig build run-ridge
 ```
 
 ### 3. Compile and Run Neural Network Model Training (MLP)

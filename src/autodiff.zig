@@ -35,6 +35,7 @@ pub const OpType = enum {
     BatchMatMul,         // Batched Matrix Multiplication
     Embedding,           // Embedding Lookup
     SigmoidCrossEntropy, // Sigmoid Cross Entropy Loss (BCE with logits)
+    L2Loss,              // L2 Regularization / Ridge Loss: 0.5 * lambda * sum(w^2)
 };
 
 // 各算子反向传播所需的上下文信息（如 Softmax 的概率输出与 Target 类别）
@@ -81,6 +82,9 @@ pub const OpContext = union(enum) {
     BatchMatMul: void,
     Embedding: void,
     SigmoidCrossEntropy: void,
+    L2Loss: struct {
+        lambda: f32,
+    },
 };
 
 
@@ -541,6 +545,16 @@ pub const Op = struct {
                         @memcpy(y_row, w_row);
                     }
                 }
+            },
+            .L2Loss => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const lambda = self.context.L2Loss.lambda;
+                var sum_sq: f32 = 0.0;
+                for (A.data) |v| {
+                    sum_sq += v * v;
+                }
+                C.data[0] = 0.5 * lambda * sum_sq;
             },
         }
     }
@@ -1175,6 +1189,16 @@ pub const Op = struct {
                     }
                 }
             },
+            .L2Loss => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const lambda = self.context.L2Loss.lambda;
+                if (A.requires_grad) {
+                    for (0..A.data.len) |i| {
+                        A.grad[i] += C.grad[0] * lambda * A.data[i];
+                    }
+                }
+            },
         }
     }
 };
@@ -1761,6 +1785,43 @@ pub const Graph = struct {
         const t = try self.tensorND(shape_slice, requires_grad);
         t.fillUniform(random, min, max);
         return t;
+    }
+
+    // L2 正则化损失函数：C = 0.5 * lambda * sum(weight_i^2)
+    pub fn l2Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const loss = try self.tensor(1, 1, weight.requires_grad);
+
+        var sum_sq: f32 = 0.0;
+        for (weight.data) |v| {
+            sum_sq += v * v;
+        }
+        loss.data[0] = 0.5 * lambda * sum_sq;
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = weight;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = loss;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .L2Loss,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .L2Loss = .{ .lambda = lambda } },
+        };
+        loss.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return loss;
+    }
+
+    // 岭回归 (Ridge) 组合损失函数：Loss = MSE(y_pred, y_true) + 0.5 * lambda * sum(weight_i^2)
+    pub fn ridgeLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor, lambda: f32) !*Tensor {
+        const mse = try self.mseLoss(y_pred, y_true);
+        if (lambda == 0.0) return mse;
+        const l2 = try self.l2Loss(weight, lambda);
+        return try self.add(mse, l2);
     }
     // 标量乘法（缩放）：C = val * A
     pub fn mulScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {

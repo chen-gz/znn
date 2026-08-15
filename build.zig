@@ -132,6 +132,25 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(exe_logr);
 
+    // Define Ridge Regression binary target
+    const exe_ridge = b.addExecutable(.{
+        .name = "ridge_regression",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/ridge_regression.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_ridge_mod = exe_ridge.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_ridge_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_ridge);
+
 
     // Define CNN binary target
     const exe_cnn = b.addExecutable(.{
@@ -309,6 +328,12 @@ pub fn build(b: *std.Build) void {
     const run_logr_cmd = b.addRunArtifact(exe_logr);
     run_logr_step.dependOn(&run_logr_cmd.step);
     run_logr_cmd.step.dependOn(b.getInstallStep());
+
+    // Run step for ridge regression
+    const run_ridge_step = b.step("run-ridge", "Run the ridge regression app");
+    const run_ridge_cmd = b.addRunArtifact(exe_ridge);
+    run_ridge_step.dependOn(&run_ridge_cmd.step);
+    run_ridge_cmd.step.dependOn(b.getInstallStep());
 
 
     // Run step for CNN

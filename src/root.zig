@@ -411,6 +411,71 @@ test "AdamOptimizer model parameter updates" {
     try std.testing.expect(w0_after < w0_before);
 }
 
+test "L2Loss and RidgeLoss autograd" {
+    const std = @import("std");
+    const arena = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    // Weight tensor: [2.0, -3.0]
+    const W = try graph.array(&.{ 2, 1 }, &[_]f32{ 2.0, -3.0 }, true);
+    const lambda: f32 = 0.5;
+
+    // L2 Loss: 0.5 * lambda * (2^2 + (-3)^2) = 0.5 * 0.5 * (4 + 9) = 3.25
+    const l2 = try graph.l2Loss(W, lambda);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.25), l2.data[0], 1e-5);
+
+    l2.grad[0] = 1.0;
+    try graph.backward(l2);
+
+    // Gradient dL/dW = lambda * W = 0.5 * [2.0, -3.0] = [1.0, -1.5]
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), W.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.5), W.grad[1], 1e-5);
+}
+
+test "solveLinearSystem Gauss-Jordan elimination" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    // System:
+    // 2*x0 + 1*x1 = 5
+    // 1*x0 + 3*x1 = 10
+    // Exact solution: x0 = 1, x1 = 3
+    const A = [_]f32{
+        2.0, 1.0,
+        1.0, 3.0,
+    };
+    const b = [_]f32{ 5.0, 10.0 };
+    var x = [_]f32{ 0.0, 0.0 };
+
+    try tensor.solveLinearSystem(allocator, &A, &b, 2, &x);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), x[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), x[1], 1e-5);
+}
+
+test "solveRidgeAnalytical convergence check" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    // 1D test: y = 2.0 * x + 1.0 with zero noise
+    const x = [_]f32{ -2.0, -1.0, 0.0, 1.0, 2.0 };
+    const y = [_]f32{ -3.0, -1.0, 1.0, 3.0, 5.0 };
+    var w = [_]f32{0.0};
+    var b: f32 = 0.0;
+
+    // With lambda = 0 (OLS), w = 2.0, b = 1.0
+    try tensor.solveRidgeAnalytical(allocator, &x, &y, 5, 1, 0.0, &w, &b);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), w[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), b, 1e-5);
+
+    // With lambda = 10.0 (Sum of dx^2 = 4 + 1 + 0 + 1 + 4 = 10):
+    // w = 20 / (10 + 10) = 1.0, b = 1.0 - 1.0 * 0.0 = 1.0
+    try tensor.solveRidgeAnalytical(allocator, &x, &y, 5, 1, 10.0, &w, &b);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), w[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), b, 1e-5);
+}
+
+
 
 
 
