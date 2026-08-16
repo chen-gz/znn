@@ -3,6 +3,7 @@ const znn = @import("zig_ml");
 const autodiff = znn.autodiff;
 const tensor = znn.tensor;
 const nn = znn.nn;
+const optim = znn.optim;
 const Tensor = tensor.Tensor;
 
 // ============================================================================
@@ -131,10 +132,20 @@ pub fn main() !void {
     defer net_d.deinit(allocator);
 
     // 初始化 Adam 优化器 (GAN 推荐参数 lr=0.005, beta1=0.5, beta2=0.999)
-    var opt_g = try nn.AdamOptimizer.init(allocator, &net_g, 0.005, 0.5, 0.999, 1e-8);
+    var opt_g = try optim.AdamOptimizer.init(allocator, &net_g, .{
+        .lr = 0.005,
+        .beta1 = 0.5,
+        .beta2 = 0.999,
+        .eps = 1e-8,
+    });
     defer opt_g.deinit();
 
-    var opt_d = try nn.AdamOptimizer.init(allocator, &net_d, 0.005, 0.5, 0.999, 1e-8);
+    var opt_d = try optim.AdamOptimizer.init(allocator, &net_d, .{
+        .lr = 0.005,
+        .beta1 = 0.5,
+        .beta2 = 0.999,
+        .eps = 1e-8,
+    });
     defer opt_d.deinit();
 
     const batch_size: usize = 64;

@@ -27,10 +27,13 @@ pub fn measureTime(comptime func: anytype, args: anytype) !struct {
 
 test "basic imports and struct definitions" {
     const std = @import("std");
+    _ = @import("optim.zig");
     try std.testing.expect(@TypeOf(nn.Linear) == type);
     try std.testing.expect(@TypeOf(nn.TransformerDecoder) == fn(comptime usize) type);
     try std.testing.expect(@TypeOf(autodiff.Tensor) == type);
     try std.testing.expect(@TypeOf(tensor.Tensor) == type);
+    try std.testing.expect(@TypeOf(optim.SGDOptimizer) == type);
+    try std.testing.expect(@TypeOf(optim.AdamOptimizer) == type);
 }
 
 test "measureTime utility" {
@@ -390,7 +393,12 @@ test "AdamOptimizer model parameter updates" {
     var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
     defer linear.deinit(allocator);
 
-    var opt = try nn.AdamOptimizer.init(allocator, &linear, 0.01, 0.9, 0.999, 1e-8);
+    var opt = try optim.AdamOptimizer.init(allocator, &linear, .{
+        .lr = 0.01,
+        .beta1 = 0.9,
+        .beta2 = 0.999,
+        .eps = 1e-8,
+    });
     defer opt.deinit();
 
     linear.weight.grad[0] = 1.0;

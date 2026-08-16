@@ -150,3 +150,65 @@ pub const AdamOptimizer = struct {
         }
     }
 };
+
+test "SGDOptimizer basic and momentum updates" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var prng = std.Random.DefaultPrng.init(42);
+    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    defer linear.deinit(allocator);
+
+    // 1. 测试无动量 SGD
+    var opt_plain = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.1, .momentum = 0.0 });
+    defer opt_plain.deinit();
+
+    linear.weight.data[0] = 1.0;
+    linear.weight.grad[0] = 0.5;
+
+    opt_plain.step();
+    // w = 1.0 - 0.1 * 0.5 = 0.95
+    try testing.expectApproxEqAbs(@as(f32, 0.95), linear.weight.data[0], 1e-5);
+
+    // 2. 测试带动量 SGD
+    var opt_mom = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.1, .momentum = 0.9 });
+    defer opt_mom.deinit();
+
+    linear.weight.data[0] = 1.0;
+    linear.weight.grad[0] = 0.5;
+
+    // Step 1: vel = 0.9*0 + 0.1*0.5 = 0.05, w = 1.0 - 0.05 = 0.95
+    opt_mom.step();
+    try testing.expectApproxEqAbs(@as(f32, 0.95), linear.weight.data[0], 1e-5);
+
+    // Step 2: vel = 0.9*0.05 + 0.1*0.5 = 0.045 + 0.05 = 0.095, w = 0.95 - 0.095 = 0.855
+    opt_mom.step();
+    try testing.expectApproxEqAbs(@as(f32, 0.855), linear.weight.data[0], 1e-5);
+}
+
+test "AdamOptimizer multi-step parameter updates" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var prng = std.Random.DefaultPrng.init(42);
+    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    defer linear.deinit(allocator);
+
+    var opt = try AdamOptimizer.init(allocator, &linear, .{
+        .lr = 0.01,
+        .beta1 = 0.9,
+        .beta2 = 0.999,
+        .eps = 1e-8,
+    });
+    defer opt.deinit();
+
+    linear.weight.data[0] = 1.0;
+    linear.weight.grad[0] = 0.2;
+
+    opt.step();
+    try testing.expect(linear.weight.data[0] < 1.0);
+
+    const after_step1 = linear.weight.data[0];
+    opt.step();
+    try testing.expect(linear.weight.data[0] < after_step1);
+}
