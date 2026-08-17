@@ -3,6 +3,9 @@ pub const nn = @import("nn.zig");
 pub const dataset = @import("dataset.zig");
 pub const autodiff = @import("autodiff.zig");
 pub const optim = @import("optim.zig");
+pub const regression = @import("regression.zig");
+pub const cv = @import("cross_validation.zig");
+
 
 pub fn measureTime(comptime func: anytype, args: anytype) !struct {
     result: @TypeOf(@call(.auto, func, args)),
@@ -474,6 +477,86 @@ test "solveRidgeAnalytical convergence check" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), w[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), b, 1e-5);
 }
+
+test "L1Loss and LassoLoss autograd" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const w = try graph.tensorWithData(1, 3, &[_]f32{ -2.0, 0.0, 3.0 }, true);
+    const l1_loss = try graph.l1Loss(w, 2.0);
+
+    // Forward: 2.0 * (| -2 | + | 0 | + | 3 |) = 2.0 * 5.0 = 10.0
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), l1_loss.data[0], 1e-5);
+
+    try graph.backward(l1_loss);
+
+    // Gradients: 2.0 * sign(w) = [-2.0, 0.0, 2.0]
+    try std.testing.expectApproxEqAbs(@as(f32, -2.0), w.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), w.grad[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), w.grad[2], 1e-5);
+}
+
+test "regression module Ridge, Lasso, and ElasticNet models" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    const x = [_]f32{
+        -2.0,  1.0,
+        -1.0, -1.0,
+         0.0,  0.0,
+         1.0, -1.0,
+         2.0,  1.0,
+    };
+    // y = 2.0 * x0 + 0.0 * x1 + 1.0
+    const y = [_]f32{ -3.0, -1.0, 1.0, 3.0, 5.0 };
+
+    var ridge = try regression.solveRidge(allocator, &x, &y, 5, 2, 0.1);
+    defer ridge.deinit();
+    try std.testing.expect(@abs(ridge.intercept - 1.0) < 0.1);
+    try std.testing.expect(@abs(ridge.weights[0] - 2.0) < 0.2);
+
+    var lasso = try regression.solveLasso(allocator, &x, &y, 5, 2, 0.05, 500, 1e-5);
+    defer lasso.deinit();
+    try std.testing.expect(@abs(lasso.intercept - 1.0) < 0.1);
+    try std.testing.expect(@abs(lasso.weights[0] - 2.0) < 0.2);
+
+    var enet = try regression.solveElasticNet(allocator, &x, &y, 5, 2, 0.05, 0.5, 500, 1e-5);
+    defer enet.deinit();
+    try std.testing.expect(@abs(enet.intercept - 1.0) < 0.1);
+    try std.testing.expect(@abs(enet.weights[0] - 2.0) < 0.2);
+}
+
+
+test "cross_validation module searchLasso" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    const N: usize = 20;
+    const P: usize = 2;
+
+    var X: [N * P]f32 = undefined;
+    var y: [N]f32 = undefined;
+
+    for (0..N) |i| {
+        const fi = @as(f32, @floatFromInt(i));
+        X[i * P + 0] = fi;
+        X[i * P + 1] = fi * 0.5;
+        y[i] = 2.0 * fi + 1.0;
+    }
+
+    var cv_search = cv.CrossValidationGridSearch.init(allocator, 5);
+    defer cv_search.deinit();
+
+    const alphas = [_]f32{ 0.001, 0.01, 0.1, 1.0, 10.0 };
+    try cv_search.searchLasso(&X, &y, N, P, &alphas, 42);
+
+    try std.testing.expectEqual(@as(usize, 5), cv_search.results.items.len);
+    try std.testing.expect(cv_search.getBestMinAlpha() <= 0.1);
+}
+
 
 
 
