@@ -291,6 +291,55 @@ pub fn build(b: *std.Build) void {
     run_gan_step.dependOn(&run_gan_cmd.step);
     run_gan_cmd.step.dependOn(b.getInstallStep());
 
+    // Define Regularized Regression (Ridge, Lasso, Elastic Net) binary
+    const exe_reg = b.addExecutable(.{
+        .name = "regularized_regression",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/regularized_regression.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_reg_mod = exe_reg.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_reg_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_reg);
+
+    const run_reg_step = b.step("run-reg", "Run the Regularized Regression (Ridge, Lasso, Elastic Net) example");
+    const run_reg_cmd = b.addRunArtifact(exe_reg);
+    run_reg_step.dependOn(&run_reg_cmd.step);
+    run_reg_cmd.step.dependOn(b.getInstallStep());
+
+    // Define 5-Fold Cross-Validation binary
+    const exe_cv = b.addExecutable(.{
+        .name = "cross_validation",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/cross_validation.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_cv_mod = exe_cv.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_cv_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_cv);
+
+    const run_cv_step = b.step("run-cv", "Run the 5-Fold Cross-Validation hyperparameter tuning example");
+    const run_cv_cmd = b.addRunArtifact(exe_cv);
+    run_cv_step.dependOn(&run_cv_cmd.step);
+    run_cv_cmd.step.dependOn(b.getInstallStep());
+
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
