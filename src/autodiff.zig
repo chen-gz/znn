@@ -36,6 +36,7 @@ pub const OpType = enum {
     Embedding,           // Embedding Lookup
     SigmoidCrossEntropy, // Sigmoid Cross Entropy Loss (BCE with logits)
     L2Loss,              // L2 Regularization / Ridge Loss: 0.5 * lambda * sum(w^2)
+    L1Loss,              // L1 Regularization / Lasso Loss: lambda * sum(|w|)
 };
 
 // 各算子反向传播所需的上下文信息（如 Softmax 的概率输出与 Target 类别）
@@ -85,7 +86,11 @@ pub const OpContext = union(enum) {
     L2Loss: struct {
         lambda: f32,
     },
+    L1Loss: struct {
+        lambda: f32,
+    },
 };
+
 
 
 
@@ -556,8 +561,19 @@ pub const Op = struct {
                 }
                 C.data[0] = 0.5 * lambda * sum_sq;
             },
+            .L1Loss => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const lambda = self.context.L1Loss.lambda;
+                var sum_abs: f32 = 0.0;
+                for (A.data) |v| {
+                    sum_abs += @abs(v);
+                }
+                C.data[0] = lambda * sum_abs;
+            },
         }
     }
+
 
     // 执行该算子的反向传播计算，更新其输入节点的梯度
     pub fn backward(self: *Op) !void {
@@ -1199,8 +1215,21 @@ pub const Op = struct {
                     }
                 }
             },
+            .L1Loss => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const lambda = self.context.L1Loss.lambda;
+                if (A.requires_grad) {
+                    for (0..A.data.len) |i| {
+                        const val = A.data[i];
+                        const sign: f32 = if (val > 0.0) 1.0 else if (val < 0.0) -1.0 else 0.0;
+                        A.grad[i] += C.grad[0] * lambda * sign;
+                    }
+                }
+            },
         }
     }
+
 };
 
 // 计算图（Graph）结构体
@@ -1823,6 +1852,60 @@ pub const Graph = struct {
         const l2 = try self.l2Loss(weight, lambda);
         return try self.add(mse, l2);
     }
+
+    // L1 正则化损失：Loss = lambda * sum(|weight_i|)
+    pub fn l1Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const loss = try self.tensor(1, 1, weight.requires_grad);
+
+        var sum_abs: f32 = 0.0;
+        for (weight.data) |v| {
+            sum_abs += @abs(v);
+        }
+        loss.data[0] = lambda * sum_abs;
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = weight;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = loss;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .L1Loss,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .L1Loss = .{ .lambda = lambda } },
+        };
+        loss.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return loss;
+    }
+
+    // Lasso 组合损失函数：Loss = MSE(y_pred, y_true) + lambda * sum(|weight_i|)
+    pub fn lassoLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor, lambda: f32) !*Tensor {
+        const mse = try self.mseLoss(y_pred, y_true);
+        if (lambda == 0.0) return mse;
+        const l1 = try self.l1Loss(weight, lambda);
+        return try self.add(mse, l1);
+    }
+
+    // Elastic Net 组合损失函数：Loss = MSE(y_pred, y_true) + lambda * rho * ||w||_1 + 0.5 * lambda * (1 - rho) * ||w||_2^2
+    pub fn elasticNetLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor, lambda: f32, l1_ratio: f32) !*Tensor {
+        const mse = try self.mseLoss(y_pred, y_true);
+        if (lambda == 0.0) return mse;
+        var total_loss = mse;
+        if (l1_ratio > 0.0) {
+            const l1 = try self.l1Loss(weight, lambda * l1_ratio);
+            total_loss = try self.add(total_loss, l1);
+        }
+        if (l1_ratio < 1.0) {
+            const l2 = try self.l2Loss(weight, lambda * (1.0 - l1_ratio));
+            total_loss = try self.add(total_loss, l2);
+        }
+        return total_loss;
+    }
+
     // 标量乘法（缩放）：C = val * A
     pub fn mulScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
