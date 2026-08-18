@@ -1308,8 +1308,10 @@ pub fn Sequential(comptime LayersTuple: type) type {
             }
         }
 
+        /// 前向传播：中间激活值由外部生命周期（Graph Arena 或 Eager 传入的 ArenaAllocator）统一释放
         pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, input: *Tensor) !*Tensor {
             var current = input;
+
             inline for (@typeInfo(LayersTuple).@"struct".fields) |field| {
                 const layer = @field(self.layers, field.name);
                 current = try layer.forward(allocator, graph, current);

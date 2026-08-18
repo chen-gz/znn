@@ -29,7 +29,10 @@ pub const MLP = struct {
     }
 
 
-    // 用户只需专注定义前向传播逻辑（无论是 Graph 模式还是 Eager 模式，直接透传 graph 即可）
+    // 用户只需专注定义前向数据流逻辑（无论是 Graph 模式还是 Eager 模式，直接透传 graph 即可）。
+    // 【内存管理说明】：前向计算产生的中间张量（x1, a1, x2, a2）生命周期由外部调用方统一管理：
+    // - 训练/反向传播模式（graph != null）：中间节点挂载在计算图上，由外部在批次结束调用 graph.deinit() 统一一键释放；
+    // - 纯推理/Eager模式（graph == null）：由外部调用方传入的 ArenaAllocator 在当前作用域结束时统一批量释放。
     pub fn forward(self: *const MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
         const x1 = try self.fc1.forward(allocator, graph, x);
         const a1 = try x1.relu(allocator, graph);
@@ -37,6 +40,7 @@ pub const MLP = struct {
         const a2 = try x2.relu(allocator, graph);
         return try self.fc3.forward(allocator, graph, a2);
     }
+
 
 };
 
