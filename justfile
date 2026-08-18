@@ -1,3 +1,7 @@
+# Download and extract Fashion MNIST dataset files
+download-data:
+    bash scripts/download_data.sh
+
 # Run all unit and integration tests
 test:
     zig build test
@@ -5,6 +9,7 @@ test:
 # Run the MLP Fashion MNIST training pipeline
 run:
     zig build run
+
 
 # Run the Linear Regression optimization demo
 run-lr:
