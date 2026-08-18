@@ -56,11 +56,19 @@ It serves as a clean, production-grade reference for:
 ## 🛠️ Build and Execution
 
 ### 1. Download Dataset
-Create a `data/` directory in the project root and download/extract the [Fashion MNIST IDX format files](https://github.com/zalandoresearch/fashion-mnist):
-* `train-images-idx3-ubyte`
-* `train-labels-idx1-ubyte`
-* `t10k-images-idx3-ubyte`
-* `t10k-labels-idx1-ubyte`
+You can download benchmark datasets with a single command:
+```bash
+# Download Fashion MNIST (default)
+zig build download-dataset
+
+# Or download classic MNIST
+zig build download-dataset -- mnist
+
+# Or use justfile
+just download-data
+```
+The IDX format binary files (`train-images-idx3-ubyte`, `train-labels-idx1-ubyte`, `t10k-images-idx3-ubyte`, `t10k-labels-idx1-ubyte`) will automatically be extracted into the `data/` directory.
+
 
 ### 2. Compile and Run Linear Regression & Ridge Regression
 Run the 1D linear regression or ridge regression example:
