@@ -30,56 +30,28 @@ pub const CNN = struct {
 
 
     pub fn forward(self: *const CNN, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
-        if (graph == null) {
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            defer arena.deinit();
-            const arena_allocator = arena.allocator();
-
-            const batch_size = x.shape.dims[0];
-            const x_reshaped = try x.reshape(&.{ batch_size, 1, 28, 28 }, arena_allocator, null);
-
-            // Layer 1
-            const x1 = try self.conv1.forward(arena_allocator, null, x_reshaped);
-            const a1 = try x1.relu(arena_allocator, null);
-            const p1 = try a1.maxpool2d(2, 2, arena_allocator, null);
-
-            // Layer 2
-            const x2 = try self.conv2.forward(arena_allocator, null, p1);
-            const a2 = try x2.relu(arena_allocator, null);
-            const p2 = try a2.maxpool2d(2, 2, arena_allocator, null);
-
-            // Layer 3
-            const x3 = try self.conv3.forward(arena_allocator, null, p2);
-            const a3 = try x3.relu(arena_allocator, null);
-
-            // Flatten and Linear
-            const flat = try a3.reshape(&.{ batch_size, 144 }, arena_allocator, null);
-            const out_arena = try self.fc1.forward(arena_allocator, null, flat);
-
-            return try tensor.array(allocator, out_arena.shape.dims[0..out_arena.shape.len], out_arena.data);
-        }
-
         const batch_size = x.shape.dims[0];
-        const x_reshaped = try graph.?.reshape(x, &.{ batch_size, 1, 28, 28 });
+        const x_reshaped = try x.reshape(&.{ batch_size, 1, 28, 28 }, allocator, graph);
 
-        // Layer 1
+        // Layer 1: Conv -> ReLU -> MaxPool
         const x1 = try self.conv1.forward(allocator, graph, x_reshaped);
-        const a1 = try graph.?.relu(x1);
-        const p1 = try graph.?.maxpool2d(a1, 2, 2);
+        const a1 = try x1.relu(allocator, graph);
+        const p1 = try a1.maxpool2d(2, 2, allocator, graph);
 
-        // Layer 2
+        // Layer 2: Conv -> ReLU -> MaxPool
         const x2 = try self.conv2.forward(allocator, graph, p1);
-        const a2 = try graph.?.relu(x2);
-        const p2 = try graph.?.maxpool2d(a2, 2, 2);
+        const a2 = try x2.relu(allocator, graph);
+        const p2 = try a2.maxpool2d(2, 2, allocator, graph);
 
-        // Layer 3
+        // Layer 3: Conv -> ReLU
         const x3 = try self.conv3.forward(allocator, graph, p2);
-        const a3 = try graph.?.relu(x3);
+        const a3 = try x3.relu(allocator, graph);
 
-        // Flatten and Linear
-        const flat = try graph.?.reshape(a3, &.{ batch_size, 144 });
+        // Flatten -> Linear
+        const flat = try a3.reshape(&.{ batch_size, 144 }, allocator, graph);
         return try self.fc1.forward(allocator, graph, flat);
     }
+
 };
 
 pub const NeuralNetwork = nn.Module(CNN);
@@ -330,14 +302,16 @@ test "CNN model initialization and forward passes (Eager & Graph)" {
 
     // Test Eager Mode (graph == null)
     {
-        const x_tensor = try tensor.array(allocator, &.{ 2, 784 }, x_data);
-        defer tensor.free(allocator, x_tensor);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const arena_allocator = arena.allocator();
 
-        const logits = try model.forward(allocator, null, x_tensor);
-        defer tensor.free(allocator, logits);
+        const x_tensor = try tensor.array(arena_allocator, &.{ 2, 784 }, x_data);
+        const logits = try model.forward(arena_allocator, null, x_tensor);
 
         try std.testing.expectEqualSlices(usize, &.{ 2, 10 }, logits.shape.dims[0..logits.shape.len]);
     }
+
 
     // Test Graph Mode (graph != null)
     {
