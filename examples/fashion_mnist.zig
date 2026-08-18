@@ -29,30 +29,15 @@ pub const MLP = struct {
     }
 
 
-    // 用户只需专注定义前向传播逻辑
+    // 用户只需专注定义前向传播逻辑（无论是 Graph 模式还是 Eager 模式，直接透传 graph 即可）
     pub fn forward(self: *const MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
-        if (graph == null) {
-            // Eager 模式：使用局部 ArenaAllocator 自动管理中间临时 Tensor 内存，避免频繁手写 defer free
-            var arena = std.heap.ArenaAllocator.init(allocator);
-            defer arena.deinit();
-            const arena_allocator = arena.allocator();
-
-            const x1 = try self.fc1.forward(arena_allocator, null, x);
-            const a1 = try x1.relu(arena_allocator, null);
-            const x2 = try self.fc2.forward(arena_allocator, null, a1);
-            const a2 = try x2.relu(arena_allocator, null);
-            const out_arena = try self.fc3.forward(arena_allocator, null, a2);
-
-            // 将最终结果克隆到外部的 allocator 中返回，出作用域后局部 arena 内的临时变量会被一并释放
-            return try zig_ml.tensor.array(allocator, out_arena.shape.dims[0..out_arena.shape.len], out_arena.data);
-        }
-
         const x1 = try self.fc1.forward(allocator, graph, x);
         const a1 = try x1.relu(allocator, graph);
         const x2 = try self.fc2.forward(allocator, graph, a1);
         const a2 = try x2.relu(allocator, graph);
         return try self.fc3.forward(allocator, graph, a2);
     }
+
 };
 
 pub const NeuralNetwork = nn.Module(MLP);
@@ -313,14 +298,16 @@ test "MLP model initialization and forward passes (Eager & Graph)" {
 
     // Test Eager Mode (graph == null)
     {
-        const x_tensor = try tensor.array(allocator, &.{ 2, 784 }, x_data);
-        defer tensor.free(allocator, x_tensor);
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const arena_allocator = arena.allocator();
 
-        const logits = try model.forward(allocator, null, x_tensor);
-        defer tensor.free(allocator, logits);
+        const x_tensor = try tensor.array(arena_allocator, &.{ 2, 784 }, x_data);
+        const logits = try model.forward(arena_allocator, null, x_tensor);
 
         try std.testing.expectEqualSlices(usize, &.{ 2, 10 }, logits.shape.dims[0..logits.shape.len]);
     }
+
 
     // Test Graph Mode (graph != null)
     {
