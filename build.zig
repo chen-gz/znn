@@ -435,6 +435,27 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&install_exe_tests.step);
     test_step.dependOn(&install_cnn_tests.step);
 
+    // ========================================================================
+    // Dataset Download Step (e.g. zig build download-dataset -- fashion_mnist)
+    // ========================================================================
+    const dataset_opt = b.option([]const u8, "dataset", "Dataset name to download (fashion_mnist, mnist)") orelse "fashion_mnist";
+
+    const download_cmd = b.addSystemCommand(&.{
+        "bash",
+        b.path("scripts/download_data.sh").getPath(b),
+    });
+    if (b.args) |args| {
+        download_cmd.addArgs(args);
+    } else {
+        download_cmd.addArg(dataset_opt);
+    }
+
+    const download_step = b.step("download-dataset", "Download benchmark dataset (e.g. fashion_mnist, mnist)");
+    download_step.dependOn(&download_cmd.step);
+
+    const download_data_step = b.step("download-data", "Alias for download-dataset");
+    download_data_step.dependOn(&download_cmd.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
