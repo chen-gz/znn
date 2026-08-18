@@ -20,29 +20,14 @@ pub const CNN = struct {
         var prng = std.Random.DefaultPrng.init(seed);
         const random = prng.random();
 
-        // Layer 1: Input [Batch, 1, 28, 28] -> Conv1 (1->4, kernel 3) -> [Batch, 4, 26, 26] -> Pool -> [Batch, 4, 13, 13]
-        const conv1 = try nn.Conv2D.init(allocator, 1, 4, 3, random);
-        errdefer conv1.deinit(allocator);
-
-        // Layer 2: Input [Batch, 4, 13, 13] -> Conv2 (4->8, kernel 3) -> [Batch, 8, 11, 11] -> Pool -> [Batch, 8, 5, 5]
-        const conv2 = try nn.Conv2D.init(allocator, 4, 8, 3, random);
-        errdefer conv2.deinit(allocator);
-
-        // Layer 3: Input [Batch, 8, 5, 5] -> Conv3 (8->16, kernel 3) -> [Batch, 16, 3, 3] -> (No pooling) -> Flatten -> [Batch, 144]
-        const conv3 = try nn.Conv2D.init(allocator, 8, 16, 3, random);
-        errdefer conv3.deinit(allocator);
-
-        // FC1: 144 input features -> 10 output classes.
-        const fc1 = try nn.Linear.init(allocator, 144, 10, random);
-        errdefer fc1.deinit(allocator);
-
-        return CNN{
-            .conv1 = conv1,
-            .conv2 = conv2,
-            .conv3 = conv3,
-            .fc1 = fc1,
+        return .{
+            .conv1 = try nn.Conv2D.init(allocator, 1, 4, 3, random),
+            .conv2 = try nn.Conv2D.init(allocator, 4, 8, 3, random),
+            .conv3 = try nn.Conv2D.init(allocator, 8, 16, 3, random),
+            .fc1 = try nn.Linear.init(allocator, 144, 10, random),
         };
     }
+
 
     pub fn forward(self: *const CNN, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
         if (graph == null) {
