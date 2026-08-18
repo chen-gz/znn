@@ -1245,6 +1245,18 @@ pub fn GPT(comptime config: GPTConfig) type {
 // Adam 优化器及 activation 模块封装
 // ============================================================================
 
+pub const ReLU = struct {
+    pub fn forward(_: ReLU, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        return try x.relu(allocator, graph);
+    }
+};
+
+pub const GELU = struct {
+    pub fn forward(_: GELU, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        return try x.gelu(allocator, graph);
+    }
+};
+
 pub const Sigmoid = struct {
     pub fn forward(_: Sigmoid, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
         return try x.sigmoid(allocator, graph);
@@ -1264,6 +1276,53 @@ pub const LeakyReLU = struct {
         return try x.leakyRelu(self.alpha, allocator, graph);
     }
 };
+
+/// PyTorch-like Sequential container chaining multiple layers
+pub fn Sequential(comptime LayersTuple: type) type {
+    return struct {
+        layers: LayersTuple,
+
+        const Self = @This();
+
+        pub fn init(layers: LayersTuple) Self {
+            return .{ .layers = layers };
+        }
+
+        pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
+            inline for (@typeInfo(LayersTuple).@"struct".fields) |field| {
+                const layer = @field(self.layers, field.name);
+                const LayerT = @TypeOf(layer);
+                if (@hasDecl(LayerT, "deinit")) {
+                    layer.deinit(allocator);
+                }
+            }
+        }
+
+        pub fn zeroGrad(self: Self) void {
+            inline for (@typeInfo(LayersTuple).@"struct".fields) |field| {
+                const layer = @field(self.layers, field.name);
+                const LayerT = @TypeOf(layer);
+                if (@hasDecl(LayerT, "zeroGrad")) {
+                    layer.zeroGrad();
+                }
+            }
+        }
+
+        pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, input: *Tensor) !*Tensor {
+            var current = input;
+            inline for (@typeInfo(LayersTuple).@"struct".fields) |field| {
+                const layer = @field(self.layers, field.name);
+                current = try layer.forward(allocator, graph, current);
+            }
+            return current;
+        }
+    };
+}
+
+pub fn sequential(layers: anytype) Sequential(@TypeOf(layers)) {
+    return Sequential(@TypeOf(layers)).init(layers);
+}
+
 
 
 // ============================================================================
@@ -1579,5 +1638,38 @@ test "GPT Module Save and Load" {
         try std.testing.expectEqual(w1, w2);
     }
 }
+
+test "Sequential container chaining" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    var seq = sequential(.{
+        try Linear.init(allocator, 10, 20, random),
+        ReLU{},
+        try Linear.init(allocator, 20, 5, random),
+    });
+    defer seq.deinit(allocator);
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const x = try graph.tensor(2, 10, false);
+    @memset(x.data, 0.5);
+
+    const y = try seq.forward(allocator, &graph, x);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, y.shape.dims[0..y.shape.len]);
+
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var grad_sum: f32 = 0.0;
+    for (seq.layers.@"0".weight.grad) |g| grad_sum += @abs(g);
+    try std.testing.expect(grad_sum > 0.0);
+}
+
+
+
+
 
 

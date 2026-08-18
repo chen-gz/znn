@@ -16,26 +16,18 @@ pub const MLP = struct {
     fc2: nn.Linear,
     fc3: nn.Linear,
 
-    // 定义初始化每一层参数的规则
+    // 定义初始化每一层参数的规则（直接字面量初始化返回，干净且无冗余变量）
     pub fn init(allocator: std.mem.Allocator, seed: u64) !MLP {
         var prng = std.Random.DefaultPrng.init(seed);
         const random = prng.random();
 
-        const fc1 = try nn.Linear.init(allocator, 784, 128, random);
-        errdefer fc1.deinit(allocator);
-
-        const fc2 = try nn.Linear.init(allocator, 128, 64, random);
-        errdefer fc2.deinit(allocator);
-
-        const fc3 = try nn.Linear.init(allocator, 64, 10, random);
-        errdefer fc3.deinit(allocator);
-
-        return MLP{
-            .fc1 = fc1,
-            .fc2 = fc2,
-            .fc3 = fc3,
+        return .{
+            .fc1 = try nn.Linear.init(allocator, 784, 128, random),
+            .fc2 = try nn.Linear.init(allocator, 128, 64, random),
+            .fc3 = try nn.Linear.init(allocator, 64, 10, random),
         };
     }
+
 
     // 用户只需专注定义前向传播逻辑
     pub fn forward(self: *const MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
