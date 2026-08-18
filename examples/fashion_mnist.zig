@@ -60,10 +60,18 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Running on CPU (Accelerate CBLAS sgemm)...\n", .{});
 
     std.debug.print("Loading dataset...\n", .{});
-    var train_dataset = try dataset.loadDataset(arena, io, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte");
+    var train_dataset = dataset.loadDataset(arena, io, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte") catch |err| {
+        std.debug.print("❌ Error loading training dataset: {}\n", .{err});
+        std.debug.print("💡 Hint: Please make sure Fashion MNIST files are present in the 'data/' directory (e.g. data/train-images-idx3-ubyte).\n", .{});
+        return err;
+    };
     defer train_dataset.deinit(arena);
 
-    var test_dataset = try dataset.loadDataset(arena, io, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
+    var test_dataset = dataset.loadDataset(arena, io, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte") catch |err| {
+        std.debug.print("❌ Error loading test dataset: {}\n", .{err});
+        std.debug.print("💡 Hint: Please make sure Fashion MNIST files are present in the 'data/' directory (e.g. data/t10k-images-idx3-ubyte).\n", .{});
+        return err;
+    };
     defer test_dataset.deinit(arena);
 
     std.debug.print("Loaded {} training images, {} test images.\n", .{ train_dataset.images.num_images, test_dataset.images.num_images });
@@ -74,6 +82,7 @@ pub fn main(init: std.process.Init) !void {
     try runTraining(&model, io, arena, train_dataset, test_dataset);
     try printPredictions(&model, arena, test_dataset, 5);
 }
+
 
 fn runTraining(
     model: anytype,
