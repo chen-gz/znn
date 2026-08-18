@@ -29,6 +29,9 @@ pub const CNN = struct {
     }
 
 
+    // 【内存管理说明】：前向计算产生的中间张量生命周期由外部调用方统一管理：
+    // - 训练模式（graph != null）：中间节点挂载在计算图上，由外部在批次结束调用 graph.deinit() 统一一键释放；
+    // - 纯推理模式（graph == null）：由外部调用方传入的 ArenaAllocator 在当前作用域结束时统一批量释放。
     pub fn forward(self: *const CNN, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
         const batch_size = x.shape.dims[0];
         const x_reshaped = try x.reshape(&.{ batch_size, 1, 28, 28 }, allocator, graph);
