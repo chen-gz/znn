@@ -248,6 +248,30 @@ pub const Tensor = struct {
         return C;
     }
 
+    pub fn mul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.mul(self, other);
+        }
+        std.debug.assert(self.data.len == other.data.len);
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data, other.data) |*c_val, a_val, b_val| {
+            c_val.* = a_val * b_val;
+        }
+        return C;
+    }
+
+    pub fn silu(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.silu(self);
+        }
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, a_val| {
+            const sig = if (a_val >= 0.0) 1.0 / (1.0 + @exp(-a_val)) else @exp(a_val) / (1.0 + @exp(a_val));
+            c_val.* = a_val * sig;
+        }
+        return C;
+    }
+
     pub fn relu(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.relu(self);
