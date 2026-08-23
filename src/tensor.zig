@@ -1784,6 +1784,95 @@ test "SigmoidCrossEntropy forward and backward" {
     try std.testing.expectApproxEqAbs(@as(f32, -0.039734), logits.grad[2], 1e-5);
 }
 
+/// 旋转位置编码应用算子 (RoPE)
+/// x: 输入张量切片，形状 [seq_len, n_head, head_dim]
+/// head_dim 必须为偶数
+pub fn applyRoPE(
+    x: []f32,
+    seq_len: usize,
+    n_head: usize,
+    head_dim: usize,
+    base_freq: f32,
+) void {
+    std.debug.assert(head_dim % 2 == 0);
+    const half_dim = head_dim / 2;
+
+    for (0..seq_len) |m| {
+        const m_f32 = @as(f32, @floatFromInt(m));
+
+        for (0..half_dim) |i| {
+            const i_f32 = @as(f32, @floatFromInt(i));
+            const theta = 1.0 / std.math.pow(f32, base_freq, (2.0 * i_f32) / @as(f32, @floatFromInt(head_dim)));
+            const freq = m_f32 * theta;
+            const cos_val = @cos(freq);
+            const sin_val = @sin(freq);
+
+            for (0..n_head) |h| {
+                const offset = (m * n_head + h) * head_dim + i * 2;
+                const x1 = x[offset];
+                const x2 = x[offset + 1];
+
+                // 2D 旋转矩阵变换
+                x[offset] = x1 * cos_val - x2 * sin_val;
+                x[offset + 1] = x1 * sin_val + x2 * cos_val;
+            }
+        }
+    }
+}
+
+/// 对 3D [T, n_head, head_dim] 或 4D [B, n_head, T, head_dim] 张量执行 RoPE 旋转
+pub fn applyRoPETensor(t: *Tensor, base_freq: f32) void {
+    if (t.shape.len == 3) {
+        const seq_len = t.shape.dims[0];
+        const n_head = t.shape.dims[1];
+        const head_dim = t.shape.dims[2];
+        applyRoPE(t.data, seq_len, n_head, head_dim, base_freq);
+    } else if (t.shape.len == 4) {
+        // [B, n_head, T, head_dim] -> 遍历每个 batch
+        const B = t.shape.dims[0];
+        const n_head = t.shape.dims[1];
+        const T = t.shape.dims[2];
+        const head_dim = t.shape.dims[3];
+        const half_dim = head_dim / 2;
+
+        for (0..B) |b| {
+            for (0..T) |m| {
+                const m_f32 = @as(f32, @floatFromInt(m));
+                for (0..half_dim) |i| {
+                    const i_f32 = @as(f32, @floatFromInt(i));
+                    const theta = 1.0 / std.math.pow(f32, base_freq, (2.0 * i_f32) / @as(f32, @floatFromInt(head_dim)));
+                    const freq = m_f32 * theta;
+                    const cos_val = @cos(freq);
+                    const sin_val = @sin(freq);
+
+                    for (0..n_head) |h| {
+                        const offset = ((b * n_head + h) * T + m) * head_dim + i * 2;
+                        const x1 = t.data[offset];
+                        const x2 = t.data[offset + 1];
+                        t.data[offset] = x1 * cos_val - x2 * sin_val;
+                        t.data[offset + 1] = x1 * sin_val + x2 * cos_val;
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "applyRoPE rotation properties" {
+    var data = [_]f32{ 1.0, 0.0, 0.0, 1.0 }; // seq_len=2, n_head=1, head_dim=2
+    applyRoPE(&data, 2, 1, 2, 10000.0);
+    // m = 0: theta^0 = 1, freq = 0 -> cos(0)=1, sin(0)=0 -> x0=1.0, x1=0.0
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), data[1], 1e-5);
+
+    // m = 1: freq = 1.0 -> cos(1), sin(1) for [0.0, 1.0] -> x2 = 0*cos(1) - 1*sin(1) = -sin(1), x3 = 0*sin(1) + 1*cos(1) = cos(1)
+    const expected_x2 = -@sin(@as(f32, 1.0));
+    const expected_x3 = @cos(@as(f32, 1.0));
+    try std.testing.expectApproxEqAbs(expected_x2, data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(expected_x3, data[3], 1e-5);
+}
+
+
 
 
 

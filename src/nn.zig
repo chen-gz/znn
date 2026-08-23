@@ -685,6 +685,112 @@ pub const MLP = struct {
     }
 };
 
+/// SwiGLU 门控激活算子：output = (gate * sigmoid(gate)) * up
+pub fn swigluForward(
+    output: []f32,
+    gate: []const f32,
+    up: []const f32,
+) void {
+    std.debug.assert(gate.len == up.len and output.len == gate.len);
+
+    for (gate, up, 0..) |g_val, u_val, idx| {
+        const sigmoid_g = if (g_val >= 0.0) 1.0 / (1.0 + @exp(-g_val)) else @exp(g_val) / (1.0 + @exp(g_val));
+        const swish_g = g_val * sigmoid_g;
+        output[idx] = swish_g * u_val;
+    }
+}
+
+/// 现代 Transformer 门控前馈网络 (SwiGLU / LLaMA-style MLP)
+/// 结构：(SiLU(x * W_gate) * (x * W_up)) * W_down
+/// 其中 hidden_dim 通常设置为 8/3 * dim
+pub const SwiGLU = struct {
+    w_gate: Linear,         // 门控投影层 (dim -> hidden_dim)
+    w_up: Linear,           // 升维投影层 (dim -> hidden_dim)
+    w_down: Linear,         // 降维投影层 (hidden_dim -> dim)
+
+    pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize, random: std.Random) !SwiGLU {
+        const w_gate = try Linear.init(allocator, dim, hidden_dim, random);
+        errdefer w_gate.deinit(allocator);
+        const w_up = try Linear.init(allocator, dim, hidden_dim, random);
+        errdefer w_up.deinit(allocator);
+        const w_down = try Linear.init(allocator, hidden_dim, dim, random);
+        errdefer w_down.deinit(allocator);
+
+        return SwiGLU{
+            .w_gate = w_gate,
+            .w_up = w_up,
+            .w_down = w_down,
+        };
+    }
+
+    pub fn deinit(self: SwiGLU, allocator: std.mem.Allocator) void {
+        self.w_gate.deinit(allocator);
+        self.w_up.deinit(allocator);
+        self.w_down.deinit(allocator);
+    }
+
+    pub fn zeroGrad(self: SwiGLU) void {
+        self.w_gate.zeroGrad();
+        self.w_up.zeroGrad();
+        self.w_down.zeroGrad();
+    }
+
+    /// 前向传播逻辑：支持 2D [B*T, D] 或 3D [B, T, D]
+    pub fn forward(self: SwiGLU, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const old_shape = x.shape;
+        const is_3d = (old_shape.len == 3);
+        var x_2d = x;
+
+        if (is_3d) {
+            const B = old_shape.dims[0];
+            const T = old_shape.dims[1];
+            const D = old_shape.dims[2];
+            if (graph) |g| {
+                x_2d = try g.reshape(x, &.{ B * T, D });
+            } else {
+                x_2d = try x.reshape(&.{ B * T, D }, allocator, null);
+            }
+        }
+        defer {
+            if (is_3d and graph == null) {
+                tensor.free(allocator, x_2d);
+            }
+        }
+
+        // 1. 计算 gate 投影: [B*T, D] -> [B*T, hidden_dim]
+        const gate = try self.w_gate.forward(allocator, graph, x_2d);
+        defer if (graph == null) tensor.free(allocator, gate);
+
+        // 2. 计算 up 投影: [B*T, D] -> [B*T, hidden_dim]
+        const up = try self.w_up.forward(allocator, graph, x_2d);
+        defer if (graph == null) tensor.free(allocator, up);
+
+        // 3. 计算 SiLU(gate) 激活
+        const silu_gate = if (graph) |g| try g.silu(gate) else try gate.silu(allocator, null);
+        defer if (graph == null) tensor.free(allocator, silu_gate);
+
+        // 4. 逐元素乘法: SiLU(gate) * up
+        const hidden = if (graph) |g| try g.mul(silu_gate, up) else try silu_gate.mul(up, allocator, null);
+        defer if (graph == null) tensor.free(allocator, hidden);
+
+        // 5. 降维投射回原始特征维度: [B*T, hidden_dim] -> [B*T, D]
+        const out = try self.w_down.forward(allocator, graph, hidden);
+
+        if (is_3d) {
+            const B = old_shape.dims[0];
+            const T = old_shape.dims[1];
+            const D = old_shape.dims[2];
+            if (graph) |g| {
+                return try g.reshape(out, &.{ B, T, D });
+            } else {
+                defer tensor.free(allocator, out);
+                return try out.reshape(&.{ B, T, D }, allocator, null);
+            }
+        }
+        return out;
+    }
+};
+
 /// 因果自注意力机制 (Causal Self-Attention / Masked Multi-Head Attention)
 /// Transformer 的核心机制，负责建模序列中不同位置的依赖关系。
 /// 
@@ -1277,6 +1383,14 @@ pub const LeakyReLU = struct {
     }
 };
 
+pub const SiLU = struct {
+    pub fn forward(_: SiLU, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        return try x.silu(allocator, graph);
+    }
+};
+
+pub const Swish = SiLU;
+
 /// PyTorch-like Sequential container chaining multiple layers
 pub fn Sequential(comptime LayersTuple: type) type {
     return struct {
@@ -1669,6 +1783,40 @@ test "Sequential container chaining" {
     for (seq.layers.@"0".weight.grad) |g| grad_sum += @abs(g);
     try std.testing.expect(grad_sum > 0.0);
 }
+
+test "SwiGLU forward and backward autograd" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    var swiglu = try SwiGLU.init(allocator, 4, 8, random);
+    defer swiglu.deinit(allocator);
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const x = try graph.tensor(2, 4, true);
+    @memset(x.data, 0.5);
+
+    const y = try swiglu.forward(allocator, &graph, x);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 4 }, y.shape.dims[0..y.shape.len]);
+
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var gate_grad: f32 = 0.0;
+    for (swiglu.w_gate.weight.grad) |g| gate_grad += @abs(g);
+    try std.testing.expect(gate_grad > 0.0);
+
+    var up_grad: f32 = 0.0;
+    for (swiglu.w_up.weight.grad) |g| up_grad += @abs(g);
+    try std.testing.expect(up_grad > 0.0);
+
+    var down_grad: f32 = 0.0;
+    for (swiglu.w_down.weight.grad) |g| down_grad += @abs(g);
+    try std.testing.expect(down_grad > 0.0);
+}
+
 
 
 
