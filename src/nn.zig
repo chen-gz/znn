@@ -1784,6 +1784,295 @@ test "Sequential container chaining" {
     try std.testing.expect(grad_sum > 0.0);
 }
 
+// ============================================================================
+// 6. LoRA (Low-Rank Adaptation) 参数高效微调模块
+// ============================================================================
+
+pub const LoRALinear = struct {
+    weight: *Tensor,       // 冻结的基础权重 (Base Weight, requires_grad = false)
+    bias: ?*Tensor,        // 可选偏置向量
+    lora_a: *Tensor,       // 可训练低秩矩阵 A [in_features, r]
+    lora_b: *Tensor,       // 可训练低秩矩阵 B [r, out_features]
+    in_features: usize,
+    out_features: usize,
+    r: usize,
+    scaling: f32,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        in_features: usize,
+        out_features: usize,
+        r: usize,
+        lora_alpha: f32,
+        random: std.Random,
+    ) !LoRALinear {
+        // 冻结的基础权重
+        const weight = try createPersistentTensor(allocator, in_features, out_features, false);
+        errdefer freePersistentTensor(allocator, weight);
+        initializeWeights(random, weight.data, in_features);
+
+        // 可微调低秩旁路 A：高斯初始化
+        const lora_a = try createPersistentTensor(allocator, in_features, r, true);
+        errdefer freePersistentTensor(allocator, lora_a);
+        initializeWeights(random, lora_a.data, in_features);
+
+        // 可微调低秩旁路 B：全 0 初始化以保证初始状态等价于 Base 模型
+        const lora_b = try createPersistentTensor(allocator, r, out_features, true);
+        errdefer freePersistentTensor(allocator, lora_b);
+        @memset(lora_b.data, 0.0);
+
+        return LoRALinear{
+            .weight = weight,
+            .bias = null,
+            .lora_a = lora_a,
+            .lora_b = lora_b,
+            .in_features = in_features,
+            .out_features = out_features,
+            .r = r,
+            .scaling = lora_alpha / @as(f32, @floatFromInt(r)),
+        };
+    }
+
+    pub fn deinit(self: LoRALinear, allocator: std.mem.Allocator) void {
+        freePersistentTensor(allocator, self.weight);
+        if (self.bias) |b| freePersistentTensor(allocator, b);
+        freePersistentTensor(allocator, self.lora_a);
+        freePersistentTensor(allocator, self.lora_b);
+    }
+
+    pub fn zeroGrad(self: LoRALinear) void {
+        self.lora_a.zeroGrad();
+        self.lora_b.zeroGrad();
+        if (self.bias) |b| b.zeroGrad();
+    }
+
+    /// 前向传播：Y = X * W_0 + (X * A) * B * scaling (+ bias)
+    pub fn forward(self: LoRALinear, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        // 1. 冻结主干前向：x * W_0
+        const base_out = try x.matmul(self.weight, allocator, graph);
+        defer if (graph == null) tensor.free(allocator, base_out);
+
+        // 2. LoRA 旁路计算：x * A -> [..., r]
+        const lora_xa = try x.matmul(self.lora_a, allocator, graph);
+        defer if (graph == null) tensor.free(allocator, lora_xa);
+
+        // (x * A) * B -> [..., out_features]
+        const lora_xab = try lora_xa.matmul(self.lora_b, allocator, graph);
+        defer if (graph == null) tensor.free(allocator, lora_xab);
+
+        // 缩放增量：lora_xab * scaling
+        const scaled_lora = if (graph) |g| try g.mulScalar(lora_xab, self.scaling) else try lora_xab.mulScalar(self.scaling, allocator, null);
+        defer if (graph == null) tensor.free(allocator, scaled_lora);
+
+        // 累加主干与旁路：base_out + scaled_lora
+        var out = if (graph) |g| try g.add(base_out, scaled_lora) else try base_out.add(scaled_lora, allocator, null);
+
+        if (self.bias) |b| {
+            const out_with_bias = if (graph) |g| try g.addBias(out, b) else try out.addBias(b, allocator, null);
+            if (graph == null) tensor.free(allocator, out);
+            out = out_with_bias;
+        }
+
+        return out;
+    }
+
+    /// 零推理延迟融合：将 LoRA 旁路权重融合至主干 W_0 = W_0 + scaling * (A * B)
+    pub fn fuse(self: *LoRALinear) void {
+        const in_f = self.in_features;
+        const r_dim = self.r;
+        const out_f = self.out_features;
+
+        for (0..in_f) |i| {
+            for (0..out_f) |j| {
+                var delta: f32 = 0.0;
+                for (0..r_dim) |k| {
+                    delta += self.lora_a.data[i * r_dim + k] * self.lora_b.data[k * out_f + j];
+                }
+                self.weight.data[i * out_f + j] += delta * self.scaling;
+            }
+        }
+        @memset(self.lora_b.data, 0.0);
+    }
+};
+
+// ============================================================================
+// 7. SFT 掩码损失 (Prompt Loss Masking) 与 DPO 对齐损失
+// ============================================================================
+
+/// 监督微调 (SFT) 掩码交叉熵损失：仅对 Assistant 回答部分 (mask > 0) 计算损失
+pub fn maskedCrossEntropyLoss(
+    logits: *Tensor,
+    targets: []const u32,
+    mask: []const f32,
+    allocator: std.mem.Allocator,
+) !f32 {
+    const N = logits.shape.dims[0];
+    const V = logits.shape.dims[1];
+    std.debug.assert(targets.len == N);
+    std.debug.assert(mask.len == N);
+    _ = allocator;
+
+    var total_loss: f32 = 0.0;
+    var total_weight: f32 = 0.0;
+
+    for (0..N) |i| {
+        if (mask[i] <= 0.0) continue;
+
+        const row = logits.data[i * V .. (i + 1) * V];
+        var max_v = row[0];
+        for (row) |v| if (v > max_v) {
+            max_v = v;
+        };
+
+        var sum_exp: f32 = 0.0;
+        for (row) |v| {
+            sum_exp += @exp(v - max_v);
+        }
+        const log_sum_exp = max_v + @log(sum_exp);
+        const target_logit = row[targets[i]];
+        const loss_i = log_sum_exp - target_logit;
+
+        total_loss += loss_i * mask[i];
+        total_weight += mask[i];
+    }
+
+    if (total_weight > 0.0) {
+        return total_loss / total_weight;
+    }
+    return 0.0;
+}
+
+pub const sftCrossEntropyLoss = maskedCrossEntropyLoss;
+
+/// 直接偏好优化 (DPO) 损失函数：
+/// L_DPO = - E [ log( sigmoid( beta * ( (log pi(y_w) - log ref(y_w)) - (log pi(y_l) - log ref(y_l)) ) ) ) ]
+pub fn dpoLoss(
+    pi_chosen_logps: []const f32,
+    pi_rejected_logps: []const f32,
+    ref_chosen_logps: []const f32,
+    ref_rejected_logps: []const f32,
+    beta: f32,
+) f32 {
+    std.debug.assert(pi_chosen_logps.len == pi_rejected_logps.len);
+    std.debug.assert(pi_chosen_logps.len == ref_chosen_logps.len);
+    std.debug.assert(pi_chosen_logps.len == ref_rejected_logps.len);
+
+    const N = pi_chosen_logps.len;
+    if (N == 0) return 0.0;
+
+    var total_loss: f32 = 0.0;
+    for (0..N) |i| {
+        const log_ratio_chosen = pi_chosen_logps[i] - ref_chosen_logps[i];
+        const log_ratio_rejected = pi_rejected_logps[i] - ref_rejected_logps[i];
+        const logits = beta * (log_ratio_chosen - log_ratio_rejected);
+
+        // -log(sigmoid(z)) = log(1 + exp(-z))
+        const loss_i = if (logits > 0.0)
+            @log(1.0 + @exp(-logits))
+        else
+            -logits + @log(1.0 + @exp(logits));
+
+        total_loss += loss_i;
+    }
+    return total_loss / @as(f32, @floatFromInt(N));
+}
+
+// ============================================================================
+// 8. 采样与生成策略 (Sampling Strategies)
+// ============================================================================
+
+/// Top-P (Nucleus) 核采样 (带 Temperature)
+pub fn sampleTopP(
+    logits: []const f32,
+    vocab_size: usize,
+    temperature: f32,
+    top_p: f32,
+    random: std.Random,
+    allocator: std.mem.Allocator,
+) !u32 {
+    std.debug.assert(logits.len >= vocab_size);
+    const scaled = try allocator.alloc(f32, vocab_size);
+    defer allocator.free(scaled);
+
+    const temp = @max(temperature, 1e-4);
+    var max_logit: f32 = -1e9;
+    for (0..vocab_size) |i| {
+        scaled[i] = logits[i] / temp;
+        if (scaled[i] > max_logit) max_logit = scaled[i];
+    }
+
+    var sum_exp: f32 = 0.0;
+    for (scaled) |*s| {
+        s.* = @exp(s.* - max_logit);
+        sum_exp += s.*;
+    }
+    for (scaled) |*s| {
+        s.* /= sum_exp;
+    }
+
+    var cum_sum: f32 = 0.0;
+    const rand_val = random.float(f32);
+    for (scaled, 0..) |p, i| {
+        cum_sum += p;
+        if (cum_sum >= rand_val or cum_sum >= top_p) {
+            return @as(u32, @intCast(i));
+        }
+    }
+    return @as(u32, @intCast(vocab_size - 1));
+}
+
+/// Top-K 截断采样 (带 Temperature)
+pub fn sampleTopK(
+    logits: []const f32,
+    vocab_size: usize,
+    temperature: f32,
+    k: usize,
+    random: std.Random,
+    allocator: std.mem.Allocator,
+) !u32 {
+    std.debug.assert(logits.len >= vocab_size);
+    const effective_k = @min(k, vocab_size);
+    const temp = @max(temperature, 1e-4);
+
+    const Item = struct { id: u32, val: f32 };
+    const items = try allocator.alloc(Item, vocab_size);
+    defer allocator.free(items);
+
+    for (0..vocab_size) |i| {
+        items[i] = .{ .id = @as(u32, @intCast(i)), .val = logits[i] / temp };
+    }
+
+    std.mem.sort(Item, items, {}, struct {
+        fn lessThan(_: void, a: Item, b: Item) bool {
+            return a.val > b.val;
+        }
+    }.lessThan);
+
+    var max_v = items[0].val;
+    for (items[0..effective_k]) |it| if (it.val > max_v) {
+        max_v = it.val;
+    };
+
+    var sum_exp: f32 = 0.0;
+    for (items[0..effective_k]) |*it| {
+        it.val = @exp(it.val - max_v);
+        sum_exp += it.val;
+    }
+    for (items[0..effective_k]) |*it| {
+        it.val /= sum_exp;
+    }
+
+    var cum: f32 = 0.0;
+    const r = random.float(f32);
+    for (items[0..effective_k]) |it| {
+        cum += it.val;
+        if (cum >= r) {
+            return it.id;
+        }
+    }
+    return items[effective_k - 1].id;
+}
+
 test "SwiGLU forward and backward autograd" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(42);
@@ -1815,6 +2104,72 @@ test "SwiGLU forward and backward autograd" {
     var down_grad: f32 = 0.0;
     for (swiglu.w_down.weight.grad) |g| down_grad += @abs(g);
     try std.testing.expect(down_grad > 0.0);
+}
+
+test "LoRALinear forward and fuse" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    var lora = try LoRALinear.init(allocator, 4, 4, 2, 4.0, random);
+    defer lora.deinit(allocator);
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const x = try graph.tensor(2, 4, false);
+    @memset(x.data, 1.0);
+
+    // Initial forward: since B=0, LoRA output must match Base Weight output exactly
+    const y = try lora.forward(allocator, &graph, x);
+    const base_y = try x.matmul(lora.weight, allocator, null);
+    defer tensor.free(allocator, base_y);
+
+    for (y.data, base_y.data) |y_val, by_val| {
+        try std.testing.expectApproxEqAbs(by_val, y_val, 1e-5);
+    }
+
+    // Set B to non-zero and test backward
+    @memset(lora.lora_b.data, 0.5);
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var lora_a_grad: f32 = 0.0;
+    for (lora.lora_a.grad) |g| lora_a_grad += @abs(g);
+    try std.testing.expect(lora_a_grad > 0.0);
+
+    // Test fuse
+    lora.fuse();
+    @memset(lora.lora_b.data, 0.0);
+    const fused_out = try x.matmul(lora.weight, allocator, null);
+    defer tensor.free(allocator, fused_out);
+    try std.testing.expect(fused_out.data[0] != base_y.data[0]);
+}
+
+test "maskedCrossEntropyLoss and dpoLoss" {
+    const allocator = std.testing.allocator;
+    const logits = try tensor.zeros(allocator, &.{ 3, 4 });
+    defer tensor.free(allocator, logits);
+
+    @memcpy(logits.data, &[_]f32{
+        2.0, 1.0, 0.1, 0.0, // Token 0 (Prompt, Mask=0)
+        0.5, 3.0, 0.2, 0.1, // Token 1 (Response, Mask=1, Target=1)
+        0.1, 0.2, 4.0, 0.1, // Token 2 (Response, Mask=1, Target=2)
+    });
+
+    const targets = [_]u32{ 0, 1, 2 };
+    const mask = [_]f32{ 0.0, 1.0, 1.0 };
+
+    const loss = try maskedCrossEntropyLoss(logits, &targets, &mask, allocator);
+    try std.testing.expect(loss > 0.0 and loss < 1.0);
+
+    // DPO Loss test
+    const pi_w = [_]f32{-1.2};
+    const pi_l = [_]f32{-2.8};
+    const ref_w = [_]f32{-1.5};
+    const ref_l = [_]f32{-2.0};
+    const d_loss = dpoLoss(&pi_w, &pi_l, &ref_w, &ref_l, 0.1);
+    try std.testing.expect(d_loss > 0.0);
 }
 
 
