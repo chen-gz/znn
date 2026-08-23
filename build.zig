@@ -267,6 +267,30 @@ pub fn build(b: *std.Build) void {
     run_gpt_step.dependOn(&run_gpt_cmd.step);
     run_gpt_cmd.step.dependOn(b.getInstallStep());
 
+    // Define LLM Training end-to-end example binary
+    const exe_llm = b.addExecutable(.{
+        .name = "llm_training",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/llm_training.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_llm_mod = exe_llm.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_llm_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_llm);
+
+    const run_llm_step = b.step("run-llm", "Run the End-to-End LLM Pipeline example");
+    const run_llm_cmd = b.addRunArtifact(exe_llm);
+    run_llm_step.dependOn(&run_llm_cmd.step);
+    run_llm_cmd.step.dependOn(b.getInstallStep());
+
     // Define GAN example binary
     const exe_gan = b.addExecutable(.{
         .name = "gan",
