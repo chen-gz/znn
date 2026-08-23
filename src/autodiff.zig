@@ -37,6 +37,8 @@ pub const OpType = enum {
     SigmoidCrossEntropy, // Sigmoid Cross Entropy Loss (BCE with logits)
     L2Loss,              // L2 Regularization / Ridge Loss: 0.5 * lambda * sum(w^2)
     L1Loss,              // L1 Regularization / Lasso Loss: lambda * sum(|w|)
+    Mul,                 // 逐元素乘法
+    Silu,                // 激活函数 SiLU / Swish
 };
 
 // 各算子反向传播所需的上下文信息（如 Softmax 的概率输出与 Target 类别）
@@ -89,6 +91,8 @@ pub const OpContext = union(enum) {
     L1Loss: struct {
         lambda: f32,
     },
+    Mul: void,
+    Silu: void,
 };
 
 
@@ -188,6 +192,14 @@ pub const Op = struct {
                 const alpha = self.context.LeakyRelu.alpha;
                 for (C.data, A.data) |*c_val, a_val| {
                     c_val.* = if (a_val > 0.0) a_val else alpha * a_val;
+                }
+            },
+            .Silu => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                for (C.data, A.data) |*c_val, a_val| {
+                    const sig = if (a_val >= 0.0) 1.0 / (1.0 + @exp(-a_val)) else @exp(a_val) / (1.0 + @exp(a_val));
+                    c_val.* = a_val * sig;
                 }
             },
             // 前向公式:
@@ -334,6 +346,14 @@ pub const Op = struct {
                 const C = self.outputs[0];
                 for (C.data, A.data, B.data) |*c_val, a_val, b_val| {
                     c_val.* = a_val + b_val;
+                }
+            },
+            .Mul => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+                for (C.data, A.data, B.data) |*c_val, a_val, b_val| {
+                    c_val.* = a_val * b_val;
                 }
             },
             .Conv2D => {
@@ -743,6 +763,17 @@ pub const Op = struct {
                     }
                 }
             },
+            .Silu => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                if (A.requires_grad) {
+                    for (A.grad, C.grad, A.data) |*a_g, c_g, a_val| {
+                        const sig = if (a_val >= 0.0) 1.0 / (1.0 + @exp(-a_val)) else @exp(a_val) / (1.0 + @exp(a_val));
+                        const d_silu = sig * (1.0 + a_val * (1.0 - sig));
+                        a_g.* += c_g * d_silu;
+                    }
+                }
+            },
             // ====================================================================
             // 4. Softmax + Cross Entropy 损失函数反向传播 (SoftmaxCrossEntropy Backward)
             // ====================================================================
@@ -923,6 +954,21 @@ pub const Op = struct {
                 if (B.requires_grad) {
                     for (0..B.data.len) |i| {
                         B.grad[i] += C.grad[i];
+                    }
+                }
+            },
+            .Mul => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+                if (A.requires_grad) {
+                    for (0..A.data.len) |i| {
+                        A.grad[i] += C.grad[i] * B.data[i];
+                    }
+                }
+                if (B.requires_grad) {
+                    for (0..B.data.len) |i| {
+                        B.grad[i] += C.grad[i] * A.data[i];
                     }
                 }
             },
@@ -1625,6 +1671,37 @@ pub const Graph = struct {
         return C;
     }
 
+    // 激活函数 SiLU (Swish) 前向传播：C = A * sigmoid(A)
+    pub fn silu(self: *Graph, A: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.silu(allocator, null);
+
+        C.requires_grad = A.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 1);
+        inputs[0] = A;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Silu,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .Silu = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
     // 损失函数 Softmax + Cross Entropy 结合前向传播
     // 在 logits 的行维度计算 Softmax 概率分布，并与 targets 分类标签计算交叉熵损失
     pub fn softmaxCrossEntropy(self: *Graph, logits: *Tensor, targets: []const u8) !*Tensor {
@@ -1993,6 +2070,38 @@ pub const Graph = struct {
             .inputs = inputs,
             .outputs = outputs,
             .context = .{ .Add = {} },
+        };
+        C.creator = o;
+        try self.ops.append(self.backing_allocator, o);
+
+        return C;
+    }
+
+    // 逐元素张量乘法 (Hadamard 积)：C = A * B
+    pub fn mul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.mul(B, allocator, null);
+
+        C.requires_grad = A.requires_grad or B.requires_grad;
+        if (C.requires_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        const inputs = try allocator.alloc(*Tensor, 2);
+        inputs[0] = A;
+        inputs[1] = B;
+        const outputs = try allocator.alloc(*Tensor, 1);
+        outputs[0] = C;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .Mul,
+            .inputs = inputs,
+            .outputs = outputs,
+            .context = .{ .Mul = {} },
         };
         C.creator = o;
         try self.ops.append(self.backing_allocator, o);
