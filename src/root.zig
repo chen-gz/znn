@@ -32,11 +32,15 @@ test "basic imports and struct definitions" {
     const std = @import("std");
     _ = @import("optim.zig");
     try std.testing.expect(@TypeOf(nn.Linear) == type);
+    try std.testing.expect(@TypeOf(nn.SwiGLU) == type);
+    try std.testing.expect(@TypeOf(nn.LoRALinear) == type);
     try std.testing.expect(@TypeOf(nn.TransformerDecoder) == fn(comptime usize) type);
     try std.testing.expect(@TypeOf(autodiff.Tensor) == type);
     try std.testing.expect(@TypeOf(tensor.Tensor) == type);
     try std.testing.expect(@TypeOf(optim.SGDOptimizer) == type);
     try std.testing.expect(@TypeOf(optim.AdamOptimizer) == type);
+    try std.testing.expect(@TypeOf(optim.AdamWOptimizer) == type);
+    try std.testing.expect(@TypeOf(dataset.BPETokenizer) == type);
 }
 
 test "measureTime utility" {
@@ -556,6 +560,116 @@ test "cross_validation module searchLasso" {
     try std.testing.expectEqual(@as(usize, 5), cv_search.results.items.len);
     try std.testing.expect(cv_search.getBestMinAlpha() <= 0.1);
 }
+
+test "SiLU and Mul autograd in Graph" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const A = try graph.tensor(2, 2, true);
+    const B = try graph.tensor(2, 2, true);
+    @memcpy(A.data, &[_]f32{ 0.0, 1.0, -1.0, 2.0 });
+    @memcpy(B.data, &[_]f32{ 2.0, 3.0, 4.0, 5.0 });
+
+    // C = silu(A)
+    const C = try graph.silu(A);
+    // D = C * B (element-wise mul)
+    const D = try graph.mul(C, B);
+
+    try graph.forward();
+
+    // Check C[0] = 0.0 * sig(0) = 0.0, D[0] = 0.0 * 2.0 = 0.0
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), C.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), D.data[0], 1e-5);
+
+    // C[1] = 1.0 / (1 + e^-1) = 0.73105858, D[1] = 0.73105858 * 3.0 = 2.1931757
+    try std.testing.expectApproxEqAbs(@as(f32, 0.73105858 * 3.0), D.data[1], 1e-4);
+
+    @memset(D.grad, 1.0);
+    try graph.backward(D);
+
+    // dD/dB = C
+    for (B.grad, C.data) |b_g, c_val| {
+        try std.testing.expectApproxEqAbs(c_val, b_g, 1e-5);
+    }
+    // dD/dA = B * d(silu(A))
+    // for i=0: A=0 -> sig=0.5 -> d_silu = 0.5 * (1 + 0) = 0.5 -> grad = 2.0 * 0.5 = 1.0
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[0], 1e-5);
+}
+
+test "SwiGLU forward operator" {
+    const std = @import("std");
+    var out: [2]f32 = undefined;
+    const gate = [_]f32{ 0.0, 2.0 };
+    const up = [_]f32{ 3.0, 4.0 };
+
+    nn.swigluForward(&out, &gate, &up);
+    // out[0] = (0 * sig(0)) * 3 = 0
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out[0], 1e-5);
+    // out[1] = (2 * sig(2)) * 4 = 2 * (1 / (1 + e^-2)) * 4 = 8 * 0.880797 = 7.046376
+    try std.testing.expectApproxEqAbs(@as(f32, 7.046376), out[1], 1e-4);
+}
+
+test "End-to-End LLM Pipeline integration demo" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(2026);
+    const random = prng.random();
+
+    // 1. BPETokenizer test
+    var tokenizer = try dataset.BPETokenizer.init(allocator);
+    defer tokenizer.deinit();
+    try tokenizer.addMerge("Z", "i", 0);
+    try tokenizer.addMerge("Zi", "g", 1);
+
+    const encoded = try tokenizer.encode(allocator, "Zig");
+    defer allocator.free(encoded);
+    try std.testing.expectEqual(@as(usize, 1), encoded.len);
+
+    const decoded = try tokenizer.decode(allocator, encoded);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings("Zig", decoded);
+
+    // 2. SwiGLU MLP
+    var swiglu = try nn.SwiGLU.init(allocator, 8, 16, random);
+    defer swiglu.deinit(allocator);
+
+    // 3. AdamW Optimizer with Cosine Scheduler
+    var opt = try optim.AdamWOptimizer.init(allocator, &swiglu, .{
+        .lr = 1e-3,
+        .weight_decay = 0.01,
+    });
+    defer opt.deinit();
+
+    const sched = optim.CosineScheduler.init(1e-3, 1e-5, 5, 20);
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const x = try graph.tensorND(&.{ 2, 4, 8 }, true);
+    @memset(x.data, 0.1);
+
+    const out = try swiglu.forward(allocator, &graph, x);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 4, 8 }, out.shape.dims[0..out.shape.len]);
+
+    @memset(out.grad, 1.0);
+    try graph.backward(out);
+
+    _ = optim.clipGradNorm(opt.params, 1.0);
+    const current_lr = sched.getLR(1);
+    opt.stepWithLR(current_lr);
+
+    // 4. Sampling test
+    const mock_logits = [_]f32{ 0.1, 0.4, 2.5, 0.2, 0.8 };
+    const sampled_top_p = try nn.sampleTopP(&mock_logits, 5, 0.7, 0.9, random, allocator);
+    try std.testing.expect(sampled_top_p < 5);
+
+    const sampled_top_k = try nn.sampleTopK(&mock_logits, 5, 0.7, 2, random, allocator);
+    try std.testing.expect(sampled_top_k < 5);
+}
+
 
 
 
