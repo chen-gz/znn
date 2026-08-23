@@ -300,3 +300,213 @@ test "DataLoader basic functionality" {
     try std.testing.expectEqual(@as(?usize, null), b3_dl);
 }
 
+// ============================================================================
+// 2. Byte-level BPE 分词器与内存映射数据集 (Byte-level BPE & Mmap Dataset)
+// ============================================================================
+
+pub const TokenId = u32;
+pub const MergePair = struct { a: TokenId, b: TokenId };
+
+pub const BPETokenizer = struct {
+    allocator: std.mem.Allocator,
+    vocab: std.StringHashMap(TokenId),
+    inv_vocab: std.ArrayList([]const u8),
+    merges: std.AutoHashMap(MergePair, u32),
+
+    pub fn init(allocator: std.mem.Allocator) !BPETokenizer {
+        var vocab = std.StringHashMap(TokenId).init(allocator);
+        errdefer vocab.deinit();
+        var inv_vocab: std.ArrayList([]const u8) = .empty;
+        errdefer inv_vocab.deinit(allocator);
+
+        // 初始化 256 个基本单字节 Token (0x00 ~ 0xFF)
+        for (0..256) |b| {
+            const slice = try allocator.alloc(u8, 1);
+            slice[0] = @as(u8, @intCast(b));
+            try inv_vocab.append(allocator, slice);
+            try vocab.put(slice, @as(TokenId, @intCast(b)));
+        }
+
+        return BPETokenizer{
+            .allocator = allocator,
+            .vocab = vocab,
+            .inv_vocab = inv_vocab,
+            .merges = std.AutoHashMap(MergePair, u32).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: *BPETokenizer) void {
+        self.vocab.deinit();
+        for (self.inv_vocab.items) |slice| {
+            self.allocator.free(slice);
+        }
+        self.inv_vocab.deinit(self.allocator);
+        self.merges.deinit();
+    }
+
+    /// 注册一个自定义/特殊 Token (如 <|bos|>, <|eos|>)
+    pub fn addToken(self: *BPETokenizer, token_str: []const u8) !TokenId {
+        if (self.vocab.get(token_str)) |id| return id;
+
+        const owned_str = try self.allocator.dupe(u8, token_str);
+        const new_id = @as(TokenId, @intCast(self.inv_vocab.items.len));
+        try self.inv_vocab.append(self.allocator, owned_str);
+        try self.vocab.put(owned_str, new_id);
+        return new_id;
+    }
+
+    /// 添加一条合并规则: (str_a, str_b) -> 优先级 rank
+    pub fn addMerge(self: *BPETokenizer, str_a: []const u8, str_b: []const u8, rank: u32) !void {
+        const id_a = self.vocab.get(str_a) orelse try self.addToken(str_a);
+        const id_b = self.vocab.get(str_b) orelse try self.addToken(str_b);
+
+        var merged_str = try self.allocator.alloc(u8, str_a.len + str_b.len);
+        defer self.allocator.free(merged_str);
+        @memcpy(merged_str[0..str_a.len], str_a);
+        @memcpy(merged_str[str_a.len..], str_b);
+
+        _ = try self.addToken(merged_str);
+        try self.merges.put(.{ .a = id_a, .b = id_b }, rank);
+    }
+
+    /// 将 UTF-8 文本编码为 Token ID 序列
+    pub fn encode(self: *const BPETokenizer, allocator: std.mem.Allocator, text: []const u8) ![]TokenId {
+        var tokens: std.ArrayList(TokenId) = .empty;
+        defer tokens.deinit(allocator);
+
+        // 1. 初始化为单字节 Token ID (0 ~ 255)
+        for (text) |byte| {
+            try tokens.append(allocator, @as(TokenId, byte));
+        }
+
+        // 2. 迭代根据 merges 规则进行连续最高优先级合并
+        while (tokens.items.len >= 2) {
+            var min_rank: u32 = std.math.maxInt(u32);
+            var best_idx: ?usize = null;
+            var best_pair: ?MergePair = null;
+
+            for (0..tokens.items.len - 1) |i| {
+                const pair = MergePair{ .a = tokens.items[i], .b = tokens.items[i + 1] };
+                if (self.merges.get(pair)) |rank| {
+                    if (rank < min_rank) {
+                        min_rank = rank;
+                        best_idx = i;
+                        best_pair = pair;
+                    }
+                }
+            }
+
+            if (best_idx) |idx| {
+                const pair = best_pair.?;
+                const str_a = self.inv_vocab.items[pair.a];
+                const str_b = self.inv_vocab.items[pair.b];
+                var merged_str = try allocator.alloc(u8, str_a.len + str_b.len);
+                defer allocator.free(merged_str);
+                @memcpy(merged_str[0..str_a.len], str_a);
+                @memcpy(merged_str[str_a.len..], str_b);
+
+                if (self.vocab.get(merged_str)) |new_id| {
+                    tokens.items[idx] = new_id;
+                    _ = tokens.orderedRemove(idx + 1);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        return tokens.toOwnedSlice(allocator);
+    }
+
+    /// 将 Token ID 序列还原为 UTF-8 字符串
+    pub fn decode(self: *const BPETokenizer, allocator: std.mem.Allocator, tokens: []const TokenId) ![]u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+
+        for (tokens) |tok| {
+            if (tok < self.inv_vocab.items.len) {
+                try buf.appendSlice(allocator, self.inv_vocab.items[tok]);
+            }
+        }
+
+        return buf.toOwnedSlice(allocator);
+    }
+};
+
+/// 零拷贝内存映射二进制数据集 (MMap Binary DataLoader)
+pub const BinaryMmapDataset = struct {
+    tokens: []const u32,
+    seq_len: usize,
+
+    pub fn fromSlice(tokens: []const u32, seq_len: usize) BinaryMmapDataset {
+        return .{
+            .tokens = tokens,
+            .seq_len = seq_len,
+        };
+    }
+
+    pub fn loadFromBytes(bytes: []align(std.mem.page_size) const u8, seq_len: usize) BinaryMmapDataset {
+        const token_count = bytes.len / @sizeOf(u32);
+        const tokens: [*]const u32 = @ptrCast(@alignCast(bytes.ptr));
+        return .{
+            .tokens = tokens[0..token_count],
+            .seq_len = seq_len,
+        };
+    }
+
+    pub fn close(self: *BinaryMmapDataset) void {
+        _ = self;
+    }
+
+    /// 获取训练批次 (输入 X 与移位预测标签 Y)
+    pub fn getBatch(self: *const BinaryMmapDataset, offset: usize, batch_size: usize) struct { x: []const u32, y: []const u32 } {
+        const total_tokens = batch_size * self.seq_len;
+        std.debug.assert(offset + total_tokens + 1 <= self.tokens.len);
+        const x_slice = self.tokens[offset .. offset + total_tokens];
+        const y_slice = self.tokens[offset + 1 .. offset + total_tokens + 1];
+        return .{ .x = x_slice, .y = y_slice };
+    }
+
+    pub fn numBatches(self: *const BinaryMmapDataset, batch_size: usize) usize {
+        const total_tokens = batch_size * self.seq_len;
+        if (self.tokens.len <= total_tokens) return 0;
+        return (self.tokens.len - 1) / total_tokens;
+    }
+};
+
+test "BPETokenizer encode, decode and merge" {
+    const allocator = std.testing.allocator;
+    var tokenizer = try BPETokenizer.init(allocator);
+    defer tokenizer.deinit();
+
+    // Add merge: "h" + "e" -> "he" (rank 0), "l" + "l" -> "ll" (rank 1), "he" + "ll" -> "hell" (rank 2), "hell" + "o" -> "hello" (rank 3)
+    try tokenizer.addMerge("h", "e", 0);
+    try tokenizer.addMerge("l", "l", 1);
+    try tokenizer.addMerge("he", "ll", 2);
+    try tokenizer.addMerge("hell", "o", 3);
+
+    const encoded = try tokenizer.encode(allocator, "hello world hello");
+    defer allocator.free(encoded);
+
+    // "hello" should be compressed to a single token ID >= 256
+    const hello_id = tokenizer.vocab.get("hello").?;
+    try std.testing.expectEqual(hello_id, encoded[0]);
+
+    const decoded = try tokenizer.decode(allocator, encoded);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings("hello world hello", decoded);
+}
+
+test "BinaryMmapDataset batch slicing" {
+    const tokens = [_]u32{ 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
+    var dataset = BinaryMmapDataset.fromSlice(&tokens, 3);
+    defer dataset.close();
+
+    const batch = dataset.getBatch(0, 2); // batch_size=2, seq_len=3 -> total 6 tokens
+    try std.testing.expectEqualSlices(u32, &.{ 10, 20, 30, 40, 50, 60 }, batch.x);
+    try std.testing.expectEqualSlices(u32, &.{ 20, 30, 40, 50, 60, 70 }, batch.y);
+}
+
+
