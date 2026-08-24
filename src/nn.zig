@@ -5,13 +5,22 @@ const engine = @import("engine.zig");
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
 
+pub const trainClassificationStep = engine.trainClassificationStep;
+pub const evalClassificationStep = engine.evalClassificationStep;
+pub const trainClassificationEpoch = engine.trainClassificationEpoch;
+pub const evaluateClassification = engine.evaluateClassification;
+pub const computeAccuracy = engine.computeAccuracy;
+pub const ClassificationStepResult = engine.ClassificationStepResult;
+pub const ClassificationEpochResult = engine.ClassificationEpochResult;
+
+// 别名
 pub const trainStep = engine.trainStep;
 pub const evalStep = engine.evalStep;
 pub const trainEpoch = engine.trainEpoch;
 pub const evaluate = engine.evaluate;
-pub const computeAccuracy = engine.computeAccuracy;
 pub const StepResult = engine.StepResult;
 pub const EpochResult = engine.EpochResult;
+
 
 // ============================================================================
 // 1. PyTorch-like Linear (全连接/线性层) 模块定义
