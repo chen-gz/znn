@@ -139,13 +139,14 @@ fn runTraining(
             _ = train_loader.nextInto(x_batch, y_batch);
 
             // 使用通用分类训练单步 (自动从 targets.len 推导 batch_size，从 x_batch 长度推导 input_dim)
-            const step_res = try nn.trainStep(
+            const step_res = try nn.trainClassificationStep(
                 arena,
                 model,
                 &optimizer,
                 x_batch[0 .. actual_batch_size * input_dim],
                 y_batch[0..actual_batch_size],
             );
+
 
 
             epoch_loss += step_res.loss;
@@ -189,7 +190,7 @@ fn evaluateModel(
     model: anytype,
     arena: std.mem.Allocator,
     test_dataset: dataset.Dataset,
-) !nn.EpochResult {
+) !nn.ClassificationEpochResult {
     const test_batch_size = 100;
 
 
@@ -199,8 +200,9 @@ fn evaluateModel(
     });
     defer test_loader.deinit(arena);
 
-    return try nn.evaluate(arena, model, &test_loader);
+    return try nn.evaluateClassification(arena, model, &test_loader);
 }
+
 
 
 fn printPredictions(

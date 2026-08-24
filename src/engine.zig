@@ -4,17 +4,21 @@ const autodiff = @import("autodiff.zig");
 const dataset = @import("dataset.zig");
 const nn = @import("nn.zig");
 
-pub const StepResult = struct {
+pub const ClassificationStepResult = struct {
     loss: f32,
     accuracy: f32,
     batch_size: usize,
 };
 
-pub const EpochResult = struct {
+pub const ClassificationEpochResult = struct {
     loss: f32,
     accuracy: f32,
     num_batches: usize,
 };
+
+// 兼容别名
+pub const StepResult = ClassificationStepResult;
+pub const EpochResult = ClassificationEpochResult;
 
 /// 计算多分类批次的预测准确率 (Top-1 Accuracy)
 pub fn computeAccuracy(logits: *tensor.Tensor, targets: []const u8, allocator: std.mem.Allocator) !f32 {
@@ -38,13 +42,13 @@ pub fn computeAccuracy(logits: *tensor.Tensor, targets: []const u8, allocator: s
 /// 2. 前向传播计算 Logits
 /// 3. 计算 Softmax 交叉熵损失与分类准确率
 /// 4. 反向传播计算梯度并调用优化器 step() 更新权重
-pub fn trainStep(
+pub fn trainClassificationStep(
     allocator: std.mem.Allocator,
     model: anytype,
     optimizer: anytype,
     x_data: []const f32,
     targets: []const u8,
-) !StepResult {
+) !ClassificationStepResult {
     const batch_size = targets.len;
     std.debug.assert(batch_size > 0);
     std.debug.assert(x_data.len % batch_size == 0);
@@ -66,7 +70,7 @@ pub fn trainStep(
     try graph.backward(loss);
     optimizer.step();
 
-    return StepResult{
+    return ClassificationStepResult{
         .loss = batch_loss,
         .accuracy = batch_acc,
         .batch_size = batch_size,
@@ -75,12 +79,12 @@ pub fn trainStep(
 
 /// 通用分类评估单步 (Classification Eval Step)
 /// 仅执行前向传播和指标计算，不计算梯度与更新权重
-pub fn evalStep(
+pub fn evalClassificationStep(
     allocator: std.mem.Allocator,
     model: anytype,
     x_data: []const f32,
     targets: []const u8,
-) !StepResult {
+) !ClassificationStepResult {
     const batch_size = targets.len;
     std.debug.assert(batch_size > 0);
     std.debug.assert(x_data.len % batch_size == 0);
@@ -98,22 +102,22 @@ pub fn evalStep(
     const batch_loss = loss.data[0];
     const batch_acc = try computeAccuracy(logits, targets, allocator);
 
-    return StepResult{
+    return ClassificationStepResult{
         .loss = batch_loss,
         .accuracy = batch_acc,
         .batch_size = batch_size,
     };
 }
 
-/// 训练整个 DataLoader 的一个完整 Epoch
+/// 训练整个 DataLoader 的一个完整 Epoch (Classification)
 /// 自动从 loader.dataset 获取单样本输入维度 (input_dim = rows * cols)
-pub fn trainEpoch(
+pub fn trainClassificationEpoch(
     allocator: std.mem.Allocator,
     model: anytype,
     optimizer: anytype,
     loader: *dataset.DataLoader,
     progress_callback: ?*const fn (batch_idx: usize, loss: f32, acc: f32) void,
-) !EpochResult {
+) !ClassificationEpochResult {
     loader.reset();
     var total_loss: f32 = 0.0;
     var total_acc: f32 = 0.0;
@@ -132,7 +136,7 @@ pub fn trainEpoch(
 
         _ = loader.nextInto(x_buffer, y_buffer);
 
-        const step_res = try trainStep(
+        const step_res = try trainClassificationStep(
             allocator,
             model,
             optimizer,
@@ -149,22 +153,22 @@ pub fn trainEpoch(
         }
     }
 
-    if (num_batches == 0) return EpochResult{ .loss = 0, .accuracy = 0, .num_batches = 0 };
+    if (num_batches == 0) return ClassificationEpochResult{ .loss = 0, .accuracy = 0, .num_batches = 0 };
 
-    return EpochResult{
+    return ClassificationEpochResult{
         .loss = total_loss / @as(f32, @floatFromInt(num_batches)),
         .accuracy = total_acc / @as(f32, @floatFromInt(num_batches)),
         .num_batches = num_batches,
     };
 }
 
-/// 评估整个 DataLoader
+/// 评估整个 DataLoader (Classification)
 /// 自动从 loader.dataset 获取单样本输入维度 (input_dim = rows * cols)
-pub fn evaluate(
+pub fn evaluateClassification(
     allocator: std.mem.Allocator,
     model: anytype,
     loader: *dataset.DataLoader,
-) !EpochResult {
+) !ClassificationEpochResult {
     loader.reset();
     var total_loss: f32 = 0.0;
     var total_acc: f32 = 0.0;
@@ -183,7 +187,7 @@ pub fn evaluate(
 
         _ = loader.nextInto(x_buffer, y_buffer);
 
-        const step_res = try evalStep(
+        const step_res = try evalClassificationStep(
             allocator,
             model,
             x_buffer[0 .. actual_batch_size * input_dim],
@@ -195,16 +199,22 @@ pub fn evaluate(
         num_batches += 1;
     }
 
-    if (num_batches == 0) return EpochResult{ .loss = 0, .accuracy = 0, .num_batches = 0 };
+    if (num_batches == 0) return ClassificationEpochResult{ .loss = 0, .accuracy = 0, .num_batches = 0 };
 
-    return EpochResult{
+    return ClassificationEpochResult{
         .loss = total_loss / @as(f32, @floatFromInt(num_batches)),
         .accuracy = total_acc / @as(f32, @floatFromInt(num_batches)),
         .num_batches = num_batches,
     };
 }
 
-test "engine trainStep and evalStep auto dimension inference" {
+// 别名导出
+pub const trainStep = trainClassificationStep;
+pub const evalStep = evalClassificationStep;
+pub const trainEpoch = trainClassificationEpoch;
+pub const evaluate = evaluateClassification;
+
+test "engine trainClassificationStep and evalClassificationStep" {
     const arena = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
@@ -234,12 +244,12 @@ test "engine trainStep and evalStep auto dimension inference" {
     const y_mock = [_]u8{ 0, 1 };
 
     // 不需要显式传递 batch_size 和 input_dim，全部自动推导
-    const step_res = try trainStep(arena, &model, &optim, &x_mock, &y_mock);
+    const step_res = try trainClassificationStep(arena, &model, &optim, &x_mock, &y_mock);
     try std.testing.expect(step_res.loss > 0);
     try std.testing.expect(step_res.accuracy >= 0 and step_res.accuracy <= 1.0);
     try std.testing.expectEqual(@as(usize, 2), step_res.batch_size);
 
-    const eval_res = try evalStep(arena, &model, &x_mock, &y_mock);
+    const eval_res = try evalClassificationStep(arena, &model, &x_mock, &y_mock);
     try std.testing.expect(eval_res.loss > 0);
     try std.testing.expect(eval_res.accuracy >= 0 and eval_res.accuracy <= 1.0);
     try std.testing.expectEqual(@as(usize, 2), eval_res.batch_size);
