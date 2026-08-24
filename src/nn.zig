@@ -1,8 +1,17 @@
 const std = @import("std");
 const autodiff = @import("autodiff.zig");
 const tensor = @import("tensor.zig");
+const engine = @import("engine.zig");
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
+
+pub const trainStep = engine.trainStep;
+pub const evalStep = engine.evalStep;
+pub const trainEpoch = engine.trainEpoch;
+pub const evaluate = engine.evaluate;
+pub const computeAccuracy = engine.computeAccuracy;
+pub const StepResult = engine.StepResult;
+pub const EpochResult = engine.EpochResult;
 
 // ============================================================================
 // 1. PyTorch-like Linear (全连接/线性层) 模块定义
