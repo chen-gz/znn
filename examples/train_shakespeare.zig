@@ -43,22 +43,22 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try dataset.BPETokenizer.init(allocator);
     defer tokenizer.deinit();
 
-    const sample_len = @min(text.len, 50_000);
+    const sample_len = @min(text.len, 100_000);
     const tokens = try tokenizer.encode(allocator, text[0..sample_len]);
     defer allocator.free(tokens);
     std.debug.print("✨ Encoded {} tokens from {} bytes\n\n", .{ tokens.len, sample_len });
 
     // 3. 构建模型配置与初始化
-    const block_size: usize = 32;
-    const batch_size: usize = 4;
+    const block_size: usize = 64;
+    const batch_size: usize = 8;
     const vocab_size: usize = 256; // 256 raw byte tokens
 
     const gpt_config = nn.GPTConfig{
         .vocab_size = vocab_size,
         .block_size = block_size,
-        .n_embd = 48,
+        .n_embd = 64,
         .n_head = 4,
-        .n_layer = 3,
+        .n_layer = 4,
     };
 
     std.debug.print("🏗️  Initializing GPT (vocab={}, block={}, embd={}, head={}, layers={})...\n", .{
@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
 
     // 4. 优化器与学习率调度器
     var optimizer = try optim.AdamWOptimizer.init(allocator, &model, .{
-        .lr = 3e-3,
+        .lr = 2e-3,
         .beta1 = 0.9,
         .beta2 = 0.95,
         .eps = 1e-8,
@@ -83,13 +83,13 @@ pub fn main(init: std.process.Init) !void {
     });
     defer optimizer.deinit();
 
-    const max_steps: usize = 30;
-    const scheduler = optim.CosineScheduler.init(3e-3, 3e-4, 5, max_steps);
+    const max_steps: usize = 200;
+    const scheduler = optim.CosineScheduler.init(2e-3, 2e-4, 15, max_steps);
 
     var train_dataset = dataset.BinaryMmapDataset.fromSlice(tokens, block_size);
     defer train_dataset.close();
 
-    std.debug.print("🚀 Starting training for {} steps...\n\n", .{max_steps});
+    std.debug.print("🚀 Starting training for {} steps (Batch Size={}, Context Length={})...\n\n", .{ max_steps, batch_size, block_size });
 
     var start_ts: std.posix.system.timespec = undefined;
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &start_ts);
@@ -127,7 +127,7 @@ pub fn main(init: std.process.Init) !void {
         const cur_lr = scheduler.getLR(step);
         optimizer.stepWithLR(cur_lr);
 
-        if ((step + 1) % 5 == 0 or step == 0) {
+        if ((step + 1) % 25 == 0 or step == 0) {
             std.debug.print("  Step {:3}/{} | Loss: {d:.4} | LR: {d:.5}\n", .{
                 step + 1,
                 max_steps,
@@ -152,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
     defer gen_tokens.deinit(allocator);
     try gen_tokens.appendSlice(allocator, prompt_tokens);
 
-    for (0..40) |_| {
+    for (0..120) |_| {
         const cur_len = @min(gen_tokens.items.len, block_size);
         const start_idx = gen_tokens.items.len - cur_len;
         const cur_slice = gen_tokens.items[start_idx..];
@@ -168,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
         const logits = try model.forward(allocator, &g, x_eval);
         const last_logits = logits.data[(cur_len - 1) * vocab_size .. cur_len * vocab_size];
 
-        const next_token = try nn.sampleTopP(last_logits, vocab_size, 0.8, 0.9, random, allocator);
+        const next_token = try nn.sampleTopP(last_logits, vocab_size, 0.7, 0.85, random, allocator);
         try gen_tokens.append(allocator, next_token);
     }
 
