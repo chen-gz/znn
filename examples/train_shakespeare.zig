@@ -43,21 +43,21 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try dataset.BPETokenizer.init(allocator);
     defer tokenizer.deinit();
 
-    const sample_len = @min(text.len, 100_000);
+    const sample_len = @min(text.len, 200_000);
     const tokens = try tokenizer.encode(allocator, text[0..sample_len]);
     defer allocator.free(tokens);
     std.debug.print("✨ Encoded {} tokens from {} bytes\n\n", .{ tokens.len, sample_len });
 
     // 3. 构建模型配置与初始化
-    const block_size: usize = 64;
-    const batch_size: usize = 8;
+    const block_size: usize = 128;
+    const batch_size: usize = 16;
     const vocab_size: usize = 256; // 256 raw byte tokens
 
     const gpt_config = nn.GPTConfig{
         .vocab_size = vocab_size,
         .block_size = block_size,
-        .n_embd = 64,
-        .n_head = 4,
+        .n_embd = 96,
+        .n_head = 6,
         .n_layer = 4,
     };
 
@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
 
     // 4. 优化器与学习率调度器
     var optimizer = try optim.AdamWOptimizer.init(allocator, &model, .{
-        .lr = 2e-3,
+        .lr = 3e-3,
         .beta1 = 0.9,
         .beta2 = 0.95,
         .eps = 1e-8,
@@ -83,8 +83,8 @@ pub fn main(init: std.process.Init) !void {
     });
     defer optimizer.deinit();
 
-    const max_steps: usize = 200;
-    const scheduler = optim.CosineScheduler.init(2e-3, 2e-4, 15, max_steps);
+    const max_steps: usize = 500;
+    const scheduler = optim.CosineScheduler.init(3e-3, 3e-4, 25, max_steps);
 
     var train_dataset = dataset.BinaryMmapDataset.fromSlice(tokens, block_size);
     defer train_dataset.close();
@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(y_target);
 
     for (0..max_steps) |step| {
-        const offset = (step * batch_size * block_size) % (tokens.len - batch_size * block_size - 2);
+        const offset = (step * 53) % (tokens.len - batch_size * block_size - 2);
         const batch = train_dataset.getBatch(offset, batch_size);
 
         for (0..batch_size * block_size) |i| {
@@ -127,7 +127,7 @@ pub fn main(init: std.process.Init) !void {
         const cur_lr = scheduler.getLR(step);
         optimizer.stepWithLR(cur_lr);
 
-        if ((step + 1) % 25 == 0 or step == 0) {
+        if ((step + 1) % 50 == 0 or step == 0) {
             std.debug.print("  Step {:3}/{} | Loss: {d:.4} | LR: {d:.5}\n", .{
                 step + 1,
                 max_steps,
@@ -143,8 +143,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("\n✅ Training finished in {d:.2}s!\n\n", .{elapsed_s});
 
     // 5. 实时文本生成 (Autoregressive Generation with Top-P Sampling)
-    std.debug.print("🎭 Sampling text from trained model (Prompt: \"KING:\")...\n", .{});
-    const prompt_text = "KING:";
+    const prompt_text = "KING:\nWhat say you to this, my lord?\n\nLORD:\n";
+    std.debug.print("🎭 Sampling text from trained model (Prompt: \"{s}\")...\n", .{prompt_text});
     const prompt_tokens = try tokenizer.encode(allocator, prompt_text);
     defer allocator.free(prompt_tokens);
 
@@ -152,7 +152,7 @@ pub fn main(init: std.process.Init) !void {
     defer gen_tokens.deinit(allocator);
     try gen_tokens.appendSlice(allocator, prompt_tokens);
 
-    for (0..120) |_| {
+    for (0..200) |_| {
         const cur_len = @min(gen_tokens.items.len, block_size);
         const start_idx = gen_tokens.items.len - cur_len;
         const cur_slice = gen_tokens.items[start_idx..];
@@ -168,7 +168,7 @@ pub fn main(init: std.process.Init) !void {
         const logits = try model.forward(allocator, &g, x_eval);
         const last_logits = logits.data[(cur_len - 1) * vocab_size .. cur_len * vocab_size];
 
-        const next_token = try nn.sampleTopP(last_logits, vocab_size, 0.7, 0.85, random, allocator);
+        const next_token = try nn.sampleTopP(last_logits, vocab_size, 0.65, 0.85, random, allocator);
         try gen_tokens.append(allocator, next_token);
     }
 
