@@ -291,6 +291,30 @@ pub fn build(b: *std.Build) void {
     run_llm_step.dependOn(&run_llm_cmd.step);
     run_llm_cmd.step.dependOn(b.getInstallStep());
 
+    // Define TinyShakespeare Training example binary
+    const exe_shakespeare = b.addExecutable(.{
+        .name = "train_shakespeare",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/train_shakespeare.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_shakespeare_mod = exe_shakespeare.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_shakespeare_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_shakespeare);
+
+    const run_shakespeare_step = b.step("run-shakespeare", "Run the TinyShakespeare GPT training and generation example");
+    const run_shakespeare_cmd = b.addRunArtifact(exe_shakespeare);
+    run_shakespeare_step.dependOn(&run_shakespeare_cmd.step);
+    run_shakespeare_cmd.step.dependOn(b.getInstallStep());
+
     // Define GAN example binary
     const exe_gan = b.addExecutable(.{
         .name = "gan",
@@ -460,9 +484,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&install_cnn_tests.step);
 
     // ========================================================================
-    // Dataset Download Step (e.g. zig build download-dataset -- fashion_mnist)
+    // Dataset Download Step (e.g. zig build download-dataset -- tinyshakespeare)
     // ========================================================================
-    const dataset_opt = b.option([]const u8, "dataset", "Dataset name to download (fashion_mnist, mnist)") orelse "fashion_mnist";
+    const dataset_opt = b.option([]const u8, "dataset", "Dataset name to download (fashion_mnist, mnist, tinyshakespeare, wikitext2, tinystories, alpaca, all_llm)") orelse "fashion_mnist";
 
     const download_cmd = b.addSystemCommand(&.{
         "bash",
@@ -474,7 +498,7 @@ pub fn build(b: *std.Build) void {
         download_cmd.addArg(dataset_opt);
     }
 
-    const download_step = b.step("download-dataset", "Download benchmark dataset (e.g. fashion_mnist, mnist)");
+    const download_step = b.step("download-dataset", "Download dataset (e.g. tinyshakespeare, wikitext2, tinystories, alpaca, fashion_mnist, mnist)");
     download_step.dependOn(&download_cmd.step);
 
     const download_data_step = b.step("download-data", "Alias for download-dataset");

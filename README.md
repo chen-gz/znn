@@ -55,20 +55,21 @@ It serves as a clean, production-grade reference for:
 
 ## 🛠️ Build and Execution
 
-### 1. Download Dataset
-You can download benchmark datasets with a single command:
+### 1. Download Datasets
+You can download computer vision and LLM text datasets with a single command:
 ```bash
-# Download Fashion MNIST (default)
-zig build download-dataset
+# Vision datasets
+zig build download-dataset                  # Fashion MNIST (default)
+zig build download-dataset -- mnist         # Classic MNIST
 
-# Or download classic MNIST
-zig build download-dataset -- mnist
-
-# Or use justfile
-just download-data
+# LLM Text datasets
+zig build download-dataset -- tinyshakespeare # TinyShakespeare (~1.1MB pure text)
+zig build download-dataset -- wikitext2       # WikiText-2 (train/valid/test ~12MB)
+zig build download-dataset -- tinystories     # TinyStories validation slice (~19MB)
+zig build download-dataset -- alpaca          # Stanford Alpaca SFT dataset (~22MB JSON)
+zig build download-dataset -- all_llm         # Download all 4 LLM datasets
 ```
-The IDX format binary files (`train-images-idx3-ubyte`, `train-labels-idx1-ubyte`, `t10k-images-idx3-ubyte`, `t10k-labels-idx1-ubyte`) will automatically be extracted into the `data/` directory.
-
+The downloaded datasets will automatically be saved and extracted into the `data/` directory.
 
 ### 2. Compile and Run Linear Regression & Ridge Regression
 Run the 1D linear regression or ridge regression example:
@@ -83,25 +84,27 @@ zig build run-logr
 zig build run-ridge
 ```
 
-### 3. Compile and Run Neural Network Model Training (MLP)
-Run the training pipeline in high-performance Release mode:
+### 3. Compile and Run LLM & GPT Model Training
+Run end-to-end LLM pretraining, LoRA fine-tuning, and Shakespeare generation:
 ```bash
-# Run training in optimized ReleaseFast mode
-zig build run -Doptimize=ReleaseFast
+# End-to-End LLM Pipeline demo (BPE + SwiGLU + AdamW + SFT + LoRA + DPO + Top-P)
+zig build run-llm
 
-# Run training in Debug mode with full runtime safety checks
-zig build run
+# Train Mini GPT on TinyShakespeare corpus and generate text live
+zig build run-shakespeare
 ```
 
-### 4. Compile and Run CNN Model Training
-Run the CNN model training pipeline (Conv2D + MaxPool2D + ReLU + Linear):
+### 4. Compile and Run Vision Neural Network Training (MLP & CNN)
 ```bash
+# Run MLP training on Fashion MNIST
+zig build run -Doptimize=ReleaseFast
+
 # Run CNN training
 zig build run-cnn
 ```
 
 ### 5. Run Unit Tests
-Execute the test suites containing autograd, reshape, transpose, and dataset parser validation:
+Execute the test suites containing autograd, SwiGLU, AdamW, LoRA, BPE, and dataset validation:
 ```bash
 zig build test
 ```

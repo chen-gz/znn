@@ -369,17 +369,14 @@ pub const BPETokenizer = struct {
         try self.merges.put(.{ .a = id_a, .b = id_b }, rank);
     }
 
-    /// 将 UTF-8 文本编码为 Token ID 序列
-    pub fn encode(self: *const BPETokenizer, allocator: std.mem.Allocator, text: []const u8) ![]TokenId {
+    fn encodeChunk(self: *const BPETokenizer, allocator: std.mem.Allocator, chunk: []const u8, out_tokens: *std.ArrayList(TokenId)) !void {
         var tokens: std.ArrayList(TokenId) = .empty;
         defer tokens.deinit(allocator);
 
-        // 1. 初始化为单字节 Token ID (0 ~ 255)
-        for (text) |byte| {
+        for (chunk) |byte| {
             try tokens.append(allocator, @as(TokenId, byte));
         }
 
-        // 2. 迭代根据 merges 规则进行连续最高优先级合并
         while (tokens.items.len >= 2) {
             var min_rank: u32 = std.math.maxInt(u32);
             var best_idx: ?usize = null;
@@ -416,7 +413,23 @@ pub const BPETokenizer = struct {
             }
         }
 
-        return tokens.toOwnedSlice(allocator);
+        try out_tokens.appendSlice(allocator, tokens.items);
+    }
+
+    /// 将 UTF-8 文本编码为 Token ID 序列
+    pub fn encode(self: *const BPETokenizer, allocator: std.mem.Allocator, text: []const u8) ![]TokenId {
+        var result: std.ArrayList(TokenId) = .empty;
+        defer result.deinit(allocator);
+
+        const chunk_size: usize = 256;
+        var start: usize = 0;
+        while (start < text.len) {
+            const end = @min(start + chunk_size, text.len);
+            try self.encodeChunk(allocator, text[start..end], &result);
+            start = end;
+        }
+
+        return result.toOwnedSlice(allocator);
     }
 
     /// 将 Token ID 序列还原为 UTF-8 字符串
