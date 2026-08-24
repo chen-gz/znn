@@ -113,6 +113,8 @@ fn runTraining(
     });
     defer train_loader.deinit(arena);
 
+    const x_batch = try arena.alloc(f32, batch_size * input_dim);
+    defer arena.free(x_batch);
     const y_batch = try arena.alloc(u8, batch_size);
     defer arena.free(y_batch);
 
@@ -134,33 +136,28 @@ fn runTraining(
             const actual_batch_size = train_loader.peekNextBatchSize();
             if (actual_batch_size == 0) break;
 
-            var graph = autodiff.Graph.init(arena);
-            defer graph.deinit();
+            _ = train_loader.nextInto(x_batch, y_batch);
 
-            const x_tensor = try graph.tensor(actual_batch_size, input_dim, false);
-            _ = train_loader.nextInto(x_tensor.data, y_batch);
-            const targets = y_batch[0..actual_batch_size];
+            // 使用通用分类训练单步 (自动从 targets.len 推导 batch_size，从 x_batch 长度推导 input_dim)
+            const step_res = try nn.trainStep(
+                arena,
+                model,
+                &optimizer,
+                x_batch[0 .. actual_batch_size * input_dim],
+                y_batch[0..actual_batch_size],
+            );
 
-            const logits = try model.forward(arena, &graph, x_tensor);
-            const loss = try graph.softmaxCrossEntropy(logits, targets);
 
-            const batch_loss = loss.data[0];
-            const batch_acc = try computeAccuracy(logits, targets, arena);
-
-            epoch_loss += batch_loss;
-            epoch_acc += batch_acc;
+            epoch_loss += step_res.loss;
+            epoch_acc += step_res.accuracy;
             num_batches += 1;
-
-            model.zeroGrad();
-            try graph.backward(loss);
-            optimizer.step();
 
             // Print batch progress every 100 batches
             if (num_batches % 100 == 0) {
                 std.debug.print("  Batch {d:4} | Loss: {d:.4} | Acc: {d:.2}%\n", .{
                     num_batches,
-                    batch_loss,
-                    batch_acc * 100.0,
+                    step_res.loss,
+                    step_res.accuracy * 100.0,
                 });
             }
         }
@@ -169,16 +166,14 @@ fn runTraining(
         epoch_acc /= @as(f32, @floatFromInt(num_batches));
 
         const eval_res = try evaluateModel(model, arena, test_dataset);
-        const test_loss = eval_res.loss;
-        const test_acc = eval_res.acc;
 
         std.debug.print("Epoch {d:2}/{d:2} | Train Loss: {d:.4} | Train Acc: {d:.2}% | Test Loss: {d:.4} | Test Acc: {d:.2}%\n", .{
             epoch + 1,
             epochs,
             epoch_loss,
             epoch_acc * 100.0,
-            test_loss,
-            test_acc * 100.0,
+            eval_res.loss,
+            eval_res.accuracy * 100.0,
         });
 
         optimizer.lr *= 0.90;
@@ -190,32 +185,13 @@ fn runTraining(
     };
 }
 
-fn computeAccuracy(logits: *tensor.Tensor, y: []const u8, allocator: std.mem.Allocator) !f32 {
-    const preds = try logits.argmax(1, allocator);
-    defer tensor.free(allocator, preds);
-
-    var correct: usize = 0;
-    for (preds.data, 0..) |pred_float, i| {
-        const pred = @as(usize, @intFromFloat(pred_float));
-        if (pred == y[i]) {
-            correct += 1;
-        }
-    }
-    return @as(f32, @floatFromInt(correct)) / @as(f32, @floatFromInt(preds.data.len));
-}
-
-const EvalResult = struct {
-    loss: f32,
-    acc: f32,
-};
-
 fn evaluateModel(
     model: anytype,
     arena: std.mem.Allocator,
     test_dataset: dataset.Dataset,
-) !EvalResult {
-    const input_dim = 784;
+) !nn.EpochResult {
     const test_batch_size = 100;
+
 
     var test_loader = try dataset.DataLoader.init(arena, test_dataset, test_batch_size, .{
         .shuffle = false,
@@ -223,37 +199,9 @@ fn evaluateModel(
     });
     defer test_loader.deinit(arena);
 
-    const eval_y_batch = try arena.alloc(u8, test_batch_size);
-    defer arena.free(eval_y_batch);
-
-    var test_loss: f32 = 0.0;
-    var test_acc: f32 = 0.0;
-    var batch_count: usize = 0;
-
-    while (true) {
-        const actual_batch_size = test_loader.peekNextBatchSize();
-        if (actual_batch_size == 0) break;
-
-        var graph = autodiff.Graph.init(arena);
-        defer graph.deinit();
-
-        const x_tensor = try graph.tensor(actual_batch_size, input_dim, false);
-        _ = test_loader.nextInto(x_tensor.data, eval_y_batch);
-        const targets = eval_y_batch[0..actual_batch_size];
-
-        const logits = try model.forward(arena, &graph, x_tensor);
-        const loss = try graph.softmaxCrossEntropy(logits, targets);
-
-        test_loss += loss.data[0];
-        test_acc += try computeAccuracy(logits, targets, arena);
-        batch_count += 1;
-    }
-
-    return EvalResult{
-        .loss = test_loss / @as(f32, @floatFromInt(batch_count)),
-        .acc = test_acc / @as(f32, @floatFromInt(batch_count)),
-    };
+    return try nn.evaluate(arena, model, &test_loader);
 }
+
 
 fn printPredictions(
     model: anytype,

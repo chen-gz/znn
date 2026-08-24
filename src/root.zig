@@ -5,6 +5,7 @@ pub const autodiff = @import("autodiff.zig");
 pub const optim = @import("optim.zig");
 pub const regression = @import("regression.zig");
 pub const cv = @import("cross_validation.zig");
+pub const engine = @import("engine.zig");
 
 
 pub fn measureTime(comptime func: anytype, args: anytype) !struct {
