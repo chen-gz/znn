@@ -484,21 +484,31 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&install_cnn_tests.step);
 
     // ========================================================================
-    // Dataset Download Step (e.g. zig build download-dataset -- tinyshakespeare)
+    // Dataset Download Step (Pure Zig: zig build download-dataset -- tinyshakespeare)
     // ========================================================================
     const dataset_opt = b.option([]const u8, "dataset", "Dataset name to download (fashion_mnist, mnist, tinyshakespeare, wikitext2, tinystories, alpaca, all_llm)") orelse "fashion_mnist";
 
-    const download_cmd = b.addSystemCommand(&.{
-        "bash",
-        b.path("scripts/download_data.sh").getPath(b),
+    const exe_download = b.addExecutable(.{
+        .name = "download_data",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/download_data.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
     });
+    if (target.result.os.tag == .macos) {
+        exe_download.root_module.linkFramework("Accelerate", .{});
+    }
+
+    const download_cmd = b.addRunArtifact(exe_download);
     if (b.args) |args| {
         download_cmd.addArgs(args);
     } else {
         download_cmd.addArg(dataset_opt);
     }
 
-    const download_step = b.step("download-dataset", "Download dataset (e.g. tinyshakespeare, wikitext2, tinystories, alpaca, fashion_mnist, mnist)");
+    const download_step = b.step("download-dataset", "Download dataset in pure Zig (e.g. tinyshakespeare, wikitext2, tinystories, alpaca, fashion_mnist, mnist)");
     download_step.dependOn(&download_cmd.step);
 
     const download_data_step = b.step("download-data", "Alias for download-dataset");
