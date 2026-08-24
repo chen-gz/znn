@@ -591,6 +591,302 @@ pub const RMSNorm = struct {
     }
 };
 
+/// 标准层归一化 (Layer Normalization)
+/// 对输入的最后一个维度进行均值中心化与方差归一化，并乘以可学习的 gamma (weight) 和 beta (bias)
+pub const LayerNorm = struct {
+    weight: *Tensor,        // 可学习的缩放因子 gamma [dim]
+    bias: *Tensor,          // 可学习的平移偏置 beta [dim]
+    eps: f32,
+
+    pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !LayerNorm {
+        const weight = try createPersistentTensor(allocator, 1, dim, true);
+        errdefer freePersistentTensor(allocator, weight);
+        @memset(weight.data, 1.0);
+        weight.shape = Shape.init(&.{dim});
+        weight.strides = tensor.computeContiguousStrides(weight.shape);
+
+        const bias = try createPersistentTensor(allocator, 1, dim, true);
+        errdefer freePersistentTensor(allocator, bias);
+        @memset(bias.data, 0.0);
+        bias.shape = Shape.init(&.{dim});
+        bias.strides = tensor.computeContiguousStrides(bias.shape);
+
+        return LayerNorm{
+            .weight = weight,
+            .bias = bias,
+            .eps = eps,
+        };
+    }
+
+    pub fn deinit(self: LayerNorm, allocator: std.mem.Allocator) void {
+        freePersistentTensor(allocator, self.weight);
+        freePersistentTensor(allocator, self.bias);
+    }
+
+    pub fn zeroGrad(self: LayerNorm) void {
+        self.weight.zeroGrad();
+        self.bias.zeroGrad();
+    }
+
+    pub fn forward(self: LayerNorm, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const dim = self.weight.shape.dims[0];
+        const num_elements = x.data.len;
+        const batch_items = num_elements / dim;
+
+        const out = if (graph) |g| try g.tensorND(x.shape.dims[0..x.shape.len], x.requires_grad) else try tensor.zeros(allocator, x.shape.dims[0..x.shape.len]);
+
+        for (0..batch_items) |b| {
+            const row = x.data[b * dim .. (b + 1) * dim];
+            const out_row = out.data[b * dim .. (b + 1) * dim];
+
+            var sum: f32 = 0.0;
+            for (row) |val| sum += val;
+            const mean = sum / @as(f32, @floatFromInt(dim));
+
+            var var_sum: f32 = 0.0;
+            for (row) |val| {
+                const diff = val - mean;
+                var_sum += diff * diff;
+            }
+            const variance = var_sum / @as(f32, @floatFromInt(dim));
+            const std_inv = 1.0 / @sqrt(variance + self.eps);
+
+            for (0..dim) |i| {
+                out_row[i] = (row[i] - mean) * std_inv * self.weight.data[i] + self.bias.data[i];
+            }
+        }
+        return out;
+    }
+};
+
+/// 二维批量归一化 (Batch Normalization 2D)
+/// 针对卷积特征图 [N, C, H, W]，在 [N, H, W] 维度上统计均值与方差
+pub const BatchNorm2d = struct {
+    num_features: usize,
+    eps: f32,
+    momentum: f32,
+    training: bool,
+    gamma: *Tensor,
+    beta: *Tensor,
+    running_mean: *Tensor,
+    running_var: *Tensor,
+
+    pub fn init(allocator: std.mem.Allocator, num_features: usize, eps: f32, momentum: f32) !BatchNorm2d {
+        const gamma = try createPersistentTensor(allocator, 1, num_features, true);
+        errdefer freePersistentTensor(allocator, gamma);
+        @memset(gamma.data, 1.0);
+        gamma.shape = Shape.init(&.{num_features});
+        gamma.strides = tensor.computeContiguousStrides(gamma.shape);
+
+        const beta = try createPersistentTensor(allocator, 1, num_features, true);
+        errdefer freePersistentTensor(allocator, beta);
+        @memset(beta.data, 0.0);
+        beta.shape = Shape.init(&.{num_features});
+        beta.strides = tensor.computeContiguousStrides(beta.shape);
+
+        const running_mean = try createPersistentTensor(allocator, 1, num_features, false);
+        errdefer freePersistentTensor(allocator, running_mean);
+        @memset(running_mean.data, 0.0);
+        running_mean.shape = Shape.init(&.{num_features});
+        running_mean.strides = tensor.computeContiguousStrides(running_mean.shape);
+
+        const running_var = try createPersistentTensor(allocator, 1, num_features, false);
+        errdefer freePersistentTensor(allocator, running_var);
+        @memset(running_var.data, 1.0);
+        running_var.shape = Shape.init(&.{num_features});
+        running_var.strides = tensor.computeContiguousStrides(running_var.shape);
+
+        return BatchNorm2d{
+            .num_features = num_features,
+            .eps = eps,
+            .momentum = momentum,
+            .training = true,
+            .gamma = gamma,
+            .beta = beta,
+            .running_mean = running_mean,
+            .running_var = running_var,
+        };
+    }
+
+    pub fn deinit(self: BatchNorm2d, allocator: std.mem.Allocator) void {
+        freePersistentTensor(allocator, self.gamma);
+        freePersistentTensor(allocator, self.beta);
+        freePersistentTensor(allocator, self.running_mean);
+        freePersistentTensor(allocator, self.running_var);
+    }
+
+    pub fn zeroGrad(self: BatchNorm2d) void {
+        self.gamma.zeroGrad();
+        self.beta.zeroGrad();
+    }
+
+    pub fn forward(self: *BatchNorm2d, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        std.debug.assert(x.shape.len == 4); // [N, C, H, W]
+        const N = x.shape.dims[0];
+        const C = x.shape.dims[1];
+        const H = x.shape.dims[2];
+        const W = x.shape.dims[3];
+        std.debug.assert(C == self.num_features);
+
+        const spatial_size = H * W;
+        const total_samples = N * spatial_size;
+        const out = if (graph) |g| try g.tensorND(x.shape.dims[0..4], x.requires_grad) else try tensor.zeros(allocator, x.shape.dims[0..4]);
+
+        for (0..C) |c| {
+            var mean: f32 = 0.0;
+            var variance: f32 = 0.0;
+
+            if (self.training) {
+                var sum: f32 = 0.0;
+                for (0..N) |n| {
+                    const c_slice = x.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
+                    for (c_slice) |val| sum += val;
+                }
+                mean = sum / @as(f32, @floatFromInt(total_samples));
+
+                var var_sum: f32 = 0.0;
+                for (0..N) |n| {
+                    const c_slice = x.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
+                    for (c_slice) |val| {
+                        const diff = val - mean;
+                        var_sum += diff * diff;
+                    }
+                }
+                variance = var_sum / @as(f32, @floatFromInt(total_samples));
+
+                self.running_mean.data[c] = (1.0 - self.momentum) * self.running_mean.data[c] + self.momentum * mean;
+                self.running_var.data[c] = (1.0 - self.momentum) * self.running_var.data[c] + self.momentum * variance;
+            } else {
+                mean = self.running_mean.data[c];
+                variance = self.running_var.data[c];
+            }
+
+            const inv_std = 1.0 / @sqrt(variance + self.eps);
+            const g = self.gamma.data[c];
+            const b = self.beta.data[c];
+
+            for (0..N) |n| {
+                const in_slice = x.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
+                const out_slice = out.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
+                for (in_slice, out_slice) |val, *o| {
+                    o.* = (val - mean) * inv_std * g + b;
+                }
+            }
+        }
+        return out;
+    }
+};
+
+/// Dropout 随机丢弃正则化层
+pub const Dropout = struct {
+    p: f32,                 // 丢弃概率 (0.0 <= p < 1.0)
+    training: bool = true,  // 是否处于训练模式
+
+    pub fn init(p: f32) Dropout {
+        return .{ .p = p, .training = true };
+    }
+
+    pub fn forward(self: Dropout, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor, random: ?std.Random) !*Tensor {
+        if (!self.training or self.p == 0.0 or random == null) {
+            return x;
+        }
+
+        const out = if (graph) |g| try g.tensorND(x.shape.dims[0..x.shape.len], x.requires_grad) else try tensor.zeros(allocator, x.shape.dims[0..x.shape.len]);
+        const scale = 1.0 / (1.0 - self.p);
+        const rand = random.?;
+
+        for (x.data, out.data) |val, *o| {
+            if (rand.float(f32) < self.p) {
+                o.* = 0.0;
+            } else {
+                o.* = val * scale;
+            }
+        }
+        return out;
+    }
+};
+
+/// 二维平均池化 (Average Pooling 2D)
+pub const AvgPool2D = struct {
+    kernel_size: usize,
+    stride: usize,
+
+    pub fn init(kernel_size: usize, stride: usize) AvgPool2D {
+        return .{ .kernel_size = kernel_size, .stride = stride };
+    }
+
+    pub fn forward(self: AvgPool2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        std.debug.assert(x.shape.len == 4);
+        const N = x.shape.dims[0];
+        const C = x.shape.dims[1];
+        const H = x.shape.dims[2];
+        const W = x.shape.dims[3];
+
+        const out_h = (H - self.kernel_size) / self.stride + 1;
+        const out_w = (W - self.kernel_size) / self.stride + 1;
+        const out = if (graph) |g| try g.tensorND(&.{ N, C, out_h, out_w }, x.requires_grad) else try tensor.zeros(allocator, &.{ N, C, out_h, out_w });
+        const pool_area = @as(f32, @floatFromInt(self.kernel_size * self.kernel_size));
+
+        for (0..N) |n| {
+            for (0..C) |c| {
+                for (0..out_h) |oh| {
+                    for (0..out_w) |ow| {
+                        const ih_start = oh * self.stride;
+                        const iw_start = ow * self.stride;
+                        var sum: f32 = 0.0;
+
+                        for (0..self.kernel_size) |kh| {
+                            for (0..self.kernel_size) |kw| {
+                                const ih = ih_start + kh;
+                                const iw = iw_start + kw;
+                                sum += x.data[((n * C + c) * H + ih) * W + iw];
+                            }
+                        }
+                        out.data[((n * C + c) * out_h + oh) * out_w + ow] = sum / pool_area;
+                    }
+                }
+            }
+        }
+        return out;
+    }
+};
+
+/// 键值缓存 (Key-Value Cache) 用于大模型自回归增量推理 (O(T) 生成复杂度)
+pub const KVCache = struct {
+    k: *Tensor,             // 缓存的 Key 张量 [batch_size, n_head, max_seq_len, head_dim]
+    v: *Tensor,             // 缓存的 Value 张量 [batch_size, n_head, max_seq_len, head_dim]
+    curr_len: usize = 0,    // 当前已缓存的 Token 步长
+    max_len: usize,         // 最大支持上下文长度
+
+    pub fn init(allocator: std.mem.Allocator, batch_size: usize, n_head: usize, max_len: usize, head_dim: usize) !KVCache {
+        const k = try createPersistentTensor(allocator, 1, batch_size * n_head * max_len * head_dim, false);
+        k.shape = Shape.init(&.{ batch_size, n_head, max_len, head_dim });
+        k.strides = tensor.computeContiguousStrides(k.shape);
+        @memset(k.data, 0.0);
+
+        const v = try createPersistentTensor(allocator, 1, batch_size * n_head * max_len * head_dim, false);
+        v.shape = Shape.init(&.{ batch_size, n_head, max_len, head_dim });
+        v.strides = tensor.computeContiguousStrides(v.shape);
+        @memset(v.data, 0.0);
+
+        return KVCache{
+            .k = k,
+            .v = v,
+            .curr_len = 0,
+            .max_len = max_len,
+        };
+    }
+
+    pub fn deinit(self: KVCache, allocator: std.mem.Allocator) void {
+        freePersistentTensor(allocator, self.k);
+        freePersistentTensor(allocator, self.v);
+    }
+
+    pub fn reset(self: *KVCache) void {
+        self.curr_len = 0;
+    }
+};
+
 /// 多层感知机 (MLP) / 前馈网络 (Feed-forward Network) 模块
 /// Transformer 架构中的重要组件，紧跟在 Self-Attention 之后，
 /// 用于在每个 Token 位置上独立地进行非线性特征投影与融合。
@@ -2170,6 +2466,76 @@ test "maskedCrossEntropyLoss and dpoLoss" {
     const ref_l = [_]f32{-2.0};
     const d_loss = dpoLoss(&pi_w, &pi_l, &ref_w, &ref_l, 0.1);
     try std.testing.expect(d_loss > 0.0);
+}
+
+test "LayerNorm forward pass" {
+    const allocator = std.testing.allocator;
+    var ln = try LayerNorm.init(allocator, 4, 1e-5);
+    defer ln.deinit(allocator);
+
+    const x = try tensor.zeros(allocator, &.{ 2, 4 });
+    defer tensor.free(allocator, x);
+    @memcpy(x.data, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0 });
+
+    const y = try ln.forward(allocator, null, x);
+    defer tensor.free(allocator, y);
+
+    try std.testing.expectEqualSlices(usize, &.{ 2, 4 }, y.shape.dims[0..2]);
+    // Mean of normalized output should be close to 0.0
+    var sum: f32 = 0.0;
+    for (y.data[0..4]) |v| sum += v;
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), sum / 4.0, 1e-4);
+}
+
+test "BatchNorm2d forward pass" {
+    const allocator = std.testing.allocator;
+    var bn = try BatchNorm2d.init(allocator, 2, 1e-5, 0.1);
+    defer bn.deinit(allocator);
+
+    const x = try tensor.zeros(allocator, &.{ 2, 2, 2, 2 });
+    defer tensor.free(allocator, x);
+    for (x.data, 0..) |*p, i| p.* = @as(f32, @floatFromInt(i));
+
+    const y = try bn.forward(allocator, null, x);
+    defer tensor.free(allocator, y);
+
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2, 2, 2 }, y.shape.dims[0..4]);
+}
+
+test "Dropout and AvgPool2D forward passes" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const rand = prng.random();
+
+    const drop = Dropout.init(0.2);
+    const x = try tensor.zeros(allocator, &.{ 1, 10 });
+    defer tensor.free(allocator, x);
+    @memset(x.data, 1.0);
+
+    const y_drop = try drop.forward(allocator, null, x, rand);
+    defer tensor.free(allocator, y_drop);
+    try std.testing.expectEqual(10, y_drop.data.len);
+
+    const pool = AvgPool2D.init(2, 2);
+    const img = try tensor.zeros(allocator, &.{ 1, 1, 4, 4 });
+    defer tensor.free(allocator, img);
+    @memset(img.data, 4.0);
+
+    const pooled = try pool.forward(allocator, null, img);
+    defer tensor.free(allocator, pooled);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2, 2 }, pooled.shape.dims[0..4]);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), pooled.data[0], 1e-5);
+}
+
+test "KVCache initialization and reset" {
+    const allocator = std.testing.allocator;
+    var cache = try KVCache.init(allocator, 1, 4, 128, 32);
+    defer cache.deinit(allocator);
+
+    try std.testing.expectEqualSlices(usize, &.{ 1, 4, 128, 32 }, cache.k.shape.dims[0..4]);
+    cache.curr_len = 50;
+    cache.reset();
+    try std.testing.expectEqual(0, cache.curr_len);
 }
 
 
