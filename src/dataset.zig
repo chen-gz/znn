@@ -445,6 +445,69 @@ pub const BPETokenizer = struct {
 
         return buf.toOwnedSlice(allocator);
     }
+
+    /// 从语料库无监督自动统计最高频 Pair 并训练 BPE Merges，直到达到目标词表大小 target_vocab_size
+    pub fn train(self: *BPETokenizer, allocator: std.mem.Allocator, corpus: []const u8, target_vocab_size: usize) !void {
+        if (target_vocab_size <= self.inv_vocab.items.len) return;
+
+        var tokens = try self.encode(allocator, corpus);
+        defer allocator.free(tokens);
+
+        var rank: u32 = @as(u32, @intCast(self.merges.count()));
+
+        while (self.inv_vocab.items.len < target_vocab_size) {
+            if (tokens.len < 2) break;
+
+            var pair_counts = std.AutoHashMap(MergePair, usize).init(allocator);
+            defer pair_counts.deinit();
+
+            for (0..tokens.len - 1) |i| {
+                const pair = MergePair{ .a = tokens[i], .b = tokens[i + 1] };
+                const entry = try pair_counts.getOrPut(pair);
+                if (entry.found_existing) {
+                    entry.value_ptr.* += 1;
+                } else {
+                    entry.value_ptr.* = 1;
+                }
+            }
+
+            var best_pair: ?MergePair = null;
+            var max_freq: usize = 0;
+            var it = pair_counts.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.* > max_freq) {
+                    max_freq = entry.value_ptr.*;
+                    best_pair = entry.key_ptr.*;
+                }
+            }
+
+            if (best_pair == null or max_freq <= 1) break;
+
+            const pair = best_pair.?;
+            const str_a = self.inv_vocab.items[pair.a];
+            const str_b = self.inv_vocab.items[pair.b];
+            try self.addMerge(str_a, str_b, rank);
+            rank += 1;
+
+            const new_id = @as(TokenId, @intCast(self.inv_vocab.items.len - 1));
+            var new_tokens: std.ArrayList(TokenId) = .empty;
+            defer new_tokens.deinit(allocator);
+
+            var i: usize = 0;
+            while (i < tokens.len) {
+                if (i + 1 < tokens.len and tokens[i] == pair.a and tokens[i + 1] == pair.b) {
+                    try new_tokens.append(allocator, new_id);
+                    i += 2;
+                } else {
+                    try new_tokens.append(allocator, tokens[i]);
+                    i += 1;
+                }
+            }
+
+            allocator.free(tokens);
+            tokens = try new_tokens.toOwnedSlice(allocator);
+        }
+    }
 };
 
 /// 零拷贝内存映射二进制数据集 (MMap Binary DataLoader)
@@ -520,6 +583,23 @@ test "BinaryMmapDataset batch slicing" {
     const batch = dataset.getBatch(0, 2); // batch_size=2, seq_len=3 -> total 6 tokens
     try std.testing.expectEqualSlices(u32, &.{ 10, 20, 30, 40, 50, 60 }, batch.x);
     try std.testing.expectEqualSlices(u32, &.{ 20, 30, 40, 50, 60, 70 }, batch.y);
+}
+
+test "BPETokenizer unsupervised training from corpus" {
+    const allocator = std.testing.allocator;
+    var tokenizer = try BPETokenizer.init(allocator);
+    defer tokenizer.deinit();
+
+    const corpus = "abababababab abababab";
+    try tokenizer.train(allocator, corpus, 258); // 256 bytes + 2 merges ("ab", "abab")
+
+    try std.testing.expect(tokenizer.vocab.contains("ab"));
+    const encoded = try tokenizer.encode(allocator, corpus);
+    defer allocator.free(encoded);
+
+    const decoded = try tokenizer.decode(allocator, encoded);
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings(corpus, decoded);
 }
 
 

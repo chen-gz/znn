@@ -41,6 +41,11 @@ test "basic imports and struct definitions" {
     try std.testing.expect(@TypeOf(optim.AdamOptimizer) == type);
     try std.testing.expect(@TypeOf(optim.AdamWOptimizer) == type);
     try std.testing.expect(@TypeOf(dataset.BPETokenizer) == type);
+    try std.testing.expect(@TypeOf(nn.LayerNorm) == type);
+    try std.testing.expect(@TypeOf(nn.BatchNorm2d) == type);
+    try std.testing.expect(@TypeOf(nn.Dropout) == type);
+    try std.testing.expect(@TypeOf(nn.AvgPool2D) == type);
+    try std.testing.expect(@TypeOf(nn.KVCache) == type);
 }
 
 test "measureTime utility" {

@@ -80,16 +80,35 @@ fn cblas_sgemm_fallback(
     const ldb_u = @as(usize, @intCast(ldb));
     const ldc_u = @as(usize, @intCast(ldc));
 
-    // 2. 矩阵乘法计算: C = alpha * A * B + C
+    // 2. SIMD 向量化矩阵乘法计算: C = alpha * A * B + C
+    const Vec8 = @Vector(8, f32);
+    const vec_len = 8;
+
     for (0..m) |i| {
+        const c_row = C + i * ldc_u;
         for (0..k) |p| {
             const a_val = alpha * (if (ta) A[p * lda_u + i] else A[i * lda_u + p]);
             if (a_val == 0.0) continue;
 
-            const c_row = C + i * ldc_u;
-            for (0..n) |j| {
-                const b_val = if (tb) B[j * ldb_u + p] else B[p * ldb_u + j];
-                c_row[j] += a_val * b_val;
+            if (!tb) {
+                const a_vec: Vec8 = @splat(a_val);
+                var j: usize = 0;
+                while (j + vec_len <= n) : (j += vec_len) {
+                    const b_ptr: *const [vec_len]f32 = @ptrCast(B + p * ldb_u + j);
+                    const b_vec: Vec8 = b_ptr.*;
+                    const c_ptr: *[vec_len]f32 = @ptrCast(c_row + j);
+                    var c_vec: Vec8 = c_ptr.*;
+                    c_vec += a_vec * b_vec;
+                    c_ptr.* = c_vec;
+                }
+                while (j < n) : (j += 1) {
+                    c_row[j] += a_val * B[p * ldb_u + j];
+                }
+            } else {
+                for (0..n) |j| {
+                    const b_val = B[j * ldb_u + p];
+                    c_row[j] += a_val * b_val;
+                }
             }
         }
     }
