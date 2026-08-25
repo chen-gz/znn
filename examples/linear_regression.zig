@@ -2,38 +2,10 @@ const std = @import("std");
 const zig_ml = @import("zig_ml");
 const tensor = zig_ml.tensor;
 const autodiff = zig_ml.autodiff;
+const regression = zig_ml.regression;
 
-pub const FitResult = struct {
-    w: f32,
-    b: f32,
-};
-
-/// Solve linear regression analytically using least-squares closed-form formula:
-/// w = cov(x, y) / var(x)
-/// b = mean_y - w * mean_x
-pub fn solveAnalytical(x: []const f32, y: []const f32) FitResult {
-    const N = x.len;
-    var sum_x: f32 = 0.0;
-    var sum_y: f32 = 0.0;
-    for (0..N) |i| {
-        sum_x += x[i];
-        sum_y += y[i];
-    }
-    const mean_x = sum_x / @as(f32, @floatFromInt(N));
-    const mean_y = sum_y / @as(f32, @floatFromInt(N));
-
-    var num: f32 = 0.0;
-    var den: f32 = 0.0;
-    for (0..N) |i| {
-        const dx = x[i] - mean_x;
-        const dy = y[i] - mean_y;
-        num += dx * dy;
-        den += dx * dx;
-    }
-    const w = num / den;
-    const b = mean_y - w * mean_x;
-    return FitResult{ .w = w, .b = b };
-}
+pub const FitResult = regression.FitResult;
+pub const solveAnalytical = regression.solveAnalytical;
 
 /// Solve linear regression iteratively using Gradient Descent on the autograd graph
 pub fn solveGradientDescent(

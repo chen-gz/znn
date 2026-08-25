@@ -12,6 +12,41 @@ pub fn softThreshold(z: f32, gamma: f32) f32 {
     }
 }
 
+/// Result of fitting a 1D linear regression model analytically
+pub const FitResult = struct {
+    w: f32,
+    b: f32,
+};
+
+/// Solve 1D linear regression analytically using least-squares closed-form formula:
+/// w = cov(x, y) / var(x)
+/// b = mean_y - w * mean_x
+pub fn solveAnalytical(x: []const f32, y: []const f32) FitResult {
+    std.debug.assert(x.len == y.len);
+    std.debug.assert(x.len > 0);
+    const N = x.len;
+    var sum_x: f32 = 0.0;
+    var sum_y: f32 = 0.0;
+    for (0..N) |i| {
+        sum_x += x[i];
+        sum_y += y[i];
+    }
+    const mean_x = sum_x / @as(f32, @floatFromInt(N));
+    const mean_y = sum_y / @as(f32, @floatFromInt(N));
+
+    var num: f32 = 0.0;
+    var den: f32 = 0.0;
+    for (0..N) |i| {
+        const dx = x[i] - mean_x;
+        const dy = y[i] - mean_y;
+        num += dx * dy;
+        den += dx * dx;
+    }
+    const w = num / den;
+    const b = mean_y - w * mean_x;
+    return FitResult{ .w = w, .b = b };
+}
+
 /// Result of fitting a linear regression model
 pub const ModelResult = struct {
     weights: []f32,
@@ -501,4 +536,13 @@ test "Ridge and Lasso solvers" {
     var enet = try solveElasticNet(allocator, &x, &y, 5, 1, 0.01, 0.5, 500, 1e-5);
     defer enet.deinit();
     try std.testing.expect(@abs(enet.weights[0] - 2.0) < 0.05);
+}
+
+test "solveAnalytical unit test" {
+    const x = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0 };
+    const y = [_]f32{ 3.0, 5.0, 7.0, 9.0, 11.0 }; // y = 2x + 1
+
+    const res = solveAnalytical(&x, &y);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), res.w, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), res.b, 1e-5);
 }

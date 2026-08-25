@@ -539,6 +539,16 @@ test "regression module Ridge, Lasso, and ElasticNet models" {
     try std.testing.expect(@abs(enet.weights[0] - 2.0) < 0.2);
 }
 
+test "regression module solveAnalytical" {
+    const std = @import("std");
+    const x = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0 };
+    const y = [_]f32{ 3.0, 5.0, 7.0, 9.0, 11.0 }; // y = 2x + 1
+
+    const res = regression.solveAnalytical(&x, &y);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), res.w, 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), res.b, 1e-5);
+}
+
 
 test "cross_validation module searchLasso" {
     const std = @import("std");
