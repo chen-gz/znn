@@ -1,6 +1,6 @@
-# Zig ML (Educational): Minimal Deep Learning Library in Zig
+# Zig ML: Minimal Deep Learning Library in Zig
 
-This project is a minimal, educational 3-layer Feedforward Neural Network (MLP) library built entirely from scratch in **Zig 0.16.0** for Fashion MNIST image classification.
+This project is a minimal 3-layer Feedforward Neural Network (MLP) library built entirely from scratch in **Zig 0.16.0** for Fashion MNIST image classification.
 
 It serves as a clean, production-grade reference for:
 1. **Autograd Mechanics**: Understanding how dynamic backward automatic differentiation engines construct computation graphs and compute gradients.
@@ -113,7 +113,7 @@ zig build test
 
 ## 🗺️ Future Improvements & Roadmap
 
-To make `znn` a more complete and high-performance educational library, the following areas have been identified for improvement:
+To make `znn` a more complete and high-performance library, the following areas have been identified for improvement:
 
 1. **Decoupled Optimizer Framework (High Priority)**
    * Currently, SGD with Momentum is hardcoded directly inside layer structures (e.g., `nn.Linear`). We plan to extract this state into a dedicated `Optimizer` abstraction.
