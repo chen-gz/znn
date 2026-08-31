@@ -11,8 +11,6 @@
 ### 1. 核心计算与张量系统 (Tensor Engine & Core Math)
 * **单精度硬编码 (Lack of Multi-Precision / Generic DTypes)**：
   在 [`Tensor`](file:///Users/guangzong/Documents/znn/src/tensor.zig#L81-L916)、[`Graph`](file:///Users/guangzong/Documents/znn/src/autodiff.zig#L2250-L2392) 及所有网络层中，底层浮点类型全部硬编码为 `f32`。缺乏对 `f16`、`bf16`（现代 LLM 训练与推理标配）、`f64` 以及整型与量化类型（如 `int8`、`q4_0`、`q8_0`）的泛型支持 (`Tensor(T)`)。
-* **广播机制不通用 (Limited Multi-Dimensional Broadcasting)**：
-  目前仅有 [`addBias`](file:///Users/guangzong/Documents/znn/src/tensor.zig#L200-L215) 等特例算子硬编码了 1D 偏置向 2D 矩阵的广播逻辑。通用的逐元素二元算子（如 [`add`](file:///Users/guangzong/Documents/znn/src/tensor.zig#L239-L249)、[`mul`](file:///Users/guangzong/Documents/znn/src/tensor.zig#L251-L261)）要求两张量形状与元素数量完全一致（直接通过 `assert(self.data.len == other.data.len)`），不支持类似 NumPy/PyTorch 的向后对齐并自动扩展维度为 1 的通用多维广播机制（如 `[B, 1, H, W] + [1, C, 1, 1] -> [B, C, H, W]`）。
 * **维度上限静态限制与静默截断**：
   [`Shape.init`](file:///Users/guangzong/Documents/znn/src/tensor.zig#L19-L29) 采用固定 `[8]usize` 静态数组，在维度超过 8 维时直接 `break` 静默截断，未返回显式错误。
 * **线性代数求解器简单且易退化**：
@@ -77,10 +75,10 @@
     - `error.MaxDimensionsExceeded`
   - [ ] 修复 [`Shape.init`](file:///Users/guangzong/Documents/znn/src/tensor.zig#L19-L29) 维度超过 8 时的静默截断行为，增加显式校验与错误拦截。
 
-- [ ] **1.2 通用多维张量广播系统 (NumPy-style Multi-Dimensional Broadcasting)**
-  - [ ] 实现通用的形状对齐与步长映射算法 `broadcastShapes(shape1, shape2) !Shape`。
-  - [ ] 为逐元素算子（`add`, `sub`, `mul`, `div`）支持任意维度的向后对齐与维度为 1 自动展开。
-  - [ ] 在 [`autodiff.zig`](file:///Users/guangzong/Documents/znn/src/autodiff.zig) 中实现广播算子的反向传播（自动沿广播维度进行梯度求和累加 `reduceSumToShape`）。
+- [x] **1.2 通用多维张量广播系统 (NumPy-style Multi-Dimensional Broadcasting)**
+  - [x] 实现通用的形状对齐与步长映射算法 `broadcastShapes(shape1, shape2) !Shape` 与 `computeBroadcastStrides`。
+  - [x] 为逐元素算子（`add`, `sub`, `mul`, `div`）支持任意维度的向后对齐与维度为 1 自动展开（包含 1D 到 8D 的虚拟步长映射）。
+  - [x] 在 [`autodiff.zig`](file:///Users/guangzong/Documents/znn/src/autodiff.zig) 中实现广播算子的反向传播（自动沿广播维度进行多维梯度求和累加与降维映射）。
 
 - [ ] **1.3 净化单元测试与构建日志**
   - [ ] 清理 [`src/root.zig`](file:///Users/guangzong/Documents/znn/src/root.zig#L149-L168) 中单元测试遗留的 `std.debug.print`，使用标准 `testing.expect*` 断言。
