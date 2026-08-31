@@ -21,8 +21,6 @@
 ### 2. 自动求导与计算图 (Autodiff & Graph Engine)
 * **不支持高阶导数 (No Higher-Order Gradients)**：
   [`Tensor.grad`](file:///Users/guangzong/Documents/znn/src/tensor.zig#L83) 是裸的一维切片 (`[]f32`)，反向传播是由 [`Graph.backward`](file:///Users/guangzong/Documents/znn/src/autodiff.zig#L2319-L2341) 执行单向链式传导，梯度计算过程本身不会在图上注册为新节点。因此无法对梯度再次求导，不支持二阶优化算法、Hessian 向量积以及带梯度惩罚项的网络（如 WGAN-GP）。
-* **评估管线中的隐式构图开销与无梯度模式 (Eval Graph Overhead & No-Grad Mode)**：
-  在纯 Eager 模式下（传入 `graph = null` 时），`znn` 天然不会构建图或分配梯度；但目前的内置评估引擎（如 [`engine.evalClassificationStep`](file:///Users/guangzong/Documents/znn/src/engine.zig#L82-L110)）仍创建并传入了 `&graph`。由于模型权重默认带有 `requires_grad = true`，图引擎会递归地为评估阶段的中间激活值分配冗余的梯度缓冲区（`grad: []f32`）并记录 Op 节点，造成不必要的内存开销。此外，`Graph` 自身也缺少类似 `enable_grad: bool` 的作用域开关。
 * **就地操作 (In-place Ops) 与计算图安全机制缺失**：
   就地算子（如 [`mulScalar_`](file:///Users/guangzong/Documents/znn/src/tensor.zig#L809-L816)、[`add_`](file:///Users/guangzong/Documents/znn/src/tensor.zig#L827-L835)）直接通过 `assert(!requires_grad and creator == null)` 防御。缺乏计算图版本计数器（Version Counter），如果用户错误地就地修改了已被前向图引用的中间张量，会导致后续反向传播产生错误的静默计算结果。
 
