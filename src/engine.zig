@@ -78,7 +78,7 @@ pub fn trainClassificationStep(
 }
 
 /// 通用分类评估单步 (Classification Eval Step)
-/// 仅执行前向传播和指标计算，不计算梯度与更新权重
+/// 纯 Eager 前向推理模式：使用 ArenaAllocator 一次性管理评估内存，传入 graph = null，零梯度开销
 pub fn evalClassificationStep(
     allocator: std.mem.Allocator,
     model: anytype,
@@ -90,17 +90,17 @@ pub fn evalClassificationStep(
     std.debug.assert(x_data.len % batch_size == 0);
     const input_dim = x_data.len / batch_size;
 
-    var graph = autodiff.Graph.init(allocator);
-    defer graph.deinit();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
 
-    const x_tensor = try graph.tensor(batch_size, input_dim, false);
-    @memcpy(x_tensor.data, x_data);
+    const x_tensor = try tensor.array(arena_allocator, &.{ batch_size, input_dim }, x_data);
 
-    const logits = try model.forward(allocator, &graph, x_tensor);
-    const loss = try graph.softmaxCrossEntropy(logits, targets);
+    const logits = try model.forward(arena_allocator, null, x_tensor);
+    const loss = try logits.softmaxCrossEntropy(targets, arena_allocator, null);
 
     const batch_loss = loss.data[0];
-    const batch_acc = try computeAccuracy(logits, targets, allocator);
+    const batch_acc = try computeAccuracy(logits, targets, arena_allocator);
 
     return ClassificationStepResult{
         .loss = batch_loss,

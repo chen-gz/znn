@@ -88,9 +88,9 @@
   - [ ] 清理 [`src/root.zig`](file:///Users/guangzong/Documents/znn/src/root.zig#L149-L168) 中单元测试遗留的 `std.debug.print`，使用标准 `testing.expect*` 断言。
   - [ ] 确保 `zig build test` 输出清晰整洁，无多余终端干扰输出。
 
-- [ ] **1.4 评估管线轻量化改造与无梯度模式 (Lightweight Eval Pipeline & No-Grad)**
-  - [ ] 重构 [`engine.evalClassificationStep`](file:///Users/guangzong/Documents/znn/src/engine.zig#L82) 与 `evaluateClassification`，改用 `ArenaAllocator` + `graph = null` 纯前向模式，消除评估阶段隐式创建图和分配梯度的冗余开销。
-  - [ ] 在 [`autodiff.Graph`](file:///Users/guangzong/Documents/znn/src/autodiff.zig#L2250) 中增加 `graph.enable_grad: bool = true` 开关，支持在图模式下显式关闭梯度缓冲区分配与 Op 追踪。
+- [x] **1.4 评估管线轻量化改造与无梯度模式 (Lightweight Eval Pipeline & No-Grad)**
+  - [x] 重构 [`engine.evalClassificationStep`](file:///Users/guangzong/Documents/znn/src/engine.zig#L82) 与 `evaluateClassification`，改用 `ArenaAllocator` + `graph = null` 纯前向模式，消除评估阶段隐式创建图和分配梯度的冗余开销。
+  - [x] 在 [`autodiff.Graph`](file:///Users/guangzong/Documents/znn/src/autodiff.zig#L2250) 中增加 `graph.enable_grad: bool = true` 开关，支持在图模式下显式关闭梯度缓冲区分配与 Op 追踪。
 
 ---
 
