@@ -73,6 +73,117 @@ pub fn transposeShape(shape: Shape, dim0: usize, dim1: usize) Shape {
     return new_shape;
 }
 
+/// 通用 NumPy 风格多维形状广播对齐算法 (Broadcasting Shape Inference)
+/// 从右向左（尾部对齐，Trailing Dimensions）逐维比对：
+/// 1. 若两维度大小相等，输出该维度大小；
+/// 2. 若其中一个维度为 1，输出另一个维度的较大值；
+/// 3. 若其中一个张量维数较少，高位缺失维度视作 1 并对齐；
+/// 4. 若两维度不同且均不为 1，则判定形状不兼容，返回 error.IncompatibleBroadcastShapes。
+pub fn broadcastShapes(shape1: Shape, shape2: Shape) !Shape {
+    const len1 = shape1.len;
+    const len2 = shape2.len;
+    const out_len = @max(len1, len2);
+    if (out_len > 8) return error.MaxDimensionsExceeded;
+
+    var out_shape = Shape{
+        .dims = [_]usize{0} ** 8,
+        .len = out_len,
+    };
+
+    for (0..out_len) |k| {
+        const d1 = if (k < len1) shape1.dims[len1 - 1 - k] else 1;
+        const d2 = if (k < len2) shape2.dims[len2 - 1 - k] else 1;
+
+        if (d1 == d2) {
+            out_shape.dims[out_len - 1 - k] = d1;
+        } else if (d1 == 1) {
+            out_shape.dims[out_len - 1 - k] = d2;
+        } else if (d2 == 1) {
+            out_shape.dims[out_len - 1 - k] = d1;
+        } else {
+            return error.IncompatibleBroadcastShapes;
+        }
+    }
+    return out_shape;
+}
+
+/// 计算输入张量在目标广播形状下的虚拟跨度 (Broadcast Strides)
+/// 算法原理：
+/// 若某维度大小为 1（或高位缺失），则在遍历该维时不移动底层数据指针，即对应步长（stride）设为 0。
+/// 这使得多维索引计算可以通过统一的跨度点积直接映射到输入张量的真实物理偏移，无需物理复制内存。
+pub fn computeBroadcastStrides(src_shape: Shape, src_strides: Shape, target_shape: Shape) Shape {
+    var b_strides = Shape{
+        .dims = [_]usize{0} ** 8,
+        .len = target_shape.len,
+    };
+    const target_len = target_shape.len;
+    const src_len = src_shape.len;
+
+    for (0..target_len) |i| {
+        const k = target_len - 1 - i;
+        if (k < src_len) {
+            const src_dim_idx = src_len - 1 - k;
+            if (src_shape.dims[src_dim_idx] == 1) {
+                b_strides.dims[i] = 0;
+            } else {
+                b_strides.dims[i] = src_strides.dims[src_dim_idx];
+            }
+        } else {
+            b_strides.dims[i] = 0;
+        }
+    }
+    return b_strides;
+}
+
+/// 底层高效通用广播二元算子执行引擎
+pub fn broadcastBinaryOpRaw(
+    C_data: []f32,
+    C_shape: Shape,
+    A_data: []const f32,
+    A_shape: Shape,
+    A_strides: Shape,
+    B_data: []const f32,
+    B_shape: Shape,
+    B_strides: Shape,
+    comptime op: fn (f32, f32) f32,
+) void {
+    // 快速路径：若形状完全相同且连续，直接单层循环 SIMD 扁平迭代
+    if (A_shape.eq(B_shape)) {
+        for (C_data, A_data, B_data) |*c_val, a_val, b_val| {
+            c_val.* = op(a_val, b_val);
+        }
+        return;
+    }
+
+    // 广播路径：基于步长为 0 的虚拟映射执行多维坐标遍历
+    const a_strides = computeBroadcastStrides(A_shape, A_strides, C_shape);
+    const b_strides = computeBroadcastStrides(B_shape, B_strides, C_shape);
+    const len = C_shape.len;
+    var coord = [_]usize{0} ** 8;
+
+    for (C_data) |*c_val| {
+        var a_idx: usize = 0;
+        var b_idx: usize = 0;
+        for (0..len) |d| {
+            a_idx += coord[d] * a_strides.dims[d];
+            b_idx += coord[d] * b_strides.dims[d];
+        }
+
+        c_val.* = op(A_data[a_idx], B_data[b_idx]);
+
+        var d = len;
+        while (d > 0) {
+            d -= 1;
+            coord[d] += 1;
+            if (coord[d] < C_shape.dims[d]) {
+                break;
+            }
+            coord[d] = 0;
+        }
+    }
+}
+
+
 // ============================================================================
 // 2. 张量（Tensor）核心定义与元数据
 // ============================================================================
@@ -197,21 +308,9 @@ pub const Tensor = struct {
         return C;
     }
 
+    // 偏置相加算子：直接复用多维广播加法
     pub fn addBias(self: *Tensor, bias: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.addBias(self, bias);
-        }
-        const M = self.shape.dims[0];
-        const N = self.shape.dims[1];
-        const C = try zeros(allocator, &.{M, N});
-        for (0..M) |i| {
-            const a_row = self.data[i * N .. (i + 1) * N];
-            const c_row = C.data[i * N .. (i + 1) * N];
-            for (0..N) |j| {
-                c_row[j] = a_row[j] + bias.data[j];
-            }
-        }
-        return C;
+        return self.add(bias, allocator, graph);
     }
 
     pub fn mulScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
@@ -236,27 +335,74 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn add(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+    pub fn subScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
-            return try g.add(self, other);
+            return try g.subScalar(self, val);
         }
-        std.debug.assert(self.data.len == other.data.len);
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data, other.data) |*c_val, s_val, o_val| {
-            c_val.* = s_val + o_val;
+        for (C.data, self.data) |*c_val, s_val| {
+            c_val.* = s_val - val;
         }
         return C;
     }
 
+    pub fn divScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.divScalar(self, val);
+        }
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, s_val| {
+            c_val.* = s_val / val;
+        }
+        return C;
+    }
+
+    fn addOp(a: f32, b: f32) f32 { return a + b; }
+    fn subOp(a: f32, b: f32) f32 { return a - b; }
+    fn mulOp(a: f32, b: f32) f32 { return a * b; }
+    fn divOp(a: f32, b: f32) f32 { return a / b; }
+
+    /// 通用多维广播加法：C = self + other
+    pub fn add(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.add(self, other);
+        }
+        const out_shape = try broadcastShapes(self.shape, other.shape);
+        const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
+        broadcastBinaryOpRaw(C.data, C.shape, self.data, self.shape, self.strides, other.data, other.shape, other.strides, addOp);
+        return C;
+    }
+
+    /// 通用多维广播减法：C = self - other
+    pub fn sub(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.sub(self, other);
+        }
+        const out_shape = try broadcastShapes(self.shape, other.shape);
+        const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
+        broadcastBinaryOpRaw(C.data, C.shape, self.data, self.shape, self.strides, other.data, other.shape, other.strides, subOp);
+        return C;
+    }
+
+    /// 通用多维广播乘法 (Hadamard 积)：C = self * other
     pub fn mul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.mul(self, other);
         }
-        std.debug.assert(self.data.len == other.data.len);
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data, other.data) |*c_val, a_val, b_val| {
-            c_val.* = a_val * b_val;
+        const out_shape = try broadcastShapes(self.shape, other.shape);
+        const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
+        broadcastBinaryOpRaw(C.data, C.shape, self.data, self.shape, self.strides, other.data, other.shape, other.strides, mulOp);
+        return C;
+    }
+
+    /// 通用多维广播除法：C = self / other
+    pub fn div(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.div(self, other);
         }
+        const out_shape = try broadcastShapes(self.shape, other.shape);
+        const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
+        broadcastBinaryOpRaw(C.data, C.shape, self.data, self.shape, self.strides, other.data, other.shape, other.strides, divOp);
         return C;
     }
 
@@ -1871,6 +2017,114 @@ test "applyRoPE rotation properties" {
     try std.testing.expectApproxEqAbs(expected_x2, data[2], 1e-5);
     try std.testing.expectApproxEqAbs(expected_x3, data[3], 1e-5);
 }
+
+test "broadcastShapes inference" {
+    // 1. Same shapes
+    const s1 = Shape.init(&.{ 2, 3 });
+    const s2 = Shape.init(&.{ 2, 3 });
+    const out1 = try broadcastShapes(s1, s2);
+    try std.testing.expect(out1.eq(Shape.init(&.{ 2, 3 })));
+
+    // 2. Trailing dimensions with 1s
+    const s3 = Shape.init(&.{ 4, 1, 5 });
+    const s4 = Shape.init(&.{ 3, 5 });
+    const out2 = try broadcastShapes(s3, s4);
+    try std.testing.expect(out2.eq(Shape.init(&.{ 4, 3, 5 })));
+
+    // 3. Different rank multi-dim broadcasting
+    const s5 = Shape.init(&.{ 2, 1, 4, 1 });
+    const s6 = Shape.init(&.{ 3, 1, 5 });
+    const out3 = try broadcastShapes(s5, s6);
+    try std.testing.expect(out3.eq(Shape.init(&.{ 2, 3, 4, 5 })));
+
+    // 4. Incompatible shapes
+    const s7 = Shape.init(&.{ 3, 4 });
+    const s8 = Shape.init(&.{ 2, 4 });
+    try std.testing.expectError(error.IncompatibleBroadcastShapes, broadcastShapes(s7, s8));
+}
+
+test "tensor eager broadcasting operations (add, sub, mul, div)" {
+    const allocator = std.testing.allocator;
+
+    // A: 2x3 matrix
+    const a = try array(allocator, &.{ 2, 3 }, &.{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 });
+    defer free(allocator, a);
+
+    // B: 1x3 row vector
+    const b = try array(allocator, &.{ 1, 3 }, &.{ 10.0, 20.0, 30.0 });
+    defer free(allocator, b);
+
+    // C: 2x1 col vector
+    const c_vec = try array(allocator, &.{ 2, 1 }, &.{ 100.0, 200.0 });
+    defer free(allocator, c_vec);
+
+    // 1. A + B -> 2x3
+    const a_add_b = try a.add(b, allocator, null);
+    defer free(allocator, a_add_b);
+    try std.testing.expect(a_add_b.shape.eq(Shape.init(&.{ 2, 3 })));
+    try std.testing.expectApproxEqAbs(@as(f32, 11.0), a_add_b.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 22.0), a_add_b.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 33.0), a_add_b.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 14.0), a_add_b.data[3], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 25.0), a_add_b.data[4], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 36.0), a_add_b.data[5], 1e-5);
+
+    // 2. A * C -> 2x3
+    const a_mul_c = try a.mul(c_vec, allocator, null);
+    defer free(allocator, a_mul_c);
+    try std.testing.expect(a_mul_c.shape.eq(Shape.init(&.{ 2, 3 })));
+    try std.testing.expectApproxEqAbs(@as(f32, 100.0), a_mul_c.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 200.0), a_mul_c.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 300.0), a_mul_c.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 800.0), a_mul_c.data[3], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1000.0), a_mul_c.data[4], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1200.0), a_mul_c.data[5], 1e-5);
+
+    // 3. B - A -> 2x3
+    const b_sub_a = try b.sub(a, allocator, null);
+    defer free(allocator, b_sub_a);
+    try std.testing.expectApproxEqAbs(@as(f32, 9.0), b_sub_a.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 18.0), b_sub_a.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 27.0), b_sub_a.data[2], 1e-5);
+
+    // 4. B / A -> 2x3
+    const b_div_a = try b.div(a, allocator, null);
+    defer free(allocator, b_div_a);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), b_div_a.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), b_div_a.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), b_div_a.data[2], 1e-5);
+
+    // 5. 4D Broadcasting: [2, 1, 3, 1] + [1, 2, 1, 4] -> [2, 2, 3, 4] (Total 48 elements)
+    const t4d_1 = try ones(allocator, &.{ 2, 1, 3, 1 });
+    defer free(allocator, t4d_1);
+    const t4d_2 = try array(allocator, &.{ 1, 2, 1, 4 }, &.{
+        1.0, 2.0, 3.0, 4.0,
+        5.0, 6.0, 7.0, 8.0,
+    });
+    defer free(allocator, t4d_2);
+
+    const t4d_out = try t4d_1.add(t4d_2, allocator, null);
+    defer free(allocator, t4d_out);
+    try std.testing.expect(t4d_out.shape.eq(Shape.init(&.{ 2, 2, 3, 4 })));
+    try std.testing.expectEqual(@as(usize, 48), t4d_out.data.len);
+    // Elements should be 1.0 + t4d_2 values
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), t4d_out.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), t4d_out.data[3], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), t4d_out.data[12], 1e-5);
+
+    // 6. subScalar and divScalar
+    const s_sub = try a.subScalar(1.0, allocator, null);
+    defer free(allocator, s_sub);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), s_sub.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), s_sub.data[5], 1e-5);
+
+    const s_div = try a.divScalar(2.0, allocator, null);
+    defer free(allocator, s_div);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), s_div.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), s_div.data[5], 1e-5);
+}
+
+
 
 
 

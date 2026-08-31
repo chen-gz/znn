@@ -13,11 +13,15 @@ pub const transposeShape = tensor.transposeShape;
 // 支持的算子类型枚举
 pub const OpType = enum {
     // --- 基础数学与张量逐元素运算 (Basic Math & Element-wise Ops) ---
-    Add,                 // 张量逐元素加法
+    Add,                 // 张量逐元素加法（支持多维广播）
     AddBias,             // 偏置项加法（广播机制）
     AddScalar,           // 标量加法
-    Mul,                 // 张量逐元素乘法
+    Sub,                 // 张量逐元素减法（支持多维广播）
+    SubScalar,           // 标量减法
+    Mul,                 // 张量逐元素乘法（支持多维广播）
     MulScalar,           // 标量乘法（张量缩放）
+    Div,                 // 张量逐元素除法（支持多维广播）
+    DivScalar,           // 标量除法
     MatMul,              // 矩阵乘法
     BatchMatMul,         // 批量矩阵乘法 (Batched Matrix Multiplication)
 
@@ -58,8 +62,16 @@ pub const OpContext = union(enum) {
     AddScalar: struct {
         val: f32,
     },
+    Sub: void,
+    SubScalar: struct {
+        val: f32,
+    },
     Mul: void,
     MulScalar: struct {
+        val: f32,
+    },
+    Div: void,
+    DivScalar: struct {
         val: f32,
     },
     MatMul: void,
@@ -152,20 +164,6 @@ pub const Op = struct {
                     C.data.ptr,
                     @intCast(N),
                 );
-            },
-            .AddBias => {
-                const A = self.inputs[0];
-                const bias = self.inputs[1];
-                const C = self.outputs[0];
-                const M = A.shape.dims[0];
-                const N = A.shape.dims[1];
-                for (0..M) |i| {
-                    const a_row = A.data[i * N .. (i + 1) * N];
-                    const c_row = C.data[i * N .. (i + 1) * N];
-                    for (0..N) |j| {
-                        c_row[j] = a_row[j] + bias.data[j];
-                    }
-                }
             },
             .Relu => {
                 const A = self.inputs[0];
@@ -350,6 +348,14 @@ pub const Op = struct {
                     c_val.* = a_val * val;
                 }
             },
+            .DivScalar => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const val = self.context.DivScalar.val;
+                for (C.data, A.data) |*c_val, a_val| {
+                    c_val.* = a_val / val;
+                }
+            },
             .AddScalar => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
@@ -358,21 +364,37 @@ pub const Op = struct {
                     c_val.* = a_val + val;
                 }
             },
-            .Add => {
+            .SubScalar => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const val = self.context.SubScalar.val;
+                for (C.data, A.data) |*c_val, a_val| {
+                    c_val.* = a_val - val;
+                }
+            },
+            .Add, .AddBias => {
                 const A = self.inputs[0];
                 const B = self.inputs[1];
                 const C = self.outputs[0];
-                for (C.data, A.data, B.data) |*c_val, a_val, b_val| {
-                    c_val.* = a_val + b_val;
-                }
+                tensor.broadcastBinaryOpRaw(C.data, C.shape, A.data, A.shape, A.strides, B.data, B.shape, B.strides, struct { fn op(a: f32, b: f32) f32 { return a + b; } }.op);
+            },
+            .Sub => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+                tensor.broadcastBinaryOpRaw(C.data, C.shape, A.data, A.shape, A.strides, B.data, B.shape, B.strides, struct { fn op(a: f32, b: f32) f32 { return a - b; } }.op);
             },
             .Mul => {
                 const A = self.inputs[0];
                 const B = self.inputs[1];
                 const C = self.outputs[0];
-                for (C.data, A.data, B.data) |*c_val, a_val, b_val| {
-                    c_val.* = a_val * b_val;
-                }
+                tensor.broadcastBinaryOpRaw(C.data, C.shape, A.data, A.shape, A.strides, B.data, B.shape, B.strides, struct { fn op(a: f32, b: f32) f32 { return a * b; } }.op);
+            },
+            .Div => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+                tensor.broadcastBinaryOpRaw(C.data, C.shape, A.data, A.shape, A.strides, B.data, B.shape, B.strides, struct { fn op(a: f32, b: f32) f32 { return a / b; } }.op);
             },
             .Conv2D => {
                 const A = self.inputs[0];
@@ -678,38 +700,7 @@ pub const Op = struct {
                 }
             },
             // ====================================================================
-            // 2. 偏置项加法反向传播 (AddBias Backward)
-            // ====================================================================
-            // 前向公式: C[i, j] = A[i, j] + bias[j]，其中 A (M x N), bias (1 x N), C (M x N)
-            // 数学推导:
-            //   1. 对输入 A 的偏导数: ∂L/∂A[i, j] = ∂L/∂C[i, j]
-            //      因此 dA += dC (逐元素直接累加)。
-            //   2. 对偏置 bias 的偏导数: ∂L/∂bias[j] = sum_{i=0}^{M-1} (∂L/∂C[i, j])
-            //      这是因为偏置项在行维度 (批量样本维度) 进行了广播复制。
-            //      因此对偏置的梯度为对输出梯度 dC 在第 0 维（行）上的降维累加和。
-            .AddBias => {
-                const A = self.inputs[0];
-                const bias = self.inputs[1];
-                const C = self.outputs[0];
-                const M = A.shape.dims[0];
-                const N = A.shape.dims[1];
-
-                for (0..N) |n| {
-                    var bias_sum: f32 = 0.0;
-                    for (0..M) |m| {
-                        const grad_val = C.grad[m * N + n];
-                        if (A.requires_grad) {
-                            A.grad[m * N + n] += grad_val;
-                        }
-                        bias_sum += grad_val;
-                    }
-                    if (bias.requires_grad) {
-                        bias.grad[n] += bias_sum;
-                    }
-                }
-            },
-            // ====================================================================
-            // 3. ReLU 激活函数反向传播 (ReLU Backward)
+            // 2. ReLU 激活函数反向传播 (ReLU Backward)
             // ====================================================================
             // 前向公式: C = max(0, A)，逐元素操作
             // 数学推导:
@@ -951,6 +942,16 @@ pub const Op = struct {
                     }
                 }
             },
+            .DivScalar => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const val = self.context.DivScalar.val;
+                if (A.requires_grad) {
+                    for (0..A.data.len) |i| {
+                        A.grad[i] += C.grad[i] / val;
+                    }
+                }
+            },
             .AddScalar => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
@@ -960,18 +961,110 @@ pub const Op = struct {
                     }
                 }
             },
-            .Add => {
+            .SubScalar => {
                 const A = self.inputs[0];
-                const B = self.inputs[1];
                 const C = self.outputs[0];
                 if (A.requires_grad) {
                     for (0..A.data.len) |i| {
                         A.grad[i] += C.grad[i];
                     }
                 }
-                if (B.requires_grad) {
-                    for (0..B.data.len) |i| {
-                        B.grad[i] += C.grad[i];
+            },
+            .Add, .AddBias => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+
+                if (A.shape.eq(B.shape)) {
+                    if (A.requires_grad) {
+                        for (A.grad, C.grad) |*a_g, c_g| {
+                            a_g.* += c_g;
+                        }
+                    }
+                    if (B.requires_grad) {
+                        for (B.grad, C.grad) |*b_g, c_g| {
+                            b_g.* += c_g;
+                        }
+                    }
+                } else {
+                    const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
+                    const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
+                    const len = C.shape.len;
+                    var coord = [_]usize{0} ** 8;
+
+                    for (C.grad) |c_g| {
+                        var a_idx: usize = 0;
+                        var b_idx: usize = 0;
+                        for (0..len) |d| {
+                            a_idx += coord[d] * a_strides.dims[d];
+                            b_idx += coord[d] * b_strides.dims[d];
+                        }
+
+                        if (A.requires_grad) {
+                            A.grad[a_idx] += c_g;
+                        }
+                        if (B.requires_grad) {
+                            B.grad[b_idx] += c_g;
+                        }
+
+                        var d = len;
+                        while (d > 0) {
+                            d -= 1;
+                            coord[d] += 1;
+                            if (coord[d] < C.shape.dims[d]) {
+                                break;
+                            }
+                            coord[d] = 0;
+                        }
+                    }
+                }
+            },
+            .Sub => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+
+                if (A.shape.eq(B.shape)) {
+                    if (A.requires_grad) {
+                        for (A.grad, C.grad) |*a_g, c_g| {
+                            a_g.* += c_g;
+                        }
+                    }
+                    if (B.requires_grad) {
+                        for (B.grad, C.grad) |*b_g, c_g| {
+                            b_g.* -= c_g;
+                        }
+                    }
+                } else {
+                    const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
+                    const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
+                    const len = C.shape.len;
+                    var coord = [_]usize{0} ** 8;
+
+                    for (C.grad) |c_g| {
+                        var a_idx: usize = 0;
+                        var b_idx: usize = 0;
+                        for (0..len) |d| {
+                            a_idx += coord[d] * a_strides.dims[d];
+                            b_idx += coord[d] * b_strides.dims[d];
+                        }
+
+                        if (A.requires_grad) {
+                            A.grad[a_idx] += c_g;
+                        }
+                        if (B.requires_grad) {
+                            B.grad[b_idx] -= c_g;
+                        }
+
+                        var d = len;
+                        while (d > 0) {
+                            d -= 1;
+                            coord[d] += 1;
+                            if (coord[d] < C.shape.dims[d]) {
+                                break;
+                            }
+                            coord[d] = 0;
+                        }
                     }
                 }
             },
@@ -979,14 +1072,99 @@ pub const Op = struct {
                 const A = self.inputs[0];
                 const B = self.inputs[1];
                 const C = self.outputs[0];
-                if (A.requires_grad) {
-                    for (0..A.data.len) |i| {
-                        A.grad[i] += C.grad[i] * B.data[i];
+
+                if (A.shape.eq(B.shape)) {
+                    if (A.requires_grad) {
+                        for (A.grad, C.grad, B.data) |*a_g, c_g, b_val| {
+                            a_g.* += c_g * b_val;
+                        }
+                    }
+                    if (B.requires_grad) {
+                        for (B.grad, C.grad, A.data) |*b_g, c_g, a_val| {
+                            b_g.* += c_g * a_val;
+                        }
+                    }
+                } else {
+                    const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
+                    const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
+                    const len = C.shape.len;
+                    var coord = [_]usize{0} ** 8;
+
+                    for (C.grad) |c_g| {
+                        var a_idx: usize = 0;
+                        var b_idx: usize = 0;
+                        for (0..len) |d| {
+                            a_idx += coord[d] * a_strides.dims[d];
+                            b_idx += coord[d] * b_strides.dims[d];
+                        }
+
+                        if (A.requires_grad) {
+                            A.grad[a_idx] += c_g * B.data[b_idx];
+                        }
+                        if (B.requires_grad) {
+                            B.grad[b_idx] += c_g * A.data[a_idx];
+                        }
+
+                        var d = len;
+                        while (d > 0) {
+                            d -= 1;
+                            coord[d] += 1;
+                            if (coord[d] < C.shape.dims[d]) {
+                                break;
+                            }
+                            coord[d] = 0;
+                        }
                     }
                 }
-                if (B.requires_grad) {
-                    for (0..B.data.len) |i| {
-                        B.grad[i] += C.grad[i] * A.data[i];
+            },
+            .Div => {
+                const A = self.inputs[0];
+                const B = self.inputs[1];
+                const C = self.outputs[0];
+
+                if (A.shape.eq(B.shape)) {
+                    if (A.requires_grad) {
+                        for (A.grad, C.grad, B.data) |*a_g, c_g, b_val| {
+                            a_g.* += c_g / b_val;
+                        }
+                    }
+                    if (B.requires_grad) {
+                        for (B.grad, C.grad, A.data, B.data) |*b_g, c_g, a_val, b_val| {
+                            b_g.* -= c_g * a_val / (b_val * b_val);
+                        }
+                    }
+                } else {
+                    const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
+                    const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
+                    const len = C.shape.len;
+                    var coord = [_]usize{0} ** 8;
+
+                    for (C.grad) |c_g| {
+                        var a_idx: usize = 0;
+                        var b_idx: usize = 0;
+                        for (0..len) |d| {
+                            a_idx += coord[d] * a_strides.dims[d];
+                            b_idx += coord[d] * b_strides.dims[d];
+                        }
+
+                        const b_val = B.data[b_idx];
+                        if (A.requires_grad) {
+                            A.grad[a_idx] += c_g / b_val;
+                        }
+                        if (B.requires_grad) {
+                            const a_val = A.data[a_idx];
+                            B.grad[b_idx] -= c_g * a_val / (b_val * b_val);
+                        }
+
+                        var d = len;
+                        while (d > 0) {
+                            d -= 1;
+                            coord[d] += 1;
+                            if (coord[d] < C.shape.dims[d]) {
+                                break;
+                            }
+                            coord[d] = 0;
+                        }
                     }
                 }
             },
@@ -1525,39 +1703,9 @@ pub const Graph = struct {
         return C;
     }
 
-    // 偏置相加算子前向传播：C = A + bias (按行广播相加)
+    // 偏置相加算子前向传播：C = A + bias (直接路由到通用广播加法)
     pub fn addBias(self: *Graph, A: *Tensor, bias: *Tensor) !*Tensor {
-        const allocator = self.arena.allocator();
-        const C = try A.addBias(bias, allocator, null);
-
-        const req_grad = self.enable_grad and (A.requires_grad or bias.requires_grad);
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = A;
-            inputs[1] = bias;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .AddBias,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .AddBias = {} },
-            };
-            C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
-        }
-
-        return C;
+        return self.add(A, bias);
     }
 
     // 激活函数 ReLU 前向传播：C = max(0, A)
@@ -2145,7 +2293,75 @@ pub const Graph = struct {
         return C;
     }
 
-    // 逐元素张量加法：C = A + B
+    // 标量减法：C = A - val
+    pub fn subScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.subScalar(val, allocator, null);
+
+        const req_grad = self.enable_grad and A.requires_grad;
+        C.requires_grad = req_grad;
+        if (req_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 1);
+            inputs[0] = A;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = C;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .SubScalar,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .SubScalar = .{ .val = val } },
+            };
+            C.creator = o;
+            try self.ops.append(self.backing_allocator, o);
+        }
+
+        return C;
+    }
+
+    // 标量除法：C = A / val
+    pub fn divScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.divScalar(val, allocator, null);
+
+        const req_grad = self.enable_grad and A.requires_grad;
+        C.requires_grad = req_grad;
+        if (req_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 1);
+            inputs[0] = A;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = C;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .DivScalar,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .DivScalar = .{ .val = val } },
+            };
+            C.creator = o;
+            try self.ops.append(self.backing_allocator, o);
+        }
+
+        return C;
+    }
+
+    // 逐元素张量加法：C = A + B (支持多维广播)
     pub fn add(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.add(B, allocator, null);
@@ -2180,7 +2396,42 @@ pub const Graph = struct {
         return C;
     }
 
-    // 逐元素张量乘法 (Hadamard 积)：C = A * B
+    // 逐元素张量减法：C = A - B (支持多维广播)
+    pub fn sub(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.sub(B, allocator, null);
+
+        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
+        C.requires_grad = req_grad;
+        if (req_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 2);
+            inputs[0] = A;
+            inputs[1] = B;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = C;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .Sub,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .Sub = {} },
+            };
+            C.creator = o;
+            try self.ops.append(self.backing_allocator, o);
+        }
+
+        return C;
+    }
+
+    // 逐元素张量乘法 (Hadamard 积)：C = A * B (支持多维广播)
     pub fn mul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.mul(B, allocator, null);
@@ -2207,6 +2458,41 @@ pub const Graph = struct {
                 .inputs = inputs,
                 .outputs = outputs,
                 .context = .{ .Mul = {} },
+            };
+            C.creator = o;
+            try self.ops.append(self.backing_allocator, o);
+        }
+
+        return C;
+    }
+
+    // 逐元素张量除法：C = A / B (支持多维广播)
+    pub fn div(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.div(B, allocator, null);
+
+        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
+        C.requires_grad = req_grad;
+        if (req_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 2);
+            inputs[0] = A;
+            inputs[1] = B;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = C;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .Div,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .Div = {} },
             };
             C.creator = o;
             try self.ops.append(self.backing_allocator, o);
@@ -2539,4 +2825,95 @@ test "autodiff Graph enable_grad and setGradEnabled" {
     try std.testing.expect(y2.creator == null);
     try std.testing.expectEqual(@as(usize, 0), graph_nograd.ops.items.len);
 }
+
+test "autodiff broadcasting add, sub, mul, div backward reduction" {
+    const allocator = std.testing.allocator;
+
+    var graph = Graph.init(allocator);
+    defer graph.deinit();
+
+    // 1. Add broadcasting: A [2, 3] + B [1, 3] -> C [2, 3]
+    const a = try graph.tensorWithData(2, 3, &.{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 }, true);
+    const b = try graph.tensorWithData(1, 3, &.{ 10.0, 20.0, 30.0 }, true);
+    const out_c = try graph.add(a, b);
+
+    // 设定输出的伪梯度 dC = all 1.0 (模拟 sum(C))
+    @memset(out_c.grad, 1.0);
+    try graph.backwardWithGrad(out_c);
+
+    // dA 应为全部 1.0
+    for (a.grad) |g| {
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), g, 1e-5);
+    }
+    // dB 应为沿第 0 维求和，即每列 1.0 + 1.0 = 2.0
+    for (b.grad) |g| {
+        try std.testing.expectApproxEqAbs(@as(f32, 2.0), g, 1e-5);
+    }
+
+    // 2. Mul broadcasting: A2 [2, 2] * B2 [1, 2] -> C2 [2, 2]
+    var graph2 = Graph.init(allocator);
+    defer graph2.deinit();
+
+    const a2 = try graph2.tensorWithData(2, 2, &.{ 1.0, 2.0, 3.0, 4.0 }, true);
+    const b2 = try graph2.tensorWithData(1, 2, &.{ 10.0, 20.0 }, true);
+    const out_c2 = try graph2.mul(a2, b2);
+
+    @memset(out_c2.grad, 1.0);
+    try graph2.backwardWithGrad(out_c2);
+
+    // dA2: C.grad * B2.data -> [10.0, 20.0, 10.0, 20.0]
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), a2.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 20.0), a2.grad[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), a2.grad[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 20.0), a2.grad[3], 1e-5);
+
+    // dB2: 沿第 0 维求和 C.grad * A2.data -> [1.0 + 3.0, 2.0 + 4.0] = [4.0, 6.0]
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), b2.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), b2.grad[1], 1e-5);
+
+    // 3. Sub broadcasting: A3 [2, 2] - B3 [1, 2] -> C3 [2, 2]
+    var graph3 = Graph.init(allocator);
+    defer graph3.deinit();
+
+    const a3 = try graph3.tensorWithData(2, 2, &.{ 10.0, 20.0, 30.0, 40.0 }, true);
+    const b3 = try graph3.tensorWithData(1, 2, &.{ 1.0, 2.0 }, true);
+    const out_c3 = try graph3.sub(a3, b3);
+
+    @memset(out_c3.grad, 1.0);
+    try graph3.backwardWithGrad(out_c3);
+
+    // dA3 = +1.0
+    for (a3.grad) |g| {
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), g, 1e-5);
+    }
+    // dB3 = - (1.0 + 1.0) = -2.0
+    for (b3.grad) |g| {
+        try std.testing.expectApproxEqAbs(@as(f32, -2.0), g, 1e-5);
+    }
+
+    // 4. Div broadcasting: A4 [2, 2] / B4 [1, 2] -> C4 [2, 2]
+    var graph4 = Graph.init(allocator);
+    defer graph4.deinit();
+
+    const a4 = try graph4.tensorWithData(2, 2, &.{ 10.0, 20.0, 30.0, 40.0 }, true);
+    const b4 = try graph4.tensorWithData(1, 2, &.{ 2.0, 4.0 }, true);
+    const out_c4 = try graph4.div(a4, b4);
+
+    @memset(out_c4.grad, 1.0);
+    try graph4.backwardWithGrad(out_c4);
+
+    // dA4: 1.0 / B4 -> [0.5, 0.25, 0.5, 0.25]
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), a4.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), a4.grad[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), a4.grad[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), a4.grad[3], 1e-5);
+
+    // dB4: - sum(A4 / B4^2)
+    // col 0: -(10 / 4 + 30 / 4) = -40 / 4 = -10.0
+    // col 1: -(20 / 16 + 40 / 16) = -60 / 16 = -3.75
+    try std.testing.expectApproxEqAbs(@as(f32, -10.0), b4.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -3.75), b4.grad[1], 1e-5);
+}
+
+
 
