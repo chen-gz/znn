@@ -47,6 +47,13 @@ test "basic imports and struct definitions" {
     try std.testing.expect(@TypeOf(nn.Dropout) == type);
     try std.testing.expect(@TypeOf(nn.AvgPool2D) == type);
     try std.testing.expect(@TypeOf(nn.KVCache) == type);
+    try std.testing.expect(@TypeOf(nn.RNNCell) == type);
+    try std.testing.expect(@TypeOf(nn.RNN) == type);
+    try std.testing.expect(@TypeOf(nn.LSTMCell) == type);
+    try std.testing.expect(@TypeOf(nn.LSTM) == type);
+    try std.testing.expect(@TypeOf(nn.StackedLSTM) == type);
+    try std.testing.expect(@TypeOf(nn.GRUCell) == type);
+    try std.testing.expect(@TypeOf(nn.GRU) == type);
 }
 
 test "measureTime utility" {
