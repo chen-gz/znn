@@ -2442,6 +2442,150 @@ pub fn dpoLoss(
     return total_loss / @as(f32, @floatFromInt(N));
 }
 
+/// 组相对策略优化 (GRPO, Group Relative Policy Optimization) 优势计算
+/// 对应 DeepSeek-R1 强化学习论文与博客第 8.5 节公式 (1)：
+/// 对每个 Prompt 并行采样的 G 个候选回复按组计算奖励的均值与标准差，并归一化输出优势值：
+/// A_i = (r_i - mean({r_1..r_G})) / (std({r_1..r_G}) + eps)
+pub fn computeGroupAdvantages(
+    allocator: std.mem.Allocator,
+    rewards: []const f32,
+    group_size: usize,
+    eps: f32,
+) ![]f32 {
+    std.debug.assert(group_size > 0);
+    std.debug.assert(rewards.len % group_size == 0);
+
+    const advantages = try allocator.alloc(f32, rewards.len);
+    const num_groups = rewards.len / group_size;
+
+    for (0..num_groups) |g| {
+        const start = g * group_size;
+        const group_rewards = rewards[start .. start + group_size];
+
+        var sum: f32 = 0.0;
+        for (group_rewards) |r| sum += r;
+        const mean = sum / @as(f32, @floatFromInt(group_size));
+
+        var var_sum: f32 = 0.0;
+        for (group_rewards) |r| {
+            const diff = r - mean;
+            var_sum += diff * diff;
+        }
+        const std_dev = @sqrt(var_sum / @as(f32, @floatFromInt(group_size)));
+
+        for (group_rewards, 0..) |r, j| {
+            advantages[start + j] = (r - mean) / (std_dev + eps);
+        }
+    }
+
+    return advantages;
+}
+
+/// 组相对策略优化 (GRPO) 纯数值损失函数评估：
+/// 对应 DeepSeek-R1 强化学习论文与博客第 8.5 节公式 (2) & (3)：
+/// L_GRPO = - 1/N \sum [ min(r_t * A_i, clip(r_t, 1-eps, 1+eps) * A_i) - \beta * D_KL ]
+/// 其中 D_KL(\pi_\theta || \pi_ref) = exp(ref_logp - new_logp) - (ref_logp - new_logp) - 1
+pub fn computeGRPOLoss(
+    old_logps: []const f32,
+    new_logps: []const f32,
+    advantages: []const f32,
+    ref_logps: ?[]const f32,
+    beta: f32,
+    clip_eps: f32,
+) f32 {
+    std.debug.assert(old_logps.len == new_logps.len);
+    std.debug.assert(old_logps.len == advantages.len);
+    if (ref_logps) |refs| std.debug.assert(refs.len == old_logps.len);
+
+    const N = old_logps.len;
+    if (N == 0) return 0.0;
+
+    var total_obj: f32 = 0.0;
+    for (0..N) |i| {
+        const ratio = @exp(new_logps[i] - old_logps[i]);
+        const adv = advantages[i];
+        const s1 = ratio * adv;
+        const clipped_ratio = std.math.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps);
+        const s2 = clipped_ratio * adv;
+        const surrogate = @min(s1, s2);
+
+        var kl: f32 = 0.0;
+        if (beta > 0.0) {
+            const ref = if (ref_logps) |refs| refs[i] else old_logps[i];
+            const u = ref - new_logps[i];
+            kl = @exp(u) - u - 1.0;
+        }
+
+        total_obj += (surrogate - beta * kl);
+    }
+
+    return -(total_obj / @as(f32, @floatFromInt(N)));
+}
+
+/// GRPO 损失函数，支持对 new_logps 的自动微分梯度回传 (若 new_logps.requires_grad 为 true)
+pub fn grpoLoss(
+    old_logps: *Tensor,
+    new_logps: *Tensor,
+    advantages: []const f32,
+    ref_logps: ?[]const f32,
+    beta: f32,
+    clip_eps: f32,
+) f32 {
+    const N = old_logps.data.len;
+    std.debug.assert(new_logps.data.len == N);
+    std.debug.assert(advantages.len == N);
+    if (ref_logps) |refs| std.debug.assert(refs.len == N);
+
+    if (N == 0) return 0.0;
+
+    var total_obj: f32 = 0.0;
+    const inv_n = 1.0 / @as(f32, @floatFromInt(N));
+
+    for (0..N) |i| {
+        const ratio = @exp(new_logps.data[i] - old_logps.data[i]);
+        const adv = advantages[i];
+        const s1 = ratio * adv;
+        const clipped_ratio = std.math.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps);
+        const s2 = clipped_ratio * adv;
+        const surrogate = @min(s1, s2);
+
+        var kl: f32 = 0.0;
+        const ref = if (ref_logps) |refs| refs[i] else old_logps.data[i];
+        if (beta > 0.0) {
+            const u = ref - new_logps.data[i];
+            kl = @exp(u) - u - 1.0;
+        }
+
+        total_obj += (surrogate - beta * kl);
+
+        if (new_logps.requires_grad and new_logps.grad.len == N) {
+            // 计算代理项梯度 d(surrogate) / d(new_logp)
+            var d_surrogate: f32 = 0.0;
+            if (adv >= 0.0) {
+                if (ratio <= 1.0 + clip_eps) {
+                    d_surrogate = ratio * adv;
+                }
+            } else {
+                if (ratio >= 1.0 - clip_eps) {
+                    d_surrogate = ratio * adv;
+                }
+            }
+
+            // 计算 KL 散度项梯度 d(kl) / d(new_logp)
+            var d_kl: f32 = 0.0;
+            if (beta > 0.0) {
+                d_kl = 1.0 - @exp(ref - new_logps.data[i]);
+            }
+
+            // d(Loss) / d(new_logp) = - inv_n * (d_surrogate - beta * d_kl)
+            const d_loss = -inv_n * (d_surrogate - beta * d_kl);
+            new_logps.grad[i] += d_loss;
+        }
+    }
+
+    return -(total_obj * inv_n);
+}
+
 // ============================================================================
 // 8. 采样与生成策略 (Sampling Strategies)
 // ============================================================================
