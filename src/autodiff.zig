@@ -1,13 +1,14 @@
 const std = @import("std");
 const c = @import("cblas.zig");
-const tensor = @import("tensor.zig");
+const tensor_mod = @import("tensor.zig");
+pub const tensor = tensor_mod;
 
 extern fn erff(x: f32) f32;
 
-pub const Tensor = tensor.Tensor;
-pub const Shape = tensor.Shape;
-pub const computeContiguousStrides = tensor.computeContiguousStrides;
-pub const transposeShape = tensor.transposeShape;
+pub const Tensor = tensor_mod.Tensor;
+pub const Shape = tensor_mod.Shape;
+pub const computeContiguousStrides = tensor_mod.computeContiguousStrides;
+pub const transposeShape = tensor_mod.transposeShape;
 
 
 // 支持的算子类型枚举
@@ -28,6 +29,8 @@ pub const OpType = enum {
     // --- 形状与维度变换 (Shape & Dimension Transforms) ---
     Reshape,             // 形状变换
     Transpose,           // 维度转置
+    Concat,              // 张量沿指定维度拼接
+    Split,               // 张量沿指定维度切分
 
     // --- 激活函数与非线性变换 (Activation Functions) ---
     Relu,                // 激活函数 ReLU
@@ -82,6 +85,12 @@ pub const OpContext = union(enum) {
     Transpose: struct {
         dim0: usize,
         dim1: usize,
+    },
+    Concat: struct {
+        dim: usize,
+    },
+    Split: struct {
+        dim: usize,
     },
 
     // --- 激活函数与非线性变换 ---
@@ -325,6 +334,61 @@ pub const Op = struct {
                             break;
                         }
                         indices[d] = 0;
+                    }
+                }
+            },
+            .Concat => {
+                const dim = self.context.Concat.dim;
+                const out = self.outputs[0];
+                const rank = out.shape.len;
+                const concat_dim_total = out.shape.dims[dim];
+
+                var outer_size: usize = 1;
+                for (0..dim) |d| {
+                    outer_size *= out.shape.dims[d];
+                }
+                var inner_size: usize = 1;
+                for (dim + 1..rank) |d| {
+                    inner_size *= out.shape.dims[d];
+                }
+
+                for (0..outer_size) |outer| {
+                    const out_base = outer * concat_dim_total * inner_size;
+                    var offset_dim: usize = 0;
+                    for (self.inputs) |t| {
+                        const d_k = t.shape.dims[dim];
+                        const src_base = outer * d_k * inner_size;
+                        const dest_base = out_base + offset_dim * inner_size;
+                        const copy_len = d_k * inner_size;
+                        @memcpy(out.data[dest_base .. dest_base + copy_len], t.data[src_base .. src_base + copy_len]);
+                        offset_dim += d_k;
+                    }
+                }
+            },
+            .Split => {
+                const dim = self.context.Split.dim;
+                const in = self.inputs[0];
+                const rank = in.shape.len;
+                const dim_size = in.shape.dims[dim];
+                const num_splits = self.outputs.len;
+                const split_dim_size = self.outputs[0].shape.dims[dim];
+
+                var outer_size: usize = 1;
+                for (0..dim) |d| {
+                    outer_size *= in.shape.dims[d];
+                }
+                var inner_size: usize = 1;
+                for (dim + 1..rank) |d| {
+                    inner_size *= in.shape.dims[d];
+                }
+
+                for (0..outer_size) |outer| {
+                    const src_base = outer * dim_size * inner_size;
+                    for (0..num_splits) |k| {
+                        const dest_base = outer * split_dim_size * inner_size;
+                        const src_offset = src_base + k * split_dim_size * inner_size;
+                        const copy_len = split_dim_size * inner_size;
+                        @memcpy(self.outputs[k].data[dest_base .. dest_base + copy_len], in.data[src_offset .. src_offset + copy_len]);
                     }
                 }
             },
@@ -910,6 +974,70 @@ pub const Op = struct {
                                 break;
                             }
                             indices[d] = 0;
+                        }
+                    }
+                }
+            },
+            .Concat => {
+                const dim = self.context.Concat.dim;
+                const out = self.outputs[0];
+                const rank = out.shape.len;
+                const concat_dim_total = out.shape.dims[dim];
+
+                var outer_size: usize = 1;
+                for (0..dim) |d| {
+                    outer_size *= out.shape.dims[d];
+                }
+                var inner_size: usize = 1;
+                for (dim + 1..rank) |d| {
+                    inner_size *= out.shape.dims[d];
+                }
+
+                for (0..outer_size) |outer| {
+                    const out_base = outer * concat_dim_total * inner_size;
+                    var offset_dim: usize = 0;
+                    for (self.inputs) |t| {
+                        const d_k = t.shape.dims[dim];
+                        const src_base = outer * d_k * inner_size;
+                        const dest_base = out_base + offset_dim * inner_size;
+                        const copy_len = d_k * inner_size;
+
+                        if (t.requires_grad) {
+                            for (0..copy_len) |j| {
+                                t.grad[src_base + j] += out.grad[dest_base + j];
+                            }
+                        }
+                        offset_dim += d_k;
+                    }
+                }
+            },
+            .Split => {
+                const dim = self.context.Split.dim;
+                const in = self.inputs[0];
+                const rank = in.shape.len;
+                const dim_size = in.shape.dims[dim];
+                const num_splits = self.outputs.len;
+                const split_dim_size = self.outputs[0].shape.dims[dim];
+
+                if (in.requires_grad) {
+                    var outer_size: usize = 1;
+                    for (0..dim) |d| {
+                        outer_size *= in.shape.dims[d];
+                    }
+                    var inner_size: usize = 1;
+                    for (dim + 1..rank) |d| {
+                        inner_size *= in.shape.dims[d];
+                    }
+
+                    for (0..outer_size) |outer| {
+                        const src_base = outer * dim_size * inner_size;
+                        for (0..num_splits) |k| {
+                            const dest_base = outer * split_dim_size * inner_size;
+                            const src_offset = src_base + k * split_dim_size * inner_size;
+                            const copy_len = split_dim_size * inner_size;
+                            for (0..copy_len) |j| {
+                                in.grad[src_offset + j] += self.outputs[k].grad[dest_base + j];
+                            }
                         }
                     }
                 }
@@ -1666,6 +1794,93 @@ pub const Graph = struct {
         }
 
         return C;
+    }
+
+    // 沿指定维度拼接张量数组 (Concat)
+    pub fn concat(self: *Graph, inputs: []const *Tensor, dim: usize) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try tensor_mod.concat(allocator, inputs, dim, null);
+
+        var req_grad = false;
+        if (self.enable_grad) {
+            for (inputs) |inp| {
+                if (inp.requires_grad) {
+                    req_grad = true;
+                    break;
+                }
+            }
+        }
+        C.requires_grad = req_grad;
+        if (req_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        if (req_grad) {
+            const inps_copy = try allocator.alloc(*Tensor, inputs.len);
+            @memcpy(inps_copy, inputs);
+            const outs_copy = try allocator.alloc(*Tensor, 1);
+            outs_copy[0] = C;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .Concat,
+                .inputs = inps_copy,
+                .outputs = outs_copy,
+                .context = .{
+                    .Concat = .{
+                        .dim = dim,
+                    },
+                },
+            };
+            C.creator = o;
+            try self.ops.append(self.backing_allocator, o);
+        }
+
+        return C;
+    }
+
+    // 沿指定维度将张量均等切分为 num_splits 份 (Split)
+    pub fn split(self: *Graph, input: *Tensor, num_splits: usize, dim: usize) ![]*Tensor {
+        const allocator = self.arena.allocator();
+        const outputs = try tensor_mod.split(allocator, input, num_splits, dim, null);
+
+        const req_grad = self.enable_grad and input.requires_grad;
+        for (outputs) |out| {
+            out.requires_grad = req_grad;
+            if (req_grad) {
+                out.grad = try allocator.alloc(f32, out.data.len);
+                @memset(out.grad, 0.0);
+            }
+            try self.tensors.append(self.backing_allocator, out);
+        }
+
+        if (req_grad) {
+            const inps = try allocator.alloc(*Tensor, 1);
+            inps[0] = input;
+            const outs_copy = try allocator.alloc(*Tensor, num_splits);
+            @memcpy(outs_copy, outputs);
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .Split,
+                .inputs = inps,
+                .outputs = outs_copy,
+                .context = .{
+                    .Split = .{
+                        .dim = dim,
+                    },
+                },
+            };
+            for (outputs) |out| {
+                out.creator = o;
+            }
+            try self.ops.append(self.backing_allocator, o);
+        }
+
+        return outputs;
     }
 
     // 矩阵乘法算子前向传播：C = A * B
