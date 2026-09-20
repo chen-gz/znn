@@ -31,6 +31,7 @@ pub const OpType = enum {
     Transpose,           // 维度转置
     Concat,              // 张量沿指定维度拼接
     Split,               // 张量沿指定维度切分
+    RepeatKV,            // GQA 注意力中沿 Head 维度复制广播 Key/Value 张量
 
     // --- 激活函数与非线性变换 (Activation Functions) ---
     Relu,                // 激活函数 ReLU
@@ -91,6 +92,9 @@ pub const OpContext = union(enum) {
     },
     Split: struct {
         dim: usize,
+    },
+    RepeatKV: struct {
+        groups: usize,
     },
 
     // --- 激活函数与非线性变换 ---
@@ -389,6 +393,27 @@ pub const Op = struct {
                         const src_offset = src_base + k * split_dim_size * inner_size;
                         const copy_len = split_dim_size * inner_size;
                         @memcpy(self.outputs[k].data[dest_base .. dest_base + copy_len], in.data[src_offset .. src_offset + copy_len]);
+                    }
+                }
+            },
+            .RepeatKV => {
+                const groups = self.context.RepeatKV.groups;
+                const X = self.inputs[0];
+                const Y = self.outputs[0];
+                const B = X.shape.dims[0];
+                const n_kv = X.shape.dims[1];
+                const T = X.shape.dims[2];
+                const hs = X.shape.dims[3];
+                const head_bytes = T * hs;
+
+                for (0..B) |b| {
+                    for (0..n_kv) |kv_h| {
+                        const src = X.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
+                        for (0..groups) |g| {
+                            const h = kv_h * groups + g;
+                            const dest = Y.data[((b * (n_kv * groups) + h) * head_bytes) .. ((b * (n_kv * groups) + h + 1) * head_bytes)];
+                            @memcpy(dest, src);
+                        }
                     }
                 }
             },
@@ -1037,6 +1062,31 @@ pub const Op = struct {
                             const copy_len = split_dim_size * inner_size;
                             for (0..copy_len) |j| {
                                 in.grad[src_offset + j] += self.outputs[k].grad[dest_base + j];
+                            }
+                        }
+                    }
+                }
+            },
+            .RepeatKV => {
+                const groups = self.context.RepeatKV.groups;
+                const X = self.inputs[0];
+                const Y = self.outputs[0];
+                if (X.requires_grad) {
+                    const B = X.shape.dims[0];
+                    const n_kv = X.shape.dims[1];
+                    const T = X.shape.dims[2];
+                    const hs = X.shape.dims[3];
+                    const head_bytes = T * hs;
+
+                    for (0..B) |b| {
+                        for (0..n_kv) |kv_h| {
+                            const x_grad = X.grad[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
+                            for (0..groups) |g| {
+                                const h = kv_h * groups + g;
+                                const y_grad = Y.grad[((b * (n_kv * groups) + h) * head_bytes) .. ((b * (n_kv * groups) + h + 1) * head_bytes)];
+                                for (x_grad, y_grad) |*xg, yg| {
+                                    xg.* += yg;
+                                }
                             }
                         }
                     }
@@ -1881,6 +1931,58 @@ pub const Graph = struct {
         }
 
         return outputs;
+    }
+
+    // GQA 注意力中沿 Head 维度复制广播 Key / Value 张量 (RepeatKV)
+    // 输入 X: [B, num_kv_heads, T, hs]
+    // 输出 Y: [B, num_kv_heads * groups, T, hs]
+    pub fn repeatKV(self: *Graph, X: *Tensor, groups: usize) !*Tensor {
+        if (groups == 1) return X;
+
+        const allocator = self.arena.allocator();
+        const B = X.shape.dims[0];
+        const n_kv = X.shape.dims[1];
+        const T = X.shape.dims[2];
+        const hs = X.shape.dims[3];
+        const nh = n_kv * groups;
+
+        const req_grad = self.enable_grad and X.requires_grad;
+        const Y = try self.tensorND(&.{ B, nh, T, hs }, req_grad);
+
+        const head_bytes = T * hs;
+        for (0..B) |b| {
+            for (0..n_kv) |kv_h| {
+                const src = X.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
+                for (0..groups) |g| {
+                    const h = kv_h * groups + g;
+                    const dest = Y.data[((b * nh + h) * head_bytes) .. ((b * nh + h + 1) * head_bytes)];
+                    @memcpy(dest, src);
+                }
+            }
+        }
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 1);
+            inputs[0] = X;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = Y;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .RepeatKV,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{
+                    .RepeatKV = .{
+                        .groups = groups,
+                    },
+                },
+            };
+            Y.creator = o;
+            try self.ops.append(self.backing_allocator, o);
+        }
+
+        return Y;
     }
 
     // 矩阵乘法算子前向传播：C = A * B
