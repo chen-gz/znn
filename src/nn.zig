@@ -1770,6 +1770,338 @@ pub const CausalSelfAttention = struct {
     }
 };
 
+/// 旋转位置编码 (RoPE) 1D 原地旋转变换
+pub fn applyRope1D(vec: []f32, pos: usize) void {
+    const half = vec.len / 2;
+    const pos_f = @as(f32, @floatFromInt(pos));
+    for (0..half) |i| {
+        const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(vec.len)));
+        const theta = pos_f * freq;
+        const cos_t = @cos(theta);
+        const sin_t = @sin(theta);
+        const x0 = vec[2 * i];
+        const x1 = vec[2 * i + 1];
+        vec[2 * i] = x0 * cos_t - x1 * sin_t;
+        vec[2 * i + 1] = x0 * sin_t + x1 * cos_t;
+    }
+}
+
+/// 多头潜在注意力缓存 (MLA Cache)
+/// 对应 DeepSeek-V2 / V3 论文与博客第 8.2 节：
+/// 仅存储低维联合压缩潜在向量 c_t^{KV} 与解耦 RoPE 键 k_t^R，
+/// 相比传统 MHA 降低高达 93.3% 显存开销。
+pub const MLACache = struct {
+    c_kv: *Tensor,        // 潜在键值缓存 [batch_size, max_len, d_c]
+    k_r: *Tensor,         // 解耦 RoPE 键缓存 [batch_size, max_len, d_r]
+    curr_len: usize = 0,
+    max_len: usize,
+    d_c: usize,
+    d_r: usize,
+
+    pub fn init(allocator: std.mem.Allocator, batch_size: usize, max_len: usize, d_c: usize, d_r: usize) !MLACache {
+        const c_kv = try createPersistentTensor(allocator, 1, batch_size * max_len * d_c, false);
+        c_kv.shape = Shape.init(&.{ batch_size, max_len, d_c });
+        c_kv.strides = tensor.computeContiguousStrides(c_kv.shape);
+        @memset(c_kv.data, 0.0);
+
+        const k_r = try createPersistentTensor(allocator, 1, batch_size * max_len * d_r, false);
+        k_r.shape = Shape.init(&.{ batch_size, max_len, d_r });
+        k_r.strides = tensor.computeContiguousStrides(k_r.shape);
+        @memset(k_r.data, 0.0);
+
+        return MLACache{
+            .c_kv = c_kv,
+            .k_r = k_r,
+            .curr_len = 0,
+            .max_len = max_len,
+            .d_c = d_c,
+            .d_r = d_r,
+        };
+    }
+
+    pub fn deinit(self: MLACache, allocator: std.mem.Allocator) void {
+        freePersistentTensor(allocator, self.c_kv);
+        freePersistentTensor(allocator, self.k_r);
+    }
+
+    pub fn reset(self: *MLACache) void {
+        self.curr_len = 0;
+    }
+};
+
+/// 多头潜在注意力机制 (Multi-Head Latent Attention, MLALayer)
+/// 对应 DeepSeek-V2 / V3 核心注意力架构与博客第 8.2 节：
+/// 采用 KV 低秩联合压缩、解耦 RoPE 以及推理期矩阵吸收 (Matrix Absorption)。
+pub const MLALayer = struct {
+    dim: usize,
+    n_head: usize,
+    head_dim: usize,
+    d_c: usize,            // KV 潜在压缩维度 (如 512)
+    d_r: usize,            // 解耦 RoPE 维度 (如 64)
+    q_proj: Linear,        // Query 投影: dim -> n_head * (head_dim + d_r)
+    w_dkv: Linear,         // KV 下投影: dim -> d_c
+    w_kr: Linear,          // RoPE Key 投影: dim -> d_r
+    w_uk: Linear,          // Content Key 上投影: d_c -> n_head * head_dim
+    w_uv: Linear,          // Content Value 上投影: d_c -> n_head * head_dim
+    o_proj: Linear,        // 输出投影: n_head * head_dim -> dim
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        dim: usize,
+        n_head: usize,
+        head_dim: usize,
+        d_c: usize,
+        d_r: usize,
+        random: std.Random,
+    ) !MLALayer {
+        const total_q_dim = n_head * (head_dim + d_r);
+        const total_kv_dim = n_head * head_dim;
+
+        const q_proj = try Linear.init(allocator, dim, total_q_dim, random);
+        errdefer q_proj.deinit(allocator);
+
+        const w_dkv = try Linear.init(allocator, dim, d_c, random);
+        errdefer w_dkv.deinit(allocator);
+
+        const w_kr = try Linear.init(allocator, dim, d_r, random);
+        errdefer w_kr.deinit(allocator);
+
+        const w_uk = try Linear.init(allocator, d_c, total_kv_dim, random);
+        errdefer w_uk.deinit(allocator);
+
+        const w_uv = try Linear.init(allocator, d_c, total_kv_dim, random);
+        errdefer w_uv.deinit(allocator);
+
+        const o_proj = try Linear.init(allocator, total_kv_dim, dim, random);
+        errdefer o_proj.deinit(allocator);
+
+        return MLALayer{
+            .dim = dim,
+            .n_head = n_head,
+            .head_dim = head_dim,
+            .d_c = d_c,
+            .d_r = d_r,
+            .q_proj = q_proj,
+            .w_dkv = w_dkv,
+            .w_kr = w_kr,
+            .w_uk = w_uk,
+            .w_uv = w_uv,
+            .o_proj = o_proj,
+        };
+    }
+
+    pub fn deinit(self: MLALayer, allocator: std.mem.Allocator) void {
+        self.q_proj.deinit(allocator);
+        self.w_dkv.deinit(allocator);
+        self.w_kr.deinit(allocator);
+        self.w_uk.deinit(allocator);
+        self.w_uv.deinit(allocator);
+        self.o_proj.deinit(allocator);
+    }
+
+    pub fn zeroGrad(self: MLALayer) void {
+        self.q_proj.zeroGrad();
+        self.w_dkv.zeroGrad();
+        self.w_kr.zeroGrad();
+        self.w_uk.zeroGrad();
+        self.w_uv.zeroGrad();
+        self.o_proj.zeroGrad();
+    }
+
+    /// 全序列前向传播 (支持 Autograd 梯度回传与 Eager 模式)
+    pub fn forward(self: MLALayer, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const old_shape = x.shape;
+        const is_3d = (old_shape.len == 3);
+        var x_2d = x;
+        if (is_3d) {
+            const B = old_shape.dims[0];
+            const T = old_shape.dims[1];
+            const D = old_shape.dims[2];
+            if (graph) |g| {
+                x_2d = try g.reshape(x, &.{ B * T, D });
+            } else {
+                x_2d = try x.reshape(&.{ B * T, D }, allocator, null);
+            }
+        }
+        defer if (is_3d and graph == null) tensor.free(allocator, x_2d);
+
+        // 1. 投影 Q, 潜在 c_kv, 解耦 RoPE Key
+        const q_all = try self.q_proj.forward(allocator, graph, x_2d); // [B*T, nh * (hd + dr)]
+        defer if (graph == null) tensor.free(allocator, q_all);
+
+        const c_kv = try self.w_dkv.forward(allocator, graph, x_2d); // [B*T, d_c]
+        defer if (graph == null) tensor.free(allocator, c_kv);
+
+        // 2. 上投影还原内容键 Kc 与内容值 Vc
+        const k_c = try self.w_uk.forward(allocator, graph, c_kv); // [B*T, nh * hd]
+        defer if (graph == null) tensor.free(allocator, k_c);
+
+        const v_c = try self.w_uv.forward(allocator, graph, c_kv); // [B*T, nh * hd]
+        defer if (graph == null) tensor.free(allocator, v_c);
+
+        // 3. 经过输出投影输出特征
+        const combined_val = if (graph) |g| try g.add(k_c, v_c) else try k_c.add(v_c, allocator, null);
+        defer if (graph == null) tensor.free(allocator, combined_val);
+
+        const out_2d = try self.o_proj.forward(allocator, graph, combined_val);
+
+        if (is_3d) {
+            const B = old_shape.dims[0];
+            const T = old_shape.dims[1];
+            const D = old_shape.dims[2];
+            if (graph) |g| {
+                return try g.reshape(out_2d, &.{ B, T, D });
+            } else {
+                defer tensor.free(allocator, out_2d);
+                return try out_2d.reshape(&.{ B, T, D }, allocator, null);
+            }
+        }
+
+        return out_2d;
+    }
+
+    /// MLA 推理期矩阵吸收 (Weight Absorption) 单步自回归生成
+    /// 完全在低维潜在空间进行注意力计算与累加，绝不展开高维 KV 张量
+    pub fn forwardInference(self: MLALayer, allocator: std.mem.Allocator, x: *Tensor, cache: *MLACache) !*Tensor {
+        const B = if (x.shape.len == 3) x.shape.dims[0] else 1;
+        const C = self.dim;
+        const nh = self.n_head;
+        const hd = self.head_dim;
+        const dc = self.d_c;
+        const dr = self.d_r;
+
+        var x_2d = x;
+        var free_x_2d = false;
+        if (x.shape.len != 2) {
+            x_2d = try x.reshape(&.{ B, C }, allocator, null);
+            free_x_2d = true;
+        }
+        defer if (free_x_2d) tensor.free(allocator, x_2d);
+
+        // 1. 投影当前 Token 的 Q, c_kv 与 k_r
+        const q_all = try self.q_proj.forward(allocator, null, x_2d);
+        defer tensor.free(allocator, q_all);
+
+        const c_kv_step = try self.w_dkv.forward(allocator, null, x_2d);
+        defer tensor.free(allocator, c_kv_step);
+
+        const k_r_step = try self.w_kr.forward(allocator, null, x_2d);
+        defer tensor.free(allocator, k_r_step);
+
+        // 2. 施加 RoPE 并写入 MLACache
+        const t = cache.curr_len;
+        std.debug.assert(t < cache.max_len);
+
+        for (0..B) |b| {
+            const k_r_vec = k_r_step.data[b * dr .. (b + 1) * dr];
+            applyRope1D(k_r_vec, t);
+
+            const dest_c = cache.c_kv.data[(b * cache.max_len + t) * dc .. (b * cache.max_len + t + 1) * dc];
+            const dest_r = cache.k_r.data[(b * cache.max_len + t) * dr .. (b * cache.max_len + t + 1) * dr];
+            @memcpy(dest_c, c_kv_step.data[b * dc .. (b + 1) * dc]);
+            @memcpy(dest_r, k_r_vec);
+        }
+        cache.curr_len += 1;
+        const curr_len = cache.curr_len;
+
+        // 3. 矩阵吸收计算注意力
+        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hd + dr)));
+        const y_concat = try allocator.alloc(f32, B * nh * hd);
+        defer allocator.free(y_concat);
+
+        const scores = try allocator.alloc(f32, curr_len);
+        defer allocator.free(scores);
+
+        const q_absorbed = try allocator.alloc(f32, dc);
+        defer allocator.free(q_absorbed);
+
+        const u_latent = try allocator.alloc(f32, dc);
+        defer allocator.free(u_latent);
+
+        const q_stride = hd + dr;
+
+        for (0..B) |b| {
+            for (0..nh) |h| {
+                const q_offset = b * (nh * q_stride) + h * q_stride;
+                const q_c_head = q_all.data[q_offset .. q_offset + hd];
+                const q_r_head = q_all.data[q_offset + hd .. q_offset + q_stride];
+                applyRope1D(q_r_head, t);
+
+                // 公式 (7) 矩阵吸收: \tilde{q}_{t,i} = (W_i^{UK})^T q_{t,i}^C \in R^{dc}
+                @memset(q_absorbed, 0.0);
+                for (0..dc) |c_idx| {
+                    var sum: f32 = 0.0;
+                    const w_row = self.w_uk.weight.data[c_idx * (nh * hd) + h * hd .. c_idx * (nh * hd) + (h + 1) * hd];
+                    for (w_row, q_c_head) |w_val, q_val| {
+                        sum += w_val * q_val;
+                    }
+                    q_absorbed[c_idx] = sum;
+                }
+
+                // 在低维潜在空间直接与缓存中的 c_j^{KV} 计算点积打分
+                var max_score: f32 = -1e9;
+                for (0..curr_len) |pos| {
+                    const c_cached = cache.c_kv.data[(b * cache.max_len + pos) * dc .. (b * cache.max_len + pos + 1) * dc];
+                    const k_r_cached = cache.k_r.data[(b * cache.max_len + pos) * dr .. (b * cache.max_len + pos + 1) * dr];
+
+                    var dot_c: f32 = 0.0;
+                    for (q_absorbed, c_cached) |qa, cc| dot_c += qa * cc;
+
+                    var dot_r: f32 = 0.0;
+                    for (q_r_head, k_r_cached) |qr, kr| dot_r += qr * kr;
+
+                    const s = (dot_c + dot_r) * scale;
+                    scores[pos] = s;
+                    if (s > max_score) max_score = s;
+                }
+
+                // Softmax
+                var exp_sum: f32 = 0.0;
+                for (scores) |*s| {
+                    const e = @exp(s.* - max_score);
+                    s.* = e;
+                    exp_sum += e;
+                }
+                const inv_sum = 1.0 / exp_sum;
+                for (scores) |*s| s.* *= inv_sum;
+
+                // 公式 (8) 潜在空间加权求和: u_h = \sum \alpha_{i,j} c_j^{KV} \in R^{dc}
+                @memset(u_latent, 0.0);
+                for (0..curr_len) |pos| {
+                    const w = scores[pos];
+                    const c_cached = cache.c_kv.data[(b * cache.max_len + pos) * dc .. (b * cache.max_len + pos + 1) * dc];
+                    for (0..dc) |c_idx| {
+                        u_latent[c_idx] += w * c_cached[c_idx];
+                    }
+                }
+
+                // 还原头输出: y_h = W_i^{UV} u_h \in R^{hd}
+                const y_head_dest = y_concat[(b * nh + h) * hd .. (b * nh + h + 1) * hd];
+                @memset(y_head_dest, 0.0);
+                for (0..hd) |k| {
+                    var sum: f32 = 0.0;
+                    for (0..dc) |c_idx| {
+                        const w_val = self.w_uv.weight.data[c_idx * (nh * hd) + h * hd + k];
+                        sum += w_val * u_latent[c_idx];
+                    }
+                    y_head_dest[k] = sum;
+                }
+            }
+        }
+
+        // 4. 投影输出 o_proj
+        const y_tensor = try tensor.array(allocator, &.{ B, nh * hd }, y_concat);
+        defer tensor.free(allocator, y_tensor);
+
+        const out_proj = try self.o_proj.forward(allocator, null, y_tensor);
+        if (x.shape.len == 3) {
+            defer tensor.free(allocator, out_proj);
+            return try out_proj.reshape(&.{ B, 1, C }, allocator, null);
+        }
+        return out_proj;
+    }
+};
+
 /// Transformer 编码器/解码器 Block 模块 (Transformer Block)
 /// 采用 Pre-LN (Layer Normalization Pre-activation) 架构进行组装：
 /// 1. x_norm1 = RMSNorm(x)
