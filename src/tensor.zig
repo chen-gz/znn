@@ -640,6 +640,10 @@ pub const Tensor = struct {
         return C;
     }
 
+    pub fn split(self: *Tensor, num_splits: usize, dim: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror![]*Tensor {
+        return tensorSplit(allocator, self, num_splits, dim, graph);
+    }
+
     pub fn transpose(self: *Tensor, dim0: usize, dim1: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.transposeND(self, dim0, dim1);
@@ -1148,6 +1152,100 @@ pub fn rand(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
 pub fn free(allocator: std.mem.Allocator, t: *Tensor) void {
     t.deinit(allocator);
 }
+
+/// 沿指定维度拼接多个张量 (Concat)
+pub fn concat(allocator: std.mem.Allocator, inputs: []const *Tensor, dim: usize, graph: ?*autodiff.Graph) anyerror!*Tensor {
+    if (graph) |g| {
+        return try g.concat(inputs, dim);
+    }
+    std.debug.assert(inputs.len > 0);
+    const rank = inputs[0].shape.len;
+    std.debug.assert(dim < rank);
+
+    var out_shape = inputs[0].shape;
+    var concat_dim_total: usize = 0;
+
+    for (inputs) |t| {
+        std.debug.assert(t.shape.len == rank);
+        for (0..rank) |d| {
+            if (d != dim) {
+                std.debug.assert(t.shape.dims[d] == inputs[0].shape.dims[d]);
+            }
+        }
+        concat_dim_total += t.shape.dims[dim];
+    }
+    out_shape.dims[dim] = concat_dim_total;
+
+    const out = try zeros(allocator, out_shape.dims[0..rank]);
+
+    var outer_size: usize = 1;
+    for (0..dim) |d| {
+        outer_size *= out_shape.dims[d];
+    }
+    var inner_size: usize = 1;
+    for (dim + 1..rank) |d| {
+        inner_size *= out_shape.dims[d];
+    }
+
+    for (0..outer_size) |outer| {
+        const out_base = outer * concat_dim_total * inner_size;
+        var offset_dim: usize = 0;
+        for (inputs) |t| {
+            const d_k = t.shape.dims[dim];
+            const src_base = outer * d_k * inner_size;
+            const dest_base = out_base + offset_dim * inner_size;
+            const copy_len = d_k * inner_size;
+            @memcpy(out.data[dest_base .. dest_base + copy_len], t.data[src_base .. src_base + copy_len]);
+            offset_dim += d_k;
+        }
+    }
+
+    return out;
+}
+
+/// 沿指定维度将张量均等切分为 num_splits 个子张量 (Split)
+pub fn split(allocator: std.mem.Allocator, input: *Tensor, num_splits: usize, dim: usize, graph: ?*autodiff.Graph) anyerror![]*Tensor {
+    if (graph) |g| {
+        return try g.split(input, num_splits, dim);
+    }
+    std.debug.assert(num_splits > 0);
+    const rank = input.shape.len;
+    std.debug.assert(dim < rank);
+    const dim_size = input.shape.dims[dim];
+    std.debug.assert(dim_size % num_splits == 0);
+    const split_dim_size = dim_size / num_splits;
+
+    var split_shape = input.shape;
+    split_shape.dims[dim] = split_dim_size;
+
+    const outputs = try allocator.alloc(*Tensor, num_splits);
+    for (0..num_splits) |k| {
+        outputs[k] = try zeros(allocator, split_shape.dims[0..rank]);
+    }
+
+    var outer_size: usize = 1;
+    for (0..dim) |d| {
+        outer_size *= input.shape.dims[d];
+    }
+    var inner_size: usize = 1;
+    for (dim + 1..rank) |d| {
+        inner_size *= input.shape.dims[d];
+    }
+
+    for (0..outer_size) |outer| {
+        const src_base = outer * dim_size * inner_size;
+        for (0..num_splits) |k| {
+            const dest_base = outer * split_dim_size * inner_size;
+            const src_offset = src_base + k * split_dim_size * inner_size;
+            const copy_len = split_dim_size * inner_size;
+            @memcpy(outputs[k].data[dest_base .. dest_base + copy_len], input.data[src_offset .. src_offset + copy_len]);
+        }
+    }
+
+    return outputs;
+}
+
+const tensorSplit = split;
 
 /// Solves linear system A * x = b using Gauss-Jordan elimination with partial pivoting.
 /// A is an n x n row-major matrix slice, b is an n-element vector, out_x is an n-element output slice.

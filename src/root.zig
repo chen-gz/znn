@@ -693,6 +693,86 @@ test "End-to-End LLM Pipeline integration demo" {
     try std.testing.expect(sampled_top_k < 5);
 }
 
+test "Tensor concat and split autograd" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    // 1. Test Concat on dim 1 for 2D tensors [2, 2] and [2, 3] -> [2, 5]
+    const A = try graph.tensorND(&.{ 2, 2 }, true);
+    const B = try graph.tensorND(&.{ 2, 3 }, true);
+    @memcpy(A.data, &[_]f32{ 1.0, 2.0, 3.0, 4.0 });
+    @memcpy(B.data, &[_]f32{ 10.0, 20.0, 30.0, 40.0, 50.0, 60.0 });
+
+    const C = try graph.concat(&.{ A, B }, 1);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, C.shape.dims[0..C.shape.len]);
+    try std.testing.expectEqual(@as(f32, 1.0), C.data[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), C.data[1]);
+    try std.testing.expectEqual(@as(f32, 10.0), C.data[2]);
+    try std.testing.expectEqual(@as(f32, 30.0), C.data[4]);
+    try std.testing.expectEqual(@as(f32, 3.0), C.data[5]);
+    try std.testing.expectEqual(@as(f32, 60.0), C.data[9]);
+
+    // Backward on Concat
+    @memset(C.grad, 2.0);
+    try graph.backwardWithGrad(C);
+    for (A.grad) |g| {
+        try std.testing.expectEqual(@as(f32, 2.0), g);
+    }
+    for (B.grad) |g| {
+        try std.testing.expectEqual(@as(f32, 2.0), g);
+    }
+
+    // 2. Test Split on dim 2 for 3D tensor [1, 2, 6] -> 3 x [1, 2, 2]
+    var graph2 = autodiff.Graph.init(allocator);
+    defer graph2.deinit();
+
+    const X = try graph2.tensorND(&.{ 1, 2, 6 }, true);
+    for (0..12) |i| {
+        X.data[i] = @as(f32, @floatFromInt(i + 1));
+    }
+
+    const splits = try graph2.split(X, 3, 2);
+    try std.testing.expectEqual(@as(usize, 3), splits.len);
+    for (splits) |sp| {
+        try std.testing.expectEqualSlices(usize, &.{ 1, 2, 2 }, sp.shape.dims[0..sp.shape.len]);
+    }
+
+    // splits[0]: row0 = [1, 2], row1 = [7, 8]
+    try std.testing.expectEqual(@as(f32, 1.0), splits[0].data[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), splits[0].data[1]);
+    try std.testing.expectEqual(@as(f32, 7.0), splits[0].data[2]);
+    try std.testing.expectEqual(@as(f32, 8.0), splits[0].data[3]);
+
+    // splits[1]: row0 = [3, 4], row1 = [9, 10]
+    try std.testing.expectEqual(@as(f32, 3.0), splits[1].data[0]);
+    try std.testing.expectEqual(@as(f32, 4.0), splits[1].data[1]);
+
+    // splits[2]: row0 = [5, 6], row1 = [11, 12]
+    try std.testing.expectEqual(@as(f32, 5.0), splits[2].data[0]);
+    try std.testing.expectEqual(@as(f32, 6.0), splits[2].data[1]);
+
+    // Backward on Split: splits[0] grad 1.0, splits[1] grad 2.0, splits[2] grad 3.0
+    @memset(splits[0].grad, 1.0);
+    @memset(splits[1].grad, 2.0);
+    @memset(splits[2].grad, 3.0);
+
+    // Call backward on each split's creator or through graph
+    if (splits[0].creator) |op| {
+        try op.backward();
+    }
+
+    try std.testing.expectEqual(@as(f32, 1.0), X.grad[0]); // [0, 0, 0] in splits[0]
+    try std.testing.expectEqual(@as(f32, 1.0), X.grad[1]); // [0, 0, 1] in splits[0]
+    try std.testing.expectEqual(@as(f32, 2.0), X.grad[2]); // [0, 0, 2] in splits[1]
+    try std.testing.expectEqual(@as(f32, 2.0), X.grad[3]); // [0, 0, 3] in splits[1]
+    try std.testing.expectEqual(@as(f32, 3.0), X.grad[4]); // [0, 0, 4] in splits[2]
+    try std.testing.expectEqual(@as(f32, 3.0), X.grad[5]); // [0, 0, 5] in splits[2]
+}
+
+
 
 
 
