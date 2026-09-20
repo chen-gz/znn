@@ -772,6 +772,77 @@ test "Tensor concat and split autograd" {
     try std.testing.expectEqual(@as(f32, 3.0), X.grad[5]); // [0, 0, 5] in splits[2]
 }
 
+test "GQA CausalSelfAttention and KVCache forwardInference" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(123);
+    const random = prng.random();
+
+    const n_embd: usize = 16;
+    const n_head: usize = 4;
+    const num_kv_heads: usize = 2; // GQA: 4 query heads, 2 KV heads (groups = 2)
+    const head_dim = n_embd / n_head; // 4
+
+    var gqa_attn = try nn.CausalSelfAttention.initGQA(allocator, n_embd, n_head, num_kv_heads, random);
+    defer gqa_attn.deinit(allocator);
+
+    // 1. Test Autograd Forward and Backward with GQA
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const B: usize = 2;
+    const T: usize = 3;
+    const x_node = try graph.tensorND(&.{ B, T, n_embd }, true);
+    for (x_node.data, 0..) |*v, i| {
+        v.* = @as(f32, @floatFromInt(i % 10)) * 0.1;
+    }
+
+    const y = try gqa_attn.forward(allocator, &graph, x_node);
+    try std.testing.expectEqualSlices(usize, &.{ B, T, n_embd }, y.shape.dims[0..y.shape.len]);
+
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var q_grad_sum: f32 = 0.0;
+    for (gqa_attn.q_attn.weight.grad) |g| q_grad_sum += @abs(g);
+    var k_grad_sum: f32 = 0.0;
+    for (gqa_attn.k_attn.weight.grad) |g| k_grad_sum += @abs(g);
+    var v_grad_sum: f32 = 0.0;
+    for (gqa_attn.v_attn.weight.grad) |g| v_grad_sum += @abs(g);
+
+    try std.testing.expect(q_grad_sum > 0.0);
+    try std.testing.expect(k_grad_sum > 0.0);
+    try std.testing.expect(v_grad_sum > 0.0);
+
+    // 2. Test Eager Forward
+    const x_eager = try tensor.zeros(allocator, &.{ B, T, n_embd });
+    defer tensor.free(allocator, x_eager);
+    @memcpy(x_eager.data, x_node.data);
+
+    const y_eager = try gqa_attn.forward(allocator, null, x_eager);
+    defer tensor.free(allocator, y_eager);
+    try std.testing.expectEqualSlices(usize, &.{ B, T, n_embd }, y_eager.shape.dims[0..y_eager.shape.len]);
+
+    // 3. Test KVCache forwardInference (3 autoregressive steps)
+    const max_seq_len: usize = 10;
+    var cache = try nn.KVCache.init(allocator, 1, num_kv_heads, max_seq_len, head_dim);
+    defer cache.deinit(allocator);
+
+    for (0..3) |step| {
+        const token_emb = try tensor.zeros(allocator, &.{ 1, 1, n_embd });
+        defer tensor.free(allocator, token_emb);
+        for (token_emb.data, 0..) |*val, i| {
+            val.* = @as(f32, @floatFromInt(step + i)) * 0.05;
+        }
+
+        const out_step = try gqa_attn.forwardInference(allocator, token_emb, &cache);
+        defer tensor.free(allocator, out_step);
+
+        try std.testing.expectEqualSlices(usize, &.{ 1, 1, n_embd }, out_step.shape.dims[0..out_step.shape.len]);
+        try std.testing.expectEqual(@as(usize, step + 1), cache.curr_len);
+    }
+}
+
 
 
 

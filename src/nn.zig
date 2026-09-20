@@ -1122,18 +1122,25 @@ pub const CausalSelfAttention = struct {
     k_attn: Linear,         // Key 线性投影层
     v_attn: Linear,         // Value 线性投影层
     c_proj: Linear,         // 最终的多头输出融合与投影层 (c_proj)
-    n_head: usize,          // 注意力头数 (n_head)
+    n_head: usize,          // 注意力头数 (Query heads)
     n_embd: usize,          // 嵌入维度 (n_embd)
+    num_kv_heads: usize,    // Key / Value 头数 (1 = MQA, < n_head = GQA, == n_head = MHA)
 
-    /// 初始化因果自注意力层
+    /// 初始化支持分组查询注意力 (GQA / MQA / MHA) 的自注意力层
     /// n_embd: 隐藏嵌入维度，必须能被 n_head 整除
-    /// n_head: 注意力头数
-    pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !CausalSelfAttention {
+    /// n_head: Query 注意力头数
+    /// num_kv_heads: Key/Value 头数，必须能整除 n_head
+    pub fn initGQA(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, num_kv_heads: usize, random: std.Random) !CausalSelfAttention {
+        std.debug.assert(n_embd % n_head == 0);
+        std.debug.assert(n_head % num_kv_heads == 0);
+        const hs = n_embd / n_head;
+        const kv_dim = num_kv_heads * hs;
+
         const q_attn = try Linear.init(allocator, n_embd, n_embd, random);
         errdefer q_attn.deinit(allocator);
-        const k_attn = try Linear.init(allocator, n_embd, n_embd, random);
+        const k_attn = try Linear.init(allocator, n_embd, kv_dim, random);
         errdefer k_attn.deinit(allocator);
-        const v_attn = try Linear.init(allocator, n_embd, n_embd, random);
+        const v_attn = try Linear.init(allocator, n_embd, kv_dim, random);
         errdefer v_attn.deinit(allocator);
         const c_proj = try Linear.init(allocator, n_embd, n_embd, random);
         errdefer c_proj.deinit(allocator);
@@ -1145,7 +1152,13 @@ pub const CausalSelfAttention = struct {
             .c_proj = c_proj,
             .n_head = n_head,
             .n_embd = n_embd,
+            .num_kv_heads = num_kv_heads,
         };
+    }
+
+    /// 初始化传统多头自注意力层 (MHA: num_kv_heads == n_head)
+    pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !CausalSelfAttention {
+        return initGQA(allocator, n_embd, n_head, n_head, random);
     }
 
     /// 释放所有线性投射子层的内存资源
@@ -1164,8 +1177,6 @@ pub const CausalSelfAttention = struct {
         self.c_proj.zeroGrad();
     }
 
-
-
     /// 前向注意力计算流程
     /// 输入 x 的形状必须为 3D: [B, T, C]
     /// 其中 B 为批次大小 (Batch Size)，T 为时间步长度 (Sequence Length)，C 为通道特征维数 (n_embd)
@@ -1174,7 +1185,9 @@ pub const CausalSelfAttention = struct {
         const T = x.shape.dims[1];
         const C = x.shape.dims[2];
         const nh = self.n_head;
+        const n_kv = self.num_kv_heads;
         const hs = C / nh; // 每个注意力头的维度大小 (head size)
+        const groups = nh / n_kv;
 
         // 1. 将 3D 输入 [B, T, C] 展平为 2D [B*T, C] 便于做常规的线性矩阵映射
         var x_2d = x;
@@ -1186,7 +1199,6 @@ pub const CausalSelfAttention = struct {
         defer if (graph == null) tensor.free(allocator, x_2d);
 
         // 2. 投影计算 Query, Key, Value
-        // 输出形状均为 [B*T, C]
         const q_2d = try self.q_attn.forward(allocator, graph, x_2d);
         defer if (graph == null) tensor.free(allocator, q_2d);
         const k_2d = try self.k_attn.forward(allocator, graph, x_2d);
@@ -1194,18 +1206,20 @@ pub const CausalSelfAttention = struct {
         const v_2d = try self.v_attn.forward(allocator, graph, x_2d);
         defer if (graph == null) tensor.free(allocator, v_2d);
 
-        // 3. 将投影后的数据重新塑形为 4D 多头结构: [B*T, C] -> [B, T, nh, hs]
+        // 3. 将投影后的数据重新塑形为 4D 多头结构:
+        // q: [B*T, C] -> [B, T, nh, hs]
+        // k, v: [B*T, n_kv*hs] -> [B, T, n_kv, hs]
         var q_4d = q_2d;
         var k_4d = k_2d;
         var v_4d = v_2d;
         if (graph) |g| {
             q_4d = try g.reshape(q_2d, &.{ B, T, nh, hs });
-            k_4d = try g.reshape(k_2d, &.{ B, T, nh, hs });
-            v_4d = try g.reshape(v_2d, &.{ B, T, nh, hs });
+            k_4d = try g.reshape(k_2d, &.{ B, T, n_kv, hs });
+            v_4d = try g.reshape(v_2d, &.{ B, T, n_kv, hs });
         } else {
             q_4d = try q_2d.reshape(&.{ B, T, nh, hs }, allocator, null);
-            k_4d = try k_2d.reshape(&.{ B, T, nh, hs }, allocator, null);
-            v_4d = try v_2d.reshape(&.{ B, T, nh, hs }, allocator, null);
+            k_4d = try k_2d.reshape(&.{ B, T, n_kv, hs }, allocator, null);
+            v_4d = try v_2d.reshape(&.{ B, T, n_kv, hs }, allocator, null);
         }
         defer if (graph == null) {
             tensor.free(allocator, q_4d);
@@ -1213,25 +1227,61 @@ pub const CausalSelfAttention = struct {
             tensor.free(allocator, v_4d);
         };
 
-        // 4. 转置特征轴，使得“注意力头数 nh”维度排在前部以进行 Batch 矩阵乘法
-        // 转置变化: [B, T, nh, hs] -> [B, nh, T, hs]
+        // 4. 转置特征轴，使得 Head 维度排在前部以进行 Batch 矩阵乘法
+        // q: [B, T, nh, hs] -> [B, nh, T, hs]
+        // k, v: [B, T, n_kv, hs] -> [B, n_kv, T, hs]
         var q = q_4d;
-        var k = k_4d;
-        var v = v_4d;
+        var k_raw = k_4d;
+        var v_raw = v_4d;
         if (graph) |g| {
             q = try g.transposeND(q_4d, 1, 2);
-            k = try g.transposeND(k_4d, 1, 2);
-            v = try g.transposeND(v_4d, 1, 2);
+            k_raw = try g.transposeND(k_4d, 1, 2);
+            v_raw = try g.transposeND(v_4d, 1, 2);
         } else {
             q = try q_4d.transpose(1, 2, allocator, null);
-            k = try k_4d.transpose(1, 2, allocator, null);
-            v = try v_4d.transpose(1, 2, allocator, null);
+            k_raw = try k_4d.transpose(1, 2, allocator, null);
+            v_raw = try v_4d.transpose(1, 2, allocator, null);
         }
         defer if (graph == null) {
             tensor.free(allocator, q);
-            tensor.free(allocator, k);
-            tensor.free(allocator, v);
+            tensor.free(allocator, k_raw);
+            tensor.free(allocator, v_raw);
         };
+
+        // 4.5 GQA 广播扩展: 如果 n_kv < nh，沿 Head 轴复制 groups 次匹配 Query
+        var k = k_raw;
+        var v = v_raw;
+        var free_k_rep = false;
+        var free_v_rep = false;
+        if (groups > 1) {
+            if (graph) |g| {
+                k = try g.repeatKV(k_raw, groups);
+                v = try g.repeatKV(v_raw, groups);
+            } else {
+                const k_rep = try tensor.zeros(allocator, &.{ B, nh, T, hs });
+                const v_rep = try tensor.zeros(allocator, &.{ B, nh, T, hs });
+                const head_bytes = T * hs;
+                for (0..B) |b| {
+                    for (0..n_kv) |kv_h| {
+                        const src_k = k_raw.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
+                        const src_v = v_raw.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
+                        for (0..groups) |g| {
+                            const h = kv_h * groups + g;
+                            const dest_k = k_rep.data[((b * nh + h) * head_bytes) .. ((b * nh + h + 1) * head_bytes)];
+                            const dest_v = v_rep.data[((b * nh + h) * head_bytes) .. ((b * nh + h + 1) * head_bytes)];
+                            @memcpy(dest_k, src_k);
+                            @memcpy(dest_v, src_v);
+                        }
+                    }
+                }
+                k = k_rep;
+                v = v_rep;
+                free_k_rep = true;
+                free_v_rep = true;
+            }
+        }
+        defer if (free_k_rep) tensor.free(allocator, k);
+        defer if (free_v_rep) tensor.free(allocator, v);
 
         // 5. 转置 Key 用于计算点积注意力: [B, nh, T, hs] -> [B, nh, hs, T]
         var k_t = k;
@@ -1354,6 +1404,107 @@ pub const CausalSelfAttention = struct {
         } else {
             return try out_2d.reshape(&.{ B, T, C }, allocator, null);
         }
+    }
+
+    /// 基于 KVCache 的单步增量自回归推理 (O(1) 增量 Key/Value 计算，O(T) 点积注意力)
+    /// 输入 x 的形状为 [B, 1, C] 或 [B, C]
+    pub fn forwardInference(self: CausalSelfAttention, allocator: std.mem.Allocator, x: *Tensor, cache: *KVCache) !*Tensor {
+        const B = x.shape.dims[0];
+        const C = self.n_embd;
+        const nh = self.n_head;
+        const n_kv = self.num_kv_heads;
+        const hs = C / nh;
+        const groups = nh / n_kv;
+        const kv_dim = n_kv * hs;
+
+        // 1. 获取 2D 输入 [B, C]
+        var x_2d = x;
+        var free_x_2d = false;
+        if (x.shape.len != 2) {
+            x_2d = try x.reshape(&.{ B, C }, allocator, null);
+            free_x_2d = true;
+        }
+        defer if (free_x_2d) tensor.free(allocator, x_2d);
+
+        // 2. 投影当前 Token 的 Q, K, V
+        const q_2d = try self.q_attn.forward(allocator, null, x_2d);
+        defer tensor.free(allocator, q_2d);
+        const k_step = try self.k_attn.forward(allocator, null, x_2d);
+        defer tensor.free(allocator, k_step);
+        const v_step = try self.v_attn.forward(allocator, null, x_2d);
+        defer tensor.free(allocator, v_step);
+
+        // 3. 写入 KVCache
+        const t = cache.curr_len;
+        std.debug.assert(t < cache.max_len);
+        for (0..B) |b| {
+            for (0..n_kv) |kv_h| {
+                const src_k = k_step.data[(b * kv_dim + kv_h * hs) .. (b * kv_dim + (kv_h + 1) * hs)];
+                const src_v = v_step.data[(b * kv_dim + kv_h * hs) .. (b * kv_dim + (kv_h + 1) * hs)];
+                const dest_k = cache.k.data[((b * n_kv + kv_h) * cache.max_len + t) * hs .. ((b * n_kv + kv_h) * cache.max_len + t + 1) * hs];
+                const dest_v = cache.v.data[((b * n_kv + kv_h) * cache.max_len + t) * hs .. ((b * n_kv + kv_h) * cache.max_len + t + 1) * hs];
+                @memcpy(dest_k, src_k);
+                @memcpy(dest_v, src_v);
+            }
+        }
+        cache.curr_len += 1;
+        const curr_len = cache.curr_len;
+
+        // 4. 注意力计算：对当前 1 个 Query 与缓存中 [0..curr_len] 个 Key 计算点积
+        const y_2d = try tensor.zeros(allocator, &.{ B, C });
+        defer tensor.free(allocator, y_2d);
+
+        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hs)));
+        const scores = try allocator.alloc(f32, curr_len);
+        defer allocator.free(scores);
+
+        for (0..B) |b| {
+            for (0..nh) |h| {
+                const kv_h = h / groups;
+                const q_head = q_2d.data[(b * C + h * hs) .. (b * C + (h + 1) * hs)];
+
+                var max_score: f32 = -1e9;
+                for (0..curr_len) |pos| {
+                    const k_cached = cache.k.data[((b * n_kv + kv_h) * cache.max_len + pos) * hs .. ((b * n_kv + kv_h) * cache.max_len + pos + 1) * hs];
+                    var dot: f32 = 0.0;
+                    for (q_head, k_cached) |q_val, k_val| {
+                        dot += q_val * k_val;
+                    }
+                    const s = dot * scale;
+                    scores[pos] = s;
+                    if (s > max_score) max_score = s;
+                }
+
+                var exp_sum: f32 = 0.0;
+                for (scores) |*s| {
+                    const e = @exp(s.* - max_score);
+                    s.* = e;
+                    exp_sum += e;
+                }
+                const inv_exp_sum = 1.0 / exp_sum;
+                for (scores) |*s| {
+                    s.* *= inv_exp_sum;
+                }
+
+                const y_head = y_2d.data[(b * C + h * hs) .. (b * C + (h + 1) * hs)];
+                @memset(y_head, 0.0);
+                for (0..curr_len) |pos| {
+                    const v_cached = cache.v.data[((b * n_kv + kv_h) * cache.max_len + pos) * hs .. ((b * n_kv + kv_h) * cache.max_len + pos + 1) * hs];
+                    const weight = scores[pos];
+                    for (y_head, v_cached) |*y_val, v_val| {
+                        y_val.* += weight * v_val;
+                    }
+                }
+            }
+        }
+
+        // 5. 投影输出
+        const out_proj = try self.c_proj.forward(allocator, null, y_2d);
+        if (x.shape.len == 3) {
+            defer tensor.free(allocator, out_proj);
+            return try out_proj.reshape(&.{ B, 1, C }, allocator, null);
+        }
+        return out_proj;
     }
 };
 
