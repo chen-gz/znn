@@ -758,6 +758,82 @@ pub const Tensor = struct {
         return out;
     }
 
+    pub fn convTranspose2d(
+        self: *Tensor,
+        weight: *Tensor,
+        bias: ?*Tensor,
+        stride: usize,
+        padding: usize,
+        allocator: std.mem.Allocator,
+        graph: ?*autodiff.Graph,
+    ) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.convTranspose2D(self, weight, bias, stride, padding);
+        }
+        std.debug.assert(self.shape.len == 4);
+        std.debug.assert(weight.shape.len == 4);
+        const N = self.shape.dims[0];
+        const C_in = self.shape.dims[1];
+        const H_in = self.shape.dims[2];
+        const W_in = self.shape.dims[3];
+
+        std.debug.assert(weight.shape.dims[0] == C_in);
+        const C_out = weight.shape.dims[1];
+        const KH = weight.shape.dims[2];
+        const KW = weight.shape.dims[3];
+
+        if (bias) |b| {
+            std.debug.assert(b.shape.dims[0] == C_out);
+        }
+
+        const H_out = (H_in - 1) * stride + KH - 2 * padding;
+        const W_out = (W_in - 1) * stride + KW - 2 * padding;
+
+        const out = try zeros(allocator, &.{ N, C_out, H_out, W_out });
+
+        for (0..N) |n| {
+            for (0..C_out) |co| {
+                const b_val = if (bias) |b| b.data[co] else 0.0;
+                for (0..H_out) |h| {
+                    for (0..W_out) |w| {
+                        out.data[n * (C_out * H_out * W_out) + co * (H_out * W_out) + h * W_out + w] = b_val;
+                    }
+                }
+            }
+        }
+
+        for (0..N) |n| {
+            for (0..C_in) |ci| {
+                for (0..H_in) |h| {
+                    for (0..W_in) |w| {
+                        const input_val = self.data[n * (C_in * H_in * W_in) + ci * (H_in * W_in) + h * W_in + w];
+                        if (input_val == 0.0) continue;
+
+                        for (0..C_out) |co| {
+                            for (0..KH) |kh| {
+                                const out_h_raw = h * stride + kh;
+                                if (out_h_raw < padding) continue;
+                                const out_h = out_h_raw - padding;
+                                if (out_h >= H_out) continue;
+
+                                for (0..KW) |kw| {
+                                    const out_w_raw = w * stride + kw;
+                                    if (out_w_raw < padding) continue;
+                                    const out_w = out_w_raw - padding;
+                                    if (out_w >= W_out) continue;
+
+                                    const weight_val = weight.data[ci * (C_out * KH * KW) + co * (KH * KW) + kh * KW + kw];
+                                    out.data[n * (C_out * H_out * W_out) + co * (H_out * W_out) + out_h * W_out + out_w] += input_val * weight_val;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
     pub fn maxpool2d(self: *Tensor, pool_size: usize, stride: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.maxpool2d(self, pool_size, stride);

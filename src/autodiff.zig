@@ -44,6 +44,7 @@ pub const OpType = enum {
 
     // --- 神经网络层与结构运算 (Neural Network Layers & Structural Ops) ---
     Conv2D,              // 二维卷积
+    ConvTranspose2D,     // 二维转置卷积 / 反卷积
     MaxPool2D,           // 二维最大池化
     RmsNorm,             // RMSNorm 归一化
     Embedding,           // 嵌入查找 (Embedding Lookup)
@@ -110,6 +111,10 @@ pub const OpContext = union(enum) {
 
     // --- 神经网络层与结构运算 ---
     Conv2D: void,
+    ConvTranspose2D: struct {
+        stride: usize,
+        padding: usize,
+    },
     MaxPool2D: struct {
         pool_size: usize,
         stride: usize,
@@ -530,6 +535,67 @@ pub const Op = struct {
                                     }
                                 }
                                 C.data[n * o_n + co * o_c + h * o_h + w * o_w] = sum;
+                            }
+                        }
+                    }
+                }
+            },
+            .ConvTranspose2D => {
+                const A = self.inputs[0];
+                const W = self.inputs[1];
+                const C = self.outputs[0];
+                const bias = if (self.inputs.len > 2) self.inputs[2] else null;
+                const stride = self.context.ConvTranspose2D.stride;
+                const padding = self.context.ConvTranspose2D.padding;
+
+                const N = A.shape.dims[0];
+                const C_in = A.shape.dims[1];
+                const H_in = A.shape.dims[2];
+                const W_in = A.shape.dims[3];
+
+                const C_out = W.shape.dims[1];
+                const KH = W.shape.dims[2];
+                const KW = W.shape.dims[3];
+
+                const H_out = C.shape.dims[2];
+                const W_out = C.shape.dims[3];
+
+                for (0..N) |n| {
+                    for (0..C_out) |co| {
+                        const b_val = if (bias) |b| b.data[co] else 0.0;
+                        for (0..H_out) |h| {
+                            for (0..W_out) |w| {
+                                C.data[n * (C_out * H_out * W_out) + co * (H_out * W_out) + h * W_out + w] = b_val;
+                            }
+                        }
+                    }
+                }
+
+                for (0..N) |n| {
+                    for (0..C_in) |ci| {
+                        for (0..H_in) |h| {
+                            for (0..W_in) |w| {
+                                const input_val = A.data[n * (C_in * H_in * W_in) + ci * (H_in * W_in) + h * W_in + w];
+                                if (input_val == 0.0) continue;
+
+                                for (0..C_out) |co| {
+                                    for (0..KH) |kh| {
+                                        const out_h_raw = h * stride + kh;
+                                        if (out_h_raw < padding) continue;
+                                        const out_h = out_h_raw - padding;
+                                        if (out_h >= H_out) continue;
+
+                                        for (0..KW) |kw| {
+                                            const out_w_raw = w * stride + kw;
+                                            if (out_w_raw < padding) continue;
+                                            const out_w = out_w_raw - padding;
+                                            if (out_w >= W_out) continue;
+
+                                            const weight_val = W.data[ci * (C_out * KH * KW) + co * (KH * KW) + kh * KW + kw];
+                                            C.data[n * (C_out * H_out * W_out) + co * (H_out * W_out) + out_h * W_out + out_w] += input_val * weight_val;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1404,6 +1470,82 @@ pub const Op = struct {
                                             if (A.requires_grad) {
                                                 const weight_val = W.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
                                                 A.grad[n * s_n + ci * s_c + ih * s_h + iw * s_w] += grad_val * weight_val;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            .ConvTranspose2D => {
+                const A = self.inputs[0];
+                const W = self.inputs[1];
+                const C = self.outputs[0];
+                const bias = if (self.inputs.len > 2) self.inputs[2] else null;
+                const stride = self.context.ConvTranspose2D.stride;
+                const padding = self.context.ConvTranspose2D.padding;
+
+                const N = A.shape.dims[0];
+                const C_in = A.shape.dims[1];
+                const H_in = A.shape.dims[2];
+                const W_in = A.shape.dims[3];
+
+                const C_out = W.shape.dims[1];
+                const KH = W.shape.dims[2];
+                const KW = W.shape.dims[3];
+
+                const H_out = C.shape.dims[2];
+                const W_out = C.shape.dims[3];
+
+                // Bias gradient
+                if (bias) |b| {
+                    if (b.requires_grad) {
+                        for (0..N) |n| {
+                            for (0..C_out) |co| {
+                                for (0..H_out) |h| {
+                                    for (0..W_out) |w| {
+                                        b.grad[co] += C.grad[n * (C_out * H_out * W_out) + co * (H_out * W_out) + h * W_out + w];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (0..N) |n| {
+                    for (0..C_in) |ci| {
+                        for (0..H_in) |h| {
+                            for (0..W_in) |w| {
+                                const in_idx = n * (C_in * H_in * W_in) + ci * (H_in * W_in) + h * W_in + w;
+                                const input_val = A.data[in_idx];
+
+                                for (0..C_out) |co| {
+                                    for (0..KH) |kh| {
+                                        const out_h_raw = h * stride + kh;
+                                        if (out_h_raw < padding) continue;
+                                        const out_h = out_h_raw - padding;
+                                        if (out_h >= H_out) continue;
+
+                                        for (0..KW) |kw| {
+                                            const out_w_raw = w * stride + kw;
+                                            if (out_w_raw < padding) continue;
+                                            const out_w = out_w_raw - padding;
+                                            if (out_w >= W_out) continue;
+
+                                            const out_idx = n * (C_out * H_out * W_out) + co * (H_out * W_out) + out_h * W_out + out_w;
+                                            const grad_out = C.grad[out_idx];
+                                            if (grad_out == 0.0) continue;
+
+                                            const w_idx = ci * (C_out * KH * KW) + co * (KH * KW) + kh * KW + kw;
+
+                                            if (W.requires_grad) {
+                                                W.grad[w_idx] += grad_out * input_val;
+                                            }
+
+                                            if (A.requires_grad) {
+                                                A.grad[in_idx] += grad_out * W.data[w_idx];
                                             }
                                         }
                                     }
@@ -2848,6 +2990,51 @@ pub const Graph = struct {
                 .inputs = inputs,
                 .outputs = outputs,
                 .context = .{ .Conv2D = {} },
+            };
+            C.creator = o;
+            try self.ops.append(self.backing_allocator, o);
+        }
+
+        return C;
+    }
+
+    pub fn convTranspose2D(
+        self: *Graph,
+        A: *Tensor,
+        weight: *Tensor,
+        bias: ?*Tensor,
+        stride: usize,
+        padding: usize,
+    ) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.convTranspose2d(weight, bias, stride, padding, allocator, null);
+
+        const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
+        C.requires_grad = req_grad;
+        if (req_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        if (req_grad) {
+            const num_inputs: usize = if (bias != null) 3 else 2;
+            const inputs = try allocator.alloc(*Tensor, num_inputs);
+            inputs[0] = A;
+            inputs[1] = weight;
+            if (bias) |b| {
+                inputs[2] = b;
+            }
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = C;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .ConvTranspose2D,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .ConvTranspose2D = .{ .stride = stride, .padding = padding } },
             };
             C.creator = o;
             try self.ops.append(self.backing_allocator, o);

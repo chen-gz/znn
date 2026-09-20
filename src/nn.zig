@@ -113,6 +113,77 @@ pub const Conv2D = struct {
     }
 };
 
+/// 二维转置卷积 (Transposed Convolution 2D / 反卷积 Deconvolution)
+/// 视觉生成模型 (如 DCGAN、VAE 解码器、U-Net) 的核心上采样算子
+/// 权重形状：[in_channels, out_channels, kernel_size, kernel_size]
+/// 偏置形状：[out_channels]
+/// 输出尺寸：H_out = (H_in - 1) * stride + kernel_size - 2 * padding
+pub const ConvTranspose2D = struct {
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: usize,
+    stride: usize,
+    padding: usize,
+    weight: *Tensor,
+    bias: ?*Tensor,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        use_bias: bool,
+        random: std.Random,
+    ) !ConvTranspose2D {
+        const weight = try createPersistentTensor(allocator, 1, in_channels * out_channels * kernel_size * kernel_size, true);
+        errdefer freePersistentTensor(allocator, weight);
+        weight.shape = Shape.init(&.{ in_channels, out_channels, kernel_size, kernel_size });
+        weight.strides = tensor.computeContiguousStrides(weight.shape);
+
+        var bias: ?*Tensor = null;
+        if (use_bias) {
+            const b = try createPersistentTensor(allocator, 1, out_channels, true);
+            errdefer freePersistentTensor(allocator, b);
+            b.shape = Shape.init(&.{out_channels});
+            b.strides = tensor.computeContiguousStrides(b.shape);
+            @memset(b.data, 0.0);
+            bias = b;
+        }
+
+        const fan_in = in_channels * kernel_size * kernel_size;
+        initializeWeights(random, weight.data, fan_in);
+
+        return ConvTranspose2D{
+            .in_channels = in_channels,
+            .out_channels = out_channels,
+            .kernel_size = kernel_size,
+            .stride = stride,
+            .padding = padding,
+            .weight = weight,
+            .bias = bias,
+        };
+    }
+
+    pub fn deinit(self: ConvTranspose2D, allocator: std.mem.Allocator) void {
+        freePersistentTensor(allocator, self.weight);
+        if (self.bias) |b| freePersistentTensor(allocator, b);
+    }
+
+    pub fn zeroGrad(self: ConvTranspose2D) void {
+        self.weight.zeroGrad();
+        if (self.bias) |b| b.zeroGrad();
+    }
+
+    pub fn forward(self: ConvTranspose2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            return try g.convTranspose2D(x, self.weight, self.bias, self.stride, self.padding);
+        }
+        return try x.convTranspose2d(self.weight, self.bias, self.stride, self.padding, allocator, null);
+    }
+};
+
 pub fn deinitModel(model: anytype, allocator: std.mem.Allocator) void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
