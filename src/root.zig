@@ -1041,6 +1041,226 @@ test "MLALayer with MLACache matrix absorption inference" {
     }
 }
 
+test "ConvTranspose2D eager and autograd backward" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    const in_channels: usize = 1;
+    const out_channels: usize = 2;
+    const kernel_size: usize = 3;
+    const stride: usize = 1;
+    const padding: usize = 0;
+
+    var conv_t = try nn.ConvTranspose2D.init(
+        allocator,
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride,
+        padding,
+        true,
+        random,
+    );
+    defer conv_t.deinit(allocator);
+
+    // 1. Eager mode on input [1, 1, 2, 2] -> expected [1, 2, 4, 4]
+    const x_eager = try tensor.zeros(allocator, &.{ 1, in_channels, 2, 2 });
+    defer tensor.free(allocator, x_eager);
+    @memcpy(x_eager.data, &[_]f32{ 1.0, 2.0, 3.0, 4.0 });
+
+    const y_eager = try conv_t.forward(allocator, null, x_eager);
+    defer tensor.free(allocator, y_eager);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 2, 4, 4 }, y_eager.shape.dims[0..y_eager.shape.len]);
+
+    // 2. Autograd Graph mode
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const x_node = try graph.tensorND(&.{ 1, in_channels, 2, 2 }, true);
+    @memcpy(x_node.data, x_eager.data);
+
+    const y = try conv_t.forward(allocator, &graph, x_node);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 2, 4, 4 }, y.shape.dims[0..y.shape.len]);
+
+    // Check numerical match between eager and graph forward
+    for (y_eager.data, y.data) |ve, vg| {
+        try std.testing.expectApproxEqAbs(ve, vg, 1e-5);
+    }
+
+    // 3. Backward pass
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var x_grad_sum: f32 = 0.0;
+    for (x_node.grad) |g| x_grad_sum += @abs(g);
+    try std.testing.expect(x_grad_sum > 0.0);
+
+    var w_grad_sum: f32 = 0.0;
+    for (conv_t.weight.grad) |g| w_grad_sum += @abs(g);
+    try std.testing.expect(w_grad_sum > 0.0);
+
+    if (conv_t.bias) |b| {
+        var b_grad_sum: f32 = 0.0;
+        for (b.grad) |g| b_grad_sum += @abs(g);
+        try std.testing.expect(b_grad_sum > 0.0);
+    }
+
+    // 4. Test 2x upsampling configuration: stride=2, padding=1, kernel=4
+    // H_out = (2 - 1) * 2 + 4 - 2 * 1 = 4 (exact 2x upsampling)
+    var upsample_conv = try nn.ConvTranspose2D.init(
+        allocator,
+        1,
+        1,
+        4,
+        2,
+        1,
+        false,
+        random,
+    );
+    defer upsample_conv.deinit(allocator);
+
+    const x_up = try tensor.zeros(allocator, &.{ 1, 1, 3, 3 });
+    defer tensor.free(allocator, x_up);
+    @memset(x_up.data, 1.0);
+
+    const y_up = try upsample_conv.forward(allocator, null, x_up);
+    defer tensor.free(allocator, y_up);
+    // H_out = (3 - 1) * 2 + 4 - 2 = 6, W_out = 6
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 6, 6 }, y_up.shape.dims[0..y_up.shape.len]);
+}
+
+test "GAN adversarial training step" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    // 1. 定义轻量 Generator: Linear(2, 8) -> LeakyReLU -> Linear(8, 2)
+    const TinyGenerator = struct {
+        l1: nn.Linear,
+        act: nn.LeakyReLU,
+        l2: nn.Linear,
+
+        pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
+            return .{
+                .l1 = try nn.Linear.init(alloc, 2, 8, rnd),
+                .act = .{ .alpha = 0.2 },
+                .l2 = try nn.Linear.init(alloc, 8, 2, rnd),
+            };
+        }
+        pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
+            self.l1.deinit(alloc);
+            self.l2.deinit(alloc);
+        }
+        pub fn zeroGrad(self: *@This()) void {
+            self.l1.zeroGrad();
+            self.l2.zeroGrad();
+        }
+        pub fn forward(self: *@This(), alloc: std.mem.Allocator, g: ?*autodiff.Graph, z: *tensor.Tensor) !*tensor.Tensor {
+            const h = try self.l1.forward(alloc, g, z);
+            defer if (g == null) tensor.free(alloc, h);
+            const a = try self.act.forward(alloc, g, h);
+            defer if (g == null) tensor.free(alloc, a);
+            return try self.l2.forward(alloc, g, a);
+        }
+    };
+
+    // 2. 定义轻量 Discriminator: Linear(2, 8) -> LeakyReLU -> Linear(8, 1)
+    const TinyDiscriminator = struct {
+        l1: nn.Linear,
+        act: nn.LeakyReLU,
+        l2: nn.Linear,
+
+        pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
+            return .{
+                .l1 = try nn.Linear.init(alloc, 2, 8, rnd),
+                .act = .{ .alpha = 0.2 },
+                .l2 = try nn.Linear.init(alloc, 8, 1, rnd),
+            };
+        }
+        pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
+            self.l1.deinit(alloc);
+            self.l2.deinit(alloc);
+        }
+        pub fn zeroGrad(self: *@This()) void {
+            self.l1.zeroGrad();
+            self.l2.zeroGrad();
+        }
+        pub fn forward(self: *@This(), alloc: std.mem.Allocator, g: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+            const h = try self.l1.forward(alloc, g, x);
+            defer if (g == null) tensor.free(alloc, h);
+            const a = try self.act.forward(alloc, g, h);
+            defer if (g == null) tensor.free(alloc, a);
+            return try self.l2.forward(alloc, g, a);
+        }
+    };
+
+    var gen = try TinyGenerator.init(allocator, random);
+    defer gen.deinit(allocator);
+
+    var disc = try TinyDiscriminator.init(allocator, random);
+    defer disc.deinit(allocator);
+
+    var opt_g = try optim.AdamOptimizer.init(allocator, &gen, .{ .lr = 0.01, .beta1 = 0.5, .beta2 = 0.999 });
+    defer opt_g.deinit();
+
+    var opt_d = try optim.AdamOptimizer.init(allocator, &disc, .{ .lr = 0.01, .beta1 = 0.5, .beta2 = 0.999 });
+    defer opt_d.deinit();
+
+    const batch_size: usize = 16;
+
+    // 执行 5 步对抗训练
+    for (0..5) |_| {
+        // Step D: 训练判别器
+        var graph_d = autodiff.Graph.init(allocator);
+        defer graph_d.deinit();
+
+        const real_data = try graph_d.randomNormal(&.{ batch_size, 2 }, random, 3.0, 0.5, false);
+        const real_targets = try graph_d.ones(&.{ batch_size, 1 }, false);
+
+        const noise_d = try graph_d.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);
+        const fake_eager = try gen.forward(allocator, null, noise_d);
+        defer tensor.free(allocator, fake_eager);
+
+        const fake_data = try graph_d.array(&.{ batch_size, 2 }, fake_eager.data, false);
+        const fake_targets = try graph_d.zeros(&.{ batch_size, 1 }, false);
+
+        const real_logits = try disc.forward(allocator, &graph_d, real_data);
+        const fake_logits = try disc.forward(allocator, &graph_d, fake_data);
+
+        const loss_real = try graph_d.bceWithLogitsLoss(real_logits, real_targets);
+        const loss_fake = try graph_d.bceWithLogitsLoss(fake_logits, fake_targets);
+        const loss_d = try graph_d.add(loss_real, loss_fake);
+
+        disc.zeroGrad();
+        @memset(loss_d.grad, 1.0);
+        try graph_d.backward(loss_d);
+        opt_d.step();
+
+        try std.testing.expect(!std.math.isNan(loss_d.data[0]));
+
+        // Step G: 训练生成器
+        var graph_g = autodiff.Graph.init(allocator);
+        defer graph_g.deinit();
+
+        const noise_g = try graph_g.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);
+        const gen_out = try gen.forward(allocator, &graph_g, noise_g);
+        const g_targets = try graph_g.ones(&.{ batch_size, 1 }, false);
+
+        const g_logits = try disc.forward(allocator, &graph_g, gen_out);
+        const loss_g = try graph_g.bceWithLogitsLoss(g_logits, g_targets);
+
+        gen.zeroGrad();
+        @memset(loss_g.grad, 1.0);
+        try graph_g.backward(loss_g);
+        opt_g.step();
+
+        try std.testing.expect(!std.math.isNan(loss_g.data[0]));
+    }
+}
+
 
 
 

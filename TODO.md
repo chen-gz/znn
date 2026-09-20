@@ -116,7 +116,10 @@
 
 - [ ] **3.1 注意力机制升级 (Memory-Efficient & FlashAttention)**
   - [ ] 实现基于 Tiling 分块与在线 Softmax 统计更新的 **FlashAttention** 前向与反向算子（避免显式存储 $O(T^2)$ 注意力分数矩阵）。
-  - [ ] 在 [`CausalSelfAttention`](file:///Users/guangzong/Documents/znn/src/nn.zig#L1120) 中支持 **Grouped-Query Attention (GQA)** 与 **Multi-Query Attention (MQA)**。
+  - [x] 在 [`CausalSelfAttention`](file:///Users/guangzong/Documents/znn/src/nn.zig#L1120) 中支持 **Grouped-Query Attention (GQA)** 与 **Multi-Query Attention (MQA)**。
+  - [x] 实现 **Multi-Head Latent Attention (MLA)** 与极简低秩 `MLACache` 矩阵吸收推理。
+  - [x] 实现混合专家前馈网络 **MoELayer**（DeepSeekMoE 细粒度路由、共享专家与 Top-K 门控）。
+  - [x] 实现强化学习 **GRPO** (Group Relative Policy Optimization) 组内优势函数与带 KL 惩罚损失函数。
 
 - [ ] **3.2 训练基础设施完备化**
   - [ ] 引入计算图版本计数器（Version Counter），增强就地修改（In-place ops）在反向传播时的安全性检测。
@@ -124,7 +127,9 @@
   - [ ] 补充现代优化器：Lion、Muon、RMSprop。
 
 - [ ] **3.3 计算机视觉与通用算子扩展**
-  - [ ] 实现 `Conv1D`、`Conv3D`、`ConvTranspose2D`（转置卷积/反卷积）。
+  - [x] 实现多维张量拼接与切分算子 `Concat` 与 `Split` 及 Autograd 反向梯度回传。
+  - [x] 实现 `ConvTranspose2D`（转置卷积/反卷积）及其 Autograd 自动求导。
+  - [ ] 实现 `Conv1D`、`Conv3D`。
   - [ ] 实现 `AdaptiveAvgPool2D`、`AdaptiveMaxPool2D`、`GroupNorm`、`PixelShuffle`。
   - [ ] 补充常用插值算法（双线性插值 `Bilinear`、最邻近插值 `Nearest`）与填充模式（Padding: Reflect, Replicate, Constant）。
 
