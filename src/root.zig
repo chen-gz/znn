@@ -979,6 +979,68 @@ test "MoELayer Top-K routing and autograd" {
     try std.testing.expect(routed_grad_sum > 0.0);
 }
 
+test "MLALayer with MLACache matrix absorption inference" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(100);
+    const random = prng.random();
+
+    const dim: usize = 16;
+    const n_head: usize = 4;
+    const head_dim: usize = 4;
+    const d_c: usize = 8;
+    const d_r: usize = 4;
+
+    var mla = try nn.MLALayer.init(allocator, dim, n_head, head_dim, d_c, d_r, random);
+    defer mla.deinit(allocator);
+
+    // 1. Eager mode full forward
+    const x_eager = try tensor.zeros(allocator, &.{ 2, 3, dim });
+    defer tensor.free(allocator, x_eager);
+    for (x_eager.data, 0..) |*v, i| {
+        v.* = @as(f32, @floatFromInt(i % 7)) * 0.1;
+    }
+
+    const y_eager = try mla.forward(allocator, null, x_eager);
+    defer tensor.free(allocator, y_eager);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, dim }, y_eager.shape.dims[0..y_eager.shape.len]);
+
+    // 2. Autograd Graph mode full forward & backward
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const x_node = try graph.tensorND(&.{ 2, 3, dim }, true);
+    @memcpy(x_node.data, x_eager.data);
+
+    const y = try mla.forward(allocator, &graph, x_node);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, dim }, y.shape.dims[0..y.shape.len]);
+
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var x_grad_sum: f32 = 0.0;
+    for (x_node.grad) |g| x_grad_sum += @abs(g);
+    try std.testing.expect(x_grad_sum > 0.0);
+
+    // 3. Autoregressive inference with MLACache and Matrix Absorption
+    var cache = try nn.MLACache.init(allocator, 1, 10, d_c, d_r);
+    defer cache.deinit(allocator);
+
+    for (0..3) |step| {
+        const token_x = try tensor.zeros(allocator, &.{ 1, 1, dim });
+        defer tensor.free(allocator, token_x);
+        for (token_x.data, 0..) |*val, i| {
+            val.* = @as(f32, @floatFromInt(step + i)) * 0.05;
+        }
+
+        const out_step = try mla.forwardInference(allocator, token_x, &cache);
+        defer tensor.free(allocator, out_step);
+
+        try std.testing.expectEqualSlices(usize, &.{ 1, 1, dim }, out_step.shape.dims[0..out_step.shape.len]);
+        try std.testing.expectEqual(@as(usize, step + 1), cache.curr_len);
+    }
+}
+
 
 
 
