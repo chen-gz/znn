@@ -908,6 +908,77 @@ test "GRPO group advantages and loss" {
     }
 }
 
+test "MoELayer Top-K routing and autograd" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    const dim: usize = 8;
+    const hidden_dim: usize = 16;
+    const num_routed_experts: usize = 4;
+    const num_shared_experts: usize = 1;
+    const top_k: usize = 2;
+
+    var moe = try nn.MoELayer.init(
+        allocator,
+        dim,
+        hidden_dim,
+        num_routed_experts,
+        num_shared_experts,
+        top_k,
+        random,
+    );
+    defer moe.deinit(allocator);
+
+    // 1. Eager mode test on 3D input [2, 3, 8]
+    const x_eager = try tensor.zeros(allocator, &.{ 2, 3, dim });
+    defer tensor.free(allocator, x_eager);
+    for (x_eager.data, 0..) |*v, i| {
+        v.* = @as(f32, @floatFromInt(i % 5)) * 0.2;
+    }
+
+    const y_eager = try moe.forward(allocator, null, x_eager);
+    defer tensor.free(allocator, y_eager);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, dim }, y_eager.shape.dims[0..y_eager.shape.len]);
+
+    // 2. Autograd Graph mode test on 3D input [2, 3, 8]
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const x_node = try graph.tensorND(&.{ 2, 3, dim }, true);
+    @memcpy(x_node.data, x_eager.data);
+
+    const y = try moe.forward(allocator, &graph, x_node);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, dim }, y.shape.dims[0..y.shape.len]);
+
+    // Backward pass
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    // Verify gradients propagated to input x
+    var x_grad_sum: f32 = 0.0;
+    for (x_node.grad) |g| x_grad_sum += @abs(g);
+    try std.testing.expect(x_grad_sum > 0.0);
+
+    // Verify gradients on gate weights
+    var gate_grad_sum: f32 = 0.0;
+    for (moe.gate.weight.grad) |g| gate_grad_sum += @abs(g);
+    try std.testing.expect(gate_grad_sum > 0.0);
+
+    // Verify gradients on shared expert
+    var shared_grad_sum: f32 = 0.0;
+    for (moe.shared_experts[0].c_fc.weight.grad) |g| shared_grad_sum += @abs(g);
+    try std.testing.expect(shared_grad_sum > 0.0);
+
+    // Verify gradients on at least one routed expert (due to top-k selection)
+    var routed_grad_sum: f32 = 0.0;
+    for (moe.routed_experts) |exp| {
+        for (exp.c_fc.weight.grad) |g| routed_grad_sum += @abs(g);
+    }
+    try std.testing.expect(routed_grad_sum > 0.0);
+}
+
 
 
 
