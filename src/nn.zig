@@ -1105,6 +1105,268 @@ pub const SwiGLU = struct {
     }
 };
 
+/// 混合专家前馈网络层 (Mixture of Experts Layer, MoELayer)
+/// 对应现代前沿大模型与 DeepSeekMoE 细粒度专家路由架构 (博客第 8.3 节)：
+/// 包含：
+/// 1. 细粒度路由专家列表 (routed_experts, 激活 top_k)
+/// 2. 可选隔离常驻共享专家列表 (shared_experts, 均无条件激活)
+/// 3. 动态门控路由网络 gate: Linear(dim -> num_routed_experts)
+/// 4. 门控概率归一化与稀疏加权聚合输出
+/// 5. 完备支持 Eager 模式与 Autograd 计算图模式前向与反向传播
+pub const MoELayer = struct {
+    dim: usize,
+    num_routed_experts: usize,
+    num_shared_experts: usize,
+    top_k: usize,
+    gate: Linear,
+    routed_experts: []MLP,
+    shared_experts: []MLP,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        dim: usize,
+        hidden_dim: usize,
+        num_routed_experts: usize,
+        num_shared_experts: usize,
+        top_k: usize,
+        random: std.Random,
+    ) !MoELayer {
+        std.debug.assert(top_k > 0 and top_k <= num_routed_experts);
+
+        const gate = try Linear.init(allocator, dim, num_routed_experts, random);
+        errdefer gate.deinit(allocator);
+
+        const routed = try allocator.alloc(MLP, num_routed_experts);
+        errdefer allocator.free(routed);
+
+        var init_r: usize = 0;
+        errdefer {
+            for (0..init_r) |i| routed[i].deinit(allocator);
+        }
+        for (0..num_routed_experts) |i| {
+            routed[i] = try MLP.init(allocator, dim, hidden_dim, random);
+            init_r += 1;
+        }
+
+        const shared = try allocator.alloc(MLP, num_shared_experts);
+        errdefer allocator.free(shared);
+
+        var init_s: usize = 0;
+        errdefer {
+            for (0..init_s) |i| shared[i].deinit(allocator);
+        }
+        for (0..num_shared_experts) |i| {
+            shared[i] = try MLP.init(allocator, dim, hidden_dim, random);
+            init_s += 1;
+        }
+
+        return MoELayer{
+            .dim = dim,
+            .num_routed_experts = num_routed_experts,
+            .num_shared_experts = num_shared_experts,
+            .top_k = top_k,
+            .gate = gate,
+            .routed_experts = routed,
+            .shared_experts = shared,
+        };
+    }
+
+    pub fn deinit(self: MoELayer, allocator: std.mem.Allocator) void {
+        self.gate.deinit(allocator);
+        for (self.routed_experts) |exp| exp.deinit(allocator);
+        allocator.free(self.routed_experts);
+        for (self.shared_experts) |exp| exp.deinit(allocator);
+        allocator.free(self.shared_experts);
+    }
+
+    pub fn zeroGrad(self: MoELayer) void {
+        self.gate.zeroGrad();
+        for (self.routed_experts) |exp| exp.zeroGrad();
+        for (self.shared_experts) |exp| exp.zeroGrad();
+    }
+
+    pub fn forward(self: MoELayer, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const old_shape = x.shape;
+        const is_3d = (old_shape.len == 3);
+        var x_2d = x;
+
+        if (is_3d) {
+            const B = old_shape.dims[0];
+            const T = old_shape.dims[1];
+            const D = old_shape.dims[2];
+            if (graph) |g| {
+                x_2d = try g.reshape(x, &.{ B * T, D });
+            } else {
+                x_2d = try x.reshape(&.{ B * T, D }, allocator, null);
+            }
+        }
+        defer {
+            if (is_3d and graph == null) {
+                tensor.free(allocator, x_2d);
+            }
+        }
+
+        const N = x_2d.shape.dims[0];
+        const E = self.num_routed_experts;
+        const K = self.top_k;
+
+        // 1. 门控打分: [N, D] -> [N, E]
+        const gate_logits = try self.gate.forward(allocator, graph, x_2d);
+        defer if (graph == null) tensor.free(allocator, gate_logits);
+
+        // 2. 构造 Top-K 掩码并执行 Softmax 归一化
+        const mask_data = try allocator.alloc(f32, N * E);
+        defer allocator.free(mask_data);
+        @memset(mask_data, -1e9);
+
+        // 对每一行寻找 Top-K 个最大的索引
+        for (0..N) |row| {
+            const row_logits = gate_logits.data[row * E .. (row + 1) * E];
+
+            var top_indices: [64]usize = undefined;
+            var top_vals: [64]f32 = undefined;
+            std.debug.assert(K <= 64);
+
+            for (0..K) |k| {
+                top_indices[k] = k;
+                top_vals[k] = row_logits[k];
+            }
+            // 对初始 K 个排序
+            for (0..K) |i| {
+                for (i + 1..K) |j| {
+                    if (top_vals[j] > top_vals[i]) {
+                        const tmp_v = top_vals[i];
+                        top_vals[i] = top_vals[j];
+                        top_vals[j] = tmp_v;
+                        const tmp_idx = top_indices[i];
+                        top_indices[i] = top_indices[j];
+                        top_indices[j] = tmp_idx;
+                    }
+                }
+            }
+
+            for (K..E) |e| {
+                const val = row_logits[e];
+                if (val > top_vals[K - 1]) {
+                    top_vals[K - 1] = val;
+                    top_indices[K - 1] = e;
+                    var pos = K - 1;
+                    while (pos > 0 and top_vals[pos] > top_vals[pos - 1]) : (pos -= 1) {
+                        const tmp_v = top_vals[pos - 1];
+                        top_vals[pos - 1] = top_vals[pos];
+                        top_vals[pos] = tmp_v;
+                        const tmp_idx = top_indices[pos - 1];
+                        top_indices[pos - 1] = top_indices[pos];
+                        top_indices[pos] = tmp_idx;
+                    }
+                }
+            }
+
+            for (0..K) |k| {
+                mask_data[row * E + top_indices[k]] = 0.0;
+            }
+        }
+
+        var total_routed: *Tensor = undefined;
+
+        if (graph) |g| {
+            const mask_node = try g.tensorNDWithData(&.{ N, E }, mask_data, false);
+            const masked_logits = try g.add(gate_logits, mask_node);
+            const probs = try g.softmax(masked_logits); // [N, E]
+            const prob_cols = try g.split(probs, E, 1); // E 个 [N, 1]
+
+            var acc: ?*Tensor = null;
+            for (self.routed_experts, 0..) |exp, e| {
+                const exp_out = try exp.forward(allocator, graph, x_2d); // [N, D]
+                const weighted = try g.mul(exp_out, prob_cols[e]); // [N, D] * [N, 1] -> [N, D]
+                if (acc) |a| {
+                    acc = try g.add(a, weighted);
+                } else {
+                    acc = weighted;
+                }
+            }
+            total_routed = acc.?;
+        } else {
+            // Eager 模式
+            const mask_t = try tensor.array(allocator, &.{ N, E }, mask_data);
+            defer tensor.free(allocator, mask_t);
+            const masked_logits = try gate_logits.add(mask_t, allocator, null);
+            defer tensor.free(allocator, masked_logits);
+            const probs = try masked_logits.softmax(allocator, null);
+            defer tensor.free(allocator, probs);
+
+            const out_accum = try tensor.zeros(allocator, &.{ N, self.dim });
+            errdefer tensor.free(allocator, out_accum);
+
+            for (self.routed_experts, 0..) |exp, e| {
+                const exp_out = try exp.forward(allocator, null, x_2d);
+                defer tensor.free(allocator, exp_out);
+
+                for (0..N) |row| {
+                    const p = probs.data[row * E + e];
+                    if (p > 0.0) {
+                        for (0..self.dim) |d| {
+                            out_accum.data[row * self.dim + d] += p * exp_out.data[row * self.dim + d];
+                        }
+                    }
+                }
+            }
+            total_routed = out_accum;
+        }
+        defer if (graph == null and self.num_shared_experts > 0) tensor.free(allocator, total_routed);
+
+        // 3. 计算常驻共享专家 (Shared Experts)
+        var total_shared: ?*Tensor = null;
+        for (self.shared_experts) |exp| {
+            const s_out = try exp.forward(allocator, graph, x_2d);
+            defer if (graph == null) tensor.free(allocator, s_out);
+
+            if (total_shared) |s| {
+                if (graph) |g| {
+                    total_shared = try g.add(s, s_out);
+                } else {
+                    const new_s = try s.add(s_out, allocator, null);
+                    tensor.free(allocator, s);
+                    total_shared = new_s;
+                }
+            } else {
+                if (graph) |_| {
+                    total_shared = s_out;
+                } else {
+                    const cloned_s = try tensor.zeros(allocator, s_out.shape.dims[0..s_out.shape.len]);
+                    @memcpy(cloned_s.data, s_out.data);
+                    total_shared = cloned_s;
+                }
+            }
+        }
+        defer if (graph == null and total_shared != null) tensor.free(allocator, total_shared.?);
+
+        // 4. 合并 Routed 与 Shared 专家
+        var final_2d = total_routed;
+        if (total_shared) |s| {
+            if (graph) |g| {
+                final_2d = try g.add(total_routed, s);
+            } else {
+                final_2d = try total_routed.add(s, allocator, null);
+            }
+        }
+
+        if (is_3d) {
+            const B = old_shape.dims[0];
+            const T = old_shape.dims[1];
+            const D = old_shape.dims[2];
+            if (graph) |g| {
+                return try g.reshape(final_2d, &.{ B, T, D });
+            } else {
+                defer tensor.free(allocator, final_2d);
+                return try final_2d.reshape(&.{ B, T, D }, allocator, null);
+            }
+        }
+
+        return final_2d;
+    }
+};
+
 /// 因果自注意力机制 (Causal Self-Attention / Masked Multi-Head Attention)
 /// Transformer 的核心机制，负责建模序列中不同位置的依赖关系。
 /// 
