@@ -843,6 +843,71 @@ test "GQA CausalSelfAttention and KVCache forwardInference" {
     }
 }
 
+test "GRPO group advantages and loss" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    // 1. Test computeGroupAdvantages
+    const rewards = [_]f32{ 1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0 };
+    const advs = try nn.computeGroupAdvantages(allocator, &rewards, 4, 1e-6);
+    defer allocator.free(advs);
+
+    try std.testing.expectEqual(@as(usize, 8), advs.len);
+
+    // Group 1 mean = 2.5, std = sqrt(1.25) ~ 1.118034
+    // adv[0] < adv[1] < adv[2] < adv[3]
+    try std.testing.expect(advs[0] < 0.0);
+    try std.testing.expect(advs[1] < 0.0);
+    try std.testing.expect(advs[2] > 0.0);
+    try std.testing.expect(advs[3] > 0.0);
+    var group1_sum: f32 = 0.0;
+    for (advs[0..4]) |a| group1_sum += a;
+    try std.testing.expect(@abs(group1_sum) < 1e-5);
+
+    // Group 2 mean = 25.0, sum of normalized should also be ~0
+    var group2_sum: f32 = 0.0;
+    for (advs[4..8]) |a| group2_sum += a;
+    try std.testing.expect(@abs(group2_sum) < 1e-5);
+
+    // 2. Test computeGRPOLoss
+    const old_logps = [_]f32{ -1.0, -1.5, -2.0, -0.5 };
+    const new_logps = [_]f32{ -0.9, -1.4, -2.1, -0.6 };
+    const sample_advs = [_]f32{ 1.0, 0.5, -0.5, -1.0 };
+    const ref_logps = [_]f32{ -1.0, -1.5, -2.0, -0.5 };
+
+    const loss_eval = nn.computeGRPOLoss(&old_logps, &new_logps, &sample_advs, &ref_logps, 0.05, 0.2);
+    try std.testing.expect(!std.math.isNan(loss_eval));
+
+    // 3. Test grpoLoss with autograd and verify gradient direction
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const old_t = try graph.tensorND(&.{4}, false);
+    @memcpy(old_t.data, &old_logps);
+
+    const new_t = try graph.tensorND(&.{4}, true);
+    @memcpy(new_t.data, &new_logps);
+    @memset(new_t.grad, 0.0);
+
+    const loss_val = nn.grpoLoss(old_t, new_t, &sample_advs, &ref_logps, 0.05, 0.2);
+    try std.testing.expectApproxEqAbs(loss_eval, loss_val, 1e-5);
+
+    // Verify finite difference gradient check on new_logps
+    const eps: f32 = 1e-3;
+    for (0..4) |i| {
+        var perturbed_plus = new_logps;
+        perturbed_plus[i] += eps;
+        const loss_plus = nn.computeGRPOLoss(&old_logps, &perturbed_plus, &sample_advs, &ref_logps, 0.05, 0.2);
+
+        var perturbed_minus = new_logps;
+        perturbed_minus[i] -= eps;
+        const loss_minus = nn.computeGRPOLoss(&old_logps, &perturbed_minus, &sample_advs, &ref_logps, 0.05, 0.2);
+
+        const numerical_grad = (loss_plus - loss_minus) / (2.0 * eps);
+        try std.testing.expectApproxEqAbs(numerical_grad, new_t.grad[i], 1e-3);
+    }
+}
+
 
 
 
