@@ -927,6 +927,178 @@ test "Optimizer checkpoint serialization and resumption" {
 
         std.Io.Dir.cwd().deleteFile(testing.io, ckpt_path) catch {};
     }
+
+    // 3. Test AdamOptimizer checkpointing
+    {
+        var opt1 = try AdamOptimizer.init(allocator, &linear, .{ .lr = 0.003 });
+        defer opt1.deinit();
+
+        linear.weight.data[0] = 2.5;
+        linear.weight.grad[0] = 0.4;
+        opt1.step();
+
+        const ckpt_path = "test_adam_ckpt.bin";
+        try opt1.saveCheckpoint(testing.io, ckpt_path);
+
+        var opt2 = try AdamOptimizer.init(allocator, &linear, .{ .lr = 0.001 });
+        defer opt2.deinit();
+
+        try opt2.loadCheckpoint(testing.io, ckpt_path);
+        try testing.expectEqual(opt1.t, opt2.t);
+        try testing.expectApproxEqAbs(opt1.lr, opt2.lr, 1e-6);
+        try testing.expectApproxEqAbs(opt1.m[0][0], opt2.m[0][0], 1e-6);
+        try testing.expectApproxEqAbs(opt1.v[0][0], opt2.v[0][0], 1e-6);
+
+        std.Io.Dir.cwd().deleteFile(testing.io, ckpt_path) catch {};
+    }
 }
+
+test "Optimizer checkpoint error conditions and corruption resilience" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var prng = std.Random.DefaultPrng.init(99);
+    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    defer linear.deinit(allocator);
+
+    // 1. Test corrupt magic header
+    {
+        const corrupt_file = "test_corrupt_magic.bin";
+        var file = try std.Io.Dir.cwd().createFile(testing.io, corrupt_file, .{});
+        defer file.close(testing.io);
+        defer std.Io.Dir.cwd().deleteFile(testing.io, corrupt_file) catch {};
+
+        var buf: [64]u8 = undefined;
+        var file_writer = file.writer(testing.io, &buf);
+        try file_writer.interface.writeAll("BADMAGICDATA12345678");
+        try file_writer.interface.flush();
+
+        var opt = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.01 });
+        defer opt.deinit();
+
+        try testing.expectError(error.InvalidCheckpointMagic, opt.loadCheckpoint(testing.io, corrupt_file));
+    }
+
+    // 2. Test optimizer type mismatch (saved as SGD, load with AdamW)
+    {
+        const sgd_file = "test_type_mismatch.bin";
+        var opt_sgd = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.01 });
+        defer opt_sgd.deinit();
+        try opt_sgd.saveCheckpoint(testing.io, sgd_file);
+        defer std.Io.Dir.cwd().deleteFile(testing.io, sgd_file) catch {};
+
+        var opt_adamw = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.01 });
+        defer opt_adamw.deinit();
+
+        try testing.expectError(error.OptimizerTypeMismatch, opt_adamw.loadCheckpoint(testing.io, sgd_file));
+    }
+
+    // 3. Test parameter count mismatch
+    {
+        const param_file = "test_param_mismatch.bin";
+        var opt_sgd = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.01 });
+        defer opt_sgd.deinit();
+        try opt_sgd.saveCheckpoint(testing.io, param_file);
+        defer std.Io.Dir.cwd().deleteFile(testing.io, param_file) catch {};
+
+        // Different model with more layers (4 parameters instead of 2)
+        var seq = nn.sequential(.{
+            try nn.Linear.init(allocator, 2, 2, prng.random()),
+            try nn.Linear.init(allocator, 2, 2, prng.random()),
+        });
+        defer seq.deinit(allocator);
+
+        var opt_diff = try SGDOptimizer.init(allocator, &seq, .{ .lr = 0.01 });
+        defer opt_diff.deinit();
+
+        try testing.expectError(error.ParamCountMismatch, opt_diff.loadCheckpoint(testing.io, param_file));
+    }
+}
+
+test "clipGradNorm and clipGradValue extreme and empty edge cases" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // 1. Empty parameter slice
+    var empty_params = [_]*Tensor{};
+    const empty_norm = clipGradNorm(&empty_params, 1.0);
+    try testing.expectEqual(@as(f32, 0.0), empty_norm);
+    clipGradValue(&empty_params, 1.0);
+    const empty_cfg_norm = clipGradients(&empty_params, .{ .norm = 1.0 });
+    try testing.expectEqual(@as(f32, 0.0), empty_cfg_norm);
+    const empty_cfg_none = clipGradients(&empty_params, .none);
+    try testing.expect(empty_cfg_none == null);
+
+    // 2. All zero gradients: norm = 0, ensure no NaN or division by zero
+    var t_zero = try tensor.zeros(allocator, &.{ 2, 2 });
+    defer tensor.free(allocator, t_zero);
+    t_zero.requires_grad = true;
+    t_zero.grad = try allocator.alloc(f32, 4);
+    @memset(t_zero.grad, 0.0);
+
+    var zero_params = [_]*Tensor{t_zero};
+    const zero_norm = clipGradNorm(&zero_params, 1.0);
+    try testing.expectEqual(@as(f32, 0.0), zero_norm);
+    for (t_zero.grad) |g| {
+        try testing.expectEqual(@as(f32, 0.0), g);
+    }
+
+    // 3. Non-clipping condition: actual norm <= max_norm
+    @memcpy(t_zero.grad, &[_]f32{ 0.3, 0.4, 0.0, 0.0 }); // norm = 0.5 <= 1.0
+    const unclipped_norm = clipGradNorm(&zero_params, 1.0);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), unclipped_norm, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 0.3), t_zero.grad[0], 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 0.4), t_zero.grad[1], 1e-5);
+
+    // 4. max_norm <= 0.0 (scales all gradients to zero)
+    const zero_scaled = clipGradNorm(&zero_params, 0.0);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), zero_scaled, 1e-5);
+    try testing.expectEqual(@as(f32, 0.0), t_zero.grad[0]);
+    try testing.expectEqual(@as(f32, 0.0), t_zero.grad[1]);
+}
+
+test "Optimizer interface uniformity and scheduler stepping" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var prng = std.Random.DefaultPrng.init(77);
+    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    defer linear.deinit(allocator);
+
+    // Test getLR / setLR / stepWithLR across all 3 optimizers
+    var sgd = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.1 });
+    defer sgd.deinit();
+    try testing.expectApproxEqAbs(@as(f32, 0.1), sgd.getLR(), 1e-6);
+    sgd.setLR(0.05);
+    try testing.expectApproxEqAbs(@as(f32, 0.05), sgd.getLR(), 1e-6);
+    sgd.stepWithLR(0.02);
+    try testing.expectEqual(@as(u64, 1), sgd.step_count);
+
+    var adam = try AdamOptimizer.init(allocator, &linear, .{ .lr = 0.01 });
+    defer adam.deinit();
+    try testing.expectApproxEqAbs(@as(f32, 0.01), adam.getLR(), 1e-6);
+    adam.setLR(0.005);
+    try testing.expectApproxEqAbs(@as(f32, 0.005), adam.getLR(), 1e-6);
+    adam.stepWithLR(0.002);
+    try testing.expectEqual(@as(f32, 1.0), adam.t);
+
+    var adamw = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.02 });
+    defer adamw.deinit();
+    try testing.expectApproxEqAbs(@as(f32, 0.02), adamw.getLR(), 1e-6);
+    adamw.setLR(0.008);
+    try testing.expectApproxEqAbs(@as(f32, 0.008), adamw.getLR(), 1e-6);
+    adamw.stepWithLR(0.004);
+    try testing.expectEqual(@as(u64, 1), adamw.step_count);
+
+    // Test polymorphic LRScheduler.step()
+    var sched = LRScheduler{ .step_lr = StepLRScheduler.init(0.1, 5, 0.5) };
+    const lr0 = sched.step(&sgd, 0); // step 0 -> lr=0.1
+    try testing.expectApproxEqAbs(@as(f32, 0.1), lr0, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.1), sgd.getLR(), 1e-6);
+    const lr5 = sched.step(&sgd, 5); // step 5 -> lr=0.05
+    try testing.expectApproxEqAbs(@as(f32, 0.05), lr5, 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.05), sgd.getLR(), 1e-6);
+}
+
 
 

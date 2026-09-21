@@ -2298,6 +2298,67 @@ test "tensor eager broadcasting operations (add, sub, mul, div)" {
     try std.testing.expectApproxEqAbs(@as(f32, 3.0), s_div.data[5], 1e-5);
 }
 
+test "tensor argmax edge cases negative values and unsupported dimension error" {
+    const allocator = std.testing.allocator;
+
+    // 2x3 matrix with all negative values
+    var t = try zeros(allocator, &.{ 2, 3 });
+    defer free(allocator, t);
+
+    // Row 0: [-10.0, -2.0, -5.0] -> max index is 1 (-2.0)
+    // Row 1: [-1.0, -8.0, -4.0]  -> max index is 0 (-1.0)
+    t.set(&.{ 0, 0 }, -10.0);
+    t.set(&.{ 0, 1 }, -2.0);
+    t.set(&.{ 0, 2 }, -5.0);
+    t.set(&.{ 1, 0 }, -1.0);
+    t.set(&.{ 1, 1 }, -8.0);
+    t.set(&.{ 1, 2 }, -4.0);
+
+    // 1. argmax dim=1
+    const idx_col = try t.argmax(1, allocator);
+    defer free(allocator, idx_col);
+    try std.testing.expectEqual(@as(f32, 1.0), idx_col.data[0]);
+    try std.testing.expectEqual(@as(f32, 0.0), idx_col.data[1]);
+
+    // 2. argmax dim=0
+    // Col 0: -10 vs -1 -> index 1 (-1)
+    // Col 1: -2 vs -8  -> index 0 (-2)
+    // Col 2: -5 vs -4  -> index 1 (-4)
+    const idx_row = try t.argmax(0, allocator);
+    defer free(allocator, idx_row);
+    try std.testing.expectEqual(@as(f32, 1.0), idx_row.data[0]);
+    try std.testing.expectEqual(@as(f32, 0.0), idx_row.data[1]);
+    try std.testing.expectEqual(@as(f32, 1.0), idx_row.data[2]);
+
+    // 3. Unsupported dimension on 3D tensor: dim=2 passes assert(dim < shape.len) and reaches error.UnsupportedDimension
+    var t_3d = try zeros(allocator, &.{ 2, 2, 2 });
+    defer free(allocator, t_3d);
+    try std.testing.expectError(error.UnsupportedDimension, t_3d.argmax(2, allocator));
+}
+
+test "solveLinearSystem singular matrix error and n=1 scalar" {
+    const allocator = std.testing.allocator;
+
+    // 1. n = 1 non-zero
+    const A1 = [_]f32{4.0};
+    const b1 = [_]f32{8.0};
+    var x1 = [_]f32{0.0};
+    try solveLinearSystem(allocator, &A1, &b1, 1, &x1);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), x1[0], 1e-6);
+
+    // 2. n = 1 singular (zero)
+    const A_zero = [_]f32{0.0};
+    try std.testing.expectError(error.SingularMatrix, solveLinearSystem(allocator, &A_zero, &b1, 1, &x1));
+
+    // 3. n = 2 singular matrix (linearly dependent rows: [1, 2; 2, 4])
+    const A_sing = [_]f32{ 1.0, 2.0, 2.0, 4.0 };
+    const b2 = [_]f32{ 3.0, 6.0 };
+    var x2 = [_]f32{ 0.0, 0.0 };
+    try std.testing.expectError(error.SingularMatrix, solveLinearSystem(allocator, &A_sing, &b2, 2, &x2));
+}
+
+
+
 
 
 

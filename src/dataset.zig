@@ -602,4 +602,82 @@ test "BPETokenizer unsupervised training from corpus" {
     try std.testing.expectEqualStrings(corpus, decoded);
 }
 
+test "BPETokenizer edge cases empty and multibyte UTF8" {
+    const allocator = std.testing.allocator;
+    var tokenizer = try BPETokenizer.init(allocator);
+    defer tokenizer.deinit();
+
+    // 1. Empty string encode & decode
+    const empty_enc = try tokenizer.encode(allocator, "");
+    defer allocator.free(empty_enc);
+    try std.testing.expectEqual(@as(usize, 0), empty_enc.len);
+
+    const empty_dec = try tokenizer.decode(allocator, empty_enc);
+    defer allocator.free(empty_dec);
+    try std.testing.expectEqualStrings("", empty_dec);
+
+    // 2. Single ASCII char
+    const single_enc = try tokenizer.encode(allocator, "Z");
+    defer allocator.free(single_enc);
+    try std.testing.expectEqual(@as(usize, 1), single_enc.len);
+    try std.testing.expectEqual(@as(u32, 'Z'), single_enc[0]);
+
+    const single_dec = try tokenizer.decode(allocator, single_enc);
+    defer allocator.free(single_dec);
+    try std.testing.expectEqualStrings("Z", single_dec);
+
+    // 3. Multibyte UTF-8 characters without merges (fallback to byte tokens)
+    const utf8_str = "深度学习🤖";
+    const utf8_enc = try tokenizer.encode(allocator, utf8_str);
+    defer allocator.free(utf8_enc);
+    try std.testing.expectEqual(utf8_str.len, utf8_enc.len); // each byte is a byte token
+
+    const utf8_dec = try tokenizer.decode(allocator, utf8_enc);
+    defer allocator.free(utf8_dec);
+    try std.testing.expectEqualStrings(utf8_str, utf8_dec);
+}
+
+test "DataLoader drop_last, shuffle, and edge batch slicing" {
+    const allocator = std.testing.allocator;
+
+    var img_data = [_]f32{
+        1, 1, 2, 2, 3, 3, 4, 4, 5, 5,
+    };
+    var lbl_data = [_]u8{ 1, 2, 3, 4, 5 };
+    const mock_ds = Dataset{
+        .images = .{ .num_images = 5, .rows = 1, .cols = 2, .data = &img_data },
+        .labels = .{ .num_items = 5, .data = &lbl_data },
+    };
+
+    // 1. drop_last = true with 5 samples and batch_size = 2 -> 2 full batches (4 items), 1 dropped
+    var loader_drop = try DataLoader.init(allocator, mock_ds, 2, .{ .shuffle = false, .drop_last = true });
+    defer loader_drop.deinit(allocator);
+
+    var x_buf: [4]f32 = undefined;
+    var y_buf: [2]u8 = undefined;
+
+    try std.testing.expectEqual(@as(usize, 2), loader_drop.peekNextBatchSize());
+    _ = loader_drop.nextInto(&x_buf, &y_buf);
+    try std.testing.expectEqual(@as(usize, 2), loader_drop.peekNextBatchSize());
+    _ = loader_drop.nextInto(&x_buf, &y_buf);
+    // 5th element remaining, but drop_last is true, so peekNextBatchSize returns 0
+    try std.testing.expectEqual(@as(usize, 0), loader_drop.peekNextBatchSize());
+
+    // 2. drop_last = false -> 5th element should be yielded as a batch of size 1
+    var loader_keep = try DataLoader.init(allocator, mock_ds, 2, .{ .shuffle = false, .drop_last = false });
+    defer loader_keep.deinit(allocator);
+
+    _ = loader_keep.nextInto(&x_buf, &y_buf);
+    _ = loader_keep.nextInto(&x_buf, &y_buf);
+    try std.testing.expectEqual(@as(usize, 1), loader_keep.peekNextBatchSize());
+    const last_n = loader_keep.nextInto(&x_buf, &y_buf);
+    try std.testing.expectEqual(@as(usize, 1), last_n.?);
+
+    // 3. BinaryMmapDataset numBatches edge case
+    const tokens = [_]u32{ 1, 2 };
+    const small_ds = BinaryMmapDataset.fromSlice(&tokens, 5); // seq_len=5, tokens.len=2 < batch*seq_len
+    try std.testing.expectEqual(@as(usize, 0), small_ds.numBatches(1));
+}
+
+
 

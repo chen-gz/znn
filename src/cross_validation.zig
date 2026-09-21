@@ -328,3 +328,56 @@ test "StandardScaler integrity" {
     try std.testing.expect(@abs(scaler.mean_[0] - 2.0) < 1e-4);
     try std.testing.expect(@abs(scaler.mean_[1] - 20.0) < 1e-4);
 }
+
+test "kFoldSplit uneven sample distribution and disjoint partitions" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(123);
+    const n_samples: usize = 7;
+    const k: usize = 3;
+
+    const folds = try kFoldSplit(allocator, n_samples, k, prng.random());
+    defer {
+        for (folds) |*f| f.deinit(allocator);
+        allocator.free(folds);
+    }
+
+    try std.testing.expectEqual(k, folds.len);
+
+    var val_seen = [_]bool{false} ** n_samples;
+    var total_val_items: usize = 0;
+
+    for (folds) |f| {
+        try std.testing.expectEqual(n_samples, f.train_indices.len + f.val_indices.len);
+        for (f.val_indices) |v_idx| {
+            try std.testing.expect(!val_seen[v_idx]); // each index in val set exactly once
+            val_seen[v_idx] = true;
+            total_val_items += 1;
+        }
+    }
+    try std.testing.expectEqual(n_samples, total_val_items);
+}
+
+test "StandardScaler zero-variance constant feature safety" {
+    const allocator = std.testing.allocator;
+    var scaler = try StandardScaler.init(allocator, 2);
+    defer scaler.deinit();
+
+    // Feature 0 is constant (5.0), Feature 1 varies (1.0, 2.0, 3.0)
+    const X = [_]f32{
+        5.0, 1.0,
+        5.0, 2.0,
+        5.0, 3.0,
+    };
+    const X_scaled = try allocator.alloc(f32, 6);
+    defer allocator.free(X_scaled);
+
+    scaler.fitTransform(&X, 3, 2, X_scaled);
+
+    // Feature 0: mean=5.0, std fallback to 1.0 to prevent division by zero
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), scaler.mean_[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), scaler.std_[0], 1e-4);
+    for (0..3) |i| {
+        try std.testing.expectApproxEqAbs(@as(f32, 0.0), X_scaled[i * 2], 1e-4);
+    }
+}
+
