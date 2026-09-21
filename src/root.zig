@@ -1,3 +1,6 @@
+pub const VERSION = "0.1.0";
+pub const version = @import("std").SemanticVersion{ .major = 0, .minor = 1, .patch = 0 };
+
 pub const tensor = @import("tensor.zig");
 pub const nn = @import("nn.zig");
 pub const dataset = @import("dataset.zig");
@@ -32,6 +35,10 @@ pub fn measureTime(comptime func: anytype, args: anytype) !struct {
 test "basic imports and struct definitions" {
     const std = @import("std");
     _ = @import("optim.zig");
+    try std.testing.expectEqualStrings("0.1.0", VERSION);
+    try std.testing.expectEqual(@as(u32, 0), version.major);
+    try std.testing.expectEqual(@as(u32, 1), version.minor);
+    try std.testing.expectEqual(@as(u32, 0), version.patch);
     try std.testing.expect(@TypeOf(nn.Linear) == type);
     try std.testing.expect(@TypeOf(nn.SwiGLU) == type);
     try std.testing.expect(@TypeOf(nn.LoRALinear) == type);
