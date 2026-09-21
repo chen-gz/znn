@@ -53,7 +53,13 @@ It spans the full continuum of machine learning:
 * **`src/` (Core Library Modules)**:
   * **[src/tensor.zig](src/tensor.zig)**: N-Dimensional Tensor library. Implements shape, logical strides, memory layout mapping, and vectorized math.
   * **[src/autodiff.zig](src/autodiff.zig)**: Core Automatic Differentiation engine. Dynamic computation `Graph`, `Node`, operator zoo, and DFS topological sorting.
-  * **[src/nn.zig](src/nn.zig)**: Complete Neural Network Module zoo (Linear, Conv2D, ConvTranspose2D, RMSNorm, LayerNorm, BatchNorm2d, Dropout, SwiGLU, MoE, MLA, LoRA, TransformerBlock, RNN, LSTM, GRU).
+  * **[src/nn.zig](src/nn.zig)** & **`src/nn/`**: Modular Neural Network subsystem & backward-compatible facade:
+    * `src/nn/core.zig`: Core containers & operators (`Linear`, `Conv2D`, `ConvTranspose2D`, `Module`, `Sequential`, `collectParameters`).
+    * `src/nn/activations.zig`: Elementwise activations (`ReLU`, `GELU`, `Sigmoid`, `Tanh`, `LeakyReLU`, `SiLU`, `Swish`).
+    * `src/nn/normalization.zig`: Normalization & pooling layers (`RMSNorm`, `LayerNorm`, `BatchNorm2d`, `Dropout`, `AvgPool2D`).
+    * `src/nn/recurrent.zig`: Recurrent neural networks (`RNN`, `LSTM`, `StackedLSTM`, `GRU`).
+    * `src/nn/transformer.zig`: Modern LLM & attention architectures (`Embedding`, `KVCache`, `MLP`, `SwiGLU`, `MoELayer`, `CausalSelfAttention`, `MLALayer`, `TransformerBlock`, `TransformerDecoder`, `GPT`, `LoRALinear`, DPO/GRPO losses, Top-P/Top-K samplers).
+    * `src/nn/serialization.zig`: Zero-dependency Safetensors persistence (`saveModel`, `loadModel`).
   * **[src/optim.zig](src/optim.zig)**: Decoupled Optimizer Framework (`SGDOptimizer`, `AdamOptimizer`, `AdamWOptimizer`).
   * **[src/engine.zig](src/engine.zig)**: High-level classification & regression training/evaluation loops, step runners, and metric evaluators.
   * **[src/regression.zig](src/regression.zig)**: Classical statistical regression (OLS, Ridge, Lasso, ElasticNet) with closed-form and iterative solvers.
