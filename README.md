@@ -174,23 +174,31 @@ zig build test
 
 ### 🚀 Next Steps & Future Roadmap
 
-To push `znn` towards a production-ready, high-throughput deep learning engine in Zig, the following high-value areas are targeted:
+To push `znn` towards a production-ready, high-throughput deep learning and LLM engine in pure Zig, the following high-value areas are targeted across 5 core dimensions:
 
-1. **CPU Parallelism & Multi-Threading Support (High Priority)**:
-   * **Multi-Threaded Tiled GEMM**: Replace the single-threaded SIMD fallback with a cache-friendly, tiled, multithreaded GEMM using Zig's `std.Thread` pool for Linux and Windows.
-   * **Operator-Level Parallelism**: Multi-thread elementwise ops, norm layers, and convolutional forward/backward passes.
+#### 1. CPU Multi-Core Parallelism & High-Performance Math (High Priority)
+* **Multi-Threaded Tiled GEMM**: Replace the current single-threaded SIMD fallback with a cache-friendly, tiled, multithreaded GEMM using Zig's `std.Thread` pool (M-blocking & N-blocking) to saturate all CPU cores on Linux and Windows.
+* **Operator-Level Parallelism**: Multi-thread elementwise tensor math, normalization layers (RMSNorm, LayerNorm), and forward/backward convolutional passes.
+* **External BLAS Linkage**: Add build script integration options (`-Dblas=openblas` / `-Dblas=mkl`) to link optimized system BLAS libraries on Linux and non-macOS environments.
 
-2. **External BLAS Linkage on Linux**:
-   * Add build script integration options (`-Dblas=openblas` / `-Dblas=mkl`) to link optimized external BLAS backends on non-macOS systems.
+#### 2. Modern Generative LLM Architecture Alignment
+* **RoPE (Rotary Position Embedding)**: Implement native forward and backward operators for rotary position embeddings, aligning `znn` with modern open-source architectures (Llama 3, Qwen 2.5, DeepSeek V2/V3).
+* **Online Softmax & FlashAttention Principles**: Replace full $O(S^2)$ attention matrix materialization with chunked online softmax, eliminating quadratic memory bottlenecks for long context sequences.
+* **Dynamic & Paged KV Cache**: Upgrade the static KV Cache to dynamically expandable buffers and chunked/paged block allocation to maximize autoregressive decoding throughput.
 
-3. **Model Serialization & Interoperability**:
-   * **Safetensors / GGUF Parser**: Native pure Zig parser for `.safetensors` and `.gguf` binary weights, enabling zero-dependency loading of open-source models (Llama, Qwen, Mistral) directly from Hugging Face.
-   * **Checkpoint Export**: Direct export of model weights and computation graphs to standardized formats (Safetensors / ONNX).
+#### 3. Model Interoperability & Open-Source Ecosystem
+* **Standard Hugging Face Safetensors Parser & Dequantization**: Pure Zig parser for official `.safetensors` model weights with automatic conversion/dequantization for BF16/F16 tensors into F32, enabling zero-dependency inference with pretrained models directly from Hugging Face.
+* **GGUF Format Reader**: Implement parser for the llama.cpp GGUF format to enable direct loading and execution of quantized model weights.
+* **Checkpoint & Graph Export**: Export trained model weights and dynamic computation graphs into standardized formats (Safetensors / ONNX).
 
-4. **GPU / Compute Shader Acceleration**:
-   * Explore a compute shader execution backend using **WebGPU** (`wgpu-native` / Dawn) or **Vulkan** compute pipelines for cross-platform GPU training and inference directly from Zig.
+#### 4. Graph Execution & Memory Optimization
+* **Activation Checkpointing (Gradient Checkpointing)**: Trade minimal compute for memory by freeing intermediate activations during forward passes and recomputing them dynamically during backward passes, enabling $3\times\text{--}5\times$ longer training context lengths.
+* **In-Place Operation Reuse**: Static computation graph lifetime analysis to reuse tensor buffers in-place for non-branching activations (e.g. ReLU, Dropout).
+* **Compile-Time Static Graph Fusion**: Deeper unification of `StaticTensor` into the dynamic autograd engine for zero-allocation, compile-time verified subgraphs.
 
-5. **Static Graph Optimization & Memory In-Place Execution**:
-   * **Activation Checkpointing (Gradient Checkpointing)**: Trade computation for memory during backward passes to enable training significantly longer sequence lengths.
-   * **In-Place Operations**: Analyze computation graph lifespans to allow buffer reuse for non-branching activations.
-   * **Comptime Tensor Type Safety**: Deeper unification of `StaticTensor` into the dynamic autograd engine for zero-allocation, statically verified subgraphs.
+#### 5. Data Pipeline Throughput & Developer Experience
+* **Multi-Threaded BPE Tokenization**: Parallelize corpus tokenization across CPU worker threads for high-speed preprocessing of multi-gigabyte text datasets.
+* **Memory-Mapped (mmap) Streaming Datasets**: Stream pre-tokenized binary datasets via POSIX `mmap`, avoiding memory-exhaustion when handling massive corpora.
+* **Terminal Training Dashboard & Telemetry**: Rich terminal interface tracking real-time tokens/second, throughput, estimated TFLOPS, dynamic learning rate schedules, and estimated time of arrival (ETA).
+* **GPU & Compute Shader Backend**: Long-term exploration of **WebGPU** (`wgpu-native` / Dawn) or **Vulkan** compute pipelines for cross-platform GPU training and inference directly from pure Zig.
+
