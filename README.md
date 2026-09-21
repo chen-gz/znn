@@ -1,4 +1,4 @@
-# Zig ML: Modern Deep Learning & LLM Library in Zig
+# Zig ML (`znn`) `v0.1.0`
 
 This project is a high-performance, modular deep learning and modern LLM library built entirely from scratch in **Zig 0.16.0**.
 
