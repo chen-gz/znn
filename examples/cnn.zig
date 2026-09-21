@@ -28,7 +28,6 @@ pub const CNN = struct {
         };
     }
 
-
     // 【内存管理说明】：前向计算产生的中间张量生命周期由外部调用方统一管理：
     // - 训练模式（graph != null）：中间节点挂载在计算图上，由外部在批次结束调用 graph.deinit() 统一一键释放；
     // - 纯推理模式（graph == null）：由外部调用方传入的 ArenaAllocator 在当前作用域结束时统一批量释放。
@@ -54,7 +53,6 @@ pub const CNN = struct {
         const flat = try a3.reshape(&.{ batch_size, 144 }, allocator, graph);
         return try self.fc1.forward(allocator, graph, flat);
     }
-
 };
 
 pub const NeuralNetwork = nn.Module(CNN);
@@ -147,8 +145,6 @@ fn runTraining(
                 y_batch[0..actual_batch_size],
             );
 
-
-
             epoch_loss += step_res.loss;
             epoch_acc += step_res.accuracy;
             num_batches += 1;
@@ -193,7 +189,6 @@ fn evaluateModel(
 ) !nn.ClassificationEpochResult {
     const test_batch_size = 100;
 
-
     var test_loader = try dataset.DataLoader.init(arena, test_dataset, test_batch_size, .{
         .shuffle = false,
         .drop_last = false,
@@ -202,8 +197,6 @@ fn evaluateModel(
 
     return try nn.evaluateClassification(arena, model, &test_loader);
 }
-
-
 
 fn printPredictions(
     model: anytype,
@@ -264,7 +257,6 @@ test "CNN model initialization and forward passes (Eager & Graph)" {
 
         try std.testing.expectEqualSlices(usize, &.{ 2, 10 }, logits.shape.dims[0..logits.shape.len]);
     }
-
 
     // Test Graph Mode (graph != null)
     {

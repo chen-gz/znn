@@ -35,19 +35,16 @@ pub fn computeAccuracy(logits: *tensor.Tensor, targets: []const u8, allocator: s
     return @as(f32, @floatFromInt(correct)) / @as(f32, @floatFromInt(preds.data.len));
 }
 
-/// 通用分类训练单步 (Classification Train Step)
-/// 自动从 targets.len 推导 batch_size，并从 x_data.len / targets.len 推导 input_dim。
-/// 流程：
-/// 1. 构建局部 Batch 计算图 (Graph)
-/// 2. 前向传播计算 Logits
-/// 3. 计算 Softmax 交叉熵损失与分类准确率
-/// 4. 反向传播计算梯度并调用优化器 step() 更新权重
-pub fn trainClassificationStep(
+pub const GradClipConfig = @import("optim.zig").GradClipConfig;
+
+/// 通用分类训练单步 (支持可选的梯度裁剪)
+pub fn trainClassificationStepWithClip(
     allocator: std.mem.Allocator,
     model: anytype,
     optimizer: anytype,
     x_data: []const f32,
     targets: []const u8,
+    clip_config: ?GradClipConfig,
 ) !ClassificationStepResult {
     const batch_size = targets.len;
     std.debug.assert(batch_size > 0);
@@ -68,6 +65,11 @@ pub fn trainClassificationStep(
 
     model.zeroGrad();
     try graph.backward(loss);
+
+    if (clip_config) |cfg| {
+        _ = @import("optim.zig").clipGradients(optimizer.params, cfg);
+    }
+
     optimizer.step();
 
     return ClassificationStepResult{
@@ -75,6 +77,17 @@ pub fn trainClassificationStep(
         .accuracy = batch_acc,
         .batch_size = batch_size,
     };
+}
+
+/// 通用分类训练单步 (Classification Train Step)
+pub fn trainClassificationStep(
+    allocator: std.mem.Allocator,
+    model: anytype,
+    optimizer: anytype,
+    x_data: []const f32,
+    targets: []const u8,
+) !ClassificationStepResult {
+    return trainClassificationStepWithClip(allocator, model, optimizer, x_data, targets, null);
 }
 
 /// 通用分类评估单步 (Classification Eval Step)
@@ -253,4 +266,9 @@ test "engine trainClassificationStep and evalClassificationStep" {
     try std.testing.expect(eval_res.loss > 0);
     try std.testing.expect(eval_res.accuracy >= 0 and eval_res.accuracy <= 1.0);
     try std.testing.expectEqual(@as(usize, 2), eval_res.batch_size);
+
+    // 测试带梯度裁剪的单步训练
+    const step_clip_res = try trainClassificationStepWithClip(arena, &model, &optim, &x_mock, &y_mock, .{ .norm = 1.0 });
+    try std.testing.expect(step_clip_res.loss > 0);
+    try std.testing.expectEqual(@as(usize, 2), step_clip_res.batch_size);
 }
