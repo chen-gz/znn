@@ -272,3 +272,84 @@ test "engine trainClassificationStep and evalClassificationStep" {
     try std.testing.expect(step_clip_res.loss > 0);
     try std.testing.expectEqual(@as(usize, 2), step_clip_res.batch_size);
 }
+
+test "engine computeAccuracy edge cases" {
+    const arena = std.testing.allocator;
+
+    // 1. All correct: logits max at target indices
+    const logits_perfect = try tensor.array(arena, &.{ 2, 3 }, &[_]f32{
+        10.0, 0.0, 0.0, // target 0
+        0.0, 10.0, 0.0, // target 1
+    });
+    defer tensor.free(arena, logits_perfect);
+
+    const targets_perfect = [_]u8{ 0, 1 };
+    const acc_perfect = try computeAccuracy(logits_perfect, &targets_perfect, arena);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), acc_perfect, 1e-6);
+
+    // 2. All wrong: logits max at incorrect indices
+    const targets_wrong = [_]u8{ 1, 0 };
+    const acc_wrong = try computeAccuracy(logits_perfect, &targets_wrong, arena);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), acc_wrong, 1e-6);
+
+    // 3. Half correct
+    const targets_half = [_]u8{ 0, 0 };
+    const acc_half = try computeAccuracy(logits_perfect, &targets_half, arena);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), acc_half, 1e-6);
+}
+
+test "engine trainClassificationEpoch and evaluateClassification with DataLoader" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(123);
+    const random = prng.random();
+
+    const SimpleMLP = struct {
+        fc: nn.Linear,
+        pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
+            return .{ .fc = try nn.Linear.init(alloc, 4, 2, rnd) };
+        }
+        pub fn forward(self: *const @This(), alloc: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+            return try self.fc.forward(alloc, graph, x);
+        }
+    };
+
+    const Model = nn.Module(SimpleMLP);
+    var model = Model.init(arena, try SimpleMLP.init(arena, random));
+    defer model.deinit();
+
+    var optim = try @import("optim.zig").AdamOptimizer.init(arena, &model, .{ .lr = 0.01 });
+    defer optim.deinit();
+
+    var img_data = [_]f32{
+        1, 2, 3, 4,
+        5, 6, 7, 8,
+        9, 10, 11, 12,
+        13, 14, 15, 16,
+    };
+    var lbl_data = [_]u8{ 0, 1, 0, 1 };
+    const mock_ds = dataset.Dataset{
+        .images = .{ .num_images = 4, .rows = 2, .cols = 2, .data = &img_data },
+        .labels = .{ .num_items = 4, .data = &lbl_data },
+    };
+
+    var loader = try dataset.DataLoader.init(arena, mock_ds, 2, .{ .shuffle = false, .drop_last = false });
+    defer loader.deinit(arena);
+
+    const Context = struct {
+        var count: usize = 0;
+        fn cb(_: usize, _: f32, _: f32) void {
+            count += 1;
+        }
+    };
+    Context.count = 0;
+
+    const train_res = try trainClassificationEpoch(arena, &model, &optim, &loader, Context.cb);
+    try std.testing.expectEqual(@as(usize, 2), Context.count);
+    try std.testing.expectEqual(@as(usize, 2), train_res.num_batches);
+    try std.testing.expect(train_res.loss > 0.0);
+
+    const eval_res = try evaluateClassification(arena, &model, &loader);
+    try std.testing.expectEqual(@as(usize, 2), eval_res.num_batches);
+    try std.testing.expect(eval_res.loss > 0.0);
+}
+

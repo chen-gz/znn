@@ -797,3 +797,110 @@ test "GRUCell and GRU forward and backward autograd" {
     for (x_seq_1.grad) |g| x_seq_grad_sum += @abs(g);
     try std.testing.expect(x_seq_grad_sum > 1e-4);
 }
+
+test "sampleTopP and sampleTopK edge cases and deterministic argmax" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    // Logits: highest at index 3 (value 10.0)
+    const logits = [_]f32{ 0.1, 1.0, 2.0, 10.0, 0.5 };
+
+    // 1. sampleTopK with k=1 must be strictly deterministic and return index 3
+    for (0..5) |_| {
+        const picked_k1 = try sampleTopK(&logits, 5, 0.1, 1, random, allocator);
+        try std.testing.expectEqual(@as(u32, 3), picked_k1);
+    }
+
+    // 2. sampleTopK with k >= vocab_size
+    const picked_kall = try sampleTopK(&logits, 5, 1.0, 10, random, allocator);
+    try std.testing.expect(picked_kall < 5);
+
+    // 3. sampleTopP with low temperature and top_p=0.1
+    const picked_p_low = try sampleTopP(&logits, 5, 0.01, 0.1, random, allocator);
+    try std.testing.expectEqual(@as(u32, 3), picked_p_low);
+}
+
+test "computeGroupAdvantages zero-variance and grpoLoss clipping" {
+    const allocator = std.testing.allocator;
+
+    // 1. All rewards equal: mean = 2.0, std = 0.0 -> advantages = 0.0 without NaN
+    const uniform_rewards = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
+    const adv = try computeGroupAdvantages(allocator, &uniform_rewards, 4, 1e-6);
+    defer allocator.free(adv);
+
+    for (adv) |a| {
+        try std.testing.expectApproxEqAbs(@as(f32, 0.0), a, 1e-4);
+    }
+
+    // 2. dpoLoss symmetry: when chosen and rejected logps match exactly, loss = log(2)
+    const pi_c = [_]f32{-1.0};
+    const pi_r = [_]f32{-1.0};
+    const ref_c = [_]f32{-1.0};
+    const ref_r = [_]f32{-1.0};
+    const sym_dpo = dpoLoss(&pi_c, &pi_r, &ref_c, &ref_r, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, @log(2.0)), sym_dpo, 1e-5);
+
+    // 3. computeGRPOLoss with clipping
+    const old_logps = [_]f32{-1.0};
+    const new_logps = [_]f32{-0.5}; // ratio = exp(0.5) ~ 1.6487 > 1 + 0.2 (clip_eps = 0.2)
+    const advantages = [_]f32{1.0};
+    const grpo_val = computeGRPOLoss(&old_logps, &new_logps, &advantages, null, 0.0, 0.2);
+    // Surrogate clamped to (1 + 0.2) * 1.0 = 1.2 -> loss = -1.2
+    try std.testing.expectApproxEqAbs(@as(f32, -1.2), grpo_val, 1e-4);
+}
+
+test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
+    const allocator = std.testing.allocator;
+
+    // 1. RMSNorm with all zeros: denominator = sqrt(eps), output = 0.0 (no NaN)
+    var rms = try RMSNorm.init(allocator, 4, 1e-5);
+    defer rms.deinit(allocator);
+
+    const x_zeros = try tensor.zeros(allocator, &.{ 1, 4 });
+    defer tensor.free(allocator, x_zeros);
+
+    const rms_out = try rms.forward(allocator, null, x_zeros);
+    defer tensor.free(allocator, rms_out);
+
+    for (rms_out.data) |v| {
+        try std.testing.expectEqual(@as(f32, 0.0), v);
+    }
+
+    // 2. LayerNorm with uniform row (all 3.0): mean=3.0, var=0.0 -> output is 0.0 (no NaN)
+    var ln = try LayerNorm.init(allocator, 4, 1e-5);
+    defer ln.deinit(allocator);
+
+    const x_uniform = try tensor.zeros(allocator, &.{ 1, 4 });
+    defer tensor.free(allocator, x_uniform);
+    @memset(x_uniform.data, 3.0);
+
+    const ln_out = try ln.forward(allocator, null, x_uniform);
+    defer tensor.free(allocator, ln_out);
+
+    for (ln_out.data) |v| {
+        try std.testing.expectApproxEqAbs(@as(f32, 0.0), v, 1e-4);
+    }
+
+    // 3. Dropout with p=0.0 (returns x directly) and high p
+    var prng = std.Random.DefaultPrng.init(11);
+    const drop0 = Dropout.init(0.0);
+    const drop_heavy = Dropout.init(0.9999);
+
+    const x_test = try tensor.zeros(allocator, &.{ 1, 4 });
+    defer tensor.free(allocator, x_test);
+    @memset(x_test.data, 2.5);
+
+    const y_drop0 = try drop0.forward(allocator, null, x_test, prng.random());
+    try std.testing.expectEqual(x_test, y_drop0);
+    for (y_drop0.data) |v| {
+        try std.testing.expectApproxEqAbs(@as(f32, 2.5), v, 1e-5);
+    }
+
+    const y_heavy = try drop_heavy.forward(allocator, null, x_test, prng.random());
+    defer tensor.free(allocator, y_heavy);
+    for (y_heavy.data) |v| {
+        try std.testing.expectEqual(@as(f32, 0.0), v);
+    }
+}
+
