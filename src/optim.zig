@@ -3,12 +3,64 @@ const nn = @import("nn.zig");
 const tensor = @import("tensor.zig");
 const Tensor = tensor.Tensor;
 
+pub const OPTIMIZER_MAGIC = [4]u8{ 'Z', 'N', 'N', 'O' };
+pub const OPTIMIZER_VERSION: u32 = 1;
+
+pub const OptimizerTypeTag = enum(u32) {
+    sgd = 0,
+    adam = 1,
+    adamw = 2,
+};
+
+pub const CheckpointError = error{
+    InvalidCheckpointMagic,
+    UnsupportedCheckpointVersion,
+    OptimizerTypeMismatch,
+    ParamCountMismatch,
+    BufferSizeMismatch,
+};
+
+fn writeU32(writer: anytype, val: u32) !void {
+    var b: [4]u8 = undefined;
+    std.mem.writeInt(u32, &b, val, .little);
+    try writer.writeAll(&b);
+}
+
+fn writeU64(writer: anytype, val: u64) !void {
+    var b: [8]u8 = undefined;
+    std.mem.writeInt(u64, &b, val, .little);
+    try writer.writeAll(&b);
+}
+
+fn writeF32(writer: anytype, val: f32) !void {
+    const bits: u32 = @bitCast(val);
+    try writeU32(writer, bits);
+}
+
+fn readU32(reader: anytype) !u32 {
+    var b: [4]u8 = undefined;
+    try reader.readSliceAll(&b);
+    return std.mem.readInt(u32, &b, .little);
+}
+
+fn readU64(reader: anytype) !u64 {
+    var b: [8]u8 = undefined;
+    try reader.readSliceAll(&b);
+    return std.mem.readInt(u64, &b, .little);
+}
+
+fn readF32(reader: anytype) !f32 {
+    const bits = try readU32(reader);
+    return @bitCast(bits);
+}
+
 pub const SGDOptimizer = struct {
     allocator: std.mem.Allocator,
     params: []*Tensor,
     velocities: ?[][]f32, // Only allocated if momentum > 0
     lr: f32,
     momentum: f32,
+    step_count: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, model: anytype, config: struct { lr: f32, momentum: f32 = 0.0 }) !SGDOptimizer {
         const params = try nn.collectParameters(model, allocator);
@@ -36,6 +88,7 @@ pub const SGDOptimizer = struct {
             .velocities = velocities,
             .lr = config.lr,
             .momentum = config.momentum,
+            .step_count = 0,
         };
     }
 
@@ -47,20 +100,112 @@ pub const SGDOptimizer = struct {
         self.allocator.free(self.params);
     }
 
-    pub fn step(self: SGDOptimizer) void {
+    pub fn getLR(self: SGDOptimizer) f32 {
+        return self.lr;
+    }
+
+    pub fn setLR(self: *SGDOptimizer, lr: f32) void {
+        self.lr = lr;
+    }
+
+    pub fn stepWithLR(self: *SGDOptimizer, current_lr: f32) void {
+        self.step_count += 1;
         for (self.params, 0..) |param, i| {
             const w = param.data;
             const dw = param.grad;
             if (self.velocities) |v_list| {
                 const v = v_list[i];
                 for (w, dw, v) |*weight, grad, *vel| {
-                    vel.* = self.momentum * vel.* + self.lr * grad;
+                    vel.* = self.momentum * vel.* + current_lr * grad;
                     weight.* -= vel.*;
                 }
             } else {
                 for (w, dw) |*weight, grad| {
-                    weight.* -= self.lr * grad;
+                    weight.* -= current_lr * grad;
                 }
+            }
+        }
+    }
+
+    pub fn step(self: *SGDOptimizer) void {
+        self.stepWithLR(self.lr);
+    }
+
+    pub fn saveCheckpoint(self: SGDOptimizer, io: std.Io, file_path: []const u8) !void {
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.createFile(io, file_path, .{});
+        defer file.close(io);
+
+        var buf: [65536]u8 = undefined;
+        var file_writer = file.writer(io, &buf);
+        const writer = &file_writer.interface;
+
+        try writer.writeAll(&OPTIMIZER_MAGIC);
+        try writeU32(writer, OPTIMIZER_VERSION);
+        try writeU32(writer, @intFromEnum(OptimizerTypeTag.sgd));
+        try writeU64(writer, self.step_count);
+        try writeF32(writer, self.lr);
+        try writeU64(writer, @as(u64, self.params.len));
+
+        const has_vel: u8 = if (self.velocities != null) 1 else 0;
+        try writer.writeAll(&[_]u8{has_vel});
+
+        for (self.params, 0..) |param, i| {
+            try writeU64(writer, @as(u64, param.data.len));
+            if (self.velocities) |v_list| {
+                try writer.writeAll(std.mem.sliceAsBytes(v_list[i]));
+            }
+        }
+        try writer.flush();
+    }
+
+    pub fn loadCheckpoint(self: *SGDOptimizer, io: std.Io, file_path: []const u8) !void {
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.openFile(io, file_path, .{});
+        defer file.close(io);
+
+        var buf: [65536]u8 = undefined;
+        var file_reader = file.reader(io, &buf);
+        const reader = &file_reader.interface;
+
+        var magic: [4]u8 = undefined;
+        try reader.readSliceAll(&magic);
+        if (!std.mem.eql(u8, &magic, &OPTIMIZER_MAGIC)) return error.InvalidCheckpointMagic;
+
+        const version = try readU32(reader);
+        if (version != OPTIMIZER_VERSION) return error.UnsupportedCheckpointVersion;
+
+        const type_tag = try readU32(reader);
+        if (type_tag != @intFromEnum(OptimizerTypeTag.sgd)) return error.OptimizerTypeMismatch;
+
+        self.step_count = try readU64(reader);
+        self.lr = try readF32(reader);
+        const param_count = try readU64(reader);
+        if (param_count != self.params.len) return error.ParamCountMismatch;
+
+        var has_vel_byte: [1]u8 = undefined;
+        try reader.readSliceAll(&has_vel_byte);
+        const has_vel = has_vel_byte[0] == 1;
+
+        if (has_vel and self.velocities == null) {
+            const v_list = try self.allocator.alloc([]f32, self.params.len);
+            errdefer self.allocator.free(v_list);
+            var init_count: usize = 0;
+            errdefer {
+                for (0..init_count) |j| self.allocator.free(v_list[j]);
+            }
+            for (self.params) |param| {
+                v_list[init_count] = try self.allocator.alloc(f32, param.data.len);
+                init_count += 1;
+            }
+            self.velocities = v_list;
+        }
+
+        for (self.params, 0..) |param, i| {
+            const param_len = try readU64(reader);
+            if (param_len != param.data.len) return error.BufferSizeMismatch;
+            if (has_vel) {
+                try reader.readSliceAll(std.mem.sliceAsBytes(self.velocities.?[i]));
             }
         }
     }
@@ -130,11 +275,19 @@ pub const AdamOptimizer = struct {
         self.allocator.free(self.params);
     }
 
-    pub fn step(self: *AdamOptimizer) void {
+    pub fn getLR(self: AdamOptimizer) f32 {
+        return self.lr;
+    }
+
+    pub fn setLR(self: *AdamOptimizer, lr: f32) void {
+        self.lr = lr;
+    }
+
+    pub fn stepWithLR(self: *AdamOptimizer, current_lr: f32) void {
         self.t += 1.0;
         const correction1 = 1.0 - std.math.pow(f32, self.beta1, self.t);
         const correction2 = 1.0 - std.math.pow(f32, self.beta2, self.t);
-        const lr_t = self.lr * @sqrt(correction2) / correction1;
+        const lr_t = current_lr * @sqrt(correction2) / correction1;
 
         for (self.params, 0..) |param, i| {
             const w = param.data;
@@ -147,6 +300,67 @@ pub const AdamOptimizer = struct {
                 v_i.* = self.beta2 * v_i.* + (1.0 - self.beta2) * grad * grad;
                 weight.* -= lr_t * m_i.* / (@sqrt(v_i.*) + self.eps);
             }
+        }
+    }
+
+    pub fn step(self: *AdamOptimizer) void {
+        self.stepWithLR(self.lr);
+    }
+
+    pub fn saveCheckpoint(self: AdamOptimizer, io: std.Io, file_path: []const u8) !void {
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.createFile(io, file_path, .{});
+        defer file.close(io);
+
+        var buf: [65536]u8 = undefined;
+        var file_writer = file.writer(io, &buf);
+        const writer = &file_writer.interface;
+
+        try writer.writeAll(&OPTIMIZER_MAGIC);
+        try writeU32(writer, OPTIMIZER_VERSION);
+        try writeU32(writer, @intFromEnum(OptimizerTypeTag.adam));
+        try writeU64(writer, @as(u64, @intFromFloat(self.t)));
+        try writeF32(writer, self.lr);
+        try writeU64(writer, @as(u64, self.params.len));
+
+        for (self.params, 0..) |param, i| {
+            try writeU64(writer, @as(u64, param.data.len));
+            try writer.writeAll(std.mem.sliceAsBytes(self.m[i]));
+            try writer.writeAll(std.mem.sliceAsBytes(self.v[i]));
+        }
+        try writer.flush();
+    }
+
+    pub fn loadCheckpoint(self: *AdamOptimizer, io: std.Io, file_path: []const u8) !void {
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.openFile(io, file_path, .{});
+        defer file.close(io);
+
+        var buf: [65536]u8 = undefined;
+        var file_reader = file.reader(io, &buf);
+        const reader = &file_reader.interface;
+
+        var magic: [4]u8 = undefined;
+        try reader.readSliceAll(&magic);
+        if (!std.mem.eql(u8, &magic, &OPTIMIZER_MAGIC)) return error.InvalidCheckpointMagic;
+
+        const version = try readU32(reader);
+        if (version != OPTIMIZER_VERSION) return error.UnsupportedCheckpointVersion;
+
+        const type_tag = try readU32(reader);
+        if (type_tag != @intFromEnum(OptimizerTypeTag.adam)) return error.OptimizerTypeMismatch;
+
+        const step_val = try readU64(reader);
+        self.t = @as(f32, @floatFromInt(step_val));
+        self.lr = try readF32(reader);
+        const param_count = try readU64(reader);
+        if (param_count != self.params.len) return error.ParamCountMismatch;
+
+        for (self.params, 0..) |param, i| {
+            const param_len = try readU64(reader);
+            if (param_len != param.data.len) return error.BufferSizeMismatch;
+            try reader.readSliceAll(std.mem.sliceAsBytes(self.m[i]));
+            try reader.readSliceAll(std.mem.sliceAsBytes(self.v[i]));
         }
     }
 };
@@ -213,6 +427,14 @@ pub const AdamWOptimizer = struct {
         self.allocator.free(self.params);
     }
 
+    pub fn getLR(self: AdamWOptimizer) f32 {
+        return self.config.lr;
+    }
+
+    pub fn setLR(self: *AdamWOptimizer, lr: f32) void {
+        self.config.lr = lr;
+    }
+
     pub fn stepWithLR(self: *AdamWOptimizer, current_lr: f32) void {
         self.step_count += 1;
         const t_f32 = @as(f32, @floatFromInt(self.step_count));
@@ -251,7 +473,67 @@ pub const AdamWOptimizer = struct {
     pub fn step(self: *AdamWOptimizer) void {
         self.stepWithLR(self.config.lr);
     }
+
+    pub fn saveCheckpoint(self: AdamWOptimizer, io: std.Io, file_path: []const u8) !void {
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.createFile(io, file_path, .{});
+        defer file.close(io);
+
+        var buf: [65536]u8 = undefined;
+        var file_writer = file.writer(io, &buf);
+        const writer = &file_writer.interface;
+
+        try writer.writeAll(&OPTIMIZER_MAGIC);
+        try writeU32(writer, OPTIMIZER_VERSION);
+        try writeU32(writer, @intFromEnum(OptimizerTypeTag.adamw));
+        try writeU64(writer, self.step_count);
+        try writeF32(writer, self.config.lr);
+        try writeU64(writer, @as(u64, self.params.len));
+
+        for (self.params, 0..) |param, i| {
+            try writeU64(writer, @as(u64, param.data.len));
+            try writer.writeAll(std.mem.sliceAsBytes(self.m[i]));
+            try writer.writeAll(std.mem.sliceAsBytes(self.v[i]));
+        }
+        try writer.flush();
+    }
+
+    pub fn loadCheckpoint(self: *AdamWOptimizer, io: std.Io, file_path: []const u8) !void {
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.openFile(io, file_path, .{});
+        defer file.close(io);
+
+        var buf: [65536]u8 = undefined;
+        var file_reader = file.reader(io, &buf);
+        const reader = &file_reader.interface;
+
+        var magic: [4]u8 = undefined;
+        try reader.readSliceAll(&magic);
+        if (!std.mem.eql(u8, &magic, &OPTIMIZER_MAGIC)) return error.InvalidCheckpointMagic;
+
+        const version = try readU32(reader);
+        if (version != OPTIMIZER_VERSION) return error.UnsupportedCheckpointVersion;
+
+        const type_tag = try readU32(reader);
+        if (type_tag != @intFromEnum(OptimizerTypeTag.adamw)) return error.OptimizerTypeMismatch;
+
+        self.step_count = try readU64(reader);
+        self.config.lr = try readF32(reader);
+        const param_count = try readU64(reader);
+        if (param_count != self.params.len) return error.ParamCountMismatch;
+
+        for (self.params, 0..) |param, i| {
+            const param_len = try readU64(reader);
+            if (param_len != param.data.len) return error.BufferSizeMismatch;
+            try reader.readSliceAll(std.mem.sliceAsBytes(self.m[i]));
+            try reader.readSliceAll(std.mem.sliceAsBytes(self.v[i]));
+        }
+    }
 };
+
+// =========================================================================
+// 学习率调度器 (Learning Rate Schedulers)
+// =========================================================================
 
 /// 带有线性预热 (Linear Warmup) 的余弦退火学习率调度器
 pub const CosineScheduler = struct {
@@ -287,6 +569,95 @@ pub const CosineScheduler = struct {
     }
 };
 
+/// 固定步长阶梯衰减学习率调度器 (StepLR)
+pub const StepLRScheduler = struct {
+    base_lr: f32,
+    step_size: u64,
+    gamma: f32,
+
+    pub fn init(base_lr: f32, step_size: u64, gamma: f32) StepLRScheduler {
+        std.debug.assert(step_size > 0);
+        return .{
+            .base_lr = base_lr,
+            .step_size = step_size,
+            .gamma = gamma,
+        };
+    }
+
+    pub fn getLR(self: StepLRScheduler, current_step: u64) f32 {
+        const factor = std.math.pow(f32, self.gamma, @as(f32, @floatFromInt(current_step / self.step_size)));
+        return self.base_lr * factor;
+    }
+};
+
+/// 纯线性预热学习率调度器 (Linear Warmup)
+pub const LinearWarmupScheduler = struct {
+    start_lr: f32,
+    target_lr: f32,
+    warmup_steps: u64,
+
+    pub fn init(start_lr: f32, target_lr: f32, warmup_steps: u64) LinearWarmupScheduler {
+        std.debug.assert(warmup_steps > 0);
+        return .{
+            .start_lr = start_lr,
+            .target_lr = target_lr,
+            .warmup_steps = warmup_steps,
+        };
+    }
+
+    pub fn getLR(self: LinearWarmupScheduler, current_step: u64) f32 {
+        if (current_step >= self.warmup_steps) {
+            return self.target_lr;
+        }
+        const progress = @as(f32, @floatFromInt(current_step)) / @as(f32, @floatFromInt(self.warmup_steps));
+        return self.start_lr + (self.target_lr - self.start_lr) * progress;
+    }
+};
+
+/// 指数衰减学习率调度器 (ExponentialLR)
+pub const ExponentialLRScheduler = struct {
+    base_lr: f32,
+    gamma: f32,
+
+    pub fn init(base_lr: f32, gamma: f32) ExponentialLRScheduler {
+        return .{
+            .base_lr = base_lr,
+            .gamma = gamma,
+        };
+    }
+
+    pub fn getLR(self: ExponentialLRScheduler, current_step: u64) f32 {
+        return self.base_lr * std.math.pow(f32, self.gamma, @as(f32, @floatFromInt(current_step)));
+    }
+};
+
+/// 统一的多态学习率调度器包装
+pub const LRScheduler = union(enum) {
+    cosine: CosineScheduler,
+    step_lr: StepLRScheduler,
+    warmup: LinearWarmupScheduler,
+    exponential: ExponentialLRScheduler,
+
+    pub fn getLR(self: LRScheduler, current_step: u64) f32 {
+        return switch (self) {
+            .cosine => |s| s.getLR(current_step),
+            .step_lr => |s| s.getLR(current_step),
+            .warmup => |s| s.getLR(current_step),
+            .exponential => |s| s.getLR(current_step),
+        };
+    }
+
+    pub fn step(self: LRScheduler, optimizer: anytype, current_step: u64) f32 {
+        const lr = self.getLR(current_step);
+        optimizer.setLR(lr);
+        return lr;
+    }
+};
+
+// =========================================================================
+// 梯度裁剪 (Gradient Clipping)
+// =========================================================================
+
 /// 全局梯度 L2 范数裁剪 (Gradient Norm Clipping)
 pub fn clipGradNorm(params: []*Tensor, max_norm: f32) f32 {
     var total_norm_sq: f32 = 0.0;
@@ -306,6 +677,39 @@ pub fn clipGradNorm(params: []*Tensor, max_norm: f32) f32 {
     }
     return total_norm;
 }
+
+/// 梯度分量数值截断 (Gradient Value Clipping)
+pub fn clipGradValue(params: []*Tensor, clip_value: f32) void {
+    const abs_clip = @abs(clip_value);
+    for (params) |param| {
+        for (param.grad) |*g| {
+            g.* = std.math.clamp(g.*, -abs_clip, abs_clip);
+        }
+    }
+}
+
+/// 梯度裁剪配置类型
+pub const GradClipConfig = union(enum) {
+    norm: f32,
+    value: f32,
+    none: void,
+};
+
+/// 统一梯度裁剪执行函数
+pub fn clipGradients(params: []*Tensor, config: GradClipConfig) ?f32 {
+    return switch (config) {
+        .norm => |max_norm| clipGradNorm(params, max_norm),
+        .value => |clip_val| {
+            clipGradValue(params, clip_val);
+            return null;
+        },
+        .none => null,
+    };
+}
+
+// =========================================================================
+// 单元测试
+// =========================================================================
 
 test "SGDOptimizer basic and momentum updates" {
     const testing = std.testing;
@@ -411,7 +815,36 @@ test "CosineScheduler warmup and decay" {
     try testing.expectApproxEqAbs(@as(f32, 1e-4), sched.getLR(120), 1e-6);
 }
 
-test "clipGradNorm gradient scaling" {
+test "StepLR and ExponentialLR schedulers" {
+    const testing = std.testing;
+
+    const step_sched = StepLRScheduler.init(0.1, 10, 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 0.1), step_sched.getLR(0), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.1), step_sched.getLR(9), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.05), step_sched.getLR(10), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.05), step_sched.getLR(19), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.025), step_sched.getLR(20), 1e-6);
+
+    const exp_sched = ExponentialLRScheduler.init(0.1, 0.9);
+    try testing.expectApproxEqAbs(@as(f32, 0.1), exp_sched.getLR(0), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.09), exp_sched.getLR(1), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.081), exp_sched.getLR(2), 1e-6);
+}
+
+test "LinearWarmupScheduler and LRScheduler union" {
+    const testing = std.testing;
+
+    const warmup = LinearWarmupScheduler.init(0.01, 0.1, 10);
+    try testing.expectApproxEqAbs(@as(f32, 0.01), warmup.getLR(0), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.055), warmup.getLR(5), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.1), warmup.getLR(10), 1e-6);
+    try testing.expectApproxEqAbs(@as(f32, 0.1), warmup.getLR(20), 1e-6);
+
+    const sched_union = LRScheduler{ .warmup = warmup };
+    try testing.expectApproxEqAbs(@as(f32, 0.055), sched_union.getLR(5), 1e-6);
+}
+
+test "clipGradNorm and clipGradValue" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
@@ -428,5 +861,72 @@ test "clipGradNorm gradient scaling" {
     // After clipping with max_norm=2.5, norm should be scaled by 2.5/5.0 = 0.5
     try testing.expectApproxEqAbs(@as(f32, 1.5), t1.grad[0], 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 2.0), t1.grad[1], 1e-5);
+
+    // Value clipping test
+    @memcpy(t1.grad, &[_]f32{ 5.0, -10.0, 0.5, -0.2 });
+    clipGradValue(&params, 1.0);
+    try testing.expectApproxEqAbs(@as(f32, 1.0), t1.grad[0], 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, -1.0), t1.grad[1], 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), t1.grad[2], 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, -0.2), t1.grad[3], 1e-5);
 }
+
+test "Optimizer checkpoint serialization and resumption" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var prng = std.Random.DefaultPrng.init(42);
+    var linear = try nn.Linear.init(allocator, 3, 2, prng.random());
+    defer linear.deinit(allocator);
+
+    // 1. Test SGDOptimizer checkpointing
+    {
+        var opt1 = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.05, .momentum = 0.9 });
+        defer opt1.deinit();
+
+        linear.weight.data[0] = 2.0;
+        linear.weight.grad[0] = 1.0;
+        opt1.step(); // updates momentum buffer and step_count
+
+        const ckpt_path = "test_sgd_ckpt.bin";
+        try opt1.saveCheckpoint(testing.io, ckpt_path);
+
+        var opt2 = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.01, .momentum = 0.0 });
+        defer opt2.deinit();
+
+        try opt2.loadCheckpoint(testing.io, ckpt_path);
+        try testing.expectEqual(opt1.step_count, opt2.step_count);
+        try testing.expectApproxEqAbs(opt1.lr, opt2.lr, 1e-6);
+        try testing.expect(opt2.velocities != null);
+        try testing.expectApproxEqAbs(opt1.velocities.?[0][0], opt2.velocities.?[0][0], 1e-6);
+
+        std.Io.Dir.cwd().deleteFile(testing.io, ckpt_path) catch {};
+    }
+
+    // 2. Test AdamWOptimizer checkpointing
+    {
+        var opt1 = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.002, .weight_decay = 0.05 });
+        defer opt1.deinit();
+
+        linear.weight.data[0] = 1.5;
+        linear.weight.grad[0] = 0.3;
+        opt1.step();
+        opt1.step();
+
+        const ckpt_path = "test_adamw_ckpt.bin";
+        try opt1.saveCheckpoint(testing.io, ckpt_path);
+
+        var opt2 = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.001 });
+        defer opt2.deinit();
+
+        try opt2.loadCheckpoint(testing.io, ckpt_path);
+        try testing.expectEqual(opt1.step_count, opt2.step_count);
+        try testing.expectApproxEqAbs(opt1.config.lr, opt2.config.lr, 1e-6);
+        try testing.expectApproxEqAbs(opt1.m[0][0], opt2.m[0][0], 1e-6);
+        try testing.expectApproxEqAbs(opt1.v[0][0], opt2.v[0][0], 1e-6);
+
+        std.Io.Dir.cwd().deleteFile(testing.io, ckpt_path) catch {};
+    }
+}
+
 

@@ -41,6 +41,11 @@ test "basic imports and struct definitions" {
     try std.testing.expect(@TypeOf(optim.SGDOptimizer) == type);
     try std.testing.expect(@TypeOf(optim.AdamOptimizer) == type);
     try std.testing.expect(@TypeOf(optim.AdamWOptimizer) == type);
+    try std.testing.expect(@TypeOf(optim.StepLRScheduler) == type);
+    try std.testing.expect(@TypeOf(optim.LinearWarmupScheduler) == type);
+    try std.testing.expect(@TypeOf(optim.ExponentialLRScheduler) == type);
+    try std.testing.expect(@TypeOf(optim.LRScheduler) == type);
+    try std.testing.expect(@TypeOf(optim.GradClipConfig) == type);
     try std.testing.expect(@TypeOf(dataset.BPETokenizer) == type);
     try std.testing.expect(@TypeOf(nn.LayerNorm) == type);
     try std.testing.expect(@TypeOf(nn.BatchNorm2d) == type);
