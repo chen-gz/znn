@@ -240,11 +240,18 @@ fn collectParametersInternal(model: anytype, list: *std.ArrayList(*Tensor), allo
     const info = @typeInfo(T);
     inline for (info.@"struct".fields) |field| {
         const FieldType = field.type;
+        if (@sizeOf(FieldType) == 0) continue;
         const field_info = @typeInfo(FieldType);
         if (FieldType == *Tensor) {
             const tensor_ptr = @field(model, field.name);
             if (tensor_ptr.requires_grad) {
                 try list.append(allocator, tensor_ptr);
+            }
+        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
+            if (@field(model, field.name)) |tensor_ptr| {
+                if (tensor_ptr.requires_grad) {
+                    try list.append(allocator, tensor_ptr);
+                }
             }
         } else if (field_info == .@"struct") {
             try collectParametersInternal(&@field(model, field.name), list, allocator);
@@ -2552,13 +2559,17 @@ pub fn Sequential(comptime LayersTuple: type) type {
             }
         }
 
-        /// 前向传播：中间激活值由外部生命周期（Graph Arena 或 Eager 传入的 ArenaAllocator）统一释放
+        /// 前向传播：在 Graph 模式下由计算图管理生命周期；在 Eager 模式下自动释放中间层临时张量
         pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, input: *Tensor) !*Tensor {
             var current = input;
 
             inline for (@typeInfo(LayersTuple).@"struct".fields) |field| {
                 const layer = @field(self.layers, field.name);
-                current = try layer.forward(allocator, graph, current);
+                const next = try layer.forward(allocator, graph, current);
+                if (graph == null and current != input) {
+                    tensor.free(allocator, current);
+                }
+                current = next;
             }
             return current;
         }
@@ -2912,6 +2923,21 @@ test "Sequential container chaining" {
     var grad_sum: f32 = 0.0;
     for (seq.layers.@"0".weight.grad) |g| grad_sum += @abs(g);
     try std.testing.expect(grad_sum > 0.0);
+
+    // Test parameter collection on Sequential container
+    const params = try collectParameters(&seq, allocator);
+    defer allocator.free(params);
+    // Two Linear layers each with weight and bias = 4 parameter tensors
+    try std.testing.expectEqual(@as(usize, 4), params.len);
+
+    // Test eager forward (graph == null) without memory leak
+    const eager_in = try createPersistentTensor(allocator, 2, 10, false);
+    defer freePersistentTensor(allocator, eager_in);
+    @memset(eager_in.data, 0.5);
+
+    const eager_out = try seq.forward(allocator, null, eager_in);
+    defer freePersistentTensor(allocator, eager_out);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, eager_out.shape.dims[0..eager_out.shape.len]);
 }
 
 // ============================================================================
