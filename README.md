@@ -148,11 +148,23 @@ zig build run-shakespeare
 zig build run-llm
 ```
 
-### 5. Run Unit Tests & Benchmarks
+### 5. Run Unit Tests & Automated Coverage
 ```bash
 # Run all unit tests across the entire codebase
 zig build test
+
+# Run automated code coverage analysis using kcov (outputs summary table & HTML report)
+zig build coverage
+
+# Or pass custom arguments (e.g., fail under 90% threshold, or auto-open browser)
+zig build coverage -- --fail-under=90
+zig build coverage -- --open
+
+# Alternatively, using just:
+just coverage
+just coverage-open
 ```
+
 
 ---
 
