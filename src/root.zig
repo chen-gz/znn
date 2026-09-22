@@ -9,6 +9,7 @@ pub const optim = @import("optim.zig");
 pub const regression = @import("regression.zig");
 pub const cv = @import("cross_validation.zig");
 pub const engine = @import("engine.zig");
+pub const bench = @import("bench.zig");
 
 
 pub fn measureTime(comptime func: anytype, args: anytype) !struct {
@@ -100,12 +101,15 @@ pub const ProfileBlock = struct {
 
     pub fn end(self: ProfileBlock) void {
         const std = @import("std");
+        const builtin = @import("builtin");
         var end_ts: std.posix.system.timespec = undefined;
         _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &end_ts);
         const start_ns = @as(u64, @intCast(self.start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(self.start_ts.nsec));
         const end_ns = @as(u64, @intCast(end_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(end_ts.nsec));
         const elapsed_ms = @as(f64, @floatFromInt(end_ns - start_ns)) / 1_000_000.0;
-        std.debug.print("[PROFILE] {s} took {d:.3}ms\n", .{ self.label, elapsed_ms });
+        if (!builtin.is_test) {
+            std.debug.print("[PROFILE] {s} took {d:.3}ms\n", .{ self.label, elapsed_ms });
+        }
     }
 };
 
@@ -164,10 +168,6 @@ test "Tensor ND reshape and transpose autograd" {
     A.data[0] = 1.0; A.data[1] = 2.0; A.data[2] = 3.0;
     A.data[3] = 4.0; A.data[4] = 5.0; A.data[5] = 6.0;
 
-    // Test print
-    std.debug.print("\nTesting print function for 2x3 tensor:\n", .{});
-    A.print();
-
     // Transpose it to 3x2
     const B = try graph.transposeND(A, 0, 1);
     try std.testing.expectEqualSlices(usize, &.{3, 2}, B.shape.dims[0..B.shape.len]);
@@ -176,15 +176,9 @@ test "Tensor ND reshape and transpose autograd" {
     try std.testing.expectEqual(@as(f32, 2.0), B.data[2]); // A[0,1]
     try std.testing.expectEqual(@as(f32, 5.0), B.data[3]); // A[1,1]
 
-    std.debug.print("Testing print function for transposed 3x2 tensor:\n", .{});
-    B.print();
-
     // Reshape it to 1x6
     const C = try graph.reshape(B, &.{1, 6});
     try std.testing.expectEqualSlices(usize, &.{1, 6}, C.shape.dims[0..C.shape.len]);
-
-    std.debug.print("Testing print function for reshaped 1x6 tensor:\n", .{});
-    C.print();
 
     // Let's set some gradients in C.grad and backward
     C.grad[0] = 10.0;

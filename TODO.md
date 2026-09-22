@@ -80,9 +80,9 @@
   - [x] 为逐元素算子（`add`, `sub`, `mul`, `div`）支持任意维度的向后对齐与维度为 1 自动展开（包含 1D 到 8D 的虚拟步长映射）。
   - [x] 在 [`autodiff.zig`](file:///Users/guangzong/Documents/znn/src/autodiff.zig) 中实现广播算子的反向传播（自动沿广播维度进行多维梯度求和累加与降维映射）。
 
-- [ ] **1.3 净化单元测试与构建日志**
-  - [ ] 清理 [`src/root.zig`](file:///Users/guangzong/Documents/znn/src/root.zig#L149-L168) 中单元测试遗留的 `std.debug.print`，使用标准 `testing.expect*` 断言。
-  - [ ] 确保 `zig build test` 输出清晰整洁，无多余终端干扰输出。
+- [x] **1.3 净化单元测试与构建日志**
+  - [x] 清理 [`src/root.zig`](file:///Users/guangzong/Documents/znn/src/root.zig#L149-L168) 中单元测试遗留的 `std.debug.print`，使用标准 `testing.expect*` 断言。
+  - [x] 确保 `zig build test` 输出清晰整洁，无多余终端干扰输出。
 
 - [x] **1.4 评估管线轻量化改造与无梯度模式 (Lightweight Eval Pipeline & No-Grad)**
   - [x] 重构 [`engine.evalClassificationStep`](file:///Users/guangzong/Documents/znn/src/engine.zig#L82) 与 `evaluateClassification`，改用 `ArenaAllocator` + `graph = null` 纯前向模式，消除评估阶段隐式创建图和分配梯度的冗余开销。

@@ -19,6 +19,10 @@ run-lr:
 run-cnn:
     zig build run-cnn
 
+# Run the performance benchmark suite (supports e.g. just bench --filter gemm)
+bench *args:
+    zig build run-bench -Doptimize=ReleaseFast -- {{args}}
+
 # Generate code coverage report using kcov and print summary table
 coverage:
     bash scripts/coverage.sh
