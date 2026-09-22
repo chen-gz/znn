@@ -165,10 +165,31 @@ just coverage
 just coverage-open
 ```
 
+---
+
+## 🔬 Comparison with Modern NumPy (NumPy 2.x)
+
+While `znn` is architected as an **autograd & deep learning micro-framework** (akin to PyTorch or tinygrad), its foundational tensor layer addresses many of the same problems as **NumPy**. 
+
+Here is a high-level comparison between `znn` and modern NumPy 2.x:
+
+| Capability Dimension | Modern NumPy (NumPy 2.x) | ZNN Current Implementation | Parity Status & Roadmap |
+| :--- | :--- | :--- | :--- |
+| **Dtypes & Multi-Precision** | Rich scalar system (`float16/32/64/128`, `int8~64`, `bool`, extensible DType API) | Hardcoded `f32` (`data: []f32`, `grad: []f32`) | 🔴 Planned: Generic `Tensor(comptime T: type)` |
+| **Strides & Slicing Views** | C/Fortran orders, $O(1)$ strided views, step (`arr[::-1]`), fancy & boolean masks | Row-major with strides, scalar `get/set`, `split`, `concat` | 🔴 Planned: Strided slice views & boolean masking |
+| **Reductions & Statistics** | `sum`, `mean`, `std`, `var`, `min`, `max` with arbitrary `axis=(...)` & `keepdims` | Single-axis `argmax`/`max`; mean/var private to Norm layers | 🔴 Planned: Generic multi-axis reduction API |
+| **Searching & Sorting** | `where(cond, x, y)`, `nonzero`, `sort`, `argsort`, `searchsorted` | Top-K / Top-P sampling, gradient clipping | 🟡 Planned: `where`, `sort`, `nonzero` |
+| **Linear Algebra (`linalg`)** | SVD, QR, Cholesky, eigenvalues (`eig/eigh`), matrix inverse, `einsum` | BLAS SGEMM, `batchMatMul`, Gauss-Jordan `solveLinearSystem` | 🟡 Planned: Cholesky, QR, and SVD decomposition |
+| **Random (`random`)** | Modern `Generator` (PCG64/Philox), 30+ distributions, shuffle/choice | Uniform `rand`, normal `fillNormal`, Top-K/Top-P | 🟡 Planned: Modular RNG & extended distributions |
+| **Autograd & DL Layers** | ❌ None (pure numerical array library) | ✅ **Native dynamic backward graph, LLM layers, AdamW, DPO/GRPO** | 🟢 Core ZNN advantage |
+| **Zero Dependencies** | ❌ Requires Python interpreter & C-API | ✅ **Pure Zig, standalone single-binary compilation** | 🟢 Core ZNN advantage |
+
+> 📖 **Detailed Gap Analysis & Technical Roadmap**: For a deep-dive breakdown of every missing NumPy feature, design trade-offs, and actionable implementation phases, see **[plan/NUMPY_GAP_ANALYSIS.md](plan/NUMPY_GAP_ANALYSIS.md)**.
 
 ---
 
 ## 🗺️ Roadmap & Future Milestones
+
 
 ### ✅ Completed Milestones
 1. **Decoupled Optimizer Framework**:
