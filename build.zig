@@ -483,6 +483,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&install_exe_tests.step);
     test_step.dependOn(&install_cnn_tests.step);
 
+    // Code coverage step using kcov
+    const coverage_step = b.step("coverage", "Generate and display test code coverage report using kcov");
+    const coverage_cmd = b.addSystemCommand(&.{ "bash", "scripts/coverage.sh" });
+    coverage_cmd.step.dependOn(test_step);
+    if (b.args) |args| {
+        coverage_cmd.addArgs(args);
+    }
+    coverage_step.dependOn(&coverage_cmd.step);
+
     // ========================================================================
     // Dataset Download Step (Pure Zig: zig build download-dataset -- tinyshakespeare)
     // ========================================================================
