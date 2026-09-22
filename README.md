@@ -66,9 +66,11 @@ It spans the full continuum of machine learning:
   * **[src/cross_validation.zig](src/cross_validation.zig)**: K-Fold cross-validation splitters, hyperparameter grid search, and evaluation metrics.
   * **[src/dataset.zig](src/dataset.zig)**: Binary parsers for MNIST/Fashion-MNIST IDX format, and Byte-Pair Encoding (`BPETokenizer`).
   * **[src/cblas.zig](src/cblas.zig)**: System CBLAS C-bindings for macOS Accelerate framework and pure Zig `@Vector` SIMD GEMM fallback.
+  * **[src/bench.zig](src/bench.zig)**: Performance benchmarking harness, timing statistics, and suites.
   * **[src/root.zig](src/root.zig)**: Module exports, unit tests, and runtime benchmarking/profiling utilities.
 
 * **`examples/` (Executable Binaries & Workflows)**:
+  * **[examples/benchmark.zig](examples/benchmark.zig)**: Comprehensive performance benchmarking tool and CLI runner.
   * **[examples/fashion_mnist.zig](examples/fashion_mnist.zig)**: 3-layer MLP on Fashion MNIST dataset.
   * **[examples/cnn.zig](examples/cnn.zig)**: 2D Convolutional Neural Network (Conv2D + MaxPool2D + Linear).
   * **[examples/gan.zig](examples/gan.zig)**: Generative Adversarial Network (Generator + Discriminator) training with BCEWithLogitsLoss.
@@ -163,6 +165,27 @@ zig build coverage -- --open
 # Alternatively, using just:
 just coverage
 just coverage-open
+```
+
+### 6. Run Performance Benchmark Suite
+Execute comprehensive performance microbenchmarks and training pipeline benchmarks (measuring GFLOPS, memory bandwidth GB/s, and training step throughput):
+```bash
+# Run full benchmark suite with ReleaseFast optimization
+just bench
+
+# Run specific suite (gemm, ops, activations, layers, models, optimizers, tokenizer)
+just bench --suite gemm
+just bench --suite models
+
+# Filter benchmarks by name pattern
+just bench --filter conv
+just bench --filter attention
+
+# Customize iterations and warmup
+just bench -i 20 -w 5
+
+# Direct zig build execution
+zig build bench -Doptimize=ReleaseFast -- --filter gemm
 ```
 
 ---

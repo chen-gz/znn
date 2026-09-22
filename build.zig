@@ -387,6 +387,36 @@ pub fn build(b: *std.Build) void {
     run_cv_step.dependOn(&run_cv_cmd.step);
     run_cv_cmd.step.dependOn(b.getInstallStep());
 
+    // Define Benchmark binary target
+    const exe_bench = b.addExecutable(.{
+        .name = "benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_bench_mod = exe_bench.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_bench_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_bench);
+
+    const run_bench_step = b.step("run-bench", "Run the znn performance benchmark suite");
+    const run_bench_cmd = b.addRunArtifact(exe_bench);
+    run_bench_step.dependOn(&run_bench_cmd.step);
+    run_bench_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| {
+        run_bench_cmd.addArgs(args);
+    }
+
+    const bench_step = b.step("bench", "Run the znn performance benchmark suite (alias for run-bench)");
+    bench_step.dependOn(&run_bench_cmd.step);
+
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
@@ -467,6 +497,12 @@ pub fn build(b: *std.Build) void {
     });
     const run_cnn_tests = b.addRunArtifact(cnn_tests);
 
+    const bench_tests = b.addTest(.{
+        .root_module = exe_bench.root_module,
+        .name = "bench_tests",
+    });
+    const run_bench_tests = b.addRunArtifact(bench_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
@@ -474,14 +510,17 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_cnn_tests.step);
+    test_step.dependOn(&run_bench_tests.step);
 
     // Copy the test binaries to zig-out/bin/ so kcov can access them cleanly
     const install_mod_tests = b.addInstallArtifact(mod_tests, .{});
     const install_exe_tests = b.addInstallArtifact(exe_tests, .{});
     const install_cnn_tests = b.addInstallArtifact(cnn_tests, .{});
+    const install_bench_tests = b.addInstallArtifact(bench_tests, .{});
     test_step.dependOn(&install_mod_tests.step);
     test_step.dependOn(&install_exe_tests.step);
     test_step.dependOn(&install_cnn_tests.step);
+    test_step.dependOn(&install_bench_tests.step);
 
     // Code coverage step using kcov
     const coverage_step = b.step("coverage", "Generate and display test code coverage report using kcov");
