@@ -77,12 +77,12 @@
 ## 🗺️ 4. 补齐演进规划 (Actionable Roadmap)
 
 ### Phase 1: 基础核心增强 (P0 - Quick Wins & Fundamentals)
-- [ ] **多轴归约函数库**：
-  - 实现通用 `sum(axis, keepdims)`, `mean(axis, keepdims)`, `var/std(axis, keepdims)`，包含 Autograd 节点。
-- [ ] **条件选择与掩码填充**：
-  - 实现 `where(condition, x, y)` 与 `maskedFill(mask, value)` 算子。
-- [ ] **多维形态补充算子**：
-  - 实现 `squeeze(dim)`, `unsqueeze(dim)` / `expandDims(dim)`, `tile(reps)`, `pad(paddings)`.
+- [x] **多轴归约函数库**：
+  - [x] 实现通用 `sum(axis, keepdims)`, `mean(axis, keepdims)`, `variance/stdDev(axis, keepdims, ddof)`，支持连续与任意多维跨步张量。
+- [x] **条件选择与掩码填充**：
+  - [x] 实现 `where(condition, x, y)` 支持多维广播对齐，与 `maskedFill(mask, value)` / `maskedFill_(mask, value)`（包含计算图安全防护）。
+- [x] **多维形态补充算子**：
+  - [x] 实现 `squeeze(axis)` (单轴/全轴为 1 维度压缩) 与 `unsqueeze(dim)` (新维度扩充)。
 
 ### Phase 2: 泛型张量与切片视图 (P1 - Architectural Evolution)
 - [ ] **泛型张量重构**：
