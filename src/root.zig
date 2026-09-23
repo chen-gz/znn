@@ -13,7 +13,9 @@ pub const engine = @import("engine.zig");
 pub const bench = @import("bench.zig");
 
 pub const TSNE = manifold.TSNE;
+pub const TSNEOptions = manifold.TSNEOptions;
 pub const tsne = manifold.tsne;
+pub const tsneDefault = manifold.tsneDefault;
 
 pub const GenericTensor = tensor.GenericTensor;
 pub const TensorOf = tensor.TensorOf;

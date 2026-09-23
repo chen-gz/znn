@@ -128,6 +128,11 @@ pub const DataLoaderOptions = struct {
     shuffle: bool = false,
     seed: ?u64 = null,
     drop_last: bool = false,
+
+    pub const default: DataLoaderOptions = .{};
+    pub fn defaultOptions() DataLoaderOptions {
+        return .{};
+    }
 };
 
 pub const DataLoader = struct {
@@ -138,6 +143,10 @@ pub const DataLoader = struct {
     indices: []usize,
     current_index: usize,
     prng: std.Random.DefaultPrng,
+
+    pub fn initDefault(allocator: std.mem.Allocator, ds: Dataset, batch_size: usize) !DataLoader {
+        return init(allocator, ds, batch_size, DataLoaderOptions.default);
+    }
 
     pub fn init(allocator: std.mem.Allocator, ds: Dataset, batch_size: usize, options: DataLoaderOptions) !DataLoader {
         const num_samples = ds.images.num_images;
