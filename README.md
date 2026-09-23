@@ -213,8 +213,10 @@ Here is a high-level comparison between `znn` and modern NumPy 2.x:
 
 ## 🗺️ Roadmap & Future Milestones
 
+> 📋 For the full architectural diagnosis and actionable development checklist, see **[plan/TODO.md](plan/TODO.md)**. For the overarching engineering roadmap and index, see **[plan/README.md](plan/README.md)**.
 
 ### ✅ Completed Milestones
+
 1. **Decoupled Optimizer Framework**:
    * Extracted parameter update states out of neural layers into [src/optim.zig](src/optim.zig).
    * Implemented `SGDOptimizer` (with Momentum), `AdamOptimizer`, and `AdamWOptimizer` (with decoupled weight decay).
