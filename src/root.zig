@@ -7,9 +7,13 @@ pub const dataset = @import("dataset.zig");
 pub const autodiff = @import("autodiff.zig");
 pub const optim = @import("optim.zig");
 pub const regression = @import("regression.zig");
+pub const manifold = @import("manifold.zig");
 pub const cv = @import("cross_validation.zig");
 pub const engine = @import("engine.zig");
 pub const bench = @import("bench.zig");
+
+pub const TSNE = manifold.TSNE;
+pub const tsne = manifold.tsne;
 
 pub const GenericTensor = tensor.GenericTensor;
 pub const TensorOf = tensor.TensorOf;
@@ -79,6 +83,9 @@ test "basic imports and struct definitions" {
     try std.testing.expect(@TypeOf(nn.StackedLSTM) == type);
     try std.testing.expect(@TypeOf(nn.GRUCell) == type);
     try std.testing.expect(@TypeOf(nn.GRU) == type);
+    _ = @import("manifold.zig");
+    try std.testing.expect(@TypeOf(manifold.TSNE) == type);
+    try std.testing.expect(@typeInfo(@TypeOf(tsne)) == .@"fn");
 }
 
 test "measureTime utility" {
