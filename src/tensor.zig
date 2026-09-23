@@ -16,21 +16,21 @@ pub const Shape = struct {
     len: usize,     // 张量的维度个数（Rank，例如 2D 矩阵的 Rank 为 2）
 
     /// 从切片安全初始化 Shape，超过 8 维返回 error.MaxDimensionsExceeded
-    pub fn fromSlice(slice: []const usize) !Shape {
-        if (slice.len > 8) return error.MaxDimensionsExceeded;
+    pub fn fromSlice(shape_slice: []const usize) !Shape {
+        if (shape_slice.len > 8) return error.MaxDimensionsExceeded;
         var self = Shape{
             .dims = [_]usize{0} ** 8,
-            .len = slice.len,
+            .len = shape_slice.len,
         };
-        for (slice, 0..) |dim, i| {
+        for (shape_slice, 0..) |dim, i| {
             self.dims[i] = dim;
         }
         return self;
     }
 
     /// 根据动态传入的切片初始化静态 Shape 结构体（若超过 8 维触发 panic）
-    pub fn init(slice: []const usize) Shape {
-        return fromSlice(slice) catch |err| switch (err) {
+    pub fn init(shape_slice: []const usize) Shape {
+        return fromSlice(shape_slice) catch |err| switch (err) {
             error.MaxDimensionsExceeded => @panic("Shape.init: maximum dimensions (8) exceeded"),
         };
     }
@@ -192,8 +192,303 @@ pub fn broadcastBinaryOpRaw(
 }
 
 
+
 // ============================================================================
-// 2. 张量（Tensor）核心定义与元数据
+// 2. 数据类型系统与泛型张量 (DType System & Generic Tensor)
+// ============================================================================
+
+/// 统一标量数据类型枚举 (DType)
+pub const DType = enum {
+    f32,
+    f64,
+    f16,
+    bf16,
+    i32,
+    i64,
+    u8,
+    bool,
+
+    pub fn sizeOf(self: DType) usize {
+        return switch (self) {
+            .f32, .i32 => 4,
+            .f64, .i64 => 8,
+            .f16, .bf16 => 2,
+            .u8, .bool => 1,
+        };
+    }
+};
+
+/// Brain Floating Point 16-bit 格式 (bfloat16)
+/// 符号位 1 位，指数位 8 位，尾数位 7 位（与 IEEE 754 f32 动态范围完全相同）
+pub const bf16 = packed struct {
+    bits: u16,
+
+    pub fn fromF32(val: f32) bf16 {
+        const u: u32 = @bitCast(val);
+        // Round to nearest even
+        const lsb = (u >> 16) & 1;
+        const rounding_bias: u32 = 0x7fff + lsb;
+        const rounded: u32 = u +% rounding_bias;
+        return .{ .bits = @truncate(rounded >> 16) };
+    }
+
+    pub fn toF32(self: bf16) f32 {
+        const u: u32 = @as(u32, self.bits) << 16;
+        return @bitCast(u);
+    }
+};
+
+/// 跨步切片范围描述 (SliceRange)
+pub const SliceRange = struct {
+    start: ?usize = null,
+    end: ?usize = null,
+    step: usize = 1,
+};
+
+/// 通用标量类型转换函数
+pub fn convertScalar(comptime DestT: type, comptime SrcT: type, val: SrcT) DestT {
+    if (DestT == SrcT) return val;
+    if (SrcT == bf16) {
+        const f = val.toF32();
+        return convertScalar(DestT, f32, f);
+    }
+    if (DestT == bf16) {
+        const f = convertScalar(f32, SrcT, val);
+        return bf16.fromF32(f);
+    }
+    if (DestT == bool) {
+        if (@typeInfo(SrcT) == .int) return val != 0;
+        if (@typeInfo(SrcT) == .float) return val != 0.0;
+    }
+    if (SrcT == bool) {
+        const int_v: usize = if (val) 1 else 0;
+        if (@typeInfo(DestT) == .int) return @intCast(int_v);
+        if (@typeInfo(DestT) == .float) return @floatFromInt(int_v);
+    }
+    if (@typeInfo(SrcT) == .float and @typeInfo(DestT) == .float) {
+        return @floatCast(val);
+    }
+    if (@typeInfo(SrcT) == .float and @typeInfo(DestT) == .int) {
+        return @intFromFloat(val);
+    }
+    if (@typeInfo(SrcT) == .int and @typeInfo(DestT) == .float) {
+        return @floatFromInt(val);
+    }
+    if (@typeInfo(SrcT) == .int and @typeInfo(DestT) == .int) {
+        return @intCast(val);
+    }
+    @compileError("Unsupported type conversion between " ++ @typeName(SrcT) ++ " and " ++ @typeName(DestT));
+}
+
+/// 泛型张量结构体 (Generic Tensor)
+pub fn GenericTensor(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        pub const ElemType = T;
+
+        data: []T,
+        shape: Shape,
+        strides: Shape,
+        is_view: bool = false,
+
+        pub fn init(allocator: std.mem.Allocator, shape_slice: []const usize, initial_val: ?T) !*Self {
+            const shape = try Shape.fromSlice(shape_slice);
+            const strides = computeContiguousStrides(shape);
+            var total_size: usize = 1;
+            for (shape_slice) |dim| {
+                total_size *= dim;
+            }
+            const self = try allocator.create(Self);
+            errdefer allocator.destroy(self);
+            const data = try allocator.alloc(T, total_size);
+            if (initial_val) |v| {
+                @memset(data, v);
+            }
+            self.* = Self{
+                .data = data,
+                .shape = shape,
+                .strides = strides,
+                .is_view = false,
+            };
+            return self;
+        }
+
+        pub fn fromSlice(allocator: std.mem.Allocator, shape_slice: []const usize, slice_data: []const T) !*Self {
+            const shape = try Shape.fromSlice(shape_slice);
+            const strides = computeContiguousStrides(shape);
+            var total_size: usize = 1;
+            for (shape_slice) |dim| {
+                total_size *= dim;
+            }
+            if (total_size != slice_data.len) return error.ShapeMismatch;
+            const self = try allocator.create(Self);
+            errdefer allocator.destroy(self);
+            const data = try allocator.alloc(T, total_size);
+            @memcpy(data, slice_data);
+            self.* = Self{
+                .data = data,
+                .shape = shape,
+                .strides = strides,
+                .is_view = false,
+            };
+            return self;
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            if (!self.is_view) {
+                allocator.free(self.data);
+            }
+            allocator.destroy(self);
+        }
+
+        pub fn isContiguous(self: Self) bool {
+            const c_strides = computeContiguousStrides(self.shape);
+            return self.strides.eq(c_strides);
+        }
+
+        pub fn getFlatIndexChecked(self: Self, indices: []const usize) !usize {
+            if (indices.len != self.shape.len) return error.DimensionMismatch;
+            var flat_idx: usize = 0;
+            for (indices, 0..) |idx, i| {
+                if (idx >= self.shape.dims[i]) return error.IndexOutOfBounds;
+                flat_idx += idx * self.strides.dims[i];
+            }
+            return flat_idx;
+        }
+
+        pub fn getFlatIndex(self: Self, indices: []const usize) usize {
+            return self.getFlatIndexChecked(indices) catch |err| switch (err) {
+                error.DimensionMismatch => @panic("getFlatIndex: dimension mismatch"),
+                error.IndexOutOfBounds => @panic("getFlatIndex: index out of bounds"),
+            };
+        }
+
+        pub fn getChecked(self: Self, indices: []const usize) !T {
+            const flat_idx = try self.getFlatIndexChecked(indices);
+            return self.data[flat_idx];
+        }
+
+        pub fn setChecked(self: *Self, indices: []const usize, val: T) !void {
+            const flat_idx = try self.getFlatIndexChecked(indices);
+            self.data[flat_idx] = val;
+        }
+
+        pub fn get(self: Self, indices: []const usize) T {
+            return self.data[self.getFlatIndex(indices)];
+        }
+
+        pub fn set(self: *Self, indices: []const usize, val: T) void {
+            self.data[self.getFlatIndex(indices)] = val;
+        }
+
+        pub fn clone(self: Self, allocator: std.mem.Allocator) !*Self {
+            const out = try Self.init(allocator, self.shape.dims[0..self.shape.len], null);
+            errdefer out.deinit(allocator);
+            if (self.isContiguous()) {
+                @memcpy(out.data, self.data);
+            } else {
+                var coord = [_]usize{0} ** 8;
+                const len = self.shape.len;
+                for (0..out.data.len) |dest_i| {
+                    var src_idx: usize = 0;
+                    for (0..len) |d| {
+                        src_idx += coord[d] * self.strides.dims[d];
+                    }
+                    out.data[dest_i] = self.data[src_idx];
+                    var d = len;
+                    while (d > 0) {
+                        d -= 1;
+                        coord[d] += 1;
+                        if (coord[d] < self.shape.dims[d]) break;
+                        coord[d] = 0;
+                    }
+                }
+            }
+            return out;
+        }
+
+        pub fn contiguous(self: Self, allocator: std.mem.Allocator) !*Self {
+            return self.clone(allocator);
+        }
+
+        pub fn slice(self: *Self, ranges: []const SliceRange, allocator: std.mem.Allocator) !*Self {
+            if (ranges.len > self.shape.len) return error.DimensionOutOfBounds;
+
+            var new_dims = [_]usize{0} ** 8;
+            var new_strides = [_]usize{0} ** 8;
+            var offset: usize = 0;
+
+            for (0..self.shape.len) |d| {
+                const dim_size = self.shape.dims[d];
+                const stride = self.strides.dims[d];
+                const range = if (d < ranges.len) ranges[d] else SliceRange{};
+                if (range.step == 0) return error.InvalidStep;
+
+                const start = range.start orelse 0;
+                const end = range.end orelse dim_size;
+
+                if (start > dim_size or end > dim_size) return error.IndexOutOfBounds;
+                if (end < start) return error.InvalidSliceRange;
+
+                const slice_len = if (end > start) (end - start + range.step - 1) / range.step else 0;
+                new_dims[d] = slice_len;
+                new_strides[d] = stride * range.step;
+                offset += start * stride;
+            }
+
+            const out = try allocator.create(Self);
+            out.* = Self{
+                .data = self.data[offset..],
+                .shape = Shape{ .dims = new_dims, .len = self.shape.len },
+                .strides = Shape{ .dims = new_strides, .len = self.shape.len },
+                .is_view = true,
+            };
+            return out;
+        }
+
+        pub fn to(self: Self, comptime DestT: type, allocator: std.mem.Allocator) !*GenericTensor(DestT) {
+            const out = try GenericTensor(DestT).init(allocator, self.shape.dims[0..self.shape.len], null);
+            errdefer out.deinit(allocator);
+
+            if (self.isContiguous()) {
+                for (self.data, 0..) |val, i| {
+                    out.data[i] = convertScalar(DestT, T, val);
+                }
+            } else {
+                var coord = [_]usize{0} ** 8;
+                const len = self.shape.len;
+                for (0..out.data.len) |dest_i| {
+                    var src_idx: usize = 0;
+                    for (0..len) |d| {
+                        src_idx += coord[d] * self.strides.dims[d];
+                    }
+                    out.data[dest_i] = convertScalar(DestT, T, self.data[src_idx]);
+                    var d = len;
+                    while (d > 0) {
+                        d -= 1;
+                        coord[d] += 1;
+                        if (coord[d] < self.shape.dims[d]) break;
+                        coord[d] = 0;
+                    }
+                }
+            }
+            return out;
+        }
+    };
+}
+
+pub const FloatTensor = GenericTensor(f32);
+pub const DoubleTensor = GenericTensor(f64);
+pub const IntTensor = GenericTensor(i32);
+pub const LongTensor = GenericTensor(i64);
+pub const BoolTensor = GenericTensor(bool);
+pub const BFloat16Tensor = GenericTensor(bf16);
+pub const UsizeTensor = GenericTensor(usize);
+pub const TensorOf = GenericTensor;
+
+
+// ============================================================================
+// 3. 基础张量（Tensor）核心定义与元数据
 // ============================================================================
 
 /// 张量（Tensor）结构体：承载机器学习网络中所有物理数据与流转拓扑信息
@@ -204,6 +499,8 @@ pub const Tensor = struct {
     strides: Shape,       // 各维度的跨度步长（用于非连续张量及快速视图映射）
     requires_grad: bool,  // 是否需要求梯度（如模型参数为 true，输入数据为 false）
     creator: ?*Op,        // 产生此张量的算子节点（前向图中的父节点，用于追踪计算路径）
+    is_view: bool = false, // 是否为零拷贝视图切片（若为 true，deinit 时不释放 data/grad）
+
 
 
     // 将梯度缓冲区全部清零，通常在每个 batch 反向传播前调用
@@ -1459,10 +1756,308 @@ pub const Tensor = struct {
         return self.reshape(new_dims[0..(self.shape.len + 1)], allocator, null);
     }
 
+    /// 跨步零拷贝切片 (Strided View Slicing)
+    /// 返回一个共享底层内存缓冲区的零拷贝视图张量 (is_view = true)
+    pub fn slice(self: *Tensor, ranges: []const SliceRange, allocator: std.mem.Allocator) !*Tensor {
+        if (ranges.len > self.shape.len) return error.DimensionOutOfBounds;
+
+        var new_dims = [_]usize{0} ** 8;
+        var new_strides = [_]usize{0} ** 8;
+        var offset: usize = 0;
+
+        for (0..self.shape.len) |d| {
+            const dim_size = self.shape.dims[d];
+            const stride = self.strides.dims[d];
+            const range = if (d < ranges.len) ranges[d] else SliceRange{};
+            if (range.step == 0) return error.InvalidStep;
+
+            const start = range.start orelse 0;
+            const end = range.end orelse dim_size;
+
+            if (start > dim_size or end > dim_size) return error.IndexOutOfBounds;
+            if (end < start) return error.InvalidSliceRange;
+
+            const slice_len = if (end > start) (end - start + range.step - 1) / range.step else 0;
+            new_dims[d] = slice_len;
+            new_strides[d] = stride * range.step;
+            offset += start * stride;
+        }
+
+        const out = try allocator.create(Tensor);
+        out.* = Tensor{
+            .data = self.data[offset..],
+            .grad = if (self.requires_grad and self.grad.len > offset) self.grad[offset..] else &.{},
+            .shape = Shape{ .dims = new_dims, .len = self.shape.len },
+            .strides = Shape{ .dims = new_strides, .len = self.shape.len },
+            .requires_grad = false,
+            .creator = null,
+            .is_view = true,
+        };
+        return out;
+    }
+
+    /// 连续化内存拷贝 (Contiguous copy)
+    pub fn contiguous(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
+        if (self.isContiguous() and !self.is_view) {
+            return self.clone(allocator);
+        }
+        const out = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        errdefer free(allocator, out);
+
+        var coord = [_]usize{0} ** 8;
+        const len = self.shape.len;
+        for (0..out.data.len) |dest_i| {
+            var src_idx: usize = 0;
+            for (0..len) |d| {
+                src_idx += coord[d] * self.strides.dims[d];
+            }
+            out.data[dest_i] = self.data[src_idx];
+
+            var d = len;
+            while (d > 0) {
+                d -= 1;
+                coord[d] += 1;
+                if (coord[d] < self.shape.dims[d]) break;
+                coord[d] = 0;
+            }
+        }
+        return out;
+    }
+
+    /// 元素截断操作 (Clip): 将张量元素限制在 [min_val, max_val] 之间
+    pub fn clip(self: *Tensor, min_val: f32, max_val: f32, allocator: std.mem.Allocator) !*Tensor {
+        if (min_val > max_val) return error.InvalidRange;
+        const out = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        if (self.isContiguous()) {
+            for (self.data, out.data) |x, *y| {
+                y.* = std.math.clamp(x, min_val, max_val);
+            }
+        } else {
+            var coord = [_]usize{0} ** 8;
+            const len = self.shape.len;
+            for (0..out.data.len) |dest_i| {
+                var src_idx: usize = 0;
+                for (0..len) |d| {
+                    src_idx += coord[d] * self.strides.dims[d];
+                }
+                out.data[dest_i] = std.math.clamp(self.data[src_idx], min_val, max_val);
+
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < self.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
+            }
+        }
+        return out;
+    }
+
+    /// 就地截断操作 (In-place Clip)
+    pub fn clip_(self: *Tensor, min_val: f32, max_val: f32) !*Tensor {
+        if (self.requires_grad or self.creator != null) return error.InPlaceOpOnGraphTensor;
+        if (min_val > max_val) return error.InvalidRange;
+        for (self.data) |*item| {
+            item.* = std.math.clamp(item.*, min_val, max_val);
+        }
+        return self;
+    }
+
+    /// 沿指定轴对张量进行排序 (Sort)
+    pub fn sort(self: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.Allocator) !*Tensor {
+        const ax = axis orelse (if (self.shape.len > 0) self.shape.len - 1 else 0);
+        if (ax >= self.shape.len) return error.DimensionOutOfBounds;
+
+        const out = try self.contiguous(allocator);
+        errdefer free(allocator, out);
+
+        const dim_size = out.shape.dims[ax];
+        if (dim_size <= 1) return out;
+
+        var outer_size: usize = 1;
+        for (0..ax) |d| outer_size *= out.shape.dims[d];
+        var inner_size: usize = 1;
+        for (ax + 1..out.shape.len) |d| inner_size *= out.shape.dims[d];
+
+        const temp_buf = try allocator.alloc(f32, dim_size);
+        defer allocator.free(temp_buf);
+
+        const stride = inner_size;
+        for (0..outer_size) |outer| {
+            for (0..inner_size) |inner| {
+                const base = outer * dim_size * inner_size + inner;
+                for (0..dim_size) |k| {
+                    temp_buf[k] = out.data[base + k * stride];
+                }
+                if (ascending) {
+                    std.mem.sort(f32, temp_buf, {}, struct {
+                        fn asc(_: void, a: f32, b: f32) bool {
+                            return a < b;
+                        }
+                    }.asc);
+                } else {
+                    std.mem.sort(f32, temp_buf, {}, struct {
+                        fn desc(_: void, a: f32, b: f32) bool {
+                            return a > b;
+                        }
+                    }.desc);
+                }
+                for (0..dim_size) |k| {
+                    out.data[base + k * stride] = temp_buf[k];
+                }
+            }
+        }
+        return out;
+    }
+
+    /// 沿指定轴返回排序后的索引 (Argsort)
+    pub fn argsort(self: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.Allocator) !*GenericTensor(usize) {
+        const ax = axis orelse (if (self.shape.len > 0) self.shape.len - 1 else 0);
+        if (ax >= self.shape.len) return error.DimensionOutOfBounds;
+
+        const contig = try self.contiguous(allocator);
+        defer free(allocator, contig);
+
+        const out_indices = try GenericTensor(usize).init(allocator, contig.shape.dims[0..contig.shape.len], null);
+        errdefer out_indices.deinit(allocator);
+
+        const dim_size = contig.shape.dims[ax];
+        if (dim_size == 0) return out_indices;
+
+        var outer_size: usize = 1;
+        for (0..ax) |d| outer_size *= contig.shape.dims[d];
+        var inner_size: usize = 1;
+        for (ax + 1..contig.shape.len) |d| inner_size *= contig.shape.dims[d];
+
+        const temp_vals = try allocator.alloc(f32, dim_size);
+        defer allocator.free(temp_vals);
+        const temp_idxs = try allocator.alloc(usize, dim_size);
+        defer allocator.free(temp_idxs);
+
+        const SortCtx = struct {
+            vals: []const f32,
+            asc: bool,
+            fn cmp(ctx: @This(), a: usize, b: usize) bool {
+                if (ctx.asc) {
+                    return ctx.vals[a] < ctx.vals[b];
+                } else {
+                    return ctx.vals[a] > ctx.vals[b];
+                }
+            }
+        };
+
+        const stride = inner_size;
+        for (0..outer_size) |outer| {
+            for (0..inner_size) |inner| {
+                const base = outer * dim_size * inner_size + inner;
+                for (0..dim_size) |k| {
+                    temp_vals[k] = contig.data[base + k * stride];
+                    temp_idxs[k] = k;
+                }
+                std.mem.sort(usize, temp_idxs, SortCtx{ .vals = temp_vals, .asc = ascending }, SortCtx.cmp);
+                for (0..dim_size) |k| {
+                    out_indices.data[base + k * stride] = temp_idxs[k];
+                }
+            }
+        }
+        return out_indices;
+    }
+
+    /// 检索非零元素的坐标 (NumPy-like nonzero)
+    /// 返回形状为 [nonzeros_count, rank] 的 GenericTensor(usize)
+    pub fn nonzero(self: Tensor, allocator: std.mem.Allocator) !*GenericTensor(usize) {
+        var count: usize = 0;
+        var coord = [_]usize{0} ** 8;
+        const len = self.shape.len;
+
+        for (0..self.data.len) |_| {
+            var src_idx: usize = 0;
+            for (0..len) |d| {
+                src_idx += coord[d] * self.strides.dims[d];
+            }
+            if (self.data[src_idx] != 0.0) {
+                count += 1;
+            }
+            var d = len;
+            while (d > 0) {
+                d -= 1;
+                coord[d] += 1;
+                if (coord[d] < self.shape.dims[d]) break;
+                coord[d] = 0;
+            }
+        }
+
+        const out = try GenericTensor(usize).init(allocator, &.{ count, len }, null);
+        errdefer out.deinit(allocator);
+
+        @memset(&coord, 0);
+        var row: usize = 0;
+        for (0..self.data.len) |_| {
+            var src_idx: usize = 0;
+            for (0..len) |d| {
+                src_idx += coord[d] * self.strides.dims[d];
+            }
+            if (self.data[src_idx] != 0.0) {
+                for (0..len) |d| {
+                    out.data[row * len + d] = coord[d];
+                }
+                row += 1;
+            }
+            var d = len;
+            while (d > 0) {
+                d -= 1;
+                coord[d] += 1;
+                if (coord[d] < self.shape.dims[d]) break;
+                coord[d] = 0;
+            }
+        }
+        return out;
+    }
+
+    /// 将当前 Tensor 转换为泛型张量 GenericTensor(DestT)
+    pub fn to(self: Tensor, comptime DestT: type, allocator: std.mem.Allocator) !*GenericTensor(DestT) {
+        const out = try GenericTensor(DestT).init(allocator, self.shape.dims[0..self.shape.len], null);
+        errdefer out.deinit(allocator);
+
+        if (self.isContiguous()) {
+            for (self.data, 0..) |val, i| {
+                out.data[i] = convertScalar(DestT, f32, val);
+            }
+        } else {
+            var coord = [_]usize{0} ** 8;
+            const len = self.shape.len;
+            for (0..out.data.len) |dest_i| {
+                var src_idx: usize = 0;
+                for (0..len) |d| {
+                    src_idx += coord[d] * self.strides.dims[d];
+                }
+                out.data[dest_i] = convertScalar(DestT, f32, self.data[src_idx]);
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < self.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
+            }
+        }
+        return out;
+    }
+
+    /// 从任意泛型张量创建标准 Autograd Tensor (f32)
+    pub fn fromGeneric(comptime SrcT: type, generic_t: *const GenericTensor(SrcT), allocator: std.mem.Allocator) !*Tensor {
+        const f32_gen = try generic_t.to(f32, allocator);
+        defer f32_gen.deinit(allocator);
+        return array(allocator, f32_gen.shape.dims[0..f32_gen.shape.len], f32_gen.data);
+    }
+
     pub fn deinit(self: *Tensor, allocator: std.mem.Allocator) void {
-        allocator.free(self.data);
-        if (self.requires_grad and self.grad.len > 0) {
-            allocator.free(self.grad);
+        if (!self.is_view) {
+            allocator.free(self.data);
+            if (self.requires_grad and self.grad.len > 0) {
+                allocator.free(self.grad);
+            }
         }
         allocator.destroy(self);
     }
@@ -1678,6 +2273,27 @@ pub fn squeeze(t: *Tensor, axis: ?usize, allocator: std.mem.Allocator) !*Tensor 
 pub fn unsqueeze(t: *Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
     return t.unsqueeze(dim, allocator);
 }
+
+pub fn slice(t: *Tensor, ranges: []const SliceRange, allocator: std.mem.Allocator) !*Tensor {
+    return t.slice(ranges, allocator);
+}
+
+pub fn clip(t: *Tensor, min_val: f32, max_val: f32, allocator: std.mem.Allocator) !*Tensor {
+    return t.clip(min_val, max_val, allocator);
+}
+
+pub fn sort(t: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.Allocator) !*Tensor {
+    return t.sort(axis, ascending, allocator);
+}
+
+pub fn argsort(t: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.Allocator) !*GenericTensor(usize) {
+    return t.argsort(axis, ascending, allocator);
+}
+
+pub fn nonzero(t: Tensor, allocator: std.mem.Allocator) !*GenericTensor(usize) {
+    return t.nonzero(allocator);
+}
+
 
 
 /// Solves linear system A * x = b using Gauss-Jordan elimination with partial pivoting.
@@ -3053,4 +3669,176 @@ test "Tensor squeeze and unsqueeze" {
     // Out of bounds
     try std.testing.expectError(error.DimensionOutOfBounds, t_2d.unsqueeze(4, allocator));
 }
+
+test "DType, bf16, and scalar type conversion" {
+    // 1. DType sizeOf
+    try std.testing.expectEqual(@as(usize, 4), DType.f32.sizeOf());
+    try std.testing.expectEqual(@as(usize, 8), DType.f64.sizeOf());
+    try std.testing.expectEqual(@as(usize, 2), DType.f16.sizeOf());
+    try std.testing.expectEqual(@as(usize, 2), DType.bf16.sizeOf());
+    try std.testing.expectEqual(@as(usize, 4), DType.i32.sizeOf());
+    try std.testing.expectEqual(@as(usize, 8), DType.i64.sizeOf());
+    try std.testing.expectEqual(@as(usize, 1), DType.u8.sizeOf());
+    try std.testing.expectEqual(@as(usize, 1), DType.bool.sizeOf());
+
+    // 2. bf16 conversions
+    const b0 = bf16.fromF32(0.0);
+    try std.testing.expectEqual(@as(f32, 0.0), b0.toF32());
+
+    const b1 = bf16.fromF32(1.0);
+    try std.testing.expectEqual(@as(f32, 1.0), b1.toF32());
+
+    const bm1 = bf16.fromF32(-1.0);
+    try std.testing.expectEqual(@as(f32, -1.0), bm1.toF32());
+
+    const b2_5 = bf16.fromF32(2.5);
+    try std.testing.expectEqual(@as(f32, 2.5), b2_5.toF32());
+
+    const b_pi = bf16.fromF32(3.14159);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.14159), b_pi.toF32(), 1e-2);
+
+    // 3. convertScalar
+    try std.testing.expectEqual(@as(f64, 1.5), convertScalar(f64, f32, 1.5));
+    try std.testing.expectEqual(@as(i32, 42), convertScalar(i32, f32, 42.0));
+    try std.testing.expectEqual(true, convertScalar(bool, i32, 1));
+    try std.testing.expectEqual(false, convertScalar(bool, i32, 0));
+    try std.testing.expectEqual(@as(f32, 2.0), convertScalar(f32, bf16, bf16.fromF32(2.0)));
+    try std.testing.expectEqual(@as(f32, 2.0), convertScalar(bf16, f32, 2.0).toF32());
+}
+
+test "GenericTensor and multi-type tensor manipulation" {
+    const allocator = std.testing.allocator;
+
+    // 1. GenericTensor(i32)
+    const t_i32 = try GenericTensor(i32).fromSlice(allocator, &.{ 2, 2 }, &[_]i32{ 1, 2, 3, 4 });
+    defer t_i32.deinit(allocator);
+    try std.testing.expectEqual(@as(i32, 1), t_i32.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(i32, 3), t_i32.get(&.{ 1, 0 }));
+    t_i32.set(&.{ 1, 0 }, 30);
+    try std.testing.expectEqual(@as(i32, 30), t_i32.get(&.{ 1, 0 }));
+
+    // 2. GenericTensor(bool)
+    const t_b = try BoolTensor.fromSlice(allocator, &.{3}, &[_]bool{ true, false, true });
+    defer t_b.deinit(allocator);
+    try std.testing.expectEqual(true, t_b.get(&.{0}));
+    try std.testing.expectEqual(false, t_b.get(&.{1}));
+    try std.testing.expectEqual(true, t_b.get(&.{2}));
+
+    // 3. GenericTensor to conversion
+    const t_f32_conv = try t_i32.to(f32, allocator);
+    defer t_f32_conv.deinit(allocator);
+    try std.testing.expectEqual(@as(f32, 1.0), t_f32_conv.data[0]);
+    try std.testing.expectEqual(@as(f32, 30.0), t_f32_conv.data[2]);
+
+    // 4. BFloat16Tensor
+    const t_bf16 = try BFloat16Tensor.init(allocator, &.{2}, bf16.fromF32(3.5));
+    defer t_bf16.deinit(allocator);
+    try std.testing.expectEqual(@as(f32, 3.5), t_bf16.data[0].toF32());
+
+    // 5. Bidirectional Tensor <-> GenericTensor
+    const t_orig = try array(allocator, &.{2}, &[_]f32{ 10.0, 20.0 });
+    defer free(allocator, t_orig);
+    const t_int_gen = try t_orig.to(i32, allocator);
+    defer t_int_gen.deinit(allocator);
+    try std.testing.expectEqual(@as(i32, 10), t_int_gen.data[0]);
+    try std.testing.expectEqual(@as(i32, 20), t_int_gen.data[1]);
+
+    const t_back = try Tensor.fromGeneric(i32, t_int_gen, allocator);
+    defer free(allocator, t_back);
+    try std.testing.expectEqual(@as(f32, 10.0), t_back.data[0]);
+    try std.testing.expectEqual(@as(f32, 20.0), t_back.data[1]);
+}
+
+test "Tensor strided view slicing, contiguous, clip, sort, argsort, nonzero" {
+    const allocator = std.testing.allocator;
+
+    // 1. Slicing on 2x3 matrix: [[1, 2, 3], [4, 5, 6]]
+    var t = try array(allocator, &.{ 2, 3 }, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer free(allocator, t);
+
+    // Extract submatrix rows 0..2, cols 1..3 -> [[2, 3], [5, 6]]
+    const s = try slice(t, &.{ .{ .start = 0, .end = 2 }, .{ .start = 1, .end = 3 } }, allocator);
+    defer free(allocator, s);
+    try std.testing.expect(s.is_view);
+    try std.testing.expectEqual(@as(usize, 2), s.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), s.shape.dims[1]);
+    try std.testing.expectEqual(@as(f32, 2.0), s.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 3.0), s.get(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 5.0), s.get(&.{ 1, 0 }));
+    try std.testing.expectEqual(@as(f32, 6.0), s.get(&.{ 1, 1 }));
+
+    // Zero-copy mutation: mutating slice modifies parent
+    s.set(&.{ 0, 0 }, 99.0);
+    try std.testing.expectEqual(@as(f32, 99.0), t.get(&.{ 0, 1 }));
+    s.set(&.{ 0, 0 }, 2.0); // restore
+
+    // Contiguous copy of non-contiguous slice
+    const c_contig = try s.contiguous(allocator);
+    defer free(allocator, c_contig);
+    try std.testing.expect(!c_contig.is_view);
+    try std.testing.expect(c_contig.isContiguous());
+    try std.testing.expectEqual(@as(f32, 2.0), c_contig.data[0]);
+    try std.testing.expectEqual(@as(f32, 3.0), c_contig.data[1]);
+    try std.testing.expectEqual(@as(f32, 5.0), c_contig.data[2]);
+    try std.testing.expectEqual(@as(f32, 6.0), c_contig.data[3]);
+
+    // Slice error conditions
+    try std.testing.expectError(error.DimensionOutOfBounds, t.slice(&.{ .{}, .{}, .{} }, allocator));
+    try std.testing.expectError(error.IndexOutOfBounds, t.slice(&.{ .{ .start = 10 } }, allocator));
+    try std.testing.expectError(error.InvalidSliceRange, t.slice(&.{ .{ .start = 2, .end = 1 } }, allocator));
+    try std.testing.expectError(error.InvalidStep, t.slice(&.{ .{ .step = 0 } }, allocator));
+
+    // 2. clip and clip_
+    var t_clip = try array(allocator, &.{4}, &[_]f32{ -5.0, 0.5, 3.0, 10.0 });
+    defer free(allocator, t_clip);
+    const clipped = try clip(t_clip, 0.0, 5.0, allocator);
+    defer free(allocator, clipped);
+    try std.testing.expectEqual(@as(f32, 0.0), clipped.data[0]);
+    try std.testing.expectEqual(@as(f32, 0.5), clipped.data[1]);
+    try std.testing.expectEqual(@as(f32, 3.0), clipped.data[2]);
+    try std.testing.expectEqual(@as(f32, 5.0), clipped.data[3]);
+
+    _ = try t_clip.clip_(0.0, 5.0);
+    try std.testing.expectEqual(@as(f32, 0.0), t_clip.data[0]);
+    try std.testing.expectEqual(@as(f32, 5.0), t_clip.data[3]);
+    try std.testing.expectError(error.InvalidRange, t_clip.clip(5.0, 2.0, allocator));
+
+    // 3. sort and argsort
+    const t_unsorted = try array(allocator, &.{4}, &[_]f32{ 3.0, 1.0, 4.0, 2.0 });
+    defer free(allocator, t_unsorted);
+
+    const t_sorted = try sort(t_unsorted, 0, true, allocator);
+    defer free(allocator, t_sorted);
+    try std.testing.expectEqual(@as(f32, 1.0), t_sorted.data[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), t_sorted.data[1]);
+    try std.testing.expectEqual(@as(f32, 3.0), t_sorted.data[2]);
+    try std.testing.expectEqual(@as(f32, 4.0), t_sorted.data[3]);
+
+    const t_desc = try sort(t_unsorted, 0, false, allocator);
+    defer free(allocator, t_desc);
+    try std.testing.expectEqual(@as(f32, 4.0), t_desc.data[0]);
+    try std.testing.expectEqual(@as(f32, 1.0), t_desc.data[3]);
+
+    const t_idxs = try argsort(t_unsorted, 0, true, allocator);
+    defer t_idxs.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), t_idxs.data[0]);
+    try std.testing.expectEqual(@as(usize, 3), t_idxs.data[1]);
+    try std.testing.expectEqual(@as(usize, 0), t_idxs.data[2]);
+    try std.testing.expectEqual(@as(usize, 2), t_idxs.data[3]);
+
+    // 4. nonzero
+    const t_sparse = try array(allocator, &.{ 2, 3 }, &[_]f32{ 0.0, 5.0, 0.0, 1.0, 0.0, 2.0 });
+    defer free(allocator, t_sparse);
+    const nz = try nonzero(t_sparse.*, allocator);
+    defer nz.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), nz.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), nz.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 0), nz.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(usize, 1), nz.get(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(usize, 1), nz.get(&.{ 1, 0 }));
+    try std.testing.expectEqual(@as(usize, 0), nz.get(&.{ 1, 1 }));
+    try std.testing.expectEqual(@as(usize, 1), nz.get(&.{ 2, 0 }));
+    try std.testing.expectEqual(@as(usize, 2), nz.get(&.{ 2, 1 }));
+}
+
 

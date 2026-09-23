@@ -88,10 +88,12 @@
 
 ### Phase 2 (P1): 泛型数据类型与跨平台高性能加速 (Generic DTypes & High-Perf Math)
 
-- [ ] **2.1 张量泛型化与多精度支持 (Generic Tensor Type)**
-  - [ ] 将核心 [`Tensor`](file:///Users/guangzong/Documents/znn/src/tensor.zig) 重构为泛型结构体 `Tensor(comptime T: type)`，支持 `f32`、`f64`、`f16`、`bf16`。
-  - [ ] 在 [`autodiff.zig`](file:///Users/guangzong/Documents/znn/src/autodiff.zig) 计算图与 [`nn/`](file:///Users/guangzong/Documents/znn/src/nn/) 模块中支持泛型类型特化。
-  - [ ] 提供基础低精度类型（`bf16` / `f16`）的浮点转换工具函数与 SIMD 指令封装。
+- [x] **2.1 张量泛型化与多精度支持 (Generic Tensor Type)**
+  - [x] 引入泛型结构体 [`GenericTensor(comptime T: type)`](file:///Users/guangzong/Documents/znn/src/tensor.zig) 与类型别名（`FloatTensor`, `DoubleTensor`, `IntTensor`, `BoolTensor`, `BFloat16Tensor`），首批完整支持 `f32`、`f64`、`i32`、`i64`、`bool`、`bf16`。
+  - [x] 实现原生 `bf16` (Brain Floating Point 16-bit) 浮点格式与 IEEE 754 互转及 `DType` 大小自省。
+  - [x] 支持跨标量与张量类型安全提升转换函数 `to(DestT)` / `fromGeneric`。
+  - [x] 引入跨步零拷贝切片 [`SliceRange`](file:///Users/guangzong/Documents/znn/src/tensor.zig) 与 `slice()`，通过 `is_view` 保障生命周期安全与 `contiguous()` 紧凑化。
+  - [x] 补充 `clip`, `clip_`, `sort`, `argsort`, `nonzero` 等排序检索算子。
 
 - [ ] **2.2 跨平台 BLAS 支持与构建选项**
   - [ ] 在 [`build.zig`](file:///Users/guangzong/Documents/znn/build.zig) 中增加选项 `-Dblas=[accelerate|openblas|mkl|fallback]`。

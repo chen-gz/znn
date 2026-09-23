@@ -11,6 +11,18 @@ pub const cv = @import("cross_validation.zig");
 pub const engine = @import("engine.zig");
 pub const bench = @import("bench.zig");
 
+pub const GenericTensor = tensor.GenericTensor;
+pub const TensorOf = tensor.TensorOf;
+pub const FloatTensor = tensor.FloatTensor;
+pub const DoubleTensor = tensor.DoubleTensor;
+pub const IntTensor = tensor.IntTensor;
+pub const LongTensor = tensor.LongTensor;
+pub const BoolTensor = tensor.BoolTensor;
+pub const BFloat16Tensor = tensor.BFloat16Tensor;
+pub const bf16 = tensor.bf16;
+pub const DType = tensor.DType;
+pub const SliceRange = tensor.SliceRange;
+
 
 pub fn measureTime(comptime func: anytype, args: anytype) !struct {
     result: @TypeOf(@call(.auto, func, args)),
