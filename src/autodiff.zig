@@ -1900,7 +1900,7 @@ pub const Graph = struct {
     pub fn reshape(self: *Graph, A: *Tensor, new_shape_slice: []const usize) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try allocator.create(Tensor);
-        const shape = Shape.init(new_shape_slice);
+        const shape = try Shape.fromSlice(new_shape_slice);
         const strides = computeContiguousStrides(shape);
 
         var old_total: usize = 1;
@@ -1911,7 +1911,8 @@ pub const Graph = struct {
         for (new_shape_slice) |dim| {
             new_total *= dim;
         }
-        std.debug.assert(old_total == new_total);
+        if (old_total != new_total) return error.ShapeMismatch;
+
 
         const req_grad = self.enable_grad and A.requires_grad;
 

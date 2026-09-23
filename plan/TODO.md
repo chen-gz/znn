@@ -63,10 +63,11 @@
 
 ### Phase 1 (P0): 健壮性增强与通用基础 (Robustness & Core Engine)
 
-- [ ] **1.1 全面规范化错误处理机制 (Replace Assertions with Typed Errors)**
-  - [ ] 移除公共 API、形状推导与张量索引中过度依赖的 `std.debug.assert`。
-  - [x] 在 [`tensor.zig`](file:///Users/guangzong/Documents/znn/src/tensor.zig) 和 [`autodiff.zig`](file:///Users/guangzong/Documents/znn/src/autodiff.zig) 中补充类型化错误处理（如 `error.SingularMatrix`, `error.UnsupportedDimension` 等）。
-  - [ ] 修复 [`Shape.init`](file:///Users/guangzong/Documents/znn/src/tensor.zig) 维度超过 8 时的静默截断行为，增加显式校验与错误拦截。
+- [x] **1.1 全面规范化错误处理机制 (Replace Assertions with Typed Errors)**
+  - [x] 移除公共 API、形状推导与张量索引中过度依赖的 `std.debug.assert`，全面替换为类型化错误。
+  - [x] 在 [`tensor.zig`](file:///Users/guangzong/Documents/znn/src/tensor.zig) 和 [`autodiff.zig`](file:///Users/guangzong/Documents/znn/src/autodiff.zig) 中补充类型化错误处理（`ShapeMismatch`, `DimensionOutOfBounds`, `IncompatibleDimensions`, `EmptyInputs`, `InvalidSplitCount`, `UnevenSplit`, `KernelBiggerThanInput` 等）。
+  - [x] 修复 [`Shape.init`](file:///Users/guangzong/Documents/znn/src/tensor.zig) 维度超过 8 时的静默截断行为，引入 `Shape.fromSlice` 显式校验与 `MaxDimensionsExceeded` 错误拦截。
+
 
 - [x] **1.2 通用多维张量广播系统 (NumPy-style Multi-Dimensional Broadcasting)**
   - [x] 实现通用的形状对齐与步长映射算法 `broadcastShapes(shape1, shape2) !Shape` 与 `computeBroadcastStrides`。
