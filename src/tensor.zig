@@ -524,15 +524,15 @@ pub const Tensor = struct {
         const loss = try zeros(allocator, &.{ 1, 1 });
         const N = self.data.len;
         if (N != targets.data.len) return error.ShapeMismatch;
-        var sum: f32 = 0.0;
+        var total_loss: f32 = 0.0;
         for (0..N) |i| {
             const x = self.data[i];
             const y = targets.data[i];
             const max_x = @max(x, 0.0);
             const abs_x = @abs(x);
-            sum += max_x - x * y + @log(1.0 + @exp(-abs_x));
+            total_loss += max_x - x * y + @log(1.0 + @exp(-abs_x));
         }
-        loss.data[0] = sum / @as(f32, @floatFromInt(N));
+        loss.data[0] = total_loss / @as(f32, @floatFromInt(N));
         return loss;
     }
 
@@ -543,19 +543,19 @@ pub const Tensor = struct {
         const loss = try zeros(allocator, &.{ 1, 1 });
         const N = self.data.len;
         if (N != targets.data.len) return error.ShapeMismatch;
-        var sum: f32 = 0.0;
+        var total_loss: f32 = 0.0;
         for (0..N) |i| {
             const p = self.data[i];
             const y = targets.data[i];
             const p_clip = @max(p, eps);
             const one_minus_p_clip = @max(1.0 - p, eps);
-            sum += -(y * @log(p_clip) + (1.0 - y) * @log(one_minus_p_clip));
+            total_loss += -(y * @log(p_clip) + (1.0 - y) * @log(one_minus_p_clip));
         }
-        loss.data[0] = sum / @as(f32, @floatFromInt(N));
+        loss.data[0] = total_loss / @as(f32, @floatFromInt(N));
         return loss;
     }
 
-    pub fn fillNormal(self: *Tensor, random: std.Random, mean: f32, stddev: f32) void {
+    pub fn fillNormal(self: *Tensor, random: std.Random, mean_val: f32, stddev: f32) void {
         var i: usize = 0;
         const len = self.data.len;
         while (i < len) {
@@ -565,11 +565,11 @@ pub const Tensor = struct {
             }
             const u_2 = random.float(f32);
             const z0 = @sqrt(-2.0 * @log(u_1)) * @cos(2.0 * std.math.pi * u_2);
-            self.data[i] = mean + z0 * stddev;
+            self.data[i] = mean_val + z0 * stddev;
             i += 1;
             if (i < len) {
                 const z1 = @sqrt(-2.0 * @log(u_1)) * @sin(2.0 * std.math.pi * u_2);
-                self.data[i] = mean + z1 * stddev;
+                self.data[i] = mean_val + z1 * stddev;
                 i += 1;
             }
         }
@@ -600,14 +600,14 @@ pub const Tensor = struct {
                 if (val > max_val) max_val = val;
             }
 
-            var sum: f32 = 0.0;
+            var exp_sum: f32 = 0.0;
             for (logits_row) |val| {
-                sum += @exp(val - max_val);
+                exp_sum += @exp(val - max_val);
             }
 
             const label = targets[i];
             if (label >= N) return error.IndexOutOfBounds;
-            const prob = @exp(logits_row[label] - max_val) / sum;
+            const prob = @exp(logits_row[label] - max_val) / exp_sum;
             const clipped = @max(prob, 1e-15);
             loss_sum += -@log(clipped);
         }
@@ -781,17 +781,17 @@ pub const Tensor = struct {
                 const b_val = if (bias) |b| b.data[co] else 0.0;
                 for (0..H_out) |h| {
                     for (0..W_out) |w| {
-                        var sum: f32 = b_val;
+                        var acc: f32 = b_val;
                         for (0..C_in) |ci| {
                             for (0..KH) |kh| {
                                 for (0..KW) |kw| {
                                     const input_val = self.data[n * s_n + ci * s_c + (h + kh) * s_h + (w + kw) * s_w];
                                     const weight_val = weight.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
-                                    sum += input_val * weight_val;
+                                    acc += input_val * weight_val;
                                 }
                             }
                         }
-                        out.data[n * o_n + co * o_c + h * o_h + w * o_w] = sum;
+                        out.data[n * o_n + co * o_c + h * o_h + w * o_w] = acc;
                     }
                 }
             }
@@ -945,15 +945,15 @@ pub const Tensor = struct {
                 if (val > max_val) max_val = val;
             }
 
-            var sum: f32 = 0.0;
+            var exp_sum: f32 = 0.0;
             for (row_in, row_out) |val, *p| {
                 const exp_val = @exp(val - max_val);
                 p.* = exp_val;
-                sum += exp_val;
+                exp_sum += exp_val;
             }
 
             for (row_out) |*p| {
-                p.* /= sum;
+                p.* /= exp_sum;
             }
         }
         return C;
@@ -1183,6 +1183,282 @@ pub const Tensor = struct {
         }
     }
 
+    pub fn isContiguous(self: Tensor) bool {
+        const contig = computeContiguousStrides(self.shape);
+        return self.strides.eq(contig);
+    }
+
+    /// 通用多维张量沿指定轴或全局求和归约 (Sum Reduction)
+    pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
+        if (axis) |ax| {
+            if (ax >= self.shape.len) return error.DimensionOutOfBounds;
+            const reduce_size = self.shape.dims[ax];
+
+            var out_shape_dims = [_]usize{0} ** 8;
+            var out_rank: usize = 0;
+
+            if (keepdims) {
+                out_rank = self.shape.len;
+                for (0..self.shape.len) |d| {
+                    out_shape_dims[d] = if (d == ax) 1 else self.shape.dims[d];
+                }
+            } else {
+                if (self.shape.len == 1) {
+                    out_rank = 1;
+                    out_shape_dims[0] = 1;
+                } else {
+                    out_rank = self.shape.len - 1;
+                    var dest_d: usize = 0;
+                    for (0..self.shape.len) |d| {
+                        if (d != ax) {
+                            out_shape_dims[dest_d] = self.shape.dims[d];
+                            dest_d += 1;
+                        }
+                    }
+                }
+            }
+
+            const out_shape = try Shape.fromSlice(out_shape_dims[0..out_rank]);
+            const C = try zeros(allocator, out_shape.dims[0..out_rank]);
+
+            var outer_size: usize = 1;
+            for (0..ax) |d| {
+                outer_size *= self.shape.dims[d];
+            }
+            var inner_size: usize = 1;
+            for ((ax + 1)..self.shape.len) |d| {
+                inner_size *= self.shape.dims[d];
+            }
+
+            if (self.isContiguous()) {
+                for (0..outer_size) |outer| {
+                    const out_base = outer * inner_size;
+                    const src_base = outer * reduce_size * inner_size;
+                    for (0..inner_size) |inner| {
+                        var acc: f32 = 0.0;
+                        for (0..reduce_size) |k| {
+                            acc += self.data[src_base + k * inner_size + inner];
+                        }
+                        C.data[out_base + inner] = acc;
+                    }
+                }
+            } else {
+                var out_indices = [_]usize{0} ** 8;
+                for (0..C.data.len) |out_idx| {
+                    var tmp = out_idx;
+                    var d: usize = out_rank;
+                    while (d > 0) {
+                        d -= 1;
+                        out_indices[d] = tmp % out_shape.dims[d];
+                        tmp /= out_shape.dims[d];
+                    }
+
+                    var src_indices = [_]usize{0} ** 8;
+                    if (keepdims) {
+                        for (0..self.shape.len) |idx_d| {
+                            src_indices[idx_d] = out_indices[idx_d];
+                        }
+                    } else {
+                        var src_d: usize = 0;
+                        for (0..self.shape.len) |idx_d| {
+                            if (idx_d == ax) continue;
+                            src_indices[idx_d] = out_indices[src_d];
+                            src_d += 1;
+                        }
+                    }
+
+                    var acc: f32 = 0.0;
+                    for (0..reduce_size) |k| {
+                        src_indices[ax] = k;
+                        acc += self.data[self.getFlatIndex(src_indices[0..self.shape.len])];
+                    }
+                    C.data[out_idx] = acc;
+                }
+            }
+            return C;
+        } else {
+            // 全局归约 (Global reduction over all elements)
+            var total: f32 = 0.0;
+            for (self.data) |v| {
+                total += v;
+            }
+
+            if (keepdims) {
+                const out_shape_dims = [_]usize{1} ** 8;
+                const out_shape = try Shape.fromSlice(out_shape_dims[0..self.shape.len]);
+                const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
+                C.data[0] = total;
+                return C;
+            } else {
+                const C = try zeros(allocator, &.{1});
+                C.data[0] = total;
+                return C;
+            }
+        }
+    }
+
+    /// 通用多维张量沿指定轴或全局均值归约 (Mean Reduction)
+    pub fn mean(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
+        const C = try self.sum(axis, keepdims, allocator);
+        const count = if (axis) |ax| @as(f32, @floatFromInt(self.shape.dims[ax])) else @as(f32, @floatFromInt(self.data.len));
+        for (C.data) |*val| {
+            val.* /= count;
+        }
+        return C;
+    }
+
+    /// 通用多维张量沿指定轴或全局方差 (Variance Reduction)
+    pub fn variance(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
+        const mean_t = try self.mean(axis, true, allocator);
+        defer free(allocator, mean_t);
+
+        const diff = try self.sub(mean_t, allocator, null);
+        defer free(allocator, diff);
+        const sq = try diff.mul(diff, allocator, null);
+        defer free(allocator, sq);
+
+        const sum_sq = try sq.sum(axis, keepdims, allocator);
+        const count = if (axis) |ax| self.shape.dims[ax] else self.data.len;
+        if (count <= ddof) {
+            free(allocator, sum_sq);
+            return error.InvalidDDOF;
+        }
+        const denom = @as(f32, @floatFromInt(count - ddof));
+        for (sum_sq.data) |*val| {
+            val.* /= denom;
+        }
+        return sum_sq;
+    }
+
+    /// 通用多维张量沿指定轴或全局标准差 (Standard Deviation Reduction)
+    pub fn stdDev(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
+        const var_t = try self.variance(axis, keepdims, ddof, allocator);
+        for (var_t.data) |*val| {
+            val.* = @sqrt(@max(val.*, 0.0));
+        }
+        return var_t;
+    }
+
+    /// 依据布尔/条件张量在两个候选张量间进行逐元素选择 (NumPy np.where)
+    /// out[i] = if (cond[i] != 0.0) x[i] else y[i]
+    pub fn where(cond: *Tensor, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+        const s_xy = try broadcastShapes(x.shape, y.shape);
+        const target_shape = try broadcastShapes(cond.shape, s_xy);
+        const C = try zeros(allocator, target_shape.dims[0..target_shape.len]);
+
+        if (cond.shape.eq(x.shape) and x.shape.eq(y.shape) and cond.isContiguous() and x.isContiguous() and y.isContiguous()) {
+            for (C.data, cond.data, x.data, y.data) |*out_v, c_v, x_v, y_v| {
+                out_v.* = if (c_v != 0.0) x_v else y_v;
+            }
+            return C;
+        }
+
+        const cond_strides = computeBroadcastStrides(cond.shape, cond.strides, target_shape);
+        const x_strides = computeBroadcastStrides(x.shape, x.strides, target_shape);
+        const y_strides = computeBroadcastStrides(y.shape, y.strides, target_shape);
+
+        const rank = target_shape.len;
+        var indices = [_]usize{0} ** 8;
+        for (0..C.data.len) |c_flat| {
+            var cond_flat: usize = 0;
+            var x_flat: usize = 0;
+            var y_flat: usize = 0;
+            for (0..rank) |d| {
+                cond_flat += indices[d] * cond_strides.dims[d];
+                x_flat += indices[d] * x_strides.dims[d];
+                y_flat += indices[d] * y_strides.dims[d];
+            }
+
+            C.data[c_flat] = if (cond.data[cond_flat] != 0.0) x.data[x_flat] else y.data[y_flat];
+
+            var d: usize = rank;
+            while (d > 0) {
+                d -= 1;
+                indices[d] += 1;
+                if (indices[d] < target_shape.dims[d]) break;
+                indices[d] = 0;
+            }
+        }
+
+        return C;
+    }
+
+    /// 根据 mask 将满足条件 (mask != 0) 的元素赋值为指定标量值（返回新分配副本）
+    pub fn maskedFill(self: *Tensor, mask: *Tensor, value: f32, allocator: std.mem.Allocator) !*Tensor {
+        if (!self.shape.eq(mask.shape)) return error.ShapeMismatch;
+        const C = try self.clone(allocator);
+        for (C.data, mask.data) |*out_v, m_v| {
+            if (m_v != 0.0) {
+                out_v.* = value;
+            }
+        }
+        return C;
+    }
+
+    /// 原地条件掩码填充
+    pub fn maskedFill_(self: *Tensor, mask: *Tensor, value: f32) !*Tensor {
+        if (self.requires_grad or self.creator != null) return error.InPlaceOpOnGraphTensor;
+        if (!self.shape.eq(mask.shape)) return error.ShapeMismatch;
+        for (self.data, mask.data) |*out_v, m_v| {
+            if (m_v != 0.0) {
+                out_v.* = value;
+            }
+        }
+        return self;
+    }
+
+    /// 压缩单维度 (Squeeze): 移除所有为 1 的维度，或移除指定为 1 的维度
+    pub fn squeeze(self: *Tensor, axis: ?usize, allocator: std.mem.Allocator) !*Tensor {
+        if (axis) |ax| {
+            if (ax >= self.shape.len) return error.DimensionOutOfBounds;
+            if (self.shape.dims[ax] != 1) return error.CannotSqueezeDimension;
+            if (self.shape.len == 1) {
+                return self.clone(allocator);
+            }
+            var new_dims = [_]usize{0} ** 8;
+            var dest_d: usize = 0;
+            for (0..self.shape.len) |d| {
+                if (d != ax) {
+                    new_dims[dest_d] = self.shape.dims[d];
+                    dest_d += 1;
+                }
+            }
+            return self.reshape(new_dims[0..dest_d], allocator, null);
+        } else {
+            var new_dims = [_]usize{0} ** 8;
+            var dest_d: usize = 0;
+            for (0..self.shape.len) |d| {
+                if (self.shape.dims[d] != 1) {
+                    new_dims[dest_d] = self.shape.dims[d];
+                    dest_d += 1;
+                }
+            }
+            if (dest_d == 0) {
+                new_dims[0] = 1;
+                dest_d = 1;
+            }
+            return self.reshape(new_dims[0..dest_d], allocator, null);
+        }
+    }
+
+    /// 扩充单维度 (Unsqueeze / expand_dims): 在指定位置插入一个大小为 1 的新维度
+    pub fn unsqueeze(self: *Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+        if (dim > self.shape.len) return error.DimensionOutOfBounds;
+        if (self.shape.len >= 8) return error.MaxDimensionsExceeded;
+
+        var new_dims = [_]usize{0} ** 8;
+        var src_d: usize = 0;
+        for (0..(self.shape.len + 1)) |d| {
+            if (d == dim) {
+                new_dims[d] = 1;
+            } else {
+                new_dims[d] = self.shape.dims[src_d];
+                src_d += 1;
+            }
+        }
+        return self.reshape(new_dims[0..(self.shape.len + 1)], allocator, null);
+    }
+
     pub fn deinit(self: *Tensor, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
         if (self.requires_grad and self.grad.len > 0) {
@@ -1191,6 +1467,7 @@ pub const Tensor = struct {
         allocator.destroy(self);
     }
 };
+
 
 
 // ============================================================================
@@ -1375,6 +1652,33 @@ pub fn split(allocator: std.mem.Allocator, input: *Tensor, num_splits: usize, di
 }
 
 const tensorSplit = split;
+
+pub const where = Tensor.where;
+
+pub fn sum(t: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
+    return t.sum(axis, keepdims, allocator);
+}
+
+pub fn mean(t: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
+    return t.mean(axis, keepdims, allocator);
+}
+
+pub fn variance(t: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
+    return t.variance(axis, keepdims, ddof, allocator);
+}
+
+pub fn stdDev(t: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
+    return t.stdDev(axis, keepdims, ddof, allocator);
+}
+
+pub fn squeeze(t: *Tensor, axis: ?usize, allocator: std.mem.Allocator) !*Tensor {
+    return t.squeeze(axis, allocator);
+}
+
+pub fn unsqueeze(t: *Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+    return t.unsqueeze(dim, allocator);
+}
+
 
 /// Solves linear system A * x = b using Gauss-Jordan elimination with partial pivoting.
 /// A is an n x n row-major matrix slice, b is an n-element vector, out_x is an n-element output slice.
@@ -2483,5 +2787,270 @@ test "tensor typed error handling and boundary validation" {
     const b = [_]f32{1.0};
     var x = [_]f32{0.0};
     try std.testing.expectError(error.ShapeMismatch, solveLinearSystem(allocator, &bad_A, &b, 1, &x));
+}
+
+test "Tensor multi-axis reductions (sum, mean, variance, stdDev)" {
+    const allocator = std.testing.allocator;
+
+    // 2x3 matrix: [[1, 2, 3], [4, 5, 6]]
+    const t = try array(allocator, &.{ 2, 3 }, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer free(allocator, t);
+
+    // 1. sum over all elements (axis = null)
+    {
+        const s_all = try t.sum(null, false, allocator);
+        defer free(allocator, s_all);
+        try std.testing.expectEqual(@as(usize, 1), s_all.shape.len);
+        try std.testing.expectEqual(@as(usize, 1), s_all.shape.dims[0]);
+        try std.testing.expectEqual(@as(f32, 21.0), s_all.data[0]);
+
+        const s_all_kd = try t.sum(null, true, allocator);
+        defer free(allocator, s_all_kd);
+        try std.testing.expectEqual(@as(usize, 2), s_all_kd.shape.len);
+        try std.testing.expectEqual(@as(usize, 1), s_all_kd.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 1), s_all_kd.shape.dims[1]);
+        try std.testing.expectEqual(@as(f32, 21.0), s_all_kd.data[0]);
+    }
+
+    // 2. sum over axis 0: [1+4, 2+5, 3+6] = [5, 7, 9]
+    {
+        const s0 = try sum(t, 0, false, allocator);
+        defer free(allocator, s0);
+        try std.testing.expectEqual(@as(usize, 1), s0.shape.len);
+        try std.testing.expectEqual(@as(usize, 3), s0.shape.dims[0]);
+        try std.testing.expectEqual(@as(f32, 5.0), s0.data[0]);
+        try std.testing.expectEqual(@as(f32, 7.0), s0.data[1]);
+        try std.testing.expectEqual(@as(f32, 9.0), s0.data[2]);
+
+        const s0_kd = try sum(t, 0, true, allocator);
+        defer free(allocator, s0_kd);
+        try std.testing.expectEqual(@as(usize, 2), s0_kd.shape.len);
+        try std.testing.expectEqual(@as(usize, 1), s0_kd.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 3), s0_kd.shape.dims[1]);
+        try std.testing.expectEqual(@as(f32, 5.0), s0_kd.data[0]);
+    }
+
+    // 3. sum over axis 1: [1+2+3, 4+5+6] = [6, 15]
+    {
+        const s1 = try sum(t, 1, false, allocator);
+        defer free(allocator, s1);
+        try std.testing.expectEqual(@as(usize, 1), s1.shape.len);
+        try std.testing.expectEqual(@as(usize, 2), s1.shape.dims[0]);
+        try std.testing.expectEqual(@as(f32, 6.0), s1.data[0]);
+        try std.testing.expectEqual(@as(f32, 15.0), s1.data[1]);
+
+        const s1_kd = try sum(t, 1, true, allocator);
+        defer free(allocator, s1_kd);
+        try std.testing.expectEqual(@as(usize, 2), s1_kd.shape.len);
+        try std.testing.expectEqual(@as(usize, 2), s1_kd.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 1), s1_kd.shape.dims[1]);
+        try std.testing.expectEqual(@as(f32, 6.0), s1_kd.data[0]);
+        try std.testing.expectEqual(@as(f32, 15.0), s1_kd.data[1]);
+    }
+
+    // 4. Non-contiguous sum test: custom strided view
+    {
+        var t_strided = Tensor{
+            .data = t.data,
+            .grad = &.{},
+            .shape = Shape.init(&.{ 3, 2 }),
+            .strides = Shape.init(&.{ 1, 3 }), // transposed strides!
+            .requires_grad = false,
+            .creator = null,
+        };
+        try std.testing.expect(!t_strided.isContiguous());
+        const s_strided = try t_strided.sum(0, false, allocator);
+        defer free(allocator, s_strided);
+        // r=0: [1, 4], r=1: [2, 5], r=2: [3, 6]
+        // sum along axis 0 gives [1+2+3, 4+5+6] = [6, 15]
+        try std.testing.expectEqual(@as(f32, 6.0), s_strided.data[0]);
+        try std.testing.expectEqual(@as(f32, 15.0), s_strided.data[1]);
+    }
+
+    // 5. mean
+    {
+        const m_all = try mean(t, null, false, allocator);
+        defer free(allocator, m_all);
+        try std.testing.expectApproxEqAbs(@as(f32, 3.5), m_all.data[0], 1e-5);
+
+        const m0 = try mean(t, 0, false, allocator);
+        defer free(allocator, m0);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.5), m0.data[0], 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 3.5), m0.data[1], 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 4.5), m0.data[2], 1e-5);
+
+        const m1 = try mean(t, 1, false, allocator);
+        defer free(allocator, m1);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.0), m1.data[0], 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 5.0), m1.data[1], 1e-5);
+    }
+
+    // 6. variance and stdDev
+    {
+        // variance with ddof=0: 17.5 / 6 = 2.9166667
+        const v_all = try variance(t, null, false, 0, allocator);
+        defer free(allocator, v_all);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.9166667), v_all.data[0], 1e-5);
+
+        // variance with ddof=1: 17.5 / 5 = 3.5
+        const v_sample = try variance(t, null, false, 1, allocator);
+        defer free(allocator, v_sample);
+        try std.testing.expectApproxEqAbs(@as(f32, 3.5), v_sample.data[0], 1e-5);
+
+        // stdDev with ddof=0: sqrt(2.9166667) ~= 1.7078251
+        const sd_all = try stdDev(t, null, false, 0, allocator);
+        defer free(allocator, sd_all);
+        try std.testing.expectApproxEqAbs(@as(f32, 1.7078251), sd_all.data[0], 1e-5);
+
+        // stdDev along axis 1:
+        // row 0: [1, 2, 3], mean = 2, sq_diff sum = (1-2)^2 + (2-2)^2 + (3-2)^2 = 2.
+        // var(ddof=0) = 2/3, stdDev = sqrt(2/3) ~= 0.8164966
+        const sd1 = try stdDev(t, 1, false, 0, allocator);
+        defer free(allocator, sd1);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.8164966), sd1.data[0], 1e-5);
+    }
+
+    // 7. Error handling
+    try std.testing.expectError(error.DimensionOutOfBounds, t.sum(5, false, allocator));
+    try std.testing.expectError(error.DimensionOutOfBounds, t.mean(2, false, allocator));
+    try std.testing.expectError(error.InvalidDDOF, t.variance(null, false, 6, allocator));
+    try std.testing.expectError(error.InvalidDDOF, t.stdDev(null, false, 10, allocator));
+}
+
+test "Tensor where condition and masking operations" {
+    const allocator = std.testing.allocator;
+
+    // 1. where with identical shapes
+    const cond = try array(allocator, &.{ 2, 2 }, &[_]f32{ 1.0, 0.0, 0.0, 1.0 });
+    defer free(allocator, cond);
+    const x = try array(allocator, &.{ 2, 2 }, &[_]f32{ 10.0, 20.0, 30.0, 40.0 });
+    defer free(allocator, x);
+    const y = try array(allocator, &.{ 2, 2 }, &[_]f32{ -1.0, -2.0, -3.0, -4.0 });
+    defer free(allocator, y);
+
+    const out = try where(cond, x, y, allocator);
+    defer free(allocator, out);
+    try std.testing.expectEqual(@as(f32, 10.0), out.data[0]);
+    try std.testing.expectEqual(@as(f32, -2.0), out.data[1]);
+    try std.testing.expectEqual(@as(f32, -3.0), out.data[2]);
+    try std.testing.expectEqual(@as(f32, 40.0), out.data[3]);
+
+    // 2. where with broadcast condition
+    // cond shape [2, 1], x shape [2, 2], y shape [2, 2]
+    const cond_bc = try array(allocator, &.{ 2, 1 }, &[_]f32{ 1.0, 0.0 });
+    defer free(allocator, cond_bc);
+    const out_bc = try where(cond_bc, x, y, allocator);
+    defer free(allocator, out_bc);
+    // Row 0 selects x: [10.0, 20.0]; Row 1 selects y: [-3.0, -4.0]
+    try std.testing.expectEqual(@as(f32, 10.0), out_bc.data[0]);
+    try std.testing.expectEqual(@as(f32, 20.0), out_bc.data[1]);
+    try std.testing.expectEqual(@as(f32, -3.0), out_bc.data[2]);
+    try std.testing.expectEqual(@as(f32, -4.0), out_bc.data[3]);
+
+    // 3. maskedFill (out of place)
+    const mask = try array(allocator, &.{ 2, 2 }, &[_]f32{ 1.0, 0.0, 1.0, 0.0 });
+    defer free(allocator, mask);
+    const filled = try x.maskedFill(mask, -999.0, allocator);
+    defer free(allocator, filled);
+    try std.testing.expectEqual(@as(f32, -999.0), filled.data[0]);
+    try std.testing.expectEqual(@as(f32, 20.0), filled.data[1]);
+    try std.testing.expectEqual(@as(f32, -999.0), filled.data[2]);
+    try std.testing.expectEqual(@as(f32, 40.0), filled.data[3]);
+    // Original x should remain unchanged
+    try std.testing.expectEqual(@as(f32, 10.0), x.data[0]);
+
+    // 4. maskedFill_ (in place)
+    var x_mut = try array(allocator, &.{ 2, 2 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0 });
+    defer free(allocator, x_mut);
+    _ = try x_mut.maskedFill_(mask, 0.0);
+    try std.testing.expectEqual(@as(f32, 0.0), x_mut.data[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), x_mut.data[1]);
+    try std.testing.expectEqual(@as(f32, 0.0), x_mut.data[2]);
+    try std.testing.expectEqual(@as(f32, 4.0), x_mut.data[3]);
+
+    // In-place protection for graph tensor
+    x_mut.requires_grad = true;
+    try std.testing.expectError(error.InPlaceOpOnGraphTensor, x_mut.maskedFill_(mask, 1.0));
+
+    // Shape mismatch
+    const bad_mask = try zeros(allocator, &.{3});
+    defer free(allocator, bad_mask);
+    try std.testing.expectError(error.ShapeMismatch, x.maskedFill(bad_mask, 0.0, allocator));
+}
+
+test "Tensor squeeze and unsqueeze" {
+    const allocator = std.testing.allocator;
+
+    // 1. Squeeze
+    const t_4d = try zeros(allocator, &.{ 1, 2, 1, 3 });
+    defer free(allocator, t_4d);
+
+    // Squeeze all size-1 dims
+    const t_sq_all = try squeeze(t_4d, null, allocator);
+    defer free(allocator, t_sq_all);
+    try std.testing.expectEqual(@as(usize, 2), t_sq_all.shape.len);
+    try std.testing.expectEqual(@as(usize, 2), t_sq_all.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), t_sq_all.shape.dims[1]);
+
+    // Squeeze specific dim 0
+    const t_sq_0 = try squeeze(t_4d, 0, allocator);
+    defer free(allocator, t_sq_0);
+    try std.testing.expectEqual(@as(usize, 3), t_sq_0.shape.len);
+    try std.testing.expectEqual(@as(usize, 2), t_sq_0.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 1), t_sq_0.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 3), t_sq_0.shape.dims[2]);
+
+    // Squeeze specific dim 2
+    const t_sq_2 = try squeeze(t_4d, 2, allocator);
+    defer free(allocator, t_sq_2);
+    try std.testing.expectEqual(@as(usize, 3), t_sq_2.shape.len);
+    try std.testing.expectEqual(@as(usize, 1), t_sq_2.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), t_sq_2.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 3), t_sq_2.shape.dims[2]);
+
+    // Cannot squeeze non-unit dimension
+    try std.testing.expectError(error.CannotSqueezeDimension, t_4d.squeeze(1, allocator));
+    try std.testing.expectError(error.DimensionOutOfBounds, t_4d.squeeze(5, allocator));
+
+    // Squeeze on tensor where all dimensions are 1
+    const t_1x1 = try zeros(allocator, &.{ 1, 1 });
+    defer free(allocator, t_1x1);
+    const t_sq_scalar = try t_1x1.squeeze(null, allocator);
+    defer free(allocator, t_sq_scalar);
+    try std.testing.expectEqual(@as(usize, 1), t_sq_scalar.shape.len);
+    try std.testing.expectEqual(@as(usize, 1), t_sq_scalar.shape.dims[0]);
+
+    // 2. Unsqueeze
+    const t_2d = try array(allocator, &.{ 2, 3 }, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer free(allocator, t_2d);
+
+    // Insert at dim 0: [1, 2, 3]
+    const u_dim0 = try unsqueeze(t_2d, 0, allocator);
+    defer free(allocator, u_dim0);
+    try std.testing.expectEqual(@as(usize, 3), u_dim0.shape.len);
+    try std.testing.expectEqual(@as(usize, 1), u_dim0.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), u_dim0.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 3), u_dim0.shape.dims[2]);
+    try std.testing.expectEqual(@as(f32, 1.0), u_dim0.data[0]);
+    try std.testing.expectEqual(@as(f32, 6.0), u_dim0.data[5]);
+
+    // Insert at dim 1: [2, 1, 3]
+    const u_dim1 = try unsqueeze(t_2d, 1, allocator);
+    defer free(allocator, u_dim1);
+    try std.testing.expectEqual(@as(usize, 3), u_dim1.shape.len);
+    try std.testing.expectEqual(@as(usize, 2), u_dim1.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 1), u_dim1.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 3), u_dim1.shape.dims[2]);
+
+    // Insert at dim 2 (end): [2, 3, 1]
+    const u_dim2 = try unsqueeze(t_2d, 2, allocator);
+    defer free(allocator, u_dim2);
+    try std.testing.expectEqual(@as(usize, 3), u_dim2.shape.len);
+    try std.testing.expectEqual(@as(usize, 2), u_dim2.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), u_dim2.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 1), u_dim2.shape.dims[2]);
+
+    // Out of bounds
+    try std.testing.expectError(error.DimensionOutOfBounds, t_2d.unsqueeze(4, allocator));
 }
 
