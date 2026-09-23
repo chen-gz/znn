@@ -10,6 +10,14 @@ pub const TSNEOptions = struct {
     early_exaggeration_iter: usize = 250,
     min_gain: f32 = 0.01,
     seed: u64 = 42,
+
+    /// Default configuration for t-SNE (2D embedding, perplexity 30, lr 200, 1000 iterations)
+    pub const default: TSNEOptions = .{};
+
+    /// Callable function to obtain default TSNEOptions
+    pub fn defaultOptions() TSNEOptions {
+        return .{};
+    }
 };
 
 /// Normal random generator using Box-Muller transform
@@ -153,6 +161,11 @@ pub const TSNE = struct {
 
     pub fn init(options: TSNEOptions) TSNE {
         return .{ .options = options };
+    }
+
+    /// Initialize TSNE model with default options
+    pub fn initDefault() TSNE {
+        return init(TSNEOptions.default);
     }
 
     /// Fits the t-SNE model on data X (N x D) and returns embedded coordinates Y (N x n_components).
@@ -307,6 +320,11 @@ pub const TSNE = struct {
 pub fn tsne(allocator: std.mem.Allocator, X: []const f32, N: usize, D: usize, options: TSNEOptions) ![]f32 {
     const model = TSNE.init(options);
     return model.fitTransform(allocator, X, N, D);
+}
+
+/// Convenience function to run t-SNE with default options (TSNEOptions.default)
+pub fn tsneDefault(allocator: std.mem.Allocator, X: []const f32, N: usize, D: usize) ![]f32 {
+    return tsne(allocator, X, N, D, TSNEOptions.default);
 }
 
 test "t-SNE pairwise distances computation" {

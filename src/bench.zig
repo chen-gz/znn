@@ -76,12 +76,21 @@ pub const BenchmarkConfig = struct {
     filter: ?[]const u8 = null,
     suite: ?[]const u8 = null,
     quiet: bool = false,
+
+    pub const default: BenchmarkConfig = .{};
+    pub fn defaultConfig() BenchmarkConfig {
+        return .{};
+    }
 };
 
 pub const BenchmarkRunner = struct {
     allocator: std.mem.Allocator,
     results: std.ArrayList(BenchmarkStats),
     config: BenchmarkConfig,
+
+    pub fn initDefault(allocator: std.mem.Allocator) BenchmarkRunner {
+        return init(allocator, BenchmarkConfig.default);
+    }
 
     pub fn init(allocator: std.mem.Allocator, config: BenchmarkConfig) BenchmarkRunner {
         return .{

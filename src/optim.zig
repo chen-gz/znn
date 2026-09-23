@@ -371,6 +371,11 @@ pub const AdamWConfig = struct {
     beta2: f32 = 0.95,
     eps: f32 = 1e-8,
     weight_decay: f32 = 0.01,
+
+    pub const default: AdamWConfig = .{};
+    pub fn defaultConfig() AdamWConfig {
+        return .{};
+    }
 };
 
 /// 具备解耦权重衰减 (Decoupled Weight Decay) 的 AdamW 优化器
@@ -381,6 +386,10 @@ pub const AdamWOptimizer = struct {
     v: [][]f32,
     config: AdamWConfig,
     step_count: u64,
+
+    pub fn initDefault(allocator: std.mem.Allocator, model: anytype) !AdamWOptimizer {
+        return init(allocator, model, AdamWConfig.default);
+    }
 
     pub fn init(allocator: std.mem.Allocator, model: anytype, config: AdamWConfig) !AdamWOptimizer {
         const params = try nn.collectParameters(model, allocator);
