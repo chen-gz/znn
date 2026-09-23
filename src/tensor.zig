@@ -15,18 +15,26 @@ pub const Shape = struct {
     dims: [8]usize, // 存储每一维度大小的静态数组，未使用的维度默认为 0
     len: usize,     // 张量的维度个数（Rank，例如 2D 矩阵的 Rank 为 2）
 
-    /// 根据动态传入的切片初始化静态 Shape 结构体
-    pub fn init(slice: []const usize) Shape {
+    /// 从切片安全初始化 Shape，超过 8 维返回 error.MaxDimensionsExceeded
+    pub fn fromSlice(slice: []const usize) !Shape {
+        if (slice.len > 8) return error.MaxDimensionsExceeded;
         var self = Shape{
             .dims = [_]usize{0} ** 8,
             .len = slice.len,
         };
         for (slice, 0..) |dim, i| {
-            if (i >= 8) break; // 超过 8 维截断
             self.dims[i] = dim;
         }
         return self;
     }
+
+    /// 根据动态传入的切片初始化静态 Shape 结构体（若超过 8 维触发 panic）
+    pub fn init(slice: []const usize) Shape {
+        return fromSlice(slice) catch |err| switch (err) {
+            error.MaxDimensionsExceeded => @panic("Shape.init: maximum dimensions (8) exceeded"),
+        };
+    }
+
 
     /// 校验两个 Shape 是否完全相等（维度个数及每一维大小都匹配）
     pub fn eq(self: Shape, other: Shape) bool {
@@ -205,15 +213,35 @@ pub const Tensor = struct {
         }
     }
 
-    // 获取多维索引对应的扁平化索引
-    pub fn getFlatIndex(self: Tensor, indices: []const usize) usize {
-        std.debug.assert(indices.len == self.shape.len);
+    // 安全获取多维索引对应的扁平化索引（带维度及边界校验）
+    pub fn getFlatIndexChecked(self: Tensor, indices: []const usize) !usize {
+        if (indices.len != self.shape.len) return error.DimensionMismatch;
         var flat_idx: usize = 0;
         for (indices, 0..) |idx, i| {
-            std.debug.assert(idx < self.shape.dims[i]);
+            if (idx >= self.shape.dims[i]) return error.IndexOutOfBounds;
             flat_idx += idx * self.strides.dims[i];
         }
         return flat_idx;
+    }
+
+    // 获取多维索引对应的扁平化索引
+    pub fn getFlatIndex(self: Tensor, indices: []const usize) usize {
+        return self.getFlatIndexChecked(indices) catch |err| switch (err) {
+            error.DimensionMismatch => @panic("getFlatIndex: dimension mismatch"),
+            error.IndexOutOfBounds => @panic("getFlatIndex: index out of bounds"),
+        };
+    }
+
+    // 安全获取特定多维索引处的值（带边界校验）
+    pub fn getChecked(self: Tensor, indices: []const usize) !f32 {
+        const flat_idx = try self.getFlatIndexChecked(indices);
+        return self.data[flat_idx];
+    }
+
+    // 安全设置特定多维索引处的值（带边界校验）
+    pub fn setChecked(self: *Tensor, indices: []const usize, val: f32) !void {
+        const flat_idx = try self.getFlatIndexChecked(indices);
+        self.data[flat_idx] = val;
     }
 
     // 获取特定多维索引处的值
@@ -284,6 +312,12 @@ pub const Tensor = struct {
     pub fn matmul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.matmul(self, other);
+        }
+        if (self.shape.len != 2 or other.shape.len != 2) {
+            return error.IncompatibleDimensions;
+        }
+        if (self.shape.dims[1] != other.shape.dims[0]) {
+            return error.ShapeMismatch;
         }
         const M = self.shape.dims[0];
         const K = self.shape.dims[1];
@@ -489,7 +523,7 @@ pub const Tensor = struct {
         }
         const loss = try zeros(allocator, &.{ 1, 1 });
         const N = self.data.len;
-        std.debug.assert(N == targets.data.len);
+        if (N != targets.data.len) return error.ShapeMismatch;
         var sum: f32 = 0.0;
         for (0..N) |i| {
             const x = self.data[i];
@@ -508,7 +542,7 @@ pub const Tensor = struct {
         }
         const loss = try zeros(allocator, &.{ 1, 1 });
         const N = self.data.len;
-        std.debug.assert(N == targets.data.len);
+        if (N != targets.data.len) return error.ShapeMismatch;
         var sum: f32 = 0.0;
         for (0..N) |i| {
             const p = self.data[i];
@@ -552,9 +586,11 @@ pub const Tensor = struct {
         if (graph) |g| {
             return try g.softmaxCrossEntropy(self, targets);
         }
+        if (self.shape.len != 2) return error.IncompatibleDimensions;
         const loss = try zeros(allocator, &.{1, 1});
         const B = self.shape.dims[0];
         const N = self.shape.dims[1];
+        if (B != targets.len) return error.ShapeMismatch;
 
         var loss_sum: f32 = 0.0;
         for (0..B) |i| {
@@ -570,6 +606,7 @@ pub const Tensor = struct {
             }
 
             const label = targets[i];
+            if (label >= N) return error.IndexOutOfBounds;
             const prob = @exp(logits_row[label] - max_val) / sum;
             const clipped = @max(prob, 1e-15);
             loss_sum += -@log(clipped);
@@ -584,7 +621,7 @@ pub const Tensor = struct {
         }
         const loss = try zeros(allocator, &.{1, 1});
         const N = self.data.len;
-        std.debug.assert(N == targets.data.len);
+        if (N != targets.data.len) return error.ShapeMismatch;
 
         var loss_sum: f32 = 0.0;
         for (0..N) |i| {
@@ -615,7 +652,7 @@ pub const Tensor = struct {
         if (graph) |g| {
             return try g.reshape(self, new_shape_slice);
         }
-        const shape = Shape.init(new_shape_slice);
+        const shape = try Shape.fromSlice(new_shape_slice);
         const strides = computeContiguousStrides(shape);
         var old_total: usize = 1;
         for (0..self.shape.len) |i| {
@@ -625,7 +662,7 @@ pub const Tensor = struct {
         for (new_shape_slice) |dim| {
             new_total *= dim;
         }
-        std.debug.assert(old_total == new_total);
+        if (old_total != new_total) return error.ShapeMismatch;
 
         const C = try allocator.create(Tensor);
         C.* = Tensor{
@@ -648,8 +685,10 @@ pub const Tensor = struct {
         if (graph) |g| {
             return try g.transposeND(self, dim0, dim1);
         }
-        std.debug.assert(dim0 < self.shape.len);
-        std.debug.assert(dim1 < self.shape.len);
+        if (dim0 >= self.shape.len or dim1 >= self.shape.len) {
+            return error.DimensionOutOfBounds;
+        }
+
 
         const shape_trans = transposeShape(self.shape, dim0, dim1);
         const strides_trans = transposeShape(self.strides, dim0, dim1);
@@ -698,22 +737,24 @@ pub const Tensor = struct {
         if (graph) |g| {
             return try g.conv2d(self, weight, bias);
         }
-        std.debug.assert(self.shape.len == 4);
-        std.debug.assert(weight.shape.len == 4);
+        if (self.shape.len != 4 or weight.shape.len != 4) {
+            return error.IncompatibleDimensions;
+        }
         const N = self.shape.dims[0];
         const C_in = self.shape.dims[1];
         const H = self.shape.dims[2];
         const W = self.shape.dims[3];
 
         const C_out = weight.shape.dims[0];
-        std.debug.assert(weight.shape.dims[1] == C_in);
+        if (weight.shape.dims[1] != C_in) return error.ShapeMismatch;
         const KH = weight.shape.dims[2];
         const KW = weight.shape.dims[3];
 
         if (bias) |b| {
-            std.debug.assert(b.shape.len == 1);
-            std.debug.assert(b.shape.dims[0] == C_out);
+            if (b.shape.len != 1 or b.shape.dims[0] != C_out) return error.ShapeMismatch;
         }
+
+        if (H < KH or W < KW) return error.KernelBiggerThanInput;
 
         const H_out = H - KH + 1;
         const W_out = W - KW + 1;
@@ -770,20 +811,21 @@ pub const Tensor = struct {
         if (graph) |g| {
             return try g.convTranspose2D(self, weight, bias, stride, padding);
         }
-        std.debug.assert(self.shape.len == 4);
-        std.debug.assert(weight.shape.len == 4);
+        if (self.shape.len != 4 or weight.shape.len != 4) {
+            return error.IncompatibleDimensions;
+        }
         const N = self.shape.dims[0];
         const C_in = self.shape.dims[1];
         const H_in = self.shape.dims[2];
         const W_in = self.shape.dims[3];
 
-        std.debug.assert(weight.shape.dims[0] == C_in);
+        if (weight.shape.dims[0] != C_in) return error.ShapeMismatch;
         const C_out = weight.shape.dims[1];
         const KH = weight.shape.dims[2];
         const KW = weight.shape.dims[3];
 
         if (bias) |b| {
-            std.debug.assert(b.shape.dims[0] == C_out);
+            if (b.shape.len != 1 or b.shape.dims[0] != C_out) return error.ShapeMismatch;
         }
 
         const H_out = (H_in - 1) * stride + KH - 2 * padding;
@@ -831,6 +873,7 @@ pub const Tensor = struct {
                 }
             }
         }
+
         return out;
     }
 
@@ -838,7 +881,8 @@ pub const Tensor = struct {
         if (graph) |g| {
             return try g.maxpool2d(self, pool_size, stride);
         }
-        std.debug.assert(self.shape.len == 4);
+        if (self.shape.len != 4) return error.IncompatibleDimensions;
+        if (stride == 0 or pool_size == 0) return error.InvalidStride;
         const N = self.shape.dims[0];
         const C = self.shape.dims[1];
         const H = self.shape.dims[2];
@@ -944,8 +988,13 @@ pub const Tensor = struct {
         if (graph) |g| {
             return try g.batchMatMul(self, other);
         }
-        std.debug.assert(self.shape.len == 4);
-        std.debug.assert(other.shape.len == 4);
+        if (self.shape.len != 4 or other.shape.len != 4) {
+            return error.IncompatibleDimensions;
+        }
+        if (self.shape.dims[0] != other.shape.dims[0] or self.shape.dims[1] != other.shape.dims[1] or self.shape.dims[3] != other.shape.dims[2]) {
+            return error.ShapeMismatch;
+        }
+
 
         const batch_size = self.shape.dims[0];
         const num_heads = self.shape.dims[1];
@@ -1061,7 +1110,8 @@ pub const Tensor = struct {
     }
 
     pub fn argmax(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
-        std.debug.assert(dim < self.shape.len);
+        if (dim >= self.shape.len) return error.DimensionOutOfBounds;
+        if (self.shape.len != 2) return error.UnsupportedDimension;
         const M = self.shape.dims[0];
         const N = self.shape.dims[1];
 
@@ -1101,7 +1151,8 @@ pub const Tensor = struct {
     }
 
     pub fn max(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
-        std.debug.assert(dim < self.shape.len);
+        if (dim >= self.shape.len) return error.DimensionOutOfBounds;
+        if (self.shape.len != 2) return error.UnsupportedDimension;
         const M = self.shape.dims[0];
         const N = self.shape.dims[1];
 
@@ -1147,15 +1198,15 @@ pub const Tensor = struct {
 // ============================================================================
 
 pub fn array(allocator: std.mem.Allocator, shape_slice: []const usize, initial_data: []const f32) !*Tensor {
-    const t = try allocator.create(Tensor);
-    const shape = Shape.init(shape_slice);
+    const shape = try Shape.fromSlice(shape_slice);
     const strides = computeContiguousStrides(shape);
     var total_size: usize = 1;
     for (shape_slice) |dim| {
         total_size *= dim;
     }
-    std.debug.assert(total_size == initial_data.len);
+    if (total_size != initial_data.len) return error.ShapeMismatch;
 
+    const t = try allocator.create(Tensor);
     t.* = Tensor{
         .data = try allocator.alloc(f32, total_size),
         .grad = &.{},
@@ -1169,14 +1220,14 @@ pub fn array(allocator: std.mem.Allocator, shape_slice: []const usize, initial_d
 }
 
 pub fn zeros(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
-    const t = try allocator.create(Tensor);
-    const shape = Shape.init(shape_slice);
+    const shape = try Shape.fromSlice(shape_slice);
     const strides = computeContiguousStrides(shape);
     var total_size: usize = 1;
     for (shape_slice) |dim| {
         total_size *= dim;
     }
 
+    const t = try allocator.create(Tensor);
     t.* = Tensor{
         .data = try allocator.alloc(f32, total_size),
         .grad = &.{},
@@ -1190,14 +1241,14 @@ pub fn zeros(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor 
 }
 
 pub fn ones(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
-    const t = try allocator.create(Tensor);
-    const shape = Shape.init(shape_slice);
+    const shape = try Shape.fromSlice(shape_slice);
     const strides = computeContiguousStrides(shape);
     var total_size: usize = 1;
     for (shape_slice) |dim| {
         total_size *= dim;
     }
 
+    const t = try allocator.create(Tensor);
     t.* = Tensor{
         .data = try allocator.alloc(f32, total_size),
         .grad = &.{},
@@ -1209,6 +1260,7 @@ pub fn ones(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
     @memset(t.data, 1.0);
     return t;
 }
+
 
 var default_prng = std.Random.DefaultPrng.init(12345);
 
@@ -1234,18 +1286,18 @@ pub fn concat(allocator: std.mem.Allocator, inputs: []const *Tensor, dim: usize,
     if (graph) |g| {
         return try g.concat(inputs, dim);
     }
-    std.debug.assert(inputs.len > 0);
+    if (inputs.len == 0) return error.EmptyInputs;
     const rank = inputs[0].shape.len;
-    std.debug.assert(dim < rank);
+    if (dim >= rank) return error.DimensionOutOfBounds;
 
     var out_shape = inputs[0].shape;
     var concat_dim_total: usize = 0;
 
     for (inputs) |t| {
-        std.debug.assert(t.shape.len == rank);
+        if (t.shape.len != rank) return error.IncompatibleDimensions;
         for (0..rank) |d| {
             if (d != dim) {
-                std.debug.assert(t.shape.dims[d] == inputs[0].shape.dims[d]);
+                if (t.shape.dims[d] != inputs[0].shape.dims[d]) return error.ShapeMismatch;
             }
         }
         concat_dim_total += t.shape.dims[dim];
@@ -1284,11 +1336,12 @@ pub fn split(allocator: std.mem.Allocator, input: *Tensor, num_splits: usize, di
     if (graph) |g| {
         return try g.split(input, num_splits, dim);
     }
-    std.debug.assert(num_splits > 0);
+    if (num_splits == 0) return error.InvalidSplitCount;
     const rank = input.shape.len;
-    std.debug.assert(dim < rank);
+    if (dim >= rank) return error.DimensionOutOfBounds;
     const dim_size = input.shape.dims[dim];
-    std.debug.assert(dim_size % num_splits == 0);
+    if (dim_size % num_splits != 0) return error.UnevenSplit;
+
     const split_dim_size = dim_size / num_splits;
 
     var split_shape = input.shape;
@@ -1326,9 +1379,7 @@ const tensorSplit = split;
 /// Solves linear system A * x = b using Gauss-Jordan elimination with partial pivoting.
 /// A is an n x n row-major matrix slice, b is an n-element vector, out_x is an n-element output slice.
 pub fn solveLinearSystem(allocator: std.mem.Allocator, A_data: []const f32, b_data: []const f32, n: usize, out_x: []f32) !void {
-    std.debug.assert(A_data.len == n * n);
-    std.debug.assert(b_data.len == n);
-    std.debug.assert(out_x.len == n);
+    if (A_data.len != n * n or b_data.len != n or out_x.len != n) return error.ShapeMismatch;
 
     if (n == 0) return;
     if (n == 1) {
@@ -1412,9 +1463,10 @@ pub fn solveRidgeAnalytical(
     out_w: []f32,
     out_b: *f32,
 ) !void {
-    std.debug.assert(x.len == n_samples * n_features);
-    std.debug.assert(y.len == n_samples);
-    std.debug.assert(out_w.len == n_features);
+    if (x.len != n_samples * n_features or y.len != n_samples or out_w.len != n_features) {
+        return error.ShapeMismatch;
+    }
+
 
     const N = n_samples;
     const D = n_features;
@@ -2357,17 +2409,79 @@ test "solveLinearSystem singular matrix error and n=1 scalar" {
     try std.testing.expectError(error.SingularMatrix, solveLinearSystem(allocator, &A_sing, &b2, 2, &x2));
 }
 
+test "tensor typed error handling and boundary validation" {
+    const allocator = std.testing.allocator;
 
+    // 1. Shape.fromSlice and creation functions exceeding max dimensions (8)
+    const nine_dims = [_]usize{ 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+    try std.testing.expectError(error.MaxDimensionsExceeded, Shape.fromSlice(&nine_dims));
+    try std.testing.expectError(error.MaxDimensionsExceeded, zeros(allocator, &nine_dims));
+    try std.testing.expectError(error.MaxDimensionsExceeded, ones(allocator, &nine_dims));
 
+    // 2. array data length mismatch
+    const data_3 = [_]f32{ 1.0, 2.0, 3.0 };
+    try std.testing.expectError(error.ShapeMismatch, array(allocator, &.{ 2, 2 }, &data_3));
 
+    // 3. getFlatIndexChecked and safe getChecked/setChecked
+    var t2x2 = try zeros(allocator, &.{ 2, 2 });
+    defer free(allocator, t2x2);
+    try std.testing.expectError(error.DimensionMismatch, t2x2.getFlatIndexChecked(&.{ 0, 0, 0 }));
+    try std.testing.expectError(error.IndexOutOfBounds, t2x2.getFlatIndexChecked(&.{ 2, 0 }));
+    try std.testing.expectError(error.IndexOutOfBounds, t2x2.getChecked(&.{ 0, 3 }));
+    try std.testing.expectError(error.IndexOutOfBounds, t2x2.setChecked(&.{ 3, 0 }, 1.0));
+    try t2x2.setChecked(&.{ 1, 1 }, 42.0);
+    try std.testing.expectEqual(@as(f32, 42.0), try t2x2.getChecked(&.{ 1, 1 }));
 
+    // 4. matmul error conditions
+    const t1d = try zeros(allocator, &.{4});
+    defer free(allocator, t1d);
+    var t2x3 = try zeros(allocator, &.{ 2, 3 });
+    defer free(allocator, t2x3);
+    const t4x2 = try zeros(allocator, &.{ 4, 2 });
+    defer free(allocator, t4x2);
+    // Non-2D inputs
+    try std.testing.expectError(error.IncompatibleDimensions, t2x2.matmul(t1d, allocator, null));
+    // Inner dimension mismatch (2x3 cannot multiply 4x2)
+    try std.testing.expectError(error.ShapeMismatch, t2x3.matmul(t4x2, allocator, null));
 
+    // 5. batchMatMul error conditions
+    var t4d_a = try zeros(allocator, &.{ 1, 2, 3, 4 });
+    defer free(allocator, t4d_a);
+    const t4d_b_bad = try zeros(allocator, &.{ 1, 2, 5, 6 }); // K mismatch (4 != 5)
+    defer free(allocator, t4d_b_bad);
+    try std.testing.expectError(error.IncompatibleDimensions, t4d_a.batchMatMul(t2x2, allocator, null));
+    try std.testing.expectError(error.ShapeMismatch, t4d_a.batchMatMul(t4d_b_bad, allocator, null));
 
+    // 6. reshape element count mismatch
+    try std.testing.expectError(error.ShapeMismatch, t2x2.reshape(&.{ 3, 3 }, allocator, null));
 
+    // 7. transpose dimension out of bounds
+    try std.testing.expectError(error.DimensionOutOfBounds, t2x2.transpose(0, 3, allocator, null));
 
+    // 8. conv2d error conditions
+    const w_bad_c = try zeros(allocator, &.{ 2, 3, 2, 2 }); // C_in mismatch with t4d_a (C_in is 2, weight has 3)
+    defer free(allocator, w_bad_c);
+    try std.testing.expectError(error.ShapeMismatch, t4d_a.conv2d(w_bad_c, null, allocator, null));
+    const w_too_big = try zeros(allocator, &.{ 2, 2, 5, 5 }); // KH/KW > H/W (5 > 3 or 4)
+    defer free(allocator, w_too_big);
+    try std.testing.expectError(error.KernelBiggerThanInput, t4d_a.conv2d(w_too_big, null, allocator, null));
 
+    // 9. concat error conditions
+    try std.testing.expectError(error.EmptyInputs, concat(allocator, &.{}, 0, null));
+    const inputs_dim_out = [_]*Tensor{t2x2};
+    try std.testing.expectError(error.DimensionOutOfBounds, concat(allocator, &inputs_dim_out, 3, null));
+    const inputs_mismatch = [_]*Tensor{ t2x2, t2x3 };
+    try std.testing.expectError(error.ShapeMismatch, concat(allocator, &inputs_mismatch, 0, null));
 
+    // 10. split error conditions
+    try std.testing.expectError(error.InvalidSplitCount, split(allocator, t2x2, 0, 0, null));
+    try std.testing.expectError(error.DimensionOutOfBounds, split(allocator, t2x2, 2, 5, null));
+    try std.testing.expectError(error.UnevenSplit, split(allocator, t2x3, 2, 1, null)); // dim 1 has size 3, not divisible by 2
 
-
-
+    // 11. solveLinearSystem slice length mismatch
+    const bad_A = [_]f32{ 1.0, 2.0 };
+    const b = [_]f32{1.0};
+    var x = [_]f32{0.0};
+    try std.testing.expectError(error.ShapeMismatch, solveLinearSystem(allocator, &bad_A, &b, 1, &x));
+}
 
