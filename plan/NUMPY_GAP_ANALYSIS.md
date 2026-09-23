@@ -85,12 +85,13 @@
   - [x] 实现 `squeeze(axis)` (单轴/全轴为 1 维度压缩) 与 `unsqueeze(dim)` (新维度扩充)。
 
 ### Phase 2: 泛型张量与切片视图 (P1 - Architectural Evolution)
-- [ ] **泛型张量重构**：
-  - 将 `Tensor` 升级为 `Tensor(comptime T: type)`，首批完整支持 `f32`, `f64`, `i32`, `bool`。
-- [ ] **跨步零拷贝切片 (Strided View Slicing)**：
-  - 引入 `SliceRange { start, end, step }`，支持对任意维度进行跨步切片且复用底层数据指针。
-- [ ] **排序与检索算子**：
-  - 实现 `sort(axis)`, `argsort(axis)`, `nonzero()`.
+- [x] **泛型张量重构与 DType 系统**：
+  - [x] 实现 `GenericTensor(comptime T: type)`，完整支持 `f32`, `f64`, `i32`, `i64`, `bool`, `bf16`, `f16` 与标量/张量跨类型互转 `to(DestT)` / `fromGeneric`。
+  - [x] 实现 `bf16` 原生浮点结构体与与 `f32` IEEE 754 互转及 `DType` 大小自省。
+- [x] **跨步零拷贝切片 (Strided View Slicing)**：
+  - [x] 引入 `SliceRange { start, end, step }`，支持对任意维度进行跨步切片且复用底层数据指针（`is_view` 内存生命周期保护），提供 `contiguous()` 紧凑拷贝。
+- [x] **排序、检索与截断算子**：
+  - [x] 实现 `sort(axis, ascending)`, `argsort(axis, ascending)`, `nonzero()`, `clip(min, max)` 与 `clip_`。
 
 ### Phase 3: 科学计算扩展与高性能线性代数 (P2 - Scientific Extensions)
 - [ ] **现代随机数发生器体系**：
