@@ -22,7 +22,11 @@ pub const serialization = @import("nn/serialization.zig");
 // ============================================================================
 
 // 1. 核心与容器 (Core & Containers)
+pub const init_mod = core.init_mod;
+pub const InitMethod = core.InitMethod;
+pub const InitOptions = core.InitOptions;
 pub const normalRandom = core.normalRandom;
+pub const initWeights = core.initWeights;
 pub const initializeWeights = core.initializeWeights;
 pub const createPersistentTensor = core.createPersistentTensor;
 pub const freePersistentTensor = core.freePersistentTensor;
@@ -903,4 +907,73 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
         try std.testing.expectEqual(@as(f32, 0.0), v);
     }
 }
+
+test "Weight initialization methods and Linear initWithOptions" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    const n_elements: usize = 20000;
+    const buf = try allocator.alloc(f32, n_elements);
+    defer allocator.free(buf);
+
+    // 1. Zeros
+    initWeights(random, buf, 100, 100, .zeros);
+    for (buf) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
+
+    // 2. Ones
+    initWeights(random, buf, 100, 100, .ones);
+    for (buf) |v| try std.testing.expectEqual(@as(f32, 1.0), v);
+
+    // 3. Constant
+    initWeights(random, buf, 100, 100, .{ .constant = 3.14 });
+    for (buf) |v| try std.testing.expectApproxEqAbs(@as(f32, 3.14), v, 1e-5);
+
+    // Helper to calculate mean and variance
+    const calcStats = struct {
+        fn run(slice: []const f32) struct { mean: f32, variance: f32 } {
+            var sum: f64 = 0.0;
+            for (slice) |v| sum += v;
+            const mean: f64 = sum / @as(f64, @floatFromInt(slice.len));
+            var var_sum: f64 = 0.0;
+            for (slice) |v| {
+                const diff = @as(f64, v) - mean;
+                var_sum += diff * diff;
+            }
+            const variance: f64 = var_sum / @as(f64, @floatFromInt(slice.len));
+            return .{ .mean = @floatCast(mean), .variance = @floatCast(variance) };
+        }
+    }.run;
+
+    // 4. He Normal: Var = 2 / fan_in = 2 / 100 = 0.02
+    initWeights(random, buf, 100, 100, .he_normal);
+    const he_stats = calcStats(buf);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), he_stats.mean, 0.015);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.02), he_stats.variance, 0.003);
+
+    // 5. Xavier Normal: Var = 2 / (fan_in + fan_out) = 2 / 200 = 0.01
+    initWeights(random, buf, 100, 100, .xavier_normal);
+    const xavier_stats = calcStats(buf);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), xavier_stats.mean, 0.015);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.01), xavier_stats.variance, 0.002);
+
+    // 6. LeCun Normal: Var = 1 / fan_in = 1 / 100 = 0.01
+    initWeights(random, buf, 100, 100, .lecun_normal);
+    const lecun_stats = calcStats(buf);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), lecun_stats.mean, 0.015);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.01), lecun_stats.variance, 0.002);
+
+    // 7. Linear with initWithOptions
+    var lin = try Linear.initWithOptions(allocator, 64, 32, random, .{
+        .weight_init = .xavier_uniform,
+        .bias_init = .{ .constant = 0.5 },
+    });
+    defer lin.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 64 * 32), lin.weight.data.len);
+    for (lin.bias.data) |b| {
+        try std.testing.expectApproxEqAbs(@as(f32, 0.5), b, 1e-5);
+    }
+}
+
 

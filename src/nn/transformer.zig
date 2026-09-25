@@ -11,6 +11,8 @@ const RMSNorm = normalization.RMSNorm;
 const createPersistentTensor = core.createPersistentTensor;
 const freePersistentTensor = core.freePersistentTensor;
 const initializeWeights = core.initializeWeights;
+const initWeights = core.initWeights;
+const InitMethod = core.InitMethod;
 
 // ============================================================================
 // 1. 嵌入层 (Embedding Layer)
@@ -24,15 +26,35 @@ const initializeWeights = core.initializeWeights;
 pub const Embedding = struct {
     weight: *Tensor,        // 嵌入层权重矩阵表 (Shape: [vocab_size, embedding_dim])
 
-    /// 初始化嵌入层
+    /// 嵌入层初始化选项
+    pub const Options = struct {
+        init_method: InitMethod = .{ .normal = .{ .mean = 0.0, .std = 0.02 } },
+
+        pub const default: Options = .{};
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    /// 初始化嵌入层 (默认使用标准预训练 NLP / Transformer 推荐的 N(0, 0.02) 初始化)
     /// vocab_size: 词表大小（可索引的最大整数范围）
     /// embedding_dim: 映射出的隐藏嵌入维度大小
     pub fn init(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize, random: std.Random) !Embedding {
+        return initWithOptions(allocator, vocab_size, embedding_dim, random, Options.default);
+    }
+
+    /// 携带自定义选项初始化嵌入层
+    pub fn initWithOptions(
+        allocator: std.mem.Allocator,
+        vocab_size: usize,
+        embedding_dim: usize,
+        random: std.Random,
+        options: Options,
+    ) !Embedding {
         const weight = try createPersistentTensor(allocator, vocab_size, embedding_dim, true);
         errdefer freePersistentTensor(allocator, weight);
 
-        // 使用正态分布 He/Kaiming 随机数初始化权重表
-        initializeWeights(random, weight.data, embedding_dim);
+        initWeights(random, weight.data, vocab_size, embedding_dim, options.init_method);
 
         return Embedding{
             .weight = weight,
