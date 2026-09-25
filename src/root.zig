@@ -17,6 +17,11 @@ pub const TSNEOptions = manifold.TSNEOptions;
 pub const tsne = manifold.tsne;
 pub const tsneDefault = manifold.tsneDefault;
 
+pub const InitMethod = nn.InitMethod;
+pub const InitOptions = nn.InitOptions;
+pub const initWeights = nn.initWeights;
+pub const initializeWeights = nn.initializeWeights;
+
 pub const GenericTensor = tensor.GenericTensor;
 pub const TensorOf = tensor.TensorOf;
 pub const FloatTensor = tensor.FloatTensor;
