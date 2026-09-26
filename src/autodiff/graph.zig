@@ -1643,16 +1643,16 @@ pub const Graph = struct {
         std.debug.print("{s}", .{report});
     }
 
-    /// 将计算图结构与各层初始化详情格式化为可交互、层级展开的 HTML 网页文档
-    pub fn formatHtmlReport(self: *Graph, allocator: std.mem.Allocator) ![]const u8 {
+    /// 将计算图与模块层级结构序列化为递归的 JSON 数据字符串 (供前端直接解析并构建完整模型拓扑)
+    pub fn formatJson(self: *Graph, allocator: std.mem.Allocator) ![]const u8 {
         const vis = @import("../nn/visualization.zig");
-        return vis.generateHtmlReport(self, allocator);
+        return vis.graph_ir.generateJson(self, allocator);
     }
 
-    /// 将计算图结构与各层初始化详情输出并保存为独立的 HTML 报告文件 (如 "report.html")
-    pub fn exportHtmlReport(self: *Graph, file_path: []const u8) !void {
+    /// 将计算图与模块层级结构直接导出保存为独立的 JSON 文件 (如 "model_graph.json")
+    pub fn exportJson(self: *Graph, file_path: []const u8) !void {
         const vis = @import("../nn/visualization.zig");
-        try vis.exportHtmlReport(self, file_path, self.backing_allocator);
+        try vis.graph_ir.exportJson(self, file_path, self.backing_allocator);
     }
 
     fn appendSingleTensorReport(
