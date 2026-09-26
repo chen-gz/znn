@@ -1504,13 +1504,15 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\      padding: 0 4px;
         \\    }
         \\    .insp-formula-box {
-        \\      background: #0f172a;
-        \\      border: 1px solid #334155;
+        \\      background: linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.7));
+        \\      border: 1px solid rgba(56, 189, 248, 0.25);
+        \\      border-left: 4px solid #38bdf8;
         \\      border-radius: 8px;
-        \\      padding: 12px 16px;
+        \\      padding: 12px 18px;
         \\      display: flex;
         \\      flex-direction: column;
-        \\      gap: 8px;
+        \\      gap: 6px;
+        \\      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
         \\    }
         \\    .insp-formula-header {
         \\      display: flex;
@@ -1522,53 +1524,34 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\      letter-spacing: 0.5px;
         \\      color: #94a3b8;
         \\    }
-        \\    .insp-formula-input-row {
-        \\      display: flex;
-        \\      gap: 10px;
-        \\      align-items: center;
-        \\    }
-        \\    .insp-formula-input {
-        \\      flex: 1;
-        \\      background: #1e293b;
-        \\      border: 1px solid #475569;
-        \\      border-radius: 6px;
-        \\      padding: 8px 12px;
+        \\    .insp-formula-badge {
+        \\      font-size: 10px;
+        \\      font-weight: 600;
+        \\      padding: 2px 7px;
+        \\      border-radius: 4px;
+        \\      background: rgba(56, 189, 248, 0.15);
         \\      color: #38bdf8;
+        \\      border: 1px solid rgba(56, 189, 248, 0.3);
         \\      font-family: var(--font-mono);
-        \\      font-size: 13px;
-        \\      font-weight: 600;
-        \\      outline: none;
-        \\      transition: all 0.2s;
         \\    }
-        \\    .insp-formula-input:focus {
-        \\      border-color: #38bdf8;
-        \\      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+        \\    .insp-formula-display {
         \\      background: #090d16;
-        \\    }
-        \\    .insp-formula-btn {
-        \\      background: #0284c7;
-        \\      color: #fff;
-        \\      border: none;
+        \\      border: 1px solid #1e293b;
         \\      border-radius: 6px;
-        \\      padding: 8px 14px;
-        \\      font-size: 12px;
-        \\      font-weight: 600;
-        \\      cursor: pointer;
-        \\      transition: background 0.2s;
-        \\      white-space: nowrap;
-        \\    }
-        \\    .insp-formula-btn:hover { background: #0369a1; }
-        \\    .insp-formula-preview {
-        \\      background: rgba(2, 132, 199, 0.08);
-        \\      border: 1px dashed rgba(56, 189, 248, 0.4);
-        \\      border-radius: 6px;
-        \\      padding: 8px 12px;
+        \\      padding: 10px 14px;
         \\      font-family: var(--font-mono);
-        \\      font-size: 12px;
-        \\      color: #a5f3fc;
+        \\      font-size: 13.5px;
+        \\      font-weight: 600;
+        \\      color: #38bdf8;
         \\      display: flex;
         \\      align-items: center;
-        \\      gap: 8px;
+        \\      gap: 10px;
+        \\      word-break: break-all;
+        \\    }
+        \\    .insp-formula-desc {
+        \\      font-size: 11.5px;
+        \\      color: #94a3b8;
+        \\      line-height: 1.4;
         \\    }
         \\    tr.node-row { cursor: pointer; }
         \\
@@ -1759,6 +1742,23 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\
         \\];
         \\
+        \\const FORMULAS_DATA = {
+    );
+
+    var formula_it = graph.module_formulas.iterator();
+    var f_idx: usize = 0;
+    while (formula_it.next()) |entry| {
+        if (f_idx > 0) try html_buf.appendSlice(allocator, ",\n");
+        try html_buf.print(allocator,
+            \\  "{s}": "{s}"
+        , .{ entry.key_ptr.*, entry.value_ptr.* });
+        f_idx += 1;
+    }
+
+    try html_buf.appendSlice(allocator,
+        \\
+        \\};
+        \\
         \\let currentKindFilter = 'all';
         \\let currentQuery = '';
         \\
@@ -1794,43 +1794,27 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\  return { icon: '📦', type: 'Module Block', cls: 'linear' };
         \\}
         \\
-        \\function getDefaultFormula(key) {
-        \\  const k = key.toLowerCase();
-        \\  if (k.includes('wte')) return 'y = Embedding(TokenIDs; W_e \\in \\mathbb{R}^{V \\times D}) \\rightarrow [B, T, D]';
-        \\  if (k.includes('wpe')) return 'y = Embedding(PosIDs; W_p \\in \\mathbb{R}^{T_{max} \\times D}) \\rightarrow [B, T, D]';
-        \\  if (k.includes('embeddings_sum') || (k.includes('embeddings') && k.includes('add'))) return 'x_0 = wte(tokens) + wpe(positions) \\rightarrow [B, T, D]';
-        \\  if (k.includes('ln_1') || k.includes('ln_2') || k.includes('ln_f') || k.includes('rms')) return 'y = \\frac{x}{\\sqrt{\\frac{1}{D} \\sum x_i^2 + \\epsilon}} \\odot \\gamma \\rightarrow [B, T, D]';
-        \\  if (k.includes('q_attn')) return 'Q = x \\cdot W_q^T + b_q \\quad (x \\in [B\\cdot T, D], W_q \\in [D, D]) \\rightarrow [B, nh, T, d_k]';
-        \\  if (k.includes('k_attn')) return 'K = x \\cdot W_k^T + b_k \\quad (x \\in [B\\cdot T, D], W_k \\in [D, D]) \\rightarrow [B, nh, T, d_k]';
-        \\  if (k.includes('v_attn')) return 'V = x \\cdot W_v^T + b_v \\quad (x \\in [B\\cdot T, D], W_v \\in [D, D]) \\rightarrow [B, nh, T, d_v]';
-        \\  if (k.includes('c_proj') && k.includes('attn')) return 'O = (A \\cdot V) \\cdot W_o^T + b_o \\quad (W_o \\in [D, D]) \\rightarrow [B, T, D]';
-        \\  if (k.includes('attn')) return 'A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\rightarrow [B, T, D]';
-        \\  if (k.includes('c_fc') && k.includes('mlp')) return 'h = \\text{GELU}(x \\cdot W_{fc}^T + b_{fc}) \\quad (W_{fc} \\in [4D, D]) \\rightarrow [B, T, 4D]';
-        \\  if (k.includes('c_proj') && k.includes('mlp')) return 'y = h \\cdot W_{proj}^T + b_{proj} \\quad (W_{proj} \\in [D, 4D]) \\rightarrow [B, T, D]';
-        \\  if (k.includes('mlp')) return 'y = \\text{GELU}(x W_1 + b_1) W_2 + b_2 \\rightarrow [B, T, D]';
-        \\  if (k.includes('residual') || k.includes('add')) return 'x_{l+1} = x_l + \\text{Sublayer}(x_l) \\rightarrow [B, T, D]';
-        \\  if (k.includes('lm_head')) return 'logits = x \\cdot W_{head}^T \\quad (W_{head} \\in [V, D]) \\rightarrow [B, T, V]';
-        \\  return 'y = f(x; \\theta) \\rightarrow [B, T, D]';
-        \\}
-        \\
-        \\const MODULE_FORMULAS = {};
-        \\
-        \\function updateModuleFormula(key) {
-        \\  const inp = document.getElementById('insp-formula-input-' + key);
-        \\  const prev = document.getElementById('insp-formula-prev-' + key);
-        \\  if (inp) {
-        \\    MODULE_FORMULAS[key] = inp.value;
-        \\    if (prev) prev.textContent = '📐 ' + inp.value;
+        \\function getEffectiveFormula(key) {
+        \\  if (FORMULAS_DATA[key]) return { formula: FORMULAS_DATA[key], source: 'CODE_SPECIFIED' };
+        \\  for (const k in FORMULAS_DATA) {
+        \\    if (key.startsWith(k) || k.startsWith(key)) return { formula: FORMULAS_DATA[k], source: 'CODE_SPECIFIED' };
         \\  }
-        \\}
-        \\
-        \\function resetModuleFormula(key) {
-        \\  const def = getDefaultFormula(key);
-        \\  MODULE_FORMULAS[key] = def;
-        \\  const inp = document.getElementById('insp-formula-input-' + key);
-        \\  const prev = document.getElementById('insp-formula-prev-' + key);
-        \\  if (inp) inp.value = def;
-        \\  if (prev) prev.textContent = '📐 ' + def;
+        \\  const k = key.toLowerCase();
+        \\  if (k.includes('wte')) return { formula: 'y = Embedding(TokenIDs; W_e \\in \\mathbb{R}^{V \\times D}) \\rightarrow [B, T, D]', source: 'INFERRED' };
+        \\  if (k.includes('wpe')) return { formula: 'y = Embedding(PosIDs; W_p \\in \\mathbb{R}^{T_{max} \\times D}) \\rightarrow [B, T, D]', source: 'INFERRED' };
+        \\  if (k.includes('embeddings_sum') || (k.includes('embeddings') && k.includes('add'))) return { formula: 'x_0 = wte(tokens) + wpe(positions) \\rightarrow [B, T, D]', source: 'INFERRED' };
+        \\  if (k.includes('ln_1') || k.includes('ln_2') || k.includes('ln_f') || k.includes('rms')) return { formula: 'y = \\frac{x}{\\sqrt{\\frac{1}{D} \\sum x_i^2 + \\epsilon}} \\odot \\gamma \\rightarrow [B, T, D]', source: 'INFERRED' };
+        \\  if (k.includes('q_attn')) return { formula: 'Q = x \\cdot W_q^T + b_q \\quad (x \\in [B\\cdot T, D], W_q \\in [D, D]) \\rightarrow [B, nh, T, d_k]', source: 'INFERRED' };
+        \\  if (k.includes('k_attn')) return { formula: 'K = x \\cdot W_k^T + b_k \\quad (x \\in [B\\cdot T, D], W_k \\in [D, D]) \\rightarrow [B, nh, T, d_k]', source: 'INFERRED' };
+        \\  if (k.includes('v_attn')) return { formula: 'V = x \\cdot W_v^T + b_v \\quad (x \\in [B\\cdot T, D], W_v \\in [D, D]) \\rightarrow [B, nh, T, d_v]', source: 'INFERRED' };
+        \\  if (k.includes('c_proj') && k.includes('attn')) return { formula: 'O = (A \\cdot V) \\cdot W_o^T + b_o \\quad (W_o \\in [D, D]) \\rightarrow [B, T, D]', source: 'INFERRED' };
+        \\  if (k.includes('attn')) return { formula: 'A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\rightarrow [B, T, D]', source: 'INFERRED' };
+        \\  if (k.includes('c_fc') && k.includes('mlp')) return { formula: 'h = \\text{GELU}(x \\cdot W_{fc}^T + b_{fc}) \\quad (W_{fc} \\in [4D, D]) \\rightarrow [B, T, 4D]', source: 'INFERRED' };
+        \\  if (k.includes('c_proj') && k.includes('mlp')) return { formula: 'y = h \\cdot W_{proj}^T + b_{proj} \\quad (W_{proj} \\in [D, 4D]) \\rightarrow [B, T, D]', source: 'INFERRED' };
+        \\  if (k.includes('mlp')) return { formula: 'y = \\text{GELU}(x W_1 + b_1) W_2 + b_2 \\rightarrow [B, T, D]', source: 'INFERRED' };
+        \\  if (k.includes('residual') || k.includes('add')) return { formula: 'x_{l+1} = x_l + \\text{Sublayer}(x_l) \\rightarrow [B, T, D]', source: 'INFERRED' };
+        \\  if (k.includes('lm_head')) return { formula: 'logits = x \\cdot W_{head}^T \\quad (W_{head} \\in [V, D]) \\rightarrow [B, T, V]', source: 'INFERRED' };
+        \\  return { formula: 'y = f(x; \\theta) \\rightarrow [B, T, D]', source: 'DEFAULT' };
         \\}
         \\
         \\function openInspector(key) {
@@ -1889,21 +1873,20 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\    </div>
         \\  `;
         \\
-        \\  // 0.5 Mathematical Vector Transformation Formula Section (可自定义/编辑的运算公式)
-        \\  const curFormula = MODULE_FORMULAS[key] || getDefaultFormula(key);
+        \\  // 0.5 Mathematical Vector Transformation Formula Section (代码中指定的数学运算公式)
+        \\  const formObj = getEffectiveFormula(key);
+        \\  const badgeLabel = formObj.source === 'CODE_SPECIFIED' ? 'CODE SPECIFIED (代码显式定义)' : 'INFERRED (框架推导公式)';
         \\  let formulaHtml = `
         \\    <div class="insp-formula-box">
         \\      <div class="insp-formula-header">
         \\        <span>📐 向量变换与运算数学公式 (Mathematical Vector Transformation Formula)</span>
-        \\        <span style="font-size: 10px; color: #64748b;">支持手动编辑调整，直观展示向量映射关系</span>
+        \\        <span class="insp-formula-badge">${badgeLabel}</span>
         \\      </div>
-        \\      <div class="insp-formula-input-row">
-        \\        <input type="text" class="insp-formula-input" id="insp-formula-input-${key}" value="${curFormula.replace(/"/g, '&quot;')}" placeholder="设置此模块的数学变换公式，例如 y = x W^T + b" oninput="updateModuleFormula('${key}')" />
-        \\        <button class="insp-formula-btn" onclick="resetModuleFormula('${key}')" title="恢复默认标准推导公式">重置默认</button>
+        \\      <div class="insp-formula-display">
+        \\        <span>📐</span>
+        \\        <span>${formObj.formula}</span>
         \\      </div>
-        \\      <div class="insp-formula-preview" id="insp-formula-prev-${key}">
-        \\        📐 ${curFormula}
-        \\      </div>
+        \\      <div class="insp-formula-desc">此公式清晰反映本模块在正向传播时对输入张量所执行的线性投影、非线性激活或注意力加权变换关系。</div>
         \\    </div>
         \\  `;
         \\
