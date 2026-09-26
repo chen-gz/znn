@@ -9,6 +9,8 @@ const Shape = tensor.Shape;
 // ============================================================================
 
 pub const init_mod = @import("init.zig");
+pub const Nonlinearity = init_mod.Nonlinearity;
+pub const calculateGain = init_mod.calculateGain;
 pub const InitMethod = init_mod.InitMethod;
 pub const InitOptions = init_mod.InitOptions;
 pub const normalRandom = init_mod.normalRandom;
@@ -54,6 +56,26 @@ pub const Linear = struct {
         return initWithOptions(allocator, in_features, out_features, random, InitOptions.default);
     }
 
+    pub fn initUninitialized(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !Linear {
+        const weight = try createPersistentTensor(allocator, in_features, out_features, true);
+        errdefer freePersistentTensor(allocator, weight);
+        const bias = try createPersistentTensor(allocator, 1, out_features, true);
+        errdefer freePersistentTensor(allocator, bias);
+
+        return Linear{
+            .weight = weight,
+            .bias = bias,
+        };
+    }
+
+    pub fn reinit(self: *Linear, random: std.Random, options: InitOptions) void {
+        const in_features = self.weight.shape.dims[0];
+        const out_features = self.weight.shape.dims[1];
+        const w_init = options.resolveWeightInit();
+        initWeights(random, self.weight.data, in_features, out_features, w_init);
+        initWeights(random, self.bias.data, in_features, out_features, options.bias_init);
+    }
+
     pub fn initWithOptions(
         allocator: std.mem.Allocator,
         in_features: usize,
@@ -61,18 +83,9 @@ pub const Linear = struct {
         random: std.Random,
         options: InitOptions,
     ) !Linear {
-        const weight = try createPersistentTensor(allocator, in_features, out_features, true);
-        errdefer freePersistentTensor(allocator, weight);
-        const bias = try createPersistentTensor(allocator, 1, out_features, true);
-        errdefer freePersistentTensor(allocator, bias);
-
-        initWeights(random, weight.data, in_features, out_features, options.weight_init);
-        initWeights(random, bias.data, in_features, out_features, options.bias_init);
-
-        return Linear{
-            .weight = weight,
-            .bias = bias,
-        };
+        var linear = try initUninitialized(allocator, in_features, out_features);
+        linear.reinit(random, options);
+        return linear;
     }
 
     pub fn deinit(self: Linear, allocator: std.mem.Allocator) void {
@@ -103,14 +116,7 @@ pub const Conv2D = struct {
         return initWithOptions(allocator, in_channels, out_channels, kernel_size, random, InitOptions.default);
     }
 
-    pub fn initWithOptions(
-        allocator: std.mem.Allocator,
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: usize,
-        random: std.Random,
-        options: InitOptions,
-    ) !Conv2D {
+    pub fn initUninitialized(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize) !Conv2D {
         const weight = try createPersistentTensor(allocator, out_channels, in_channels * kernel_size * kernel_size, true);
         errdefer freePersistentTensor(allocator, weight);
         weight.shape = Shape.init(&.{ out_channels, in_channels, kernel_size, kernel_size });
@@ -121,15 +127,34 @@ pub const Conv2D = struct {
         bias.shape = Shape.init(&.{out_channels});
         bias.strides = tensor.computeContiguousStrides(bias.shape);
 
-        const fan_in = in_channels * kernel_size * kernel_size;
-        const fan_out = out_channels * kernel_size * kernel_size;
-        initWeights(random, weight.data, fan_in, fan_out, options.weight_init);
-        initWeights(random, bias.data, fan_in, fan_out, options.bias_init);
-
         return Conv2D{
             .weight = weight,
             .bias = bias,
         };
+    }
+
+    pub fn reinit(self: *Conv2D, random: std.Random, options: InitOptions) void {
+        const out_channels = self.weight.shape.dims[0];
+        const in_channels = self.weight.shape.dims[1];
+        const kernel_size = self.weight.shape.dims[2];
+        const fan_in = in_channels * kernel_size * kernel_size;
+        const fan_out = out_channels * kernel_size * kernel_size;
+        const w_init = options.resolveWeightInit();
+        initWeights(random, self.weight.data, fan_in, fan_out, w_init);
+        initWeights(random, self.bias.data, fan_in, fan_out, options.bias_init);
+    }
+
+    pub fn initWithOptions(
+        allocator: std.mem.Allocator,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        random: std.Random,
+        options: InitOptions,
+    ) !Conv2D {
+        var conv = try initUninitialized(allocator, in_channels, out_channels, kernel_size);
+        conv.reinit(random, options);
+        return conv;
     }
 
     pub fn deinit(self: Conv2D, allocator: std.mem.Allocator) void {
@@ -172,7 +197,7 @@ pub const ConvTranspose2D = struct {
         return initWithOptions(allocator, in_channels, out_channels, kernel_size, stride, padding, use_bias, random, InitOptions.default);
     }
 
-    pub fn initWithOptions(
+    pub fn initUninitialized(
         allocator: std.mem.Allocator,
         in_channels: usize,
         out_channels: usize,
@@ -180,17 +205,11 @@ pub const ConvTranspose2D = struct {
         stride: usize,
         padding: usize,
         use_bias: bool,
-        random: std.Random,
-        options: InitOptions,
     ) !ConvTranspose2D {
         const weight = try createPersistentTensor(allocator, 1, in_channels * out_channels * kernel_size * kernel_size, true);
         errdefer freePersistentTensor(allocator, weight);
         weight.shape = Shape.init(&.{ in_channels, out_channels, kernel_size, kernel_size });
         weight.strides = tensor.computeContiguousStrides(weight.shape);
-
-        const fan_in = in_channels * kernel_size * kernel_size;
-        const fan_out = out_channels * kernel_size * kernel_size;
-        initWeights(random, weight.data, fan_in, fan_out, options.weight_init);
 
         var bias: ?*Tensor = null;
         if (use_bias) {
@@ -198,7 +217,6 @@ pub const ConvTranspose2D = struct {
             errdefer freePersistentTensor(allocator, b);
             b.shape = Shape.init(&.{out_channels});
             b.strides = tensor.computeContiguousStrides(b.shape);
-            initWeights(random, b.data, fan_in, fan_out, options.bias_init);
             bias = b;
         }
 
@@ -211,6 +229,32 @@ pub const ConvTranspose2D = struct {
             .weight = weight,
             .bias = bias,
         };
+    }
+
+    pub fn reinit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
+        const fan_in = self.in_channels * self.kernel_size * self.kernel_size;
+        const fan_out = self.out_channels * self.kernel_size * self.kernel_size;
+        const w_init = options.resolveWeightInit();
+        initWeights(random, self.weight.data, fan_in, fan_out, w_init);
+        if (self.bias) |b| {
+            initWeights(random, b.data, fan_in, fan_out, options.bias_init);
+        }
+    }
+
+    pub fn initWithOptions(
+        allocator: std.mem.Allocator,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        use_bias: bool,
+        random: std.Random,
+        options: InitOptions,
+    ) !ConvTranspose2D {
+        var conv = try initUninitialized(allocator, in_channels, out_channels, kernel_size, stride, padding, use_bias);
+        conv.reinit(random, options);
+        return conv;
     }
 
     pub fn deinit(self: ConvTranspose2D, allocator: std.mem.Allocator) void {
@@ -385,6 +429,17 @@ pub fn Sequential(comptime LayersTuple: type) type {
             }
         }
 
+        pub fn autoInit(self: *Self, random: std.Random) void {
+            const fields = @typeInfo(LayersTuple).@"struct".fields;
+            inline for (fields, 0..) |field, i| {
+                const LayerT = field.type;
+                if (LayerT == Linear or LayerT == Conv2D or LayerT == ConvTranspose2D) {
+                    const act = comptime detectNextActivation(LayersTuple, i);
+                    @field(self.layers, field.name).reinit(random, .{ .nonlinearity = act });
+                }
+            }
+        }
+
         pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, input: *Tensor) !*Tensor {
             var current = input;
 
@@ -401,6 +456,37 @@ pub fn Sequential(comptime LayersTuple: type) type {
     };
 }
 
+/// 编译期静态检测 Sequential 元组中第 i 个层之后的首个有效激活函数
+pub fn detectNextActivation(comptime LayersTuple: type, comptime current_idx: usize) Nonlinearity {
+    const fields = @typeInfo(LayersTuple).@"struct".fields;
+    const activations = @import("activations.zig");
+
+    inline for (current_idx + 1..fields.len) |next_idx| {
+        const NextT = fields[next_idx].type;
+
+        if (NextT == activations.ReLU) return .relu;
+        if (NextT == activations.Tanh) return .tanh;
+        if (NextT == activations.Sigmoid) return .sigmoid;
+        if (NextT == activations.GELU) return .gelu;
+        if (NextT == activations.SiLU) return .silu;
+        if (NextT == activations.LeakyReLU) return .{ .leaky_relu = 0.2 };
+
+        // 如果又遇到了另一个参数层 (例如 Linear 或 Conv2D)，说明当前层后续没有激活函数 (如多层特征变换或网络出口 Logits)
+        if (NextT == Linear or NextT == Conv2D or NextT == ConvTranspose2D) {
+            return .linear;
+        }
+    }
+    // 直到末尾都未遇到激活函数，说明是网络输出层 (Logits)
+    return .linear;
+}
+
 pub fn sequential(layers: anytype) Sequential(@TypeOf(layers)) {
     return Sequential(@TypeOf(layers)).init(layers);
+}
+
+/// 构造并自动根据各层后续激活函数自适应初始化权重的 Sequential 模型
+pub fn autoSequential(layers: anytype, random: std.Random) Sequential(@TypeOf(layers)) {
+    var seq = Sequential(@TypeOf(layers)).init(layers);
+    seq.autoInit(random);
+    return seq;
 }
