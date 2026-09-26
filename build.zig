@@ -267,6 +267,30 @@ pub fn build(b: *std.Build) void {
     run_gpt_step.dependOn(&run_gpt_cmd.step);
     run_gpt_cmd.step.dependOn(b.getInstallStep());
 
+    // Define Model Report Export example binary
+    const exe_report = b.addExecutable(.{
+        .name = "export_model_report",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/export_model_report.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    const exe_report_mod = exe_report.root_module;
+    if (target.result.os.tag == .macos) {
+        exe_report_mod.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_report);
+
+    const run_report_step = b.step("run-report", "Run the HTML Model Report export example");
+    const run_report_cmd = b.addRunArtifact(exe_report);
+    run_report_step.dependOn(&run_report_cmd.step);
+    run_report_cmd.step.dependOn(b.getInstallStep());
+
     // Define LLM Training end-to-end example binary
     const exe_llm = b.addExecutable(.{
         .name = "llm_training",

@@ -933,6 +933,9 @@ pub const CausalSelfAttention = struct {
         var mask_node = mask;
         if (graph) |g| {
             mask_node = try g.tensorNDWithData(&.{ B, nh, T, T }, mask_data, false);
+            if (self.name) |mod_name| {
+                mask_node.setNameFormatted("{s}.causal_mask", .{mod_name});
+            }
         }
 
         // 9. 将掩码加上注意力得分: score + mask
@@ -1534,6 +1537,9 @@ pub const TransformerBlock = struct {
         // 2. 第一条残差混合: x1 = x + Attention(RMSNorm(x))
         const x1 = if (graph) |g| try g.add(x, x_attn) else try x.add(x_attn, allocator, null);
         defer if (graph == null) tensor.free(allocator, x1);
+        if (graph != null and self.name != null) {
+            x1.setNameFormatted("{s}.residual_attn", .{self.name.?});
+        }
 
         // 3. 第二条支路: RMSNorm -> MLP
         const x_norm2 = try self.ln_2.forward(allocator, graph, x1);
@@ -1544,7 +1550,11 @@ pub const TransformerBlock = struct {
 
         // 4. 第二条残差混合: out = x1 + MLP(RMSNorm(x1))
         if (graph) |g| {
-            return try g.add(x1, x_mlp);
+            const out = try g.add(x1, x_mlp);
+            if (self.name) |mod_name| {
+                out.setNameFormatted("{s}.output", .{mod_name});
+            }
+            return out;
         } else {
             return try x1.add(x_mlp, allocator, null);
         }
@@ -1554,10 +1564,39 @@ pub const TransformerBlock = struct {
 /// 堆叠多层 Transformer 块的解码器主干网络 (Transformer Decoder)
 pub fn TransformerDecoder(comptime n_layer: usize) type {
     return struct {
+        const Self = @This();
+
         h: [n_layer]TransformerBlock, // 堆叠的 Blocks 数组
         ln_f: RMSNorm,                // 骨架最末端用于规范化的归一化层
 
-        const Self = @This();
+        name: ?[]const u8 = null,
+        name_buf: [64]u8 = undefined,
+
+        /// 为整个 Decoder 骨架及其包含的每层 Block 统一设置分层名称
+        pub fn setName(self: *Self, name: []const u8) void {
+            if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+                self.name = s;
+            } else |_| {
+                self.name = name;
+            }
+            for (&self.h, 0..) |*layer, i| {
+                layer.setNameFormatted("{s}.{d}", .{ self.name.?, i });
+            }
+            self.ln_f.setNameFormatted("{s}.ln_f", .{ self.name.? });
+        }
+
+        pub fn setNameFormatted(self: *Self, comptime fmt: []const u8, args: anytype) void {
+            var buf: [64]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+                self.setName(s);
+            } else |_| {
+                self.setName("decoder");
+            }
+        }
+
+        pub fn getName(self: *const Self) ?[]const u8 {
+            return self.name;
+        }
 
         /// 初始化整个解码器组件
         pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !Self {
@@ -1647,8 +1686,52 @@ pub fn GPT(comptime config: GPTConfig) type {
         position_embedding: Embedding,              // 位置嵌入层
         decoder: TransformerDecoder(config.n_layer),// 堆叠的解码器层与最终归一化层
         lm_head: Linear,                            // 最终输出概率的线性分类投影头
+        name: ?[]const u8 = null,
+        name_buf: [64]u8 = undefined,
 
         const Self = @This();
+
+        /// 为 GPT 顶层及其包含的 embedding、decoder、lm_head 统一设置分层命名
+        pub fn setName(self: *Self, name: []const u8) void {
+            if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+                self.name = s;
+            } else |_| {
+                self.name = name;
+            }
+            self.token_embedding.setNameFormatted("{s}.wte", .{self.name.?});
+            self.position_embedding.setNameFormatted("{s}.wpe", .{self.name.?});
+            self.decoder.setNameFormatted("{s}.layers", .{self.name.?});
+            self.lm_head.setNameFormatted("{s}.lm_head", .{self.name.?});
+        }
+
+        pub fn setNameFormatted(self: *Self, comptime fmt: []const u8, args: anytype) void {
+            var buf: [64]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+                self.setName(s);
+            } else |_| {
+                self.setName("gpt");
+            }
+        }
+
+        pub fn getName(self: *const Self) ?[]const u8 {
+            return self.name;
+        }
+
+        /// 释放 GPT 模型所有子模块的内存资源
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.token_embedding.deinit(allocator);
+            self.position_embedding.deinit(allocator);
+            self.decoder.deinit(allocator);
+            self.lm_head.deinit(allocator);
+        }
+
+        /// 模型所有参数梯度清零
+        pub fn zeroGrad(self: *Self) void {
+            self.token_embedding.zeroGrad();
+            self.position_embedding.zeroGrad();
+            self.decoder.zeroGrad();
+            self.lm_head.zeroGrad();
+        }
 
         /// 初始化 GPT 模型中的所有网络层权重
         pub fn init(allocator: std.mem.Allocator, random: std.Random) !Self {
@@ -1710,6 +1793,9 @@ pub fn GPT(comptime config: GPTConfig) type {
             var pos_node = pos_tensor;
             if (graph) |g| {
                 pos_node = try g.tensorNDWithData(&.{ B, T }, pos_data, false);
+                if (self.name) |mod_name| {
+                    pos_node.setNameFormatted("{s}.wpe.pos_indices", .{mod_name});
+                }
             }
 
             // 3. 获取对应的 Learned 位置嵌入向量: [B, T] -> [B, T, n_embd]
@@ -1720,6 +1806,9 @@ pub fn GPT(comptime config: GPTConfig) type {
             var h_x = tok_emb;
             if (graph) |g| {
                 h_x = try g.add(tok_emb, pos_emb);
+                if (self.name) |mod_name| {
+                    h_x.setNameFormatted("{s}.embeddings_sum", .{mod_name});
+                }
             } else {
                 h_x = try tok_emb.add(pos_emb, allocator, null);
             }
