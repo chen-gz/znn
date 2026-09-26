@@ -59,18 +59,19 @@ pub fn main() !void {
     logits.setName("outputs.logits");
 
     // 显式在代码中为各层模块配置向量变换数学公式 (直接写入代码，界面将直接精准展示)
-    try graph.setModuleFormula("gpt.wte", "y = TokenEmbedding(ids; W_e \\in \\mathbb{R}^{256 \\times 64}) \\rightarrow [2, 16, 64]");
-    try graph.setModuleFormula("gpt.wpe", "y = PosEmbedding(pos; W_p \\in \\mathbb{R}^{32 \\times 64}) \\rightarrow [2, 16, 64]");
-    try graph.setModuleFormula("gpt.layers.0.ln_1", "y = RMSNorm(x; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]");
+    try graph.setModuleFormula("gpt", "\\text{logits} = \\text{GPT}(\\text{tokens}; \\theta) \\rightarrow [2, 16, 256]");
+    try graph.setModuleFormula("gpt.wte", "y = \\text{TokenEmbedding}(\\text{ids}; W_e \\in \\mathbb{R}^{256 \\times 64}) \\rightarrow [2, 16, 64]");
+    try graph.setModuleFormula("gpt.wpe", "y = \\text{PosEmbedding}(\\text{pos}; W_p \\in \\mathbb{R}^{32 \\times 64}) \\rightarrow [2, 16, 64]");
+    try graph.setModuleFormula("gpt.layers.0.ln_1", "y = \\text{RMSNorm}(x; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]");
     try graph.setModuleFormula("gpt.layers.0.attn", "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o \\rightarrow [2, 16, 64]");
     try graph.setModuleFormula("gpt.layers.0.attn.q_attn", "Q = x_{2D} W_q^T + b_q \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])");
     try graph.setModuleFormula("gpt.layers.0.attn.k_attn", "K = x_{2D} W_k^T + b_k \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])");
     try graph.setModuleFormula("gpt.layers.0.attn.v_attn", "V = x_{2D} W_v^T + b_v \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])");
     try graph.setModuleFormula("gpt.layers.0.attn.c_proj", "y = (\\text{HeadsConcat}) \\cdot W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]");
-    try graph.setModuleFormula("gpt.layers.0.ln_2", "y = RMSNorm(x_1; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]");
+    try graph.setModuleFormula("gpt.layers.0.ln_2", "y = \\text{RMSNorm}(x_1; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]");
     try graph.setModuleFormula("gpt.layers.0.mlp", "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]");
-    try graph.setModuleFormula("gpt.layers.ln_f", "y = RMSNorm(x_{last}; \\gamma \\in \\mathbb{R}^{64}) \\rightarrow [2, 16, 64]");
-    try graph.setModuleFormula("gpt.lm_head", "\\text{logits} = x_{norm} \\cdot W_{head}^T \\quad ([2, 16, 64] \\times [256, 64]^T \\rightarrow [2, 16, 256])");
+    try graph.setModuleFormula("gpt.layers.ln_f", "y = \\text{RMSNorm}(x_{\\text{last}}; \\gamma \\in \\mathbb{R}^{64}) \\rightarrow [2, 16, 64]");
+    try graph.setModuleFormula("gpt.lm_head", "\\text{logits} = x_{\\text{norm}} \\cdot W_{head}^T \\quad ([2, 16, 64] \\times [256, 64]^T \\rightarrow [2, 16, 256])");
 
     std.debug.print("  * Input shape:       [{d}, {d}]\n", .{ batch_size, seq_len });
     std.debug.print("  * Output shape:      [{d}, {d}, {d}]\n", .{ logits.shape.dims[0], logits.shape.dims[1], logits.shape.dims[2] });

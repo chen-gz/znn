@@ -1198,17 +1198,18 @@ const OPS_DATA = [  { "op_type": "Embedding", "name": "gpt.wte.act_Embedding_0",
   { "op_type": "Reshape", "name": "outputs.logits", "module": "outputs", "input_shape": "[32, 256]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 256]", "elements": 8192, "bytes": 32768 }
 ];
 
-const FORMULAS_DATA = {  "gpt.layers.ln_f": "y = RMSNorm(x_{last}; \\gamma \\in \\mathbb{R}^{64}) \\rightarrow [2, 16, 64]",
-  "gpt.lm_head": "\\text{logits} = x_{norm} \\cdot W_{head}^T \\quad ([2, 16, 64] \\times [256, 64]^T \\rightarrow [2, 16, 256])",
-  "gpt.wpe": "y = PosEmbedding(pos; W_p \\in \\mathbb{R}^{32 \\times 64}) \\rightarrow [2, 16, 64]",
-  "gpt.layers.0.ln_1": "y = RMSNorm(x; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
-  "gpt.layers.0.attn.v_attn": "V = x_{2D} W_v^T + b_v \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
-  "gpt.layers.0.attn.k_attn": "K = x_{2D} W_k^T + b_k \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
-  "gpt.layers.0.ln_2": "y = RMSNorm(x_1; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
-  "gpt.layers.0.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o \\rightarrow [2, 16, 64]",
-  "gpt.wte": "y = TokenEmbedding(ids; W_e \\in \\mathbb{R}^{256 \\times 64}) \\rightarrow [2, 16, 64]",
-  "gpt.layers.0.attn.q_attn": "Q = x_{2D} W_q^T + b_q \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
+const FORMULAS_DATA = {  "gpt.layers.0.attn.v_attn": "V = x_{2D} W_v^T + b_v \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
+  "gpt.layers.0.ln_2": "y = \\text{RMSNorm}(x_1; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
+  "gpt.layers.ln_f": "y = \\text{RMSNorm}(x_{\\text{last}}; \\gamma \\in \\mathbb{R}^{64}) \\rightarrow [2, 16, 64]",
   "gpt.layers.0.attn.c_proj": "y = (\\text{HeadsConcat}) \\cdot W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]",
+  "gpt.lm_head": "\\text{logits} = x_{\\text{norm}} \\cdot W_{head}^T \\quad ([2, 16, 64] \\times [256, 64]^T \\rightarrow [2, 16, 256])",
+  "gpt": "\\text{logits} = \\text{GPT}(\\text{tokens}; \\theta) \\rightarrow [2, 16, 256]",
+  "gpt.wpe": "y = \\text{PosEmbedding}(\\text{pos}; W_p \\in \\mathbb{R}^{32 \\times 64}) \\rightarrow [2, 16, 64]",
+  "gpt.layers.0.ln_1": "y = \\text{RMSNorm}(x; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
+  "gpt.layers.0.attn.k_attn": "K = x_{2D} W_k^T + b_k \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
+  "gpt.layers.0.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o \\rightarrow [2, 16, 64]",
+  "gpt.wte": "y = \\text{TokenEmbedding}(\\text{ids}; W_e \\in \\mathbb{R}^{256 \\times 64}) \\rightarrow [2, 16, 64]",
+  "gpt.layers.0.attn.q_attn": "Q = x_{2D} W_q^T + b_q \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
   "gpt.layers.0.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]"
 };
 
@@ -1249,25 +1250,30 @@ function getNodeOpType(name) {
 
 function getEffectiveFormula(key) {
   if (FORMULAS_DATA[key]) return { formula: FORMULAS_DATA[key], source: 'CODE_SPECIFIED' };
+  // Only allow prefix match if key is a sub-path of a specified parent (e.g. key is 'gpt.wte.sub' and parent is 'gpt.wte')
+  // NEVER allow key to match a child (e.g. 'gpt' matching 'gpt.layers.ln_f')
   for (const k in FORMULAS_DATA) {
-    if (key.startsWith(k) || k.startsWith(key)) return { formula: FORMULAS_DATA[k], source: 'CODE_SPECIFIED' };
+    if (key.startsWith(k + '.')) return { formula: FORMULAS_DATA[k], source: 'CODE_SPECIFIED' };
   }
   const k = key.toLowerCase();
-  if (k.includes('wte')) return { formula: 'y = Embedding(TokenIDs; W_e \\in \\mathbb{R}^{V \\times D}) \\rightarrow [B, T, D]', source: 'INFERRED' };
-  if (k.includes('wpe')) return { formula: 'y = Embedding(PosIDs; W_p \\in \\mathbb{R}^{T_{max} \\times D}) \\rightarrow [B, T, D]', source: 'INFERRED' };
-  if (k.includes('embeddings_sum') || (k.includes('embeddings') && k.includes('add'))) return { formula: 'x_0 = wte(tokens) + wpe(positions) \\rightarrow [B, T, D]', source: 'INFERRED' };
-  if (k.includes('ln_1') || k.includes('ln_2') || k.includes('ln_f') || k.includes('rms')) return { formula: 'y = \\frac{x}{\\sqrt{\\frac{1}{D} \\sum x_i^2 + \\epsilon}} \\odot \\gamma \\rightarrow [B, T, D]', source: 'INFERRED' };
-  if (k.includes('q_attn')) return { formula: 'Q = x \\cdot W_q^T + b_q \\quad (x \\in [B\\cdot T, D], W_q \\in [D, D]) \\rightarrow [B, nh, T, d_k]', source: 'INFERRED' };
-  if (k.includes('k_attn')) return { formula: 'K = x \\cdot W_k^T + b_k \\quad (x \\in [B\\cdot T, D], W_k \\in [D, D]) \\rightarrow [B, nh, T, d_k]', source: 'INFERRED' };
-  if (k.includes('v_attn')) return { formula: 'V = x \\cdot W_v^T + b_v \\quad (x \\in [B\\cdot T, D], W_v \\in [D, D]) \\rightarrow [B, nh, T, d_v]', source: 'INFERRED' };
-  if (k.includes('c_proj') && k.includes('attn')) return { formula: 'O = (A \\cdot V) \\cdot W_o^T + b_o \\quad (W_o \\in [D, D]) \\rightarrow [B, T, D]', source: 'INFERRED' };
-  if (k.includes('attn')) return { formula: 'A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\rightarrow [B, T, D]', source: 'INFERRED' };
-  if (k.includes('c_fc') && k.includes('mlp')) return { formula: 'h = \\text{GELU}(x \\cdot W_{fc}^T + b_{fc}) \\quad (W_{fc} \\in [4D, D]) \\rightarrow [B, T, 4D]', source: 'INFERRED' };
-  if (k.includes('c_proj') && k.includes('mlp')) return { formula: 'y = h \\cdot W_{proj}^T + b_{proj} \\quad (W_{proj} \\in [D, 4D]) \\rightarrow [B, T, D]', source: 'INFERRED' };
-  if (k.includes('mlp')) return { formula: 'y = \\text{GELU}(x W_1 + b_1) W_2 + b_2 \\rightarrow [B, T, D]', source: 'INFERRED' };
-  if (k.includes('residual') || k.includes('add')) return { formula: 'x_{l+1} = x_l + \\text{Sublayer}(x_l) \\rightarrow [B, T, D]', source: 'INFERRED' };
-  if (k.includes('lm_head')) return { formula: 'logits = x \\cdot W_{head}^T \\quad (W_{head} \\in [V, D]) \\rightarrow [B, T, V]', source: 'INFERRED' };
-  return { formula: 'y = f(x; \\theta) \\rightarrow [B, T, D]', source: 'DEFAULT' };
+  if (k === 'gpt' || k === 'model' || k === 'network' || k === 'transformer') {
+    return { formula: '\\\\text{logits} = \\\\text{GPT}(\\\\text{TokenIDs}; \\\\theta) \\\\rightarrow [B, T, V]', source: 'INFERRED' };
+  }
+  if (k.includes('wte')) return { formula: 'y = \\\\text{Embedding}(\\\\text{TokenIDs}; W_e \\\\in \\\\mathbb{R}^{V \\\\times D}) \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  if (k.includes('wpe')) return { formula: 'y = \\\\text{Embedding}(\\\\text{PosIDs}; W_p \\\\in \\\\mathbb{R}^{T_{max} \\\\times D}) \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  if (k.includes('embeddings_sum') || (k.includes('embeddings') && k.includes('add'))) return { formula: 'x_0 = \\\\text{wte}(\\\\text{tokens}) + \\\\text{wpe}(\\\\text{positions}) \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  if (k.includes('ln_1') || k.includes('ln_2') || k.includes('ln_f') || k.includes('rms')) return { formula: 'y = \\\\frac{x}{\\\\sqrt{\\\\frac{1}{D} \\\\sum x_i^2 + \\\\epsilon}} \\\\odot \\\\gamma \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  if (k.includes('q_attn')) return { formula: 'Q = x \\\\cdot W_q^T + b_q \\\\quad (x \\\\in [B\\\\cdot T, D], W_q \\\\in [D, D]) \\\\rightarrow [B, nh, T, d_k]', source: 'INFERRED' };
+  if (k.includes('k_attn')) return { formula: 'K = x \\\\cdot W_k^T + b_k \\\\quad (x \\\\in [B\\\\cdot T, D], W_k \\\\in [D, D]) \\\\rightarrow [B, nh, T, d_k]', source: 'INFERRED' };
+  if (k.includes('v_attn')) return { formula: 'V = x \\\\cdot W_v^T + b_v \\\\quad (x \\\\in [B\\\\cdot T, D], W_v \\in [D, D]) \\\\rightarrow [B, nh, T, d_v]', source: 'INFERRED' };
+  if (k.includes('c_proj') && k.includes('attn')) return { formula: 'O = (A \\\\cdot V) \\\\cdot W_o^T + b_o \\\\quad (W_o \\\\in [D, D]) \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  if (k.includes('attn')) return { formula: 'A = \\\\text{softmax}\\\\left(\\\\frac{Q K^T}{\\\\sqrt{d_k}} + M\\\\right) V \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  if (k.includes('c_fc') && k.includes('mlp')) return { formula: 'h = \\\\text{GELU}(x \\\\cdot W_{fc}^T + b_{fc}) \\\\quad (W_{fc} \\\\in [4D, D]) \\\\rightarrow [B, T, 4D]', source: 'INFERRED' };
+  if (k.includes('c_proj') && k.includes('mlp')) return { formula: 'y = h \\\\cdot W_{proj}^T + b_{proj} \\\\quad (W_{proj} \\\\in [D, 4D]) \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  if (k.includes('mlp')) return { formula: 'y = \\\\text{GELU}(x W_1 + b_1) W_2 + b_2 \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  if (k.includes('residual') || k.includes('add')) return { formula: 'x_{l+1} = x_l + \\\\text{Sublayer}(x_l) \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  if (k.includes('lm_head')) return { formula: 'logits = x \\\\cdot W_{head}^T \\\\quad (W_{head} \\\\in [V, D]) \\\\rightarrow [B, T, V]', source: 'INFERRED' };
+  return { formula: 'y = f(x; \\\\theta) \\\\rightarrow [B, T, D]', source: 'DEFAULT' };
 }
 
 function openInspector(key) {
@@ -1295,11 +1301,28 @@ function openInspector(key) {
   if (subEl) subEl.textContent = `${opInfo.type} · ${paramStr}`;
 
   // 0. Module Overall Input & Output Shape Banner
+  const isRootModule = (key === 'gpt' || key === 'model' || !key.includes('.'));
   const incEdges = EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.'));
   const outEdges = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
 
-  let modInpShape = incEdges.length > 0 ? incEdges[0].shape : (matchedOps.length > 0 ? matchedOps[0].input_shape : 'Unknown');
-  let modOutShape = outEdges.length > 0 ? outEdges[outEdges.length - 1].shape : (matchedOps.length > 0 ? matchedOps[matchedOps.length - 1].output_shape : 'Unknown');
+  let modInpShape = 'Unknown';
+  let modOutShape = 'Unknown';
+
+  if (isRootModule) {
+    const inputNode = NODES_DATA.find(n => n.kind === 'Input' && (n.name.includes('token') || n.name.includes('input')));
+    if (inputNode) modInpShape = `${inputNode.shape} (Token IDs)`;
+    const outputNode = NODES_DATA.find(n => n.name.includes('logits') || n.name.includes('output'));
+    if (outputNode) modOutShape = `${outputNode.shape} (Logits)`;
+  }
+
+  if (modInpShape === 'Unknown') {
+    if (incEdges.length > 0) modInpShape = incEdges[0].shape;
+    else if (matchedOps.length > 0) modInpShape = matchedOps[0].input_shape;
+  }
+  if (modOutShape === 'Unknown') {
+    if (outEdges.length > 0) modOutShape = outEdges[outEdges.length - 1].shape;
+    else if (matchedOps.length > 0) modOutShape = matchedOps[matchedOps.length - 1].output_shape;
+  }
 
   if (modInpShape === 'Unknown') {
     if (key.includes('wte') || key.includes('wpe')) modInpShape = '[2, 16] (Token/Pos IDs)';
@@ -1307,7 +1330,7 @@ function openInspector(key) {
   }
   if (modOutShape === 'Unknown') {
     if (key.includes('wte') || key.includes('wpe') || key.includes('ln_1') || key.includes('attn') || key.includes('ln_2') || key.includes('mlp') || key.includes('ln_f')) modOutShape = '[2, 16, 64] (Hidden State)';
-    else if (key.includes('lm_head')) modOutShape = '[2, 16, 50257] (Logits)';
+    else if (key.includes('lm_head')) modOutShape = '[2, 16, 256] (Logits)';
   }
 
   let ioBannerHtml = `
