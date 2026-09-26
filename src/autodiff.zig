@@ -1802,6 +1802,7 @@ pub const Graph = struct {
     tensors: std.ArrayList(*Tensor),     // 追踪计算图中的所有张量指针
     ops: std.ArrayList(*Op),             // 追踪计算图中的所有算子指针
     enable_grad: bool,                   // 梯度使能开关（类似 torch.set_grad_enabled），为 false 时不分配梯度缓冲区亦不记录 Op 节点
+    module_formulas: std.StringHashMap([]const u8), // 存储模块在代码中声明的显式数学运算公式 (如 "y = x W^T + b")
 
     // 初始化计算图，传入底层通用内存分配器
     pub fn init(backing_allocator: std.mem.Allocator) Graph {
@@ -1811,7 +1812,20 @@ pub const Graph = struct {
             .tensors = .empty,
             .ops = .empty,
             .enable_grad = true,
+            .module_formulas = std.StringHashMap([]const u8).init(backing_allocator),
         };
+    }
+
+    /// 在代码中为指定模块路径设置数学公式 (如 graph.setModuleFormula("gpt.layers.0.attn", "A = softmax(QK^T / sqrt(d_k)) V"))
+    pub fn setModuleFormula(self: *Graph, module_path: []const u8, formula: []const u8) !void {
+        const mod_copy = try self.arena.allocator().dupe(u8, module_path);
+        const form_copy = try self.arena.allocator().dupe(u8, formula);
+        try self.module_formulas.put(mod_copy, form_copy);
+    }
+
+    /// 获取指定模块路径绑定的数学公式
+    pub fn getModuleFormula(self: *const Graph, module_path: []const u8) ?[]const u8 {
+        return self.module_formulas.get(module_path);
     }
 
     // 设置梯度追踪开关
@@ -1821,6 +1835,7 @@ pub const Graph = struct {
 
     // 释放整个计算图的内存（包括所有张量与算子节点的前向/反向缓冲区）
     pub fn deinit(self: *Graph) void {
+        self.module_formulas.deinit();
         self.tensors.deinit(self.backing_allocator);
         self.ops.deinit(self.backing_allocator);
         self.arena.deinit();
