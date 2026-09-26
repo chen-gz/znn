@@ -1825,24 +1825,6 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\  return root;
         \\}
         \\
-        \\function renderTableRows(nodes) {
-        \\  return nodes.map(n => {
-        \\    const kindBadge = n.kind === 'Param' ? 'badge-param' : (n.kind === 'Input' ? 'badge-input' : 'badge-act');
-        \\    const statusBadge = n.status === 'CUSTOM_INIT' ? 'badge-custom' : (n.status === 'AUTO_GRAPH' ? 'badge-auto' : 'badge-op');
-        \\    return `
-        \\      <tr class="node-row" onclick="openInspector('${n.name}')" title="Click to view inputs, parameters & outputs in standalone window" data-name="${n.name.toLowerCase()}" data-kind="${n.kind}" data-act="${n.act.toLowerCase()}" data-shape="${n.shape}">
-        \\        <td class="node-name">${n.name}</td>
-        \\        <td><span class="badge ${kindBadge}">${n.kind}</span></td>
-        \\        <td class="node-shape">${n.shape}</td>
-        \\        <td style="font-family: var(--font-mono);">${formatNumber(n.elements)}</td>
-        \\        <td><span class="badge ${statusBadge}">${n.status}</span></td>
-        \\        <td style="font-family: var(--font-mono);">${n.act}</td>
-        \\        <td class="strategy-col">${n.strategy}</td>
-        \\      </tr>
-        \\    `;
-        \\  }).join('');
-        \\}
-        \\
         \\function renderBranch(prefix, node) {
         \\  let html = '';
         \\  const childKeys = Object.keys(node._children);
@@ -1871,8 +1853,8 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\    const isAttentionLayer = prefix.endsWith('.attn') || (node._children['q_attn'] && node._children['k_attn'] && node._children['v_attn']);
         \\    const isLeafOrSpecial = !isDecoderLayer && !isAttentionLayer && (node._nodes.length > 0 || childKeys.length === 0);
         \\
-        \\    // TensorBoard node card for leaf/op modules
-        \\    if (isLeafOrSpecial) {
+        \\    // TensorBoard node card for leaf/op modules (No static table: inspect in standalone modal)
+        \\    if (isLeafOrSpecial && !isRoot) {
         \\      const opInfo = getNodeOpType(prefix);
         \\      html += `
         \\        <div class="tb-node-card" onclick="openInspector('${prefix}')" title="Click to view inputs, parameters & outputs in standalone window" style="margin-bottom: 10px;">
@@ -1891,29 +1873,25 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\      `;
         \\    }
         \\
-        \\    const tableNodes = (isDecoderLayer || isAttentionLayer)
-        \\      ? []
-        \\      : node._nodes;
-        \\
-        \\    if (tableNodes.length > 0) {
-        \\      html += `
-        \\        <table class="node-table">
-        \\          <thead>
-        \\            <tr>
-        \\              <th>Node Name</th>
-        \\              <th>Kind</th>
-        \\              <th>Shape</th>
-        \\              <th>Elements</th>
-        \\              <th>Status</th>
-        \\              <th>Inferred Act / Op</th>
-        \\              <th>Initialization Strategy</th>
-        \\            </tr>
-        \\          </thead>
-        \\          <tbody>
-        \\            ${renderTableRows(tableNodes)}
-        \\          </tbody>
-        \\        </table>
-        \\      `;
+        \\    if (isRoot && node._nodes.length > 0) {
+        \\      node._nodes.forEach(n => {
+        \\        const opInfo = getNodeOpType(n.name);
+        \\        html += `
+        \\          <div class="tb-node-card" onclick="openInspector('${n.name}')" title="Click to view inputs, parameters & outputs in standalone window" style="margin-bottom: 8px;">
+        \\            <div class="tb-node-header">
+        \\              <div class="tb-node-title">
+        \\                <span class="tb-op-icon ${opInfo.cls}">${opInfo.icon}</span>
+        \\                <span>${n.name}</span>
+        \\              </div>
+        \\              <div style="display: flex; align-items: center; gap: 8px;">
+        \\                <span class="tb-type-pill">${n.kind}</span>
+        \\                <span class="tb-shape-chip">${n.shape}</span>
+        \\                <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${n.name}')">🔍 Inspect</button>
+        \\              </div>
+        \\            </div>
+        \\          </div>
+        \\        `;
+        \\      });
         \\    }
         \\
         \\    if (isAttentionLayer) {
@@ -1987,7 +1965,7 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\
         \\      if (node._nodes.length > 0) {
         \\        html += `
-        \\          <div class="tb-node-card" onclick="openInspector('${prefix}')" title="Click to inspect attention core activations" style="border-color: #818cf8; background: rgba(99, 102, 241, 0.06); margin: 6px 0;">
+        \\          <div class="tb-node-card" onclick="openInspector('${prefix}')" title="Click to inspect attention core activations in standalone window" style="border-color: #818cf8; background: rgba(99, 102, 241, 0.06); margin: 6px 0;">
         \\            <div class="tb-node-header">
         \\              <div class="tb-node-title">
         \\                <span class="tb-op-icon attn">🎯</span>
@@ -1999,22 +1977,6 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\              </div>
         \\            </div>
         \\          </div>
-        \\          <table class="node-table" style="margin-bottom: 10px;">
-        \\            <thead>
-        \\              <tr>
-        \\                <th>Node Name</th>
-        \\                <th>Kind</th>
-        \\                <th>Shape</th>
-        \\                <th>Elements</th>
-        \\                <th>Status</th>
-        \\                <th>Inferred Act / Op</th>
-        \\                <th>Initialization Strategy</th>
-        \\              </tr>
-        \\            </thead>
-        \\            <tbody>
-        \\              ${renderTableRows(node._nodes)}
-        \\            </tbody>
-        \\          </table>
         \\        `;
         \\      }
         \\
