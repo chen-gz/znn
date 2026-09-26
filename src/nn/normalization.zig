@@ -11,6 +11,7 @@ const freePersistentTensor = core.freePersistentTensor;
 pub const RMSNorm = struct {
     weight: *Tensor,        // 可学习的缩放因子 gamma (Shape: [dim])
     eps: f32,               // 均方根分母防止除以 0 的极小常数 (epsilon)
+    name: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !RMSNorm {
         const weight = try createPersistentTensor(allocator, 1, dim, true);
@@ -24,6 +25,15 @@ pub const RMSNorm = struct {
             .weight = weight,
             .eps = eps,
         };
+    }
+
+    pub fn setName(self: *RMSNorm, name: []const u8) void {
+        self.name = name;
+        self.weight.setNameFormatted("{s}.weight", .{name});
+    }
+
+    pub fn getName(self: *const RMSNorm) ?[]const u8 {
+        return self.name;
     }
 
     pub fn deinit(self: RMSNorm, allocator: std.mem.Allocator) void {
@@ -44,6 +54,17 @@ pub const LayerNorm = struct {
     weight: *Tensor,        // 可学习的缩放因子 gamma [dim]
     bias: *Tensor,          // 可学习的平移偏置 beta [dim]
     eps: f32,
+    name: ?[]const u8 = null,
+
+    pub fn setName(self: *LayerNorm, name: []const u8) void {
+        self.name = name;
+        self.weight.setNameFormatted("{s}.weight", .{name});
+        self.bias.setNameFormatted("{s}.bias", .{name});
+    }
+
+    pub fn getName(self: *const LayerNorm) ?[]const u8 {
+        return self.name;
+    }
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !LayerNorm {
         const weight = try createPersistentTensor(allocator, 1, dim, true);
@@ -116,6 +137,7 @@ pub const BatchNorm2d = struct {
     beta: *Tensor,
     running_mean: *Tensor,
     running_var: *Tensor,
+    name: ?[]const u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, num_features: usize, eps: f32, momentum: f32) !BatchNorm2d {
         const gamma = try createPersistentTensor(allocator, 1, num_features, true);
@@ -152,6 +174,18 @@ pub const BatchNorm2d = struct {
             .running_mean = running_mean,
             .running_var = running_var,
         };
+    }
+
+    pub fn setName(self: *BatchNorm2d, name: []const u8) void {
+        self.name = name;
+        self.gamma.setNameFormatted("{s}.gamma", .{name});
+        self.beta.setNameFormatted("{s}.beta", .{name});
+        self.running_mean.setNameFormatted("{s}.running_mean", .{name});
+        self.running_var.setNameFormatted("{s}.running_var", .{name});
+    }
+
+    pub fn getName(self: *const BatchNorm2d) ?[]const u8 {
+        return self.name;
     }
 
     pub fn deinit(self: BatchNorm2d, allocator: std.mem.Allocator) void {

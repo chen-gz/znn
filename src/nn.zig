@@ -1045,13 +1045,18 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
 
-    // 1. 各层通过干净的 initClean 创建（无随机数，只分配内存）
+    // 1. 各层通过干净的 initClean 创建（无随机数，只分配内存）并设置人类可读名字
     var fc_relu = try Linear.initClean(allocator, 100, 100);
     defer fc_relu.deinit(allocator);
+    fc_relu.setName("dense_relu_1");
+
     var fc_tanh = try Linear.initClean(allocator, 100, 100);
     defer fc_tanh.deinit(allocator);
+    fc_tanh.setName("dense_tanh_2");
+
     var fc_custom = try Linear.initClean(allocator, 100, 10);
     defer fc_custom.deinit(allocator);
+    fc_custom.setName("special_head");
 
     // 2. 特殊层显式调用 customInit：指定常数偏置 3.14，并随机初始化权重
     fc_custom.customInit(random, .{
@@ -1063,18 +1068,24 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
 
     // 3. 在构造/连接期通过各类 Operation 将图自然动态串联起来
     const x = try graph.zeros(&.{ 2, 100 }, false);
+    x.setName("features_input");
+
     const z1 = try graph.addBias(try graph.matmul(x, fc_relu.weight), fc_relu.bias);
     const a1 = try graph.relu(z1); // 后续接 ReLU
+    a1.setName("relu_activation_1");
 
     const z2 = try graph.addBias(try graph.matmul(a1, fc_tanh.weight), fc_tanh.bias);
     const a2 = try graph.tanh(z2); // 后续接 Tanh
 
     var fc_out = try Linear.initClean(allocator, 10, 2);
     defer fc_out.deinit(allocator);
+    fc_out.setName("logits_out");
 
     const logits = try graph.addBias(try graph.matmul(a2, fc_custom.weight), fc_custom.bias);
+    logits.setName("custom_head_logits");
+
     const final_out = try graph.addBias(try graph.matmul(logits, fc_out.weight), fc_out.bias);
-    _ = final_out;
+    final_out.setName("network_final_out");
 
     // 4. 一键初始化全图！
     graph.initWeights(random);
@@ -1108,11 +1119,24 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
         try std.testing.expectApproxEqAbs(@as(f32, 3.14), b, 1e-5);
     }
 
-    // 6. 测试 formatInitReport 能够正常输出并展示 CUSTOM_INIT 状态
+    // 6. 测试 formatInitReport 能够正常输出自定义名称、非参数节点 (Input, Activation) 和各种初始化状态
     const report_str = try graph.formatInitReport(allocator);
     defer allocator.free(report_str);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "dense_relu_1.weight") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "dense_relu_1.bias") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "dense_tanh_2.weight") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "special_head.weight") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "logits_out.weight") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "features_input") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "relu_activation_1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "custom_head_logits") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "network_final_out") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "Input") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "Activation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "Param") != null);
     try std.testing.expect(std.mem.indexOf(u8, report_str, "CUSTOM_INIT") != null);
     try std.testing.expect(std.mem.indexOf(u8, report_str, "AUTO_GRAPH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "OP_OUTPUT") != null);
     try std.testing.expect(std.mem.indexOf(u8, report_str, "ReLU") != null);
     try std.testing.expect(std.mem.indexOf(u8, report_str, "Tanh") != null);
     try std.testing.expect(std.mem.indexOf(u8, report_str, "Linear (None)") != null);
