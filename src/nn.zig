@@ -23,6 +23,8 @@ pub const serialization = @import("nn/serialization.zig");
 
 // 1. 核心与容器 (Core & Containers)
 pub const init_mod = core.init_mod;
+pub const Nonlinearity = core.Nonlinearity;
+pub const calculateGain = core.calculateGain;
 pub const InitMethod = core.InitMethod;
 pub const InitOptions = core.InitOptions;
 pub const normalRandom = core.normalRandom;
@@ -38,6 +40,8 @@ pub const deinitModel = core.deinitModel;
 pub const collectParameters = core.collectParameters;
 pub const Sequential = core.Sequential;
 pub const sequential = core.sequential;
+pub const autoSequential = core.autoSequential;
+pub const detectNextActivation = core.detectNextActivation;
 
 // 2. 激活函数 (Activations)
 pub const ReLU = activations.ReLU;
@@ -945,14 +949,14 @@ test "Weight initialization methods and Linear initWithOptions" {
         }
     }.run;
 
-    // 4. He Normal: Var = 2 / fan_in = 2 / 100 = 0.02
-    initWeights(random, buf, 100, 100, .he_normal);
+    // 4. He Normal: Var = gain^2 / fan_in = 2 / 100 = 0.02
+    initWeights(random, buf, 100, 100, .{ .he_normal = .{} });
     const he_stats = calcStats(buf);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), he_stats.mean, 0.015);
     try std.testing.expectApproxEqAbs(@as(f32, 0.02), he_stats.variance, 0.003);
 
-    // 5. Xavier Normal: Var = 2 / (fan_in + fan_out) = 2 / 200 = 0.01
-    initWeights(random, buf, 100, 100, .xavier_normal);
+    // 5. Xavier Normal: Var = gain^2 * 2 / (fan_in + fan_out) = 2 / 200 = 0.01
+    initWeights(random, buf, 100, 100, .{ .xavier_normal = .{} });
     const xavier_stats = calcStats(buf);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), xavier_stats.mean, 0.015);
     try std.testing.expectApproxEqAbs(@as(f32, 0.01), xavier_stats.variance, 0.002);
@@ -963,17 +967,72 @@ test "Weight initialization methods and Linear initWithOptions" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), lecun_stats.mean, 0.015);
     try std.testing.expectApproxEqAbs(@as(f32, 0.01), lecun_stats.variance, 0.002);
 
-    // 7. Linear with initWithOptions
-    var lin = try Linear.initWithOptions(allocator, 64, 32, random, .{
-        .weight_init = .xavier_uniform,
+    // 7. Linear with initWithOptions specifying nonlinearity
+    var lin_tanh = try Linear.initWithOptions(allocator, 100, 100, random, .{
+        .nonlinearity = .tanh, // Gain = 5/3 ~ 1.6667 -> Xavier Normal with Gain
         .bias_init = .{ .constant = 0.5 },
     });
-    defer lin.deinit(allocator);
+    defer lin_tanh.deinit(allocator);
 
-    try std.testing.expectEqual(@as(usize, 64 * 32), lin.weight.data.len);
-    for (lin.bias.data) |b| {
+    const tanh_stats = calcStats(lin_tanh.weight.data);
+    // Var = gain^2 * 2 / (100 + 100) = (25 / 9) * 2 / 200 = 25 / 900 ~ 0.02778
+    try std.testing.expectApproxEqAbs(@as(f32, 0.02778), tanh_stats.variance, 0.005);
+    for (lin_tanh.bias.data) |b| {
         try std.testing.expectApproxEqAbs(@as(f32, 0.5), b, 1e-5);
     }
 }
+
+test "Sequential autoInit and detectNextActivation" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(1234);
+    const random = prng.random();
+
+    // 自动检测网络：
+    // fc1 -> ReLU (自动探测为 .relu -> He Normal, gain=sqrt(2))
+    // fc2 -> Tanh (自动探测为 .tanh -> Xavier Normal, gain=5/3)
+    // fc3 -> 无激活函数 (自动探测为 .linear, gain=1.0)
+    var model = autoSequential(.{
+        try Linear.initUninitialized(allocator, 100, 100),
+        ReLU{},
+        try Linear.initUninitialized(allocator, 100, 100),
+        Tanh{},
+        try Linear.initUninitialized(allocator, 100, 10),
+    }, random);
+    defer model.deinit(allocator);
+
+    const calcVar = struct {
+        fn run(slice: []const f32) f32 {
+            var sum: f64 = 0.0;
+            for (slice) |v| sum += v;
+            const mean = sum / @as(f64, @floatFromInt(slice.len));
+            var var_sum: f64 = 0.0;
+            for (slice) |v| {
+                const diff = @as(f64, v) - mean;
+                var_sum += diff * diff;
+            }
+            return @floatCast(var_sum / @as(f64, @floatFromInt(slice.len)));
+        }
+    }.run;
+
+    // 1. 验证编译期类型推导
+    const TupleT = @TypeOf(model.layers);
+    try std.testing.expectEqual(Nonlinearity.relu, detectNextActivation(TupleT, 0));
+    try std.testing.expectEqual(Nonlinearity.tanh, detectNextActivation(TupleT, 2));
+    try std.testing.expectEqual(Nonlinearity.linear, detectNextActivation(TupleT, 4));
+
+    // 2. 统计方差验证
+    // fc1 (ReLU): Var = 2 / 100 = 0.02
+    const var_fc1 = calcVar(model.layers.@"0".weight.data);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.02), var_fc1, 0.003);
+
+    // fc2 (Tanh): Var = (5/3)^2 * 2 / 200 = 25 / 900 ~ 0.02778
+    const var_fc2 = calcVar(model.layers.@"2".weight.data);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.02778), var_fc2, 0.004);
+
+    // fc3 (Linear/Logits): Var = 1.0^2 / 100 = 0.01 (无放大！)
+    const var_fc3 = calcVar(model.layers.@"4".weight.data);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.01), var_fc3, 0.003);
+}
+
 
 
