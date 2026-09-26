@@ -967,12 +967,13 @@ test "Weight initialization methods and Linear initWithOptions" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), lecun_stats.mean, 0.015);
     try std.testing.expectApproxEqAbs(@as(f32, 0.01), lecun_stats.variance, 0.002);
 
-    // 7. Linear with initWithOptions specifying nonlinearity
-    var lin_tanh = try Linear.initWithOptions(allocator, 100, 100, random, .{
+    // 7. Linear with customInit specifying nonlinearity
+    var lin_tanh = try Linear.initClean(allocator, 100, 100);
+    defer lin_tanh.deinit(allocator);
+    lin_tanh.customInit(random, .{
         .nonlinearity = .tanh, // Gain = 5/3 ~ 1.6667 -> Xavier Normal with Gain
         .bias_init = .{ .constant = 0.5 },
     });
-    defer lin_tanh.deinit(allocator);
 
     const tanh_stats = calcStats(lin_tanh.weight.data);
     // Var = gain^2 * 2 / (100 + 100) = (25 / 9) * 2 / 200 = 25 / 900 ~ 0.02778
@@ -980,6 +981,8 @@ test "Weight initialization methods and Linear initWithOptions" {
     for (lin_tanh.bias.data) |b| {
         try std.testing.expectApproxEqAbs(@as(f32, 0.5), b, 1e-5);
     }
+    try std.testing.expect(lin_tanh.weight.is_custom_initialized);
+    try std.testing.expect(lin_tanh.bias.is_custom_initialized);
 }
 
 test "Sequential autoInit and detectNextActivation" {
@@ -1033,6 +1036,75 @@ test "Sequential autoInit and detectNextActivation" {
     const var_fc3 = calcVar(model.layers.@"4".weight.data);
     try std.testing.expectApproxEqAbs(@as(f32, 0.01), var_fc3, 0.003);
 }
+
+test "Graph.initWeights dynamically infers activations and respects customInit" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(999);
+    const random = prng.random();
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    // 1. 各层通过干净的 initClean 创建（无随机数，只分配内存）
+    var fc_relu = try Linear.initClean(allocator, 100, 100);
+    defer fc_relu.deinit(allocator);
+    var fc_tanh = try Linear.initClean(allocator, 100, 100);
+    defer fc_tanh.deinit(allocator);
+    var fc_custom = try Linear.initClean(allocator, 100, 10);
+    defer fc_custom.deinit(allocator);
+
+    // 2. 特殊层显式调用 customInit：指定常数偏置 3.14，并随机初始化权重
+    fc_custom.customInit(random, .{
+        .nonlinearity = .linear,
+        .bias_init = .{ .constant = 3.14 },
+    });
+    // 记录 custom 权重切片的一个样本以验证后续不被 Graph 篡改重写
+    const custom_weight_sample = fc_custom.weight.data[0];
+
+    // 3. 在构造/连接期通过各类 Operation 将图自然动态串联起来
+    const x = try graph.zeros(&.{ 2, 100 }, false);
+    const z1 = try graph.addBias(try graph.matmul(x, fc_relu.weight), fc_relu.bias);
+    const a1 = try graph.relu(z1); // 后续接 ReLU
+
+    const z2 = try graph.addBias(try graph.matmul(a1, fc_tanh.weight), fc_tanh.bias);
+    const a2 = try graph.tanh(z2); // 后续接 Tanh
+
+    const logits = try graph.addBias(try graph.matmul(a2, fc_custom.weight), fc_custom.bias);
+    _ = logits;
+
+    // 4. 一键初始化全图！
+    graph.initWeights(random);
+
+    const calcVar = struct {
+        fn run(slice: []const f32) f32 {
+            var sum: f64 = 0.0;
+            for (slice) |v| sum += v;
+            const mean = sum / @as(f64, @floatFromInt(slice.len));
+            var var_sum: f64 = 0.0;
+            for (slice) |v| {
+                const diff = @as(f64, v) - mean;
+                var_sum += diff * diff;
+            }
+            return @floatCast(var_sum / @as(f64, @floatFromInt(slice.len)));
+        }
+    }.run;
+
+    // 5. 校验：
+    // fc_relu 后面探查到 ReLU -> 自动赋 He Normal (Var = 2 / 100 = 0.02)
+    const var_relu = calcVar(fc_relu.weight.data);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.02), var_relu, 0.003);
+
+    // fc_tanh 后面探查到 Tanh -> 自动赋 Xavier Normal (Var = (5/3)^2 * 2 / 200 ~ 0.02778)
+    const var_tanh = calcVar(fc_tanh.weight.data);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.02778), var_tanh, 0.004);
+
+    // fc_custom 已经过 customInit -> 绝对不会被 Graph 重写覆盖！
+    try std.testing.expectEqual(custom_weight_sample, fc_custom.weight.data[0]);
+    for (fc_custom.bias.data) |b| {
+        try std.testing.expectApproxEqAbs(@as(f32, 3.14), b, 1e-5);
+    }
+}
+
 
 
 

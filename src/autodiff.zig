@@ -1826,6 +1826,11 @@ pub const Graph = struct {
         self.arena.deinit();
     }
 
+    // 在计算图中注册外部持久化参数张量节点 (如 Linear / Conv2D 的权重与偏置)
+    pub fn registerParameter(self: *Graph, t: *Tensor) !void {
+        try self.tensors.append(self.backing_allocator, t);
+    }
+
     // 在计算图中创建并注册一个新的张量节点
     pub fn tensor(self: *Graph, rows: usize, cols: usize, requires_grad: bool) !*Tensor {
         return self.tensorND(&.{rows, cols}, requires_grad);
@@ -3284,6 +3289,114 @@ pub const Graph = struct {
         for (self.tensors.items) |t| {
             t.zeroGrad();
         }
+    }
+
+    /// 在图建立完毕后，智能探查参数节点的下游消费者算子并自动初始化权重
+    pub fn initWeights(self: *Graph, random: std.Random) void {
+        const init_mod = @import("nn/init.zig");
+
+        // 搜集图内所有 Ops 的输入参数节点与 registered tensors
+        const allocator = self.arena.allocator();
+        var visited = std.AutoHashMap(*Tensor, void).init(allocator);
+        defer visited.deinit();
+
+        // 1. 扫描图中的 Ops 所有输入
+        for (self.ops.items) |op| {
+            for (op.inputs) |t| {
+                if (visited.contains(t)) continue;
+                visited.put(t, {}) catch continue;
+                self.initSingleTensor(t, random, init_mod);
+            }
+        }
+
+        // 2. 扫描显式注册的 tensors
+        for (self.tensors.items) |t| {
+            if (visited.contains(t)) continue;
+            visited.put(t, {}) catch continue;
+            self.initSingleTensor(t, random, init_mod);
+        }
+    }
+
+    fn initSingleTensor(self: *Graph, t: *Tensor, random: std.Random, comptime init_mod: type) void {
+        // 只对属于可训练参数（requires_grad=true 且非中间激活运算生成）的节点进行初始化
+        // 如果已经被层的 customInit 初始化过，则坚决跳过，绝不覆盖！
+        if (!t.requires_grad or t.is_custom_initialized or t.creator != null) return;
+
+        // 1. 如果是 1D 偏置向量 (Shape 类似 [out_features] 或 [1, out_features] 且为加法偏置)
+        if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
+            // 默认置零偏置
+            @memset(t.data, 0.0);
+            return;
+        }
+
+        // 2. 如果是高维权重矩阵 (Linear, Conv2D, ConvTranspose2D 等)
+        // 沿计算图中的 Ops 向后探测第一个下游消费算子 (Consumer Op)
+        const nonlinearity = self.detectConsumerActivation(t);
+        const gain = init_mod.calculateGain(nonlinearity);
+
+        var fan_in: usize = 1;
+        var fan_out: usize = 1;
+        if (t.shape.len == 2) {
+            fan_in = t.shape.dims[0];
+            fan_out = t.shape.dims[1];
+        } else if (t.shape.len == 4) {
+            // Conv2D: [out_channels, in_channels, kh, kw]
+            const out_c = t.shape.dims[0];
+            const in_c = t.shape.dims[1];
+            const kh = t.shape.dims[2];
+            const kw = t.shape.dims[3];
+            fan_in = in_c * kh * kw;
+            fan_out = out_c * kh * kw;
+        } else {
+            for (t.shape.dims[0 .. t.shape.len - 1]) |d| fan_in *= d;
+            fan_out = t.shape.dims[t.shape.len - 1];
+        }
+
+        const method: init_mod.InitMethod = switch (nonlinearity) {
+            .tanh, .sigmoid => .{ .xavier_normal = .{ .gain = gain } },
+            .selu => .lecun_normal,
+            else => .{ .he_normal = .{ .gain = gain } },
+        };
+
+        init_mod.initWeights(random, t.data, fan_in, fan_out, method);
+    }
+
+    /// 顺着张量 t 往后在图的 Ops 列表中探查下游消费者的激活函数类型
+    pub fn detectConsumerActivation(self: *Graph, target: *Tensor) @import("nn/init.zig").Nonlinearity {
+        var current: *Tensor = target;
+
+        // BFS / DFS 往后搜寻直到遇到激活函数或多层终点
+        while (true) {
+            var found_consumer = false;
+            for (self.ops.items) |op| {
+                for (op.inputs) |inp| {
+                    if (inp == current) {
+                        found_consumer = true;
+                        switch (op.op_type) {
+                            .Relu => return .relu,
+                            .Tanh => return .tanh,
+                            .Sigmoid => return .sigmoid,
+                            .Gelu => return .gelu,
+                            .Silu => return .silu,
+                            .LeakyRelu => return .{ .leaky_relu = op.context.LeakyRelu.alpha },
+                            // 如果经过了 MatMul/AddBias/Add 等中间运算，顺着它的 output 继续往后看
+                            .MatMul, .BatchMatMul, .AddBias, .Add, .Reshape, .Transpose => {
+                                if (op.outputs.len > 0) {
+                                    current = op.outputs[0];
+                                    break;
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+                }
+                if (found_consumer and current != target) break;
+            }
+            if (!found_consumer or current == target) break;
+        }
+
+        // 如果下游没有接激活函数或直接进入输出/损失层，判定为 linear (gain=1.0)
+        return .linear;
     }
 };
 
