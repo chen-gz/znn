@@ -80,7 +80,9 @@ pub fn main() !void {
     // 4. 导出交互式、树形可折叠的 HTML 架构报告
     const output_path = "examples/gpt_model_report.html";
     std.debug.print("[Step 3/4] Exporting Interactive HTML Report...\n", .{});
-    try graph.exportHtmlReport(output_path);
+    const json_data = try graph.formatJson(allocator);
+    defer allocator.free(json_data);
+    try nn.html_report.exportFromJson(json_data, output_path, allocator);
 
     std.debug.print("[Step 4/4] Done! Report written to: {s}\n\n", .{output_path});
     std.debug.print("-----------------------------------------------------------------\n", .{});
