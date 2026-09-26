@@ -1232,13 +1232,15 @@
 
     "gpt.layers.0.ln_2": "y = \\text{RMSNorm}(x_1; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
 
-    "gpt.layers.ln_f": "y = \\text{RMSNorm}(x_{\\text{last}}; \\gamma \\in \\mathbb{R}^{64}) \\rightarrow [2, 16, 64]",
+    "gpt.layers.0.attn.c_proj": "y = (\\text{HeadsConcat}) \\cdot W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]",
 
     "gpt.lm_head": "\\text{logits} = x_{\\text{norm}} \\cdot W_{head}^T \\quad ([2, 16, 64] \\times [256, 64]^T \\rightarrow [2, 16, 256])",
 
-    "gpt.layers.0.attn.c_proj": "y = (\\text{HeadsConcat}) \\cdot W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]",
+    "gpt.layers.ln_f": "y = \\text{RMSNorm}(x_{\\text{last}}; \\gamma \\in \\mathbb{R}^{64}) \\rightarrow [2, 16, 64]",
 
     "gpt": "\\text{logits} = \\text{GPT}(\\text{tokens}; \\theta) \\rightarrow [2, 16, 256]",
+
+    "gpt.layers.0.attn.core": "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\rightarrow [2, 4, 16, 16] \\xrightarrow{\\text{MergeHeads}} [2, 16, 64]",
 
     "gpt.wpe": "y = \\text{PosEmbedding}(\\text{pos}; W_p \\in \\mathbb{R}^{32 \\times 64}) \\rightarrow [2, 16, 64]",
 
@@ -1314,14 +1316,14 @@ function getNodeOpType(name) {
 
 function getEffectiveFormula(key) {
   if (FORMULAS_DATA[key]) return { formula: FORMULAS_DATA[key], source: 'CODE_SPECIFIED' };
-  // Only allow prefix match if key is a sub-path of a specified parent (e.g. key is 'gpt.wte.sub' and parent is 'gpt.wte')
-  // NEVER allow key to match a child (e.g. 'gpt' matching 'gpt.layers.ln_f')
-  for (const k in FORMULAS_DATA) {
-    if (key.startsWith(k + '.')) return { formula: FORMULAS_DATA[k], source: 'CODE_SPECIFIED' };
-  }
   const k = key.toLowerCase();
   if (k.endsWith('.core') || k.includes('dot_product') || k.includes('attention_core')) {
-    return { formula: '\\\\text{Attention}(Q, K, V) = \\\\text{softmax}\\\\left(\\\\frac{Q K^T}{\\\\sqrt{d_k}} + M\\\\right) V \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+    return { formula: '\\\\text{AttentionCore}(Q, K, V) = \\\\text{softmax}\\\\left(\\\\frac{Q K^T}{\\\\sqrt{d_k}} + M\\\\right) V \\\\longrightarrow [B, nh, T, d_v] \\\\xrightarrow{\\\\text{MergeHeads}} [B, T, D]', source: 'INFERRED' };
+  }
+  // Only allow prefix match if key is a sub-path of a specified parent (e.g. key is 'gpt.wte.sub' and parent is 'gpt.wte')
+  // NEVER allow key to match a child (e.g. 'gpt' matching 'gpt.layers.ln_f')
+  for (const parentKey in FORMULAS_DATA) {
+    if (key.startsWith(parentKey + '.')) return { formula: FORMULAS_DATA[parentKey], source: 'CODE_SPECIFIED' };
   }
   if (k === 'gpt' || k === 'model' || k === 'network' || k === 'transformer') {
     return { formula: '\\\\text{logits} = \\\\text{GPT}(\\\\text{TokenIDs}; \\\\theta) \\\\rightarrow [B, T, V]', source: 'INFERRED' };

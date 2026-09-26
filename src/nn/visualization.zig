@@ -2189,14 +2189,14 @@ pub const html_report = struct {
         \\
         \\function getEffectiveFormula(key) {
         \\  if (FORMULAS_DATA[key]) return { formula: FORMULAS_DATA[key], source: 'CODE_SPECIFIED' };
-        \\  // Only allow prefix match if key is a sub-path of a specified parent (e.g. key is 'gpt.wte.sub' and parent is 'gpt.wte')
-        \\  // NEVER allow key to match a child (e.g. 'gpt' matching 'gpt.layers.ln_f')
-        \\  for (const k in FORMULAS_DATA) {
-        \\    if (key.startsWith(k + '.')) return { formula: FORMULAS_DATA[k], source: 'CODE_SPECIFIED' };
-        \\  }
         \\  const k = key.toLowerCase();
         \\  if (k.endsWith('.core') || k.includes('dot_product') || k.includes('attention_core')) {
-        \\    return { formula: '\\\\text{Attention}(Q, K, V) = \\\\text{softmax}\\\\left(\\\\frac{Q K^T}{\\\\sqrt{d_k}} + M\\\\right) V \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+        \\    return { formula: '\\\\text{AttentionCore}(Q, K, V) = \\\\text{softmax}\\\\left(\\\\frac{Q K^T}{\\\\sqrt{d_k}} + M\\\\right) V \\\\longrightarrow [B, nh, T, d_v] \\\\xrightarrow{\\\\text{MergeHeads}} [B, T, D]', source: 'INFERRED' };
+        \\  }
+        \\  // Only allow prefix match if key is a sub-path of a specified parent (e.g. key is 'gpt.wte.sub' and parent is 'gpt.wte')
+        \\  // NEVER allow key to match a child (e.g. 'gpt' matching 'gpt.layers.ln_f')
+        \\  for (const parentKey in FORMULAS_DATA) {
+        \\    if (key.startsWith(parentKey + '.')) return { formula: FORMULAS_DATA[parentKey], source: 'CODE_SPECIFIED' };
         \\  }
         \\  if (k === 'gpt' || k === 'model' || k === 'network' || k === 'transformer') {
         \\    return { formula: '\\\\text{logits} = \\\\text{GPT}(\\\\text{TokenIDs}; \\\\theta) \\\\rightarrow [B, T, V]', source: 'INFERRED' };

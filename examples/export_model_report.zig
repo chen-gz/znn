@@ -67,6 +67,7 @@ pub fn main() !void {
     try graph.setModuleFormula("gpt.layers.0.attn.q_attn", "Q = x_{2D} W_q^T + b_q \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])");
     try graph.setModuleFormula("gpt.layers.0.attn.k_attn", "K = x_{2D} W_k^T + b_k \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])");
     try graph.setModuleFormula("gpt.layers.0.attn.v_attn", "V = x_{2D} W_v^T + b_v \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])");
+    try graph.setModuleFormula("gpt.layers.0.attn.core", "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\rightarrow [2, 4, 16, 16] \\xrightarrow{\\text{MergeHeads}} [2, 16, 64]");
     try graph.setModuleFormula("gpt.layers.0.attn.c_proj", "y = (\\text{HeadsConcat}) \\cdot W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]");
     try graph.setModuleFormula("gpt.layers.0.ln_2", "y = \\text{RMSNorm}(x_1; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]");
     try graph.setModuleFormula("gpt.layers.0.mlp", "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]");
