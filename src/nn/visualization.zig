@@ -331,28 +331,35 @@ fn getLogicalModule(name: []const u8) []const u8 {
     if (std.mem.startsWith(u8, name, "outputs.")) return name;
 
     if (std.mem.indexOf(u8, name, ".attn.")) |idx| {
-        return name[0 .. idx + 5];
+        return name[0 .. idx + 5]; // e.g. "gpt.layers.0.attn"
     }
     if (std.mem.indexOf(u8, name, ".mlp.")) |idx| {
-        return name[0 .. idx + 4];
+        return name[0 .. idx + 4]; // e.g. "gpt.layers.0.mlp"
     }
     if (std.mem.indexOf(u8, name, ".ln_1.")) |idx| {
-        return name[0 .. idx + 5];
+        return name[0 .. idx + 5]; // e.g. "gpt.layers.0.ln_1"
     }
     if (std.mem.indexOf(u8, name, ".ln_2.")) |idx| {
-        return name[0 .. idx + 5];
+        return name[0 .. idx + 5]; // e.g. "gpt.layers.0.ln_2"
     }
     if (std.mem.indexOf(u8, name, ".ln_f.")) |idx| {
-        return name[0 .. idx + 5];
+        return name[0 .. idx + 5]; // e.g. "gpt.layers.ln_f"
     }
     if (std.mem.indexOf(u8, name, ".wte.")) |idx| {
-        return name[0 .. idx + 4];
+        return name[0 .. idx + 4]; // e.g. "gpt.wte"
     }
     if (std.mem.indexOf(u8, name, ".wpe.")) |idx| {
-        return name[0 .. idx + 4];
+        return name[0 .. idx + 4]; // e.g. "gpt.wpe"
     }
     if (std.mem.indexOf(u8, name, ".lm_head.")) |idx| {
-        return name[0 .. idx + 8];
+        return name[0 .. idx + 8]; // e.g. "gpt.lm_head"
+    }
+
+    if (std.mem.endsWith(u8, name, ".wte") or
+        std.mem.endsWith(u8, name, ".wpe") or
+        std.mem.endsWith(u8, name, ".lm_head"))
+    {
+        return name;
     }
 
     if (extractModuleScope(name)) |p| return p;
