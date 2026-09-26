@@ -51,6 +51,7 @@ pub fn freePersistentTensor(allocator: std.mem.Allocator, t: *Tensor) void {
 pub const Linear = struct {
     weight: *Tensor,
     bias: *Tensor,
+    name: ?[]const u8 = null,
 
     /// 构造线性层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize, random_opt: anytype) !Linear {
@@ -99,6 +100,18 @@ pub const Linear = struct {
         self.customInit(random, options);
     }
 
+    /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "fc1"，自动设置 "fc1.weight" 与 "fc1.bias")
+    pub fn setName(self: *Linear, name: []const u8) void {
+        self.name = name;
+        self.weight.setNameFormatted("{s}.weight", .{name});
+        self.bias.setNameFormatted("{s}.bias", .{name});
+    }
+
+    /// 获取层的人类可读名称
+    pub fn getName(self: *const Linear) ?[]const u8 {
+        return self.name;
+    }
+
     pub fn deinit(self: Linear, allocator: std.mem.Allocator) void {
         freePersistentTensor(allocator, self.weight);
         freePersistentTensor(allocator, self.bias);
@@ -122,6 +135,7 @@ pub const Linear = struct {
 pub const Conv2D = struct {
     weight: *Tensor,
     bias: *Tensor,
+    name: ?[]const u8 = null,
 
     /// 构造卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random_opt: anytype) !Conv2D {
@@ -178,6 +192,18 @@ pub const Conv2D = struct {
         self.customInit(random, options);
     }
 
+    /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "conv1"，自动设置 "conv1.weight" 与 "conv1.bias")
+    pub fn setName(self: *Conv2D, name: []const u8) void {
+        self.name = name;
+        self.weight.setNameFormatted("{s}.weight", .{name});
+        self.bias.setNameFormatted("{s}.bias", .{name});
+    }
+
+    /// 获取层的人类可读名称
+    pub fn getName(self: *const Conv2D) ?[]const u8 {
+        return self.name;
+    }
+
     pub fn deinit(self: Conv2D, allocator: std.mem.Allocator) void {
         freePersistentTensor(allocator, self.weight);
         freePersistentTensor(allocator, self.bias);
@@ -204,6 +230,7 @@ pub const ConvTranspose2D = struct {
     padding: usize,
     weight: *Tensor,
     bias: ?*Tensor,
+    name: ?[]const u8 = null,
 
     /// 构造反卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(
@@ -291,6 +318,18 @@ pub const ConvTranspose2D = struct {
 
     pub fn reinit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
         self.customInit(random, options);
+    }
+
+    /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "deconv1"，自动设置 "deconv1.weight" 与 "deconv1.bias")
+    pub fn setName(self: *ConvTranspose2D, name: []const u8) void {
+        self.name = name;
+        self.weight.setNameFormatted("{s}.weight", .{name});
+        if (self.bias) |b| b.setNameFormatted("{s}.bias", .{name});
+    }
+
+    /// 获取层的人类可读名称
+    pub fn getName(self: *const ConvTranspose2D) ?[]const u8 {
+        return self.name;
     }
 
     pub fn deinit(self: ConvTranspose2D, allocator: std.mem.Allocator) void {

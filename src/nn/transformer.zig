@@ -25,6 +25,7 @@ const InitMethod = core.InitMethod;
 /// 权重形状：[vocab_size, embedding_dim]
 pub const Embedding = struct {
     weight: *Tensor,        // 嵌入层权重矩阵表 (Shape: [vocab_size, embedding_dim])
+    name: ?[]const u8 = null,
 
     /// 嵌入层初始化选项
     pub const Options = struct {
@@ -65,6 +66,17 @@ pub const Embedding = struct {
         const embedding_dim = self.weight.shape.dims[1];
         initWeights(random, self.weight.data, vocab_size, embedding_dim, options.init_method);
         self.weight.is_custom_initialized = true;
+    }
+
+    /// 为嵌入层及权重张量设置人类可读的名称 (如传入 "wte"，自动设置 "wte.weight")
+    pub fn setName(self: *Embedding, name: []const u8) void {
+        self.name = name;
+        self.weight.setNameFormatted("{s}.weight", .{name});
+    }
+
+    /// 获取嵌入层的人类可读名称
+    pub fn getName(self: *const Embedding) ?[]const u8 {
+        return self.name;
     }
 
     /// 释放层内所有关联的 Tensor 内存资源

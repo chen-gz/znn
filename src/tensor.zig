@@ -501,6 +501,27 @@ pub const Tensor = struct {
     creator: ?*Op,        // 产生此张量的算子节点（前向图中的父节点，用于追踪计算路径）
     is_view: bool = false, // 是否为零拷贝视图切片（若为 true，deinit 时不释放 data/grad）
     is_custom_initialized: bool = false, // 是否已被层专属自定义初始化 (避免被 Graph 自动初始化重写)
+    name: ?[]const u8 = null, // 可选张量调试名称 (如 "fc1.weight", "conv1.bias")
+    name_buf: [64]u8 = undefined,
+
+    /// 设置张量的人类可读名称 (用于 Graph.printInitReport 等调试报告)
+    pub fn setName(self: *Tensor, name: []const u8) void {
+        self.name = name;
+    }
+
+    /// 使用格式化模板设置张量的人类可读名称
+    pub fn setNameFormatted(self: *Tensor, comptime fmt: []const u8, args: anytype) void {
+        if (std.fmt.bufPrint(&self.name_buf, fmt, args)) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = "truncated_name";
+        }
+    }
+
+    /// 获取张量的人类可读名称
+    pub fn getName(self: *const Tensor) ?[]const u8 {
+        return self.name;
+    }
 
 
 

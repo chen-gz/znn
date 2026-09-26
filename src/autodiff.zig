@@ -3361,37 +3361,47 @@ pub const Graph = struct {
         init_mod.initWeights(random, t.data, fan_in, fan_out, method);
     }
 
-    /// 格式化全图各层参数的初始化详情报告为分配的字符串，清晰展示每层使用的策略、增益以及是否使用了 customInit
+    /// 格式化全图各节点（包括输入数据、模型参数及中间算子输出）的详情与初始化报告为分配的字符串
     pub fn formatInitReport(self: *Graph, allocator: std.mem.Allocator) ![]const u8 {
         const init_mod = @import("nn/init.zig");
         var buf: std.ArrayList(u8) = .empty;
         errdefer buf.deinit(allocator);
 
-        try buf.appendSlice(allocator, "\n=== Graph Parameter Initialization Report ===\n");
-        try buf.print(allocator, "{s:<20} {s:<18} {s:<12} {s:<15} {s:<26}\n", .{ "Node", "Shape", "Status", "Inferred Act", "Strategy / Parameters" });
-        try buf.print(allocator, "{s:-<20} {s:-<18} {s:-<12} {s:-<15} {s:-<26}\n", .{ "", "", "", "", "" });
+        try buf.appendSlice(allocator, "\n=== Graph Architecture & Initialization Report ===\n");
+        try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
+            "Node", "Kind", "Shape", "Status", "Inferred / Op", "Strategy / Details",
+        });
+        try buf.print(allocator, "{s:-<24} {s:-<12} {s:-<18} {s:-<14} {s:-<16} {s:-<28}\n", .{
+            "", "", "", "", "", "",
+        });
 
         const arena_alloc = self.arena.allocator();
         var visited = std.AutoHashMap(*Tensor, void).init(arena_alloc);
         defer visited.deinit();
 
-        var idx: usize = 0;
+        var param_idx: usize = 0;
+        var input_idx: usize = 0;
+        var op_idx: usize = 0;
+
         for (self.ops.items) |op| {
             for (op.inputs) |t| {
                 if (visited.contains(t)) continue;
                 visited.put(t, {}) catch continue;
-                try appendSingleTensorReport(self, t, idx, &buf, allocator, init_mod);
-                idx += 1;
+                try self.appendSingleTensorReport(t, &param_idx, &input_idx, &op_idx, &buf, allocator, init_mod);
+            }
+            for (op.outputs) |t| {
+                if (visited.contains(t)) continue;
+                visited.put(t, {}) catch continue;
+                try self.appendSingleTensorReport(t, &param_idx, &input_idx, &op_idx, &buf, allocator, init_mod);
             }
         }
 
         for (self.tensors.items) |t| {
             if (visited.contains(t)) continue;
             visited.put(t, {}) catch continue;
-            try appendSingleTensorReport(self, t, idx, &buf, allocator, init_mod);
-            idx += 1;
+            try self.appendSingleTensorReport(t, &param_idx, &input_idx, &op_idx, &buf, allocator, init_mod);
         }
-        try buf.appendSlice(allocator, "=============================================\n\n");
+        try buf.appendSlice(allocator, "=========================================================================================================\n\n");
         return buf.toOwnedSlice(allocator);
     }
 
@@ -3402,12 +3412,16 @@ pub const Graph = struct {
         std.debug.print("{s}", .{report});
     }
 
-    fn appendSingleTensorReport(self: *Graph, t: *Tensor, idx: usize, buf: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime init_mod: type) !void {
-        if (!t.requires_grad or t.creator != null) return;
-
-        var name_buf: [32]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "Param_{d}", .{idx}) catch "Param";
-
+    fn appendSingleTensorReport(
+        self: *Graph,
+        t: *Tensor,
+        param_idx: *usize,
+        input_idx: *usize,
+        op_idx: *usize,
+        buf: *std.ArrayList(u8),
+        allocator: std.mem.Allocator,
+        comptime init_mod: type,
+    ) !void {
         var shape_buf: [64]u8 = undefined;
         var shape_len: usize = 0;
         shape_buf[0] = '[';
@@ -3425,16 +3439,49 @@ pub const Graph = struct {
         shape_len += 1;
         const shape_str = shape_buf[0..shape_len];
 
+        // 1. 算子生成的中间计算节点 / 激活输出
+        if (t.creator) |creator_op| {
+            var name_buf: [48]u8 = undefined;
+            const op_name = @tagName(creator_op.op_type);
+            const name: []const u8 = if (t.name) |n| n else (std.fmt.bufPrint(&name_buf, "Node_{s}_{d}", .{ op_name, op_idx.* }) catch "Node_Op");
+            op_idx.* += 1;
+
+            var detail_buf: [64]u8 = undefined;
+            const detail = std.fmt.bufPrint(&detail_buf, "produced by {s}", .{op_name}) catch "op output";
+
+            try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
+                name, "Activation", shape_str, "OP_OUTPUT", op_name, detail,
+            });
+            return;
+        }
+
+        // 2. 外部输入或常量张量 (非可学习参数)
+        if (!t.requires_grad) {
+            var name_buf: [48]u8 = undefined;
+            const name: []const u8 = if (t.name) |n| n else (std.fmt.bufPrint(&name_buf, "Input_{d}", .{input_idx.*}) catch "Input");
+            input_idx.* += 1;
+
+            try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
+                name, "Input", shape_str, "INPUT", "N/A", "user input / constant",
+            });
+            return;
+        }
+
+        // 3. 模型可学习参数节点
+        var name_buf: [48]u8 = undefined;
+        const name: []const u8 = if (t.name) |n| n else (std.fmt.bufPrint(&name_buf, "Param_{d}", .{param_idx.*}) catch "Param");
+        param_idx.* += 1;
+
         if (t.is_custom_initialized) {
-            try buf.print(allocator, "{s:<20} {s:<18} {s:<12} {s:<15} {s:<26}\n", .{
-                name, shape_str, "CUSTOM_INIT", "N/A", "user-defined customInit",
+            try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
+                name, "Param", shape_str, "CUSTOM_INIT", "N/A", "user-defined customInit",
             });
             return;
         }
 
         if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
-            try buf.print(allocator, "{s:<20} {s:<18} {s:<12} {s:<15} {s:<26}\n", .{
-                name, shape_str, "AUTO_GRAPH", "bias", "zeros (0.0)",
+            try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
+                name, "Param", shape_str, "AUTO_GRAPH", "bias", "zeros (0.0)",
             });
             return;
         }
@@ -3459,8 +3506,8 @@ pub const Graph = struct {
             else => std.fmt.bufPrint(&strat_buf, "He Normal (gain={d:.3})", .{gain}) catch "He Normal",
         };
 
-        try buf.print(allocator, "{s:<20} {s:<18} {s:<12} {s:<15} {s:<26}\n", .{
-            name, shape_str, "AUTO_GRAPH", act_name, strat,
+        try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
+            name, "Param", shape_str, "AUTO_GRAPH", act_name, strat,
         });
     }
 
