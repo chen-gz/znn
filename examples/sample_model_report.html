@@ -1119,6 +1119,7 @@ function getNodeOpType(name) {
   if (n.includes('wte') || n.includes('wpe') || n.includes('emb')) return { icon: '🔲', type: 'Embedding Table', cls: 'emb' };
   if (n.includes('attn') && !n.includes('q_') && !n.includes('k_') && !n.includes('v_')) return { icon: '🔀', type: 'Causal Self-Attention', cls: 'attn' };
   if (n.includes('mlp')) return { icon: '⚡', type: 'MLP / SwiGLU Block', cls: 'mlp' };
+  if (n.includes('layers') && !n.match(/layers\.\d+/)) return { icon: '🥞', type: 'Transformer Decoder Stack', cls: 'attn' };
   if (n.includes('q_attn') || n.includes('k_attn') || n.includes('v_attn')) return { icon: '⚙️', type: 'Multi-Head Linear Proj', cls: 'linear' };
   if (n.includes('c_proj') || n.includes('c_fc') || n.includes('lm_head') || n.includes('linear')) return { icon: '⚙️', type: 'Linear (Dense)', cls: 'linear' };
   if (n.includes('add') || n.includes('residual')) return { icon: '⊕', type: 'Residual Add', cls: 'add' };
@@ -1135,6 +1136,9 @@ function getEffectiveFormula(key) {
   const k = key.toLowerCase();
   if (k === 'gpt' || k === 'model' || k === 'network' || k === 'transformer') {
     return { formula: '\\\\text{logits} = \\\\text{GPT}(\\\\text{TokenIDs}; \\\\theta) \\\\rightarrow [B, T, V]', source: 'INFERRED' };
+  }
+  if (k.endsWith('.layers') || k === 'layers' || k.includes('decoder')) {
+    return { formula: 'x_L = \\\\text{DecoderStack}(x_0) = (\\\\text{Layer}_L \\\\circ \\\\dots \\\\circ \\\\text{Layer}_1)(x_0) \\\\rightarrow [B, T, D]', source: 'INFERRED' };
   }
   if (k.includes('wte')) return { formula: 'y = \\\\text{Embedding}(\\\\text{TokenIDs}; W_e \\\\in \\\\mathbb{R}^{V \\\\times D}) \\\\rightarrow [B, T, D]', source: 'INFERRED' };
   if (k.includes('wpe')) return { formula: 'y = \\\\text{Embedding}(\\\\text{PosIDs}; W_p \\\\in \\\\mathbb{R}^{T_{max} \\\\times D}) \\\\rightarrow [B, T, D]', source: 'INFERRED' };
@@ -1640,6 +1644,27 @@ function buildHierarchy(data) {
 function renderBranch(prefix, node) {
   let html = '';
   const childKeys = Object.keys(node._children);
+  const isRoot = prefix.includes('Root') || prefix.includes('Global');
+
+  // Leaf module: render directly on a single row without nested folder
+  if (childKeys.length === 0 && !isRoot) {
+    const opInfo = getNodeOpType(prefix);
+    return `
+      <div class="tb-node-card" onclick="openInspector('${prefix}')" title="Click to inspect ${prefix} inputs, parameters & outputs" style="margin-bottom: 8px;">
+        <div class="tb-node-header">
+          <div class="tb-node-title">
+            <span class="tb-op-icon ${opInfo.cls}">${opInfo.icon}</span>
+            <span>${prefix}</span>
+            <span class="tb-type-pill">${opInfo.type}</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            ${node._paramCount > 0 ? `<span class="tb-param-chip">⚙️ ${formatNumber(node._paramCount)} params</span>` : ''}
+            <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${prefix}')">🔍 Inspect</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
   
   if (node._nodes.length > 0 || childKeys.length > 0) {
     const hasParams = node._paramCount > 0;
@@ -1656,6 +1681,7 @@ function renderBranch(prefix, node) {
           </div>
           <div class="module-meta">
             <span>${metaInfo}</span>
+            ${!isRoot ? `<button class="tb-inspect-btn" onclick="event.preventDefault(); event.stopPropagation(); openInspector('${prefix}')">🔍 Inspect</button>` : ''}
           </div>
         </summary>
         <div class="module-content">
@@ -1663,27 +1689,6 @@ function renderBranch(prefix, node) {
 
     const isDecoderLayer = /^gpt\.layers\.\d+$/.test(prefix) || /layers\.\d+$/.test(prefix);
     const isAttentionLayer = prefix.endsWith('.attn') || (node._children['q_attn'] && node._children['k_attn'] && node._children['v_attn']);
-    const isLeafOrSpecial = !isDecoderLayer && !isAttentionLayer && (node._nodes.length > 0 || childKeys.length === 0);
-
-    // TensorBoard node card for leaf/op modules (No static table: inspect in standalone modal)
-    if (isLeafOrSpecial && !isRoot) {
-      const opInfo = getNodeOpType(prefix);
-      html += `
-        <div class="tb-node-card" onclick="openInspector('${prefix}')" title="Click to view inputs, parameters & outputs in standalone window" style="margin-bottom: 10px;">
-          <div class="tb-node-header">
-            <div class="tb-node-title">
-              <span class="tb-op-icon ${opInfo.cls}">${opInfo.icon}</span>
-              <span>${prefix}</span>
-            </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <span class="tb-type-pill">${opInfo.type}</span>
-              ${node._paramCount > 0 ? `<span class="tb-param-chip">⚙️ ${formatNumber(node._paramCount)} params</span>` : ''}
-              <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${prefix}')">🔍 Inspect</button>
-            </div>
-          </div>
-        </div>
-      `;
-    }
 
     if (isRoot && node._nodes.length > 0) {
       node._nodes.forEach(n => {
