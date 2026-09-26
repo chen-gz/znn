@@ -1115,6 +1115,7 @@ function formatBytes(bytes) {
 
 function getNodeOpType(name) {
   const n = name.toLowerCase();
+  if (n.endsWith('.core') || n.includes('dot_product') || n.includes('attention_core')) return { icon: '🎯', type: 'Scaled Dot-Product Attention Core', cls: 'attn' };
   if (n.includes('ln_') || n.includes('norm')) return { icon: '📐', type: 'RMSNorm / LayerNorm', cls: 'norm' };
   if (n.includes('wte') || n.includes('wpe') || n.includes('emb')) return { icon: '🔲', type: 'Embedding Table', cls: 'emb' };
   if (n.includes('attn') && !n.includes('q_') && !n.includes('k_') && !n.includes('v_')) return { icon: '🔀', type: 'Causal Self-Attention', cls: 'attn' };
@@ -1134,6 +1135,9 @@ function getEffectiveFormula(key) {
     if (key.startsWith(k + '.')) return { formula: FORMULAS_DATA[k], source: 'CODE_SPECIFIED' };
   }
   const k = key.toLowerCase();
+  if (k.endsWith('.core') || k.includes('dot_product') || k.includes('attention_core')) {
+    return { formula: '\\\\text{Attention}(Q, K, V) = \\\\text{softmax}\\\\left(\\\\frac{Q K^T}{\\\\sqrt{d_k}} + M\\\\right) V \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  }
   if (k === 'gpt' || k === 'model' || k === 'network' || k === 'transformer') {
     return { formula: '\\\\text{logits} = \\\\text{GPT}(\\\\text{TokenIDs}; \\\\theta) \\\\rightarrow [B, T, V]', source: 'INFERRED' };
   }
@@ -1165,11 +1169,26 @@ function openInspector(key) {
   const bodyEl = document.getElementById('insp-body');
   if (!modal || !bodyEl) return;
 
-  const matchedNodes = NODES_DATA.filter(n => n.name === key || n.name.startsWith(key + '.'));
-  const matchedOps = OPS_DATA.filter(o => o.module === key || o.module.startsWith(key + '.') || o.name.startsWith(key + '.'));
+  const isAttentionCore = key.endsWith('.core');
+  const baseKey = isAttentionCore ? key.slice(0, -5) : key;
+
+  let matchedNodes;
+  let matchedOps;
+  if (isAttentionCore) {
+    matchedNodes = NODES_DATA.filter(n => {
+      if (!n.name.startsWith(baseKey + '.')) return false;
+      const sub = n.name.slice(baseKey.length + 1);
+      return !sub.startsWith('q_attn.') && !sub.startsWith('k_attn.') && !sub.startsWith('v_attn.') && !sub.startsWith('c_proj.');
+    });
+    matchedOps = OPS_DATA.filter(o => o.module === baseKey);
+  } else {
+    matchedNodes = NODES_DATA.filter(n => n.name === key || n.name.startsWith(key + '.'));
+    matchedOps = OPS_DATA.filter(o => o.module === key || o.module.startsWith(key + '.') || o.name.startsWith(key + '.'));
+  }
+
   const opInfo = getNodeOpType(key);
   if (iconEl) iconEl.textContent = opInfo.icon;
-  if (titleEl) titleEl.textContent = key;
+  if (titleEl) titleEl.textContent = isAttentionCore ? `${baseKey} · Attention Core` : key;
 
   let totalParams = 0;
   let totalBytes = 0;
@@ -1182,14 +1201,20 @@ function openInspector(key) {
   if (subEl) subEl.textContent = `${opInfo.type} · ${paramStr}`;
 
   // 0. Module Overall Input & Output Shape Banner
-  const isRootModule = (key === 'gpt' || key === 'model' || !key.includes('.'));
-  const incEdges = EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.'));
-  const outEdges = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
+  const isRootModule = (!isAttentionCore && (key === 'gpt' || key === 'model' || !key.includes('.')));
+  const incEdges = isAttentionCore ? [] : EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.'));
+  const outEdges = isAttentionCore ? [] : EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
 
   let modInpShape = 'Unknown';
   let modOutShape = 'Unknown';
 
-  if (isRootModule) {
+  if (isAttentionCore) {
+    const firstOp = matchedOps.length > 0 ? matchedOps[0] : null;
+    const lastOp = matchedOps.length > 0 ? matchedOps[matchedOps.length - 1] : null;
+    const shapeMatch = firstOp && firstOp.input_shape ? firstOp.input_shape.match(/\[[^\]]+\]/) : null;
+    modInpShape = shapeMatch ? `Q, K, V: ${shapeMatch[0]} & Mask` : 'Q, K, V Heads & Mask';
+    modOutShape = lastOp ? `${lastOp.output_shape} (Concatenated Context)` : '[B, T, D]';
+  } else if (isRootModule) {
     const inputNode = NODES_DATA.find(n => n.kind === 'Input' && (n.name.includes('token') || n.name.includes('input')));
     if (inputNode) modInpShape = `${inputNode.shape} (Token IDs)`;
     const outputNode = NODES_DATA.find(n => n.name.includes('logits') || n.name.includes('output'));
@@ -1219,13 +1244,13 @@ function openInspector(key) {
       <div class="insp-io-card input">
         <div class="insp-io-label">📥 Module Input Shape (模块输入维度)</div>
         <div class="insp-io-shape">${modInpShape}</div>
-        <div class="insp-io-sub">Incoming tensor fed into ${key}</div>
+        <div class="insp-io-sub">Incoming tensor fed into ${isAttentionCore ? baseKey + ' core' : key}</div>
       </div>
       <div class="insp-io-arrow">➔</div>
       <div class="insp-io-card output">
         <div class="insp-io-label">📤 Module Output Shape (模块输出维度)</div>
         <div class="insp-io-shape">${modOutShape}</div>
-        <div class="insp-io-sub">Final tensor output from ${key}</div>
+        <div class="insp-io-sub">Final tensor output from ${isAttentionCore ? baseKey + ' core' : key}</div>
       </div>
     </div>
   `;
@@ -1273,7 +1298,8 @@ function openInspector(key) {
           <tbody>
     `;
     matchedOps.forEach((op, idx) => {
-      const shortName = op.name.startsWith(key + '.') ? op.name.slice(key.length + 1) : op.name;
+      const matchPrefix = isAttentionCore ? baseKey + '.' : key + '.';
+      const shortName = op.name.startsWith(matchPrefix) ? op.name.slice(matchPrefix.length) : op.name;
       opsHtml += `
         <tr>
           <td style="font-family:var(--font-mono); color:#64748b;">${idx + 1}</td>
@@ -1305,11 +1331,38 @@ function openInspector(key) {
   paramsHtml += '</div>';
 
   // 3. Inputs Section (Incoming Graph Edges)
-  const incoming = EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.') || (key.startsWith(e.to) && e.to.length > 5));
-  const inputNodes = matchedNodes.filter(n => n.kind === 'Input');
+  const incoming = isAttentionCore ? [] : EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.') || (key.startsWith(e.to) && e.to.length > 5));
+  const inputNodes = isAttentionCore ? [] : matchedNodes.filter(n => n.kind === 'Input');
 
   let inputsHtml = '<div class="insp-section"><div class="insp-section-title"><span>📥 Inbound Connections (外部输入依赖流)</span></div>';
-  if (incoming.length > 0 || inputNodes.length > 0) {
+  if (isAttentionCore) {
+    let coreInbound = [
+      { from: `${baseKey}.q_attn`, to: `${key} (Query)`, shape: '[2, 4, 8, 16]', type: 'Q Projections (Heads)' },
+      { from: `${baseKey}.k_attn`, to: `${key} (Key)`, shape: '[2, 4, 16, 8]', type: 'K Projections (Transposed)' },
+      { from: `${baseKey}.v_attn`, to: `${key} (Value)`, shape: '[2, 4, 8, 16]', type: 'V Projections (Heads)' },
+      { from: `${baseKey}.causal_mask`, to: `${key} (Mask)`, shape: '[2, 4, 8, 8]', type: 'Triangular Causal Mask' }
+    ];
+    if (matchedOps.length > 0) {
+      const qkOp = matchedOps[0];
+      const shapes = qkOp.input_shape.split(',').map(s => s.trim());
+      if (shapes.length >= 2) {
+        coreInbound[0].shape = shapes[0];
+        coreInbound[1].shape = shapes[1];
+      }
+      const maskNode = matchedNodes.find(n => n.name.includes('mask'));
+      if (maskNode) coreInbound[3].shape = maskNode.shape;
+      const vOp = matchedOps.find(o => o.op_type === 'BatchMatMul' && o !== qkOp);
+      if (vOp) {
+        const vShapes = vOp.input_shape.split(',').map(s => s.trim());
+        if (vShapes.length >= 2) coreInbound[2].shape = vShapes[1];
+      }
+    }
+    inputsHtml += '<table class="node-table"><thead><tr><th>Source Tensor / Predecessor</th><th>Target Port</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
+    coreInbound.forEach(e => {
+      inputsHtml += `<tr><td class="node-name">${e.from}</td><td class="node-name">${e.to}</td><td class="node-shape">${e.shape}</td><td><span class="badge" style="background:#4f46e5;color:#fff;">🎯 ${e.type}</span></td></tr>`;
+    });
+    inputsHtml += '</tbody></table>';
+  } else if (incoming.length > 0 || inputNodes.length > 0) {
     inputsHtml += '<table class="node-table"><thead><tr><th>Source Tensor / Predecessor</th><th>Target Port</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
     incoming.forEach(e => {
       const typeBadge = e.is_skip 
@@ -1340,7 +1393,8 @@ function openInspector(key) {
   if (actNodes.length > 0) {
     actsHtml += '<table class="node-table"><thead><tr><th>Tensor Name</th><th>Shape</th><th>Elements</th><th>Inferred Op</th><th>Memory</th></tr></thead><tbody>';
     actNodes.forEach(a => {
-      actsHtml += `<tr><td class="node-name">${a.name}</td><td class="node-shape">${a.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(a.elements)}</td><td style="font-family:var(--font-mono);"><span class="badge badge-op">${a.act}</span></td><td style="font-family:var(--font-mono);">${formatBytes(a.bytes)}</td></tr>`;
+      const actShortName = isAttentionCore && a.name.startsWith(baseKey + '.') ? a.name.slice(baseKey.length + 1) : a.name;
+      actsHtml += `<tr><td class="node-name" title="${a.name}">${actShortName}</td><td class="node-shape">${a.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(a.elements)}</td><td style="font-family:var(--font-mono);"><span class="badge badge-op">${a.act}</span></td><td style="font-family:var(--font-mono);">${formatBytes(a.bytes)}</td></tr>`;
     });
     actsHtml += '</tbody></table>';
   } else {
@@ -1349,17 +1403,37 @@ function openInspector(key) {
   actsHtml += '</div>';
 
   // 5. Downstream Connections
-  const outgoing = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
   let outHtml = '';
-  if (outgoing.length > 0) {
-    outHtml += '<div class="insp-section"><div class="insp-section-title"><span>🔀 Downstream Flow (下游流向)</span></div><table class="node-table"><thead><tr><th>Consumer Node</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
-    outgoing.forEach(e => {
-      const typeBadge = e.is_skip 
-        ? '<span class="badge" style="background:#0284c7;color:#fff;">⚡ Residual Skip Highway</span>'
-        : '<span class="badge" style="background:#334155;color:#94a3b8;">▼ Sequential Flow</span>';
-      outHtml += `<tr><td class="node-name">${e.to}</td><td class="node-shape">${e.shape}</td><td>${typeBadge}</td></tr>`;
-    });
-    outHtml += '</tbody></table></div>';
+  if (isAttentionCore) {
+    const lastOp = matchedOps.length > 0 ? matchedOps[matchedOps.length - 1] : null;
+    const outShape = lastOp ? lastOp.output_shape : '[16, 64]';
+    outHtml += `
+      <div class="insp-section">
+        <div class="insp-section-title"><span>🔀 Downstream Flow (下游流向)</span></div>
+        <table class="node-table">
+          <thead><tr><th>Consumer Node</th><th>Shape</th><th>Connection Type</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="node-name">${baseKey}.c_proj</td>
+              <td class="node-shape">${outShape}</td>
+              <td><span class="badge" style="background:#334155;color:#94a3b8;">▼ Sequential Flow (Multi-Head Linear Output Projection)</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+  } else {
+    const outgoing = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
+    if (outgoing.length > 0) {
+      outHtml += '<div class="insp-section"><div class="insp-section-title"><span>🔀 Downstream Flow (下游流向)</span></div><table class="node-table"><thead><tr><th>Consumer Node</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
+      outgoing.forEach(e => {
+        const typeBadge = e.is_skip 
+          ? '<span class="badge" style="background:#0284c7;color:#fff;">⚡ Residual Skip Highway</span>'
+          : '<span class="badge" style="background:#334155;color:#94a3b8;">▼ Sequential Flow</span>';
+        outHtml += `<tr><td class="node-name">${e.to}</td><td class="node-shape">${e.shape}</td><td>${typeBadge}</td></tr>`;
+      });
+      outHtml += '</tbody></table></div>';
+    }
   }
 
   bodyEl.innerHTML = ioBannerHtml + formulaHtml + opsHtml + paramsHtml + inputsHtml + actsHtml + outHtml;
@@ -1782,7 +1856,7 @@ function renderBranch(prefix, node) {
 
       if (node._nodes.length > 0) {
         html += `
-          <div class="tb-node-card" onclick="openInspector('${prefix}')" title="Click to inspect attention core activations in standalone window" style="border-color: #818cf8; background: rgba(99, 102, 241, 0.06); margin: 6px 0;">
+          <div class="tb-node-card" onclick="openInspector('${prefix}.core')" title="Click to inspect Scaled Dot-Product Attention Core activations in standalone window" style="border-color: #818cf8; background: rgba(99, 102, 241, 0.06); margin: 6px 0;">
             <div class="tb-node-header">
               <div class="tb-node-title">
                 <span class="tb-op-icon attn">🎯</span>
@@ -1790,8 +1864,11 @@ function renderBranch(prefix, node) {
               </div>
               <div style="display: flex; align-items: center; gap: 8px;">
                 <span class="tb-type-pill" style="border-color: #818cf8; color: #a5b4fc;">Softmax((Q·Kᵀ)/√d + Mask)·V</span>
-                <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${prefix}')">🔍 Inspect</button>
+                <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${prefix}.core')">🔍 Inspect</button>
               </div>
+            </div>
+            <div style="margin-top: 6px; font-size: 11px; color: #c7d2fe; display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); opacity: 0.85;">
+              <span>Q·Kᵀ ➔ ÷√d ➔ +Mask ➔ Softmax ➔ ·V ➔ Merge Heads</span>
             </div>
           </div>
         `;
