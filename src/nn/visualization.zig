@@ -314,10 +314,129 @@ pub fn freeGraphNodes(nodes: *std.ArrayList(NodeData), allocator: std.mem.Alloca
     nodes.deinit(allocator);
 }
 
+/// 计算图中逻辑模块之间的数据流转边
+pub const EdgeData = struct {
+    from: []const u8,
+    to: []const u8,
+    shape: []const u8,
+    is_skip: bool = false,
+};
+
+fn getLogicalModule(name: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, name, ".residual_attn")) return name;
+    if (std.mem.endsWith(u8, name, ".output")) return name;
+    if (std.mem.endsWith(u8, name, ".embeddings_sum")) return name;
+    if (std.mem.startsWith(u8, name, "inputs.")) return name;
+    if (std.mem.startsWith(u8, name, "outputs.")) return name;
+
+    if (std.mem.indexOf(u8, name, ".attn.")) |idx| {
+        return name[0 .. idx + 5];
+    }
+    if (std.mem.indexOf(u8, name, ".mlp.")) |idx| {
+        return name[0 .. idx + 4];
+    }
+    if (std.mem.indexOf(u8, name, ".ln_1.")) |idx| {
+        return name[0 .. idx + 5];
+    }
+    if (std.mem.indexOf(u8, name, ".ln_2.")) |idx| {
+        return name[0 .. idx + 5];
+    }
+    if (std.mem.indexOf(u8, name, ".ln_f.")) |idx| {
+        return name[0 .. idx + 5];
+    }
+    if (std.mem.indexOf(u8, name, ".wte.")) |idx| {
+        return name[0 .. idx + 4];
+    }
+    if (std.mem.indexOf(u8, name, ".wpe.")) |idx| {
+        return name[0 .. idx + 4];
+    }
+    if (std.mem.indexOf(u8, name, ".lm_head.")) |idx| {
+        return name[0 .. idx + 8];
+    }
+
+    if (extractModuleScope(name)) |p| return p;
+    return name;
+}
+
+pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayList(EdgeData) {
+    var edges: std.ArrayList(EdgeData) = .empty;
+    errdefer freeGraphEdges(&edges, allocator);
+
+    const arena_alloc = graph.arena.allocator();
+    var edge_set = std.StringHashMap(void).init(arena_alloc);
+    defer edge_set.deinit();
+
+    for (graph.ops.items) |op| {
+        for (op.outputs) |out| {
+            const out_name = out.name orelse continue;
+            const to_mod = getLogicalModule(out_name);
+
+            for (op.inputs) |inp| {
+                const inp_name = inp.name orelse continue;
+                if (inp.creator == null and inp.requires_grad) continue;
+                if (std.mem.endsWith(u8, inp_name, ".causal_mask")) continue;
+                if (std.mem.endsWith(u8, inp_name, ".pos_indices") and std.mem.eql(u8, to_mod, "gpt.wpe")) continue;
+
+                const from_mod = getLogicalModule(inp_name);
+                if (std.mem.eql(u8, from_mod, to_mod)) continue;
+
+                var shape_buf: [64]u8 = undefined;
+                var shape_len: usize = 0;
+                shape_buf[0] = '[';
+                shape_len += 1;
+                for (0..inp.shape.len) |d| {
+                    if (d > 0) {
+                        shape_buf[shape_len] = ',';
+                        shape_buf[shape_len + 1] = ' ';
+                        shape_len += 2;
+                    }
+                    const part = std.fmt.bufPrint(shape_buf[shape_len..], "{d}", .{inp.shape.dims[d]}) catch "";
+                    shape_len += part.len;
+                }
+                shape_buf[shape_len] = ']';
+                shape_len += 1;
+                const shape_str = try allocator.dupe(u8, shape_buf[0..shape_len]);
+
+                const is_skip = (std.mem.endsWith(u8, to_mod, ".residual_attn") and !std.mem.endsWith(u8, from_mod, ".attn")) or
+                                (std.mem.endsWith(u8, to_mod, ".output") and !std.mem.endsWith(u8, from_mod, ".mlp"));
+
+                var key_buf: [256]u8 = undefined;
+                const key = std.fmt.bufPrint(&key_buf, "{s}->{s}", .{ from_mod, to_mod }) catch continue;
+                if (edge_set.contains(key)) {
+                    allocator.free(shape_str);
+                    continue;
+                }
+                try edge_set.put(try arena_alloc.dupe(u8, key), {});
+
+                try edges.append(allocator, .{
+                    .from = try allocator.dupe(u8, from_mod),
+                    .to = try allocator.dupe(u8, to_mod),
+                    .shape = shape_str,
+                    .is_skip = is_skip,
+                });
+            }
+        }
+    }
+
+    return edges;
+}
+
+pub fn freeGraphEdges(edges: *std.ArrayList(EdgeData), allocator: std.mem.Allocator) void {
+    for (edges.items) |e| {
+        allocator.free(e.from);
+        allocator.free(e.to);
+        allocator.free(e.shape);
+    }
+    edges.deinit(allocator);
+}
+
 /// 将计算图结构与各层初始化详情格式化为可交互、层级展开的 HTML 网页文档
 pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const u8 {
     var nodes = try collectGraphNodes(graph, allocator);
     defer freeGraphNodes(&nodes, allocator);
+
+    var edges = try collectGraphEdges(graph, allocator);
+    defer freeGraphEdges(&edges, allocator);
 
     var total_params: usize = 0;
     var total_bytes: usize = 0;
@@ -523,6 +642,234 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\    .badge-custom { background: rgba(225, 29, 72, 0.2); color: #fb7185; border: 1px solid rgba(251, 113, 133, 0.3); }
         \\    .badge-op { background: rgba(99, 102, 241, 0.2); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.3); }
         \\    .strategy-col { font-family: var(--font-mono); font-size: 12px; color: #94a3b8; }
+        \\
+        \\    /* Tab Navigation */
+        \\    .nav-tabs {
+        \\      display: flex;
+        \\      gap: 10px;
+        \\      margin-bottom: 20px;
+        \\      border-bottom: 1px solid var(--border-color);
+        \\      padding-bottom: 8px;
+        \\    }
+        \\    .tab-btn {
+        \\      background: var(--bg-card);
+        \\      border: 1px solid var(--border-color);
+        \\      color: var(--text-sub);
+        \\      padding: 10px 20px;
+        \\      border-radius: 8px;
+        \\      font-size: 14px;
+        \\      font-weight: 600;
+        \\      cursor: pointer;
+        \\      display: flex;
+        \\      align-items: center;
+        \\      gap: 8px;
+        \\      transition: all 0.2s;
+        \\    }
+        \\    .tab-btn:hover { background: var(--bg-card-hover); color: var(--text-main); }
+        \\    .tab-btn.active {
+        \\      background: #0284c7;
+        \\      border-color: #38bdf8;
+        \\      color: #fff;
+        \\      box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
+        \\    }
+        \\    .tab-view { display: none; }
+        \\    .tab-view.active { display: block; }
+        \\
+        \\    /* DAG Architecture Flow & Skip Connection Styling */
+        \\    .dag-flow-container {
+        \\      display: flex;
+        \\      flex-direction: column;
+        \\      align-items: center;
+        \\      gap: 0px;
+        \\      max-width: 900px;
+        \\      margin: 0 auto;
+        \\      padding: 12px 0 32px 0;
+        \\    }
+        \\    .flow-card {
+        \\      background: var(--bg-secondary);
+        \\      border: 1px solid var(--border-color);
+        \\      border-radius: 10px;
+        \\      padding: 14px 20px;
+        \\      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+        \\      transition: all 0.2s;
+        \\    }
+        \\    .flow-card:hover { border-color: var(--border-focus); transform: translateY(-1px); }
+        \\    .flow-card-linear { width: 100%; max-width: 440px; }
+        \\    .flow-card-header {
+        \\      display: flex;
+        \\      align-items: center;
+        \\      justify-content: space-between;
+        \\      margin-bottom: 6px;
+        \\    }
+        \\    .flow-card-title {
+        \\      font-family: var(--font-mono);
+        \\      font-weight: 700;
+        \\      font-size: 14px;
+        \\      color: #38bdf8;
+        \\    }
+        \\    .flow-card-body {
+        \\      font-size: 12px;
+        \\      color: var(--text-sub);
+        \\      display: flex;
+        \\      justify-content: space-between;
+        \\      align-items: center;
+        \\    }
+        \\    .flow-card-shape {
+        \\      font-family: var(--font-mono);
+        \\      background: rgba(15, 23, 42, 0.8);
+        \\      padding: 2px 8px;
+        \\      border-radius: 4px;
+        \\      border: 1px solid rgba(51, 65, 85, 0.6);
+        \\      color: #cbd5e1;
+        \\    }
+        \\
+        \\    /* Downward Flow Arrow */
+        \\    .flow-arrow-down {
+        \\      display: flex;
+        \\      flex-direction: column;
+        \\      align-items: center;
+        \\      padding: 6px 0;
+        \\      color: #64748b;
+        \\      font-size: 14px;
+        \\    }
+        \\    .flow-arrow-line {
+        \\      width: 2px;
+        \\      height: 18px;
+        \\      background: #334155;
+        \\    }
+        \\    .flow-arrow-head {
+        \\      color: #64748b;
+        \\      line-height: 1;
+        \\      font-size: 12px;
+        \\    }
+        \\    .flow-arrow-label {
+        \\      font-family: var(--font-mono);
+        \\      font-size: 10px;
+        \\      color: #94a3b8;
+        \\      background: #0f172a;
+        \\      padding: 1px 6px;
+        \\      border-radius: 4px;
+        \\      border: 1px solid #334155;
+        \\      margin: 2px 0;
+        \\    }
+        \\
+        \\    /* Parallel Branch Stage: [Module A] | [Module B] */
+        \\    .flow-stage-parallel {
+        \\      width: 100%;
+        \\      background: rgba(15, 23, 42, 0.45);
+        \\      border: 1px dashed #334155;
+        \\      border-radius: 12px;
+        \\      padding: 16px;
+        \\      box-sizing: border-box;
+        \\    }
+        \\    .parallel-header {
+        \\      font-size: 12px;
+        \\      font-weight: 600;
+        \\      text-transform: uppercase;
+        \\      letter-spacing: 0.5px;
+        \\      color: var(--text-sub);
+        \\      margin-bottom: 12px;
+        \\      display: flex;
+        \\      align-items: center;
+        \\      justify-content: space-between;
+        \\    }
+        \\    .parallel-branches-row {
+        \\      display: flex;
+        \\      align-items: stretch;
+        \\      gap: 16px;
+        \\    }
+        \\    .parallel-branch-col {
+        \\      flex: 1;
+        \\      display: flex;
+        \\      flex-direction: column;
+        \\      background: var(--bg-card);
+        \\      border: 1px solid var(--border-color);
+        \\      border-radius: 10px;
+        \\      padding: 14px;
+        \\      position: relative;
+        \\    }
+        \\    .parallel-branch-col.skip-branch {
+        \\      border-style: dashed;
+        \\      border-color: #38bdf8;
+        \\      background: rgba(2, 132, 199, 0.04);
+        \\    }
+        \\    .parallel-branch-col.transform-branch {
+        \\      border-color: #818cf8;
+        \\      background: rgba(99, 102, 241, 0.04);
+        \\    }
+        \\    .branch-badge {
+        \\      position: absolute;
+        \\      top: -10px;
+        \\      left: 14px;
+        \\      font-size: 10px;
+        \\      font-weight: 700;
+        \\      font-family: var(--font-mono);
+        \\      padding: 2px 8px;
+        \\      border-radius: 4px;
+        \\      text-transform: uppercase;
+        \\    }
+        \\    .branch-badge.skip {
+        \\      background: #0284c7;
+        \\      color: #fff;
+        \\      border: 1px solid #38bdf8;
+        \\    }
+        \\    .branch-badge.transform {
+        \\      background: #4f46e5;
+        \\      color: #fff;
+        \\      border: 1px solid #818cf8;
+        \\    }
+        \\    .branch-divider {
+        \\      display: flex;
+        \\      align-items: center;
+        \\      justify-content: center;
+        \\      font-weight: 700;
+        \\      color: #64748b;
+        \\      font-size: 18px;
+        \\      padding: 0 4px;
+        \\    }
+        \\    .converge-arrow-box {
+        \\      display: flex;
+        \\      flex-direction: column;
+        \\      align-items: center;
+        \\      margin-top: 14px;
+        \\      padding-top: 10px;
+        \\      border-top: 1px dashed #334155;
+        \\      width: 100%;
+        \\    }
+        \\    .converge-card {
+        \\      width: 100%;
+        \\      max-width: 480px;
+        \\      background: #1e1e38;
+        \\      border: 1px solid #818cf8;
+        \\      border-radius: 10px;
+        \\      padding: 12px 18px;
+        \\      text-align: center;
+        \\    }
+        \\    .converge-title {
+        \\      font-family: var(--font-mono);
+        \\      font-weight: 700;
+        \\      font-size: 14px;
+        \\      color: #a5b4fc;
+        \\      display: flex;
+        \\      align-items: center;
+        \\      justify-content: center;
+        \\      gap: 8px;
+        \\    }
+        \\
+        \\    /* Mermaid container */
+        \\    .mermaid-box {
+        \\      background: var(--bg-secondary);
+        \\      border: 1px solid var(--border-color);
+        \\      border-radius: 10px;
+        \\      padding: 24px;
+        \\      font-family: var(--font-mono);
+        \\      font-size: 13px;
+        \\      color: #f8fafc;
+        \\      white-space: pre-wrap;
+        \\      line-height: 1.6;
+        \\      overflow-x: auto;
+        \\    }
+        \\
         \\    footer { margin-top: 36px; text-align: center; font-size: 12px; color: #64748b; }
         \\  </style>
         \\</head>
@@ -564,24 +911,49 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\    </div>
         \\  </div>
         \\
-        \\  <!-- Controls -->
-        \\  <div class="controls-bar">
-        \\    <div class="search-box">
-        \\      <span class="search-icon">🔍</span>
-        \\      <input type="text" id="search-input" class="search-input" placeholder="Search by module path, node name, op, or shape..." oninput="filterNodes()">
-        \\    </div>
-        \\    <div class="btn-group">
-        \\      <button class="btn active" onclick="setKindFilter('all', this)">All Nodes ({d})</button>
-        \\      <button class="btn" onclick="setKindFilter('Param', this)">Params ({d})</button>
-        \\      <button class="btn" onclick="setKindFilter('Input', this)">Inputs ({d})</button>
-        \\      <button class="btn" onclick="setKindFilter('Activation', this)">Activations ({d})</button>
-        \\      <button class="btn" onclick="expandAll()">Expand All</button>
-        \\      <button class="btn" onclick="collapseAll()">Collapse All</button>
+        \\  <!-- Navigation Tabs -->
+        \\  <div class="nav-tabs">
+        \\    <button class="tab-btn active" id="btn-tab-dag" onclick="switchMainTab('dag')">🔀 Architecture & Skip Connections</button>
+        \\    <button class="tab-btn" id="btn-tab-tree" onclick="switchMainTab('tree')">📋 Hierarchical Module Tree</button>
+        \\    <button class="tab-btn" id="btn-tab-mermaid" onclick="switchMainTab('mermaid')">📊 Mermaid Flowchart</button>
+        \\  </div>
+        \\
+        \\  <!-- View 1: Architecture DAG with Skip Connections -->
+        \\  <div class="tab-view active" id="view-dag">
+        \\    <div class="dag-flow-container" id="dag-container">
         \\    </div>
         \\  </div>
         \\
-        \\  <!-- Hierarchical Container -->
-        \\  <div class="hierarchy-container" id="tree-container">
+        \\  <!-- View 2: Hierarchical Tree & Node Inspection -->
+        \\  <div class="tab-view" id="view-tree">
+        \\    <!-- Controls -->
+        \\    <div class="controls-bar">
+        \\      <div class="search-box">
+        \\        <span class="search-icon">🔍</span>
+        \\        <input type="text" id="search-input" class="search-input" placeholder="Search by module path, node name, op, or shape..." oninput="filterNodes()">
+        \\      </div>
+        \\      <div class="btn-group">
+        \\        <button class="btn active" onclick="setKindFilter('all', this)">All Nodes ({d})</button>
+        \\        <button class="btn" onclick="setKindFilter('Param', this)">Params ({d})</button>
+        \\        <button class="btn" onclick="setKindFilter('Input', this)">Inputs ({d})</button>
+        \\        <button class="btn" onclick="setKindFilter('Activation', this)">Activations ({d})</button>
+        \\        <button class="btn" onclick="expandAll()">Expand All</button>
+        \\        <button class="btn" onclick="collapseAll()">Collapse All</button>
+        \\      </div>
+        \\    </div>
+        \\
+        \\    <!-- Hierarchical Container -->
+        \\    <div class="hierarchy-container" id="tree-container">
+        \\    </div>
+        \\  </div>
+        \\
+        \\  <!-- View 3: Mermaid Diagram -->
+        \\  <div class="tab-view" id="view-mermaid">
+        \\    <div class="mermaid-box" id="mermaid-code"></div>
+        \\  </div>
+        \\
+        \\  <footer>Generated automatically by ZNN Autodiff Engine</footer>
+        \\</div>
         \\
     , .{
         total_params,
@@ -601,10 +973,6 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
 
     // 2. Embedded JSON data array
     try html_buf.appendSlice(allocator,
-        \\  </div>
-        \\  <footer>Generated automatically by ZNN Autodiff Engine</footer>
-        \\</div>
-        \\
         \\<script>
         \\const NODES_DATA = [
     );
@@ -630,11 +998,260 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\
         \\];
         \\
+        \\const EDGES_DATA = [
+    );
+
+    for (edges.items, 0..) |e, i| {
+        if (i > 0) try html_buf.appendSlice(allocator, ",\n");
+        try html_buf.print(allocator,
+            \\  {{ "from": "{s}", "to": "{s}", "shape": "{s}", "is_skip": {s} }}
+        , .{
+            e.from,
+            e.to,
+            e.shape,
+            if (e.is_skip) "true" else "false",
+        });
+    }
+
+    try html_buf.appendSlice(allocator,
+        \\
+        \\];
+        \\
         \\let currentKindFilter = 'all';
         \\let currentQuery = '';
         \\
+        \\function switchMainTab(tab) {
+        \\  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        \\  document.querySelectorAll('.tab-view').forEach(v => v.classList.remove('active'));
+        \\  const btn = document.getElementById('btn-tab-' + tab);
+        \\  const view = document.getElementById('view-' + tab);
+        \\  if (btn) btn.classList.add('active');
+        \\  if (view) view.classList.add('active');
+        \\}
+        \\
         \\function formatNumber(num) {
         \\  return num.toLocaleString();
+        \\}
+        \\
+        \\function renderDagView() {
+        \\  const container = document.getElementById('dag-container');
+        \\  if (!container) return;
+        \\
+        \\  // Map module to total parameters and primary tensor info
+        \\  const modParams = {};
+        \\  NODES_DATA.forEach(n => {
+        \\    const mod = n.name.split('.').slice(0, -1).join('.');
+        \\    if (!modParams[mod]) modParams[mod] = 0;
+        \\    if (n.kind === 'Param') modParams[mod] += n.elements;
+        \\  });
+        \\
+        \\  // Group edges into incoming lists per target
+        \\  const incoming = {};
+        \\  EDGES_DATA.forEach(e => {
+        \\    if (!incoming[e.to]) incoming[e.to] = [];
+        \\    incoming[e.to].push(e);
+        \\  });
+        \\
+        \\  // Step sequence of key target checkpoints in topological order
+        \\  const stageTargets = [
+        \\    'gpt.wte',
+        \\    'gpt.embeddings_sum',
+        \\    'gpt.layers.0.residual_attn',
+        \\    'gpt.layers.0.output',
+        \\    'gpt.layers.1.residual_attn',
+        \\    'gpt.layers.1.output',
+        \\    'gpt.ln_f',
+        \\    'gpt.lm_head',
+        \\    'outputs.logits'
+        \\  ];
+        \\
+        \\  // If model has different layers, dynamically find all convergence/checkpoint nodes
+        \\  const seenTargets = new Set();
+        \\  const stages = [];
+        \\  stageTargets.forEach(st => {
+        \\    if (incoming[st] || EDGES_DATA.some(e => e.from === st)) {
+        \\      stages.push(st);
+        \\      seenTargets.add(st);
+        \\    }
+        \\  });
+        \\  EDGES_DATA.forEach(e => {
+        \\    if (!seenTargets.has(e.to)) {
+        \\      stages.push(e.to);
+        \\      seenTargets.add(e.to);
+        \\    }
+        \\  });
+        \\
+        \\  let html = '';
+        \\  const renderedModules = new Set();
+        \\
+        \\  stages.forEach((target, sIdx) => {
+        \\    const inc = incoming[target] || [];
+        \\    const hasSkip = inc.some(e => e.is_skip);
+        \\    const isMultiBranch = inc.length > 1;
+        \\
+        \\    if (isMultiBranch && hasSkip) {
+        \\      // Render parallel branch stage: [Module A (Skip / Shortcut)] | [Module B (Transform)]
+        \\      const skipEdge = inc.find(e => e.is_skip);
+        \\      const transformEdge = inc.find(e => !e.is_skip);
+        \\
+        \\      const isAttnBlock = target.endsWith('.residual_attn');
+        \\      const blockLabel = isAttnBlock ? 'Residual Attention Sub-Layer' : 'Residual Feed-Forward (MLP) Sub-Layer';
+        \\      const layerMatch = target.match(/layers\.(\d+)/);
+        \\      const layerNum = layerMatch ? `Layer ${layerMatch[1]}` : 'Block';
+        \\
+        \\      html += `
+        \\        <div class="flow-stage-parallel">
+        \\          <div class="parallel-header">
+        \\            <span>${layerNum} · ${blockLabel}</span>
+        \\            <span class="flow-card-shape">${skipEdge ? skipEdge.shape : ''}</span>
+        \\          </div>
+        \\          <div class="parallel-branches-row">
+        \\            <!-- Branch 1: Skip Connection -->
+        \\            <div class="parallel-branch-col skip-branch">
+        \\              <span class="branch-badge skip">⚡ Shortcut (Skip)</span>
+        \\              <div style="margin-top: 8px;">
+        \\                <div class="flow-card-title">${skipEdge ? skipEdge.from : 'Identity'}</div>
+        \\                <div style="font-size: 11px; color: #38bdf8; margin-top: 4px;">Direct Identity Connection</div>
+        \\                <div style="font-size: 11px; color: var(--text-sub); margin-top: 2px;">Preserves gradient highway (x)</div>
+        \\              </div>
+        \\            </div>
+        \\
+        \\            <div class="branch-divider">|</div>
+        \\
+        \\            <!-- Branch 2: Transform Sub-Layer -->
+        \\            <div class="parallel-branch-col transform-branch">
+        \\              <span class="branch-badge transform">⚙️ Transform Branch</span>
+        \\              <div style="margin-top: 8px;">
+        \\                <div class="flow-card-title">${transformEdge ? transformEdge.from : 'Sublayer'}</div>
+        \\                <div style="font-size: 11px; color: #a5b4fc; margin-top: 4px;">LayerNorm + ${isAttnBlock ? 'Multi-Head Attention' : 'SwiGLU / MLP'}</div>
+        \\                <div style="font-size: 11px; color: var(--text-sub); margin-top: 2px;">F(x) Feature Extraction</div>
+        \\              </div>
+        \\            </div>
+        \\          </div>
+        \\
+        \\          <!-- Convergence / Merge Downward -->
+        \\          <div class="converge-arrow-box">
+        \\            <div class="flow-arrow-down">
+        \\              <span class="flow-arrow-head">▼</span>
+        \\              <span class="flow-arrow-label">⊕ Element-wise Add (x + F(x))</span>
+        \\            </div>
+        \\            <div class="converge-card">
+        \\              <div class="converge-title">
+        \\                <span>⊕</span>
+        \\                <span>${target}</span>
+        \\              </div>
+        \\              <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">
+        \\                Residual Sum Output · Shape: <span class="flow-card-shape">${skipEdge ? skipEdge.shape : ''}</span>
+        \\              </div>
+        \\            </div>
+        \\          </div>
+        \\        </div>
+        \\      `;
+        \\      renderedModules.add(target);
+        \\    } else if (target === 'gpt.embeddings_sum') {
+        \\      // Embedding combine stage: Token Embeddings | Positional Embeddings -> embeddings_sum
+        \\      const wteEdge = inc.find(e => e.from.includes('wte'));
+        \\      const wpeEdge = inc.find(e => e.from.includes('wpe'));
+        \\      html += `
+        \\        <div class="flow-stage-parallel">
+        \\          <div class="parallel-header">
+        \\            <span>Embedding Stage · Input Projection</span>
+        \\            <span class="flow-card-shape">${wteEdge ? wteEdge.shape : ''}</span>
+        \\          </div>
+        \\          <div class="parallel-branches-row">
+        \\            <div class="parallel-branch-col">
+        \\              <span class="branch-badge transform">Token Embedding</span>
+        \\              <div style="margin-top: 8px;">
+        \\                <div class="flow-card-title">gpt.wte</div>
+        \\                <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">Vocabulary lookup table</div>
+        \\              </div>
+        \\            </div>
+        \\            <div class="branch-divider">|</div>
+        \\            <div class="parallel-branch-col">
+        \\              <span class="branch-badge transform">Positional Embedding</span>
+        \\              <div style="margin-top: 8px;">
+        \\                <div class="flow-card-title">gpt.wpe</div>
+        \\                <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">Learned position table</div>
+        \\              </div>
+        \\            </div>
+        \\          </div>
+        \\          <div class="converge-arrow-box">
+        \\            <div class="flow-arrow-down">
+        \\              <span class="flow-arrow-head">▼</span>
+        \\              <span class="flow-arrow-label">⊕ Sum (token + pos)</span>
+        \\            </div>
+        \\            <div class="converge-card">
+        \\              <div class="converge-title">
+        \\                <span>⊕</span>
+        \\                <span>gpt.embeddings_sum</span>
+        \\              </div>
+        \\              <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">Combined Latent Representation</div>
+        \\            </div>
+        \\          </div>
+        \\        </div>
+        \\      `;
+        \\      renderedModules.add(target);
+        \\    } else {
+        \\      // Linear stage card
+        \\      const pCount = modParams[target] || 0;
+        \\      const pMeta = pCount > 0 ? `${formatNumber(pCount)} params` : '';
+        \\      const edge = inc[0];
+        \\      const shapeText = edge ? edge.shape : '';
+        \\
+        \\      html += `
+        \\        <div class="flow-card flow-card-linear">
+        \\          <div class="flow-card-header">
+        \\            <span class="flow-card-title">${target}</span>
+        \\            ${shapeText ? `<span class="flow-card-shape">${shapeText}</span>` : ''}
+        \\          </div>
+        \\          <div class="flow-card-body">
+        \\            <span>${pMeta ? `⚙️ ${pMeta}` : 'Forward checkpoint'}</span>
+        \\            <span style="font-size: 11px; color: #38bdf8;">Sequential</span>
+        \\          </div>
+        \\        </div>
+        \\      `;
+        \\      renderedModules.add(target);
+        \\    }
+        \\
+        \\    // Downward arrow connector to next stage
+        \\    if (sIdx < stages.length - 1) {
+        \\      html += `
+        \\        <div class="flow-arrow-down">
+        \\          <div class="flow-arrow-line"></div>
+        \\          <span class="flow-arrow-head">▼</span>
+        \\        </div>
+        \\      `;
+        \\    }
+        \\  });
+        \\
+        \\  container.innerHTML = html;
+        \\}
+        \\
+        \\function renderMermaidView() {
+        \\  const container = document.getElementById('mermaid-code');
+        \\  if (!container) return;
+        \\
+        \\  let code = 'flowchart TD\n';
+        \\  code += '  subgraph Inputs["Inputs"]\n';
+        \\  code += '    token_ids["inputs.token_ids"]\n';
+        \\  code += '  end\n\n';
+        \\
+        \\  const edgesSeen = new Set();
+        \\  EDGES_DATA.forEach(e => {
+        \\    const fromSafe = e.from.replace(/[^a-zA-Z0-9_]/g, '_');
+        \\    const toSafe = e.to.replace(/[^a-zA-Z0-9_]/g, '_');
+        \\    const edgeKey = fromSafe + '->' + toSafe;
+        \\    if (edgesSeen.has(edgeKey)) return;
+        \\    edgesSeen.add(edgeKey);
+        \\
+        \\    if (e.is_skip) {
+        \\      code += `  ${fromSafe}["${e.from}"] -.->|⚡ Skip Shortcut| ${toSafe}["${e.to}"]\n`;
+        \\    } else {
+        \\      code += `  ${fromSafe}["${e.from}"] -->|${e.shape}| ${toSafe}["${e.to}"]\n`;
+        \\    }
+        \\  });
+        \\
+        \\  container.textContent = code;
         \\}
         \\
         \\function buildHierarchy(data) {
@@ -794,7 +1411,9 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\}
         \\
         \\// Initial Render
+        \\renderDagView();
         \\renderTree();
+        \\renderMermaidView();
         \\</script>
         \\</body>
         \\</html>
