@@ -173,6 +173,38 @@
     .badge-op { background: rgba(99, 102, 241, 0.2); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.3); }
     .strategy-col { font-family: var(--font-mono); font-size: 12px; color: #94a3b8; }
 
+    /* Sequential Flow Connectors in Module Tree */
+    .tree-flow-connector {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      margin: 2px 0;
+      color: #64748b;
+      font-size: 11px;
+      font-family: var(--font-mono);
+    }
+    .tree-flow-connector .flow-line {
+      width: 2px;
+      height: 14px;
+      background: #334155;
+      margin-left: 12px;
+    }
+    .tree-flow-connector .flow-arrow-text {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(15, 23, 42, 0.7);
+      padding: 2px 8px;
+      border-radius: 4px;
+      border: 1px solid rgba(51, 65, 85, 0.4);
+      color: #94a3b8;
+    }
+    .tree-flow-connector .flow-arrow-text span.arrow-symbol {
+      color: #38bdf8;
+      font-weight: 700;
+    }
+
     /* In-Tree Residual Parallel Branch Styling */
     .tree-sublayer-block {
       background: rgba(15, 23, 42, 0.6);
@@ -1034,6 +1066,7 @@ function renderBranch(prefix, node) {
       `;
     }
 
+    let prevSublayerOutput = '';
     if (isDecoderLayer) {
       const attnChild = node._children['attn'];
       const ln1Child = node._children['ln_1'];
@@ -1073,6 +1106,9 @@ function renderBranch(prefix, node) {
                 <span class="tree-branch-badge transform">⚙️ Transform Branch F(x)</span>
                 <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
                   ${ln1Child ? renderBranch(`${prefix}.ln_1`, ln1Child) : ''}
+                  <div class="tree-flow-connector" style="padding: 2px 8px;">
+                    <span class="flow-arrow-text"><span class="arrow-symbol">▼</span> Normalized Activation to Attention</span>
+                  </div>
                   ${renderBranch(`${prefix}.attn`, attnChild)}
                 </div>
               </div>
@@ -1090,6 +1126,18 @@ function renderBranch(prefix, node) {
                 <span class="flow-card-shape" style="margin-left: 8px;">${attnShape}</span>
               </div>
             </div>
+          </div>
+        `;
+      }
+
+      if (attnChild && mlpChild) {
+        html += `
+          <div class="tree-flow-connector">
+            <div class="flow-line"></div>
+            <span class="flow-arrow-text">
+              <span class="arrow-symbol">▼</span>
+              <span>Output of Sub-Layer 1 feeds into Sub-Layer 2 input</span>
+            </span>
           </div>
         `;
       }
@@ -1124,6 +1172,9 @@ function renderBranch(prefix, node) {
                 <span class="tree-branch-badge transform">⚙️ Transform Branch F(x')</span>
                 <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
                   ${ln2Child ? renderBranch(`${prefix}.ln_2`, ln2Child) : ''}
+                  <div class="tree-flow-connector" style="padding: 2px 8px;">
+                    <span class="flow-arrow-text"><span class="arrow-symbol">▼</span> Normalized Activation to MLP</span>
+                  </div>
                   ${renderBranch(`${prefix}.mlp`, mlpChild)}
                 </div>
               </div>
@@ -1146,12 +1197,22 @@ function renderBranch(prefix, node) {
       }
     }
 
+    let renderedChildCount = 0;
     for (const childKey of childKeys) {
       if (isDecoderLayer && (childKey === 'ln_1' || childKey === 'attn' || childKey === 'ln_2' || childKey === 'mlp')) {
         continue;
       }
       const fullChildName = isRoot ? childKey : `${prefix}.${childKey}`;
+      if (renderedChildCount > 0 && !isRoot) {
+        html += `
+          <div class="tree-flow-connector">
+            <div class="flow-line"></div>
+            <span class="flow-arrow-text"><span class="arrow-symbol">▼</span> Sequential Data Flow</span>
+          </div>
+        `;
+      }
       html += renderBranch(fullChildName, node._children[childKey]);
+      renderedChildCount++;
     }
 
     html += `
@@ -1187,9 +1248,20 @@ function renderTree() {
     outputHtml += renderBranch('(Root / Global Scope)', { _children: {}, _nodes: hierarchy._nodes, _paramCount: hierarchy._paramCount, _bytes: hierarchy._bytes });
   }
 
-  for (const modKey of Object.keys(hierarchy._children)) {
+  const childKeys = Object.keys(hierarchy._children);
+  childKeys.forEach((modKey, idx) => {
+    if (idx > 0 || hierarchy._nodes.length > 0) {
+      outputHtml += `
+        <div class="tree-flow-connector" style="justify-content: center; margin: 4px 0 8px 0;">
+          <span class="flow-arrow-text">
+            <span class="arrow-symbol">▼</span>
+            <span>Default Sequential Data Flow: Output feeds as next module Input</span>
+          </span>
+        </div>
+      `;
+    }
     outputHtml += renderBranch(modKey, hierarchy._children[modKey]);
-  }
+  });
 
   container.innerHTML = outputHtml;
 }
