@@ -12,6 +12,7 @@ pub const RMSNorm = struct {
     weight: *Tensor,        // 可学习的缩放因子 gamma (Shape: [dim])
     eps: f32,               // 均方根分母防止除以 0 的极小常数 (epsilon)
     name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !RMSNorm {
         const weight = try createPersistentTensor(allocator, 1, dim, true);
@@ -28,8 +29,21 @@ pub const RMSNorm = struct {
     }
 
     pub fn setName(self: *RMSNorm, name: []const u8) void {
-        self.name = name;
-        self.weight.setNameFormatted("{s}.weight", .{name});
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
+    }
+
+    pub fn setNameFormatted(self: *RMSNorm, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("rmsnorm");
+        }
     }
 
     pub fn getName(self: *const RMSNorm) ?[]const u8 {
@@ -55,11 +69,25 @@ pub const LayerNorm = struct {
     bias: *Tensor,          // 可学习的平移偏置 beta [dim]
     eps: f32,
     name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     pub fn setName(self: *LayerNorm, name: []const u8) void {
-        self.name = name;
-        self.weight.setNameFormatted("{s}.weight", .{name});
-        self.bias.setNameFormatted("{s}.bias", .{name});
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
+        self.bias.setNameFormatted("{s}.bias", .{self.name.?});
+    }
+
+    pub fn setNameFormatted(self: *LayerNorm, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("layernorm");
+        }
     }
 
     pub fn getName(self: *const LayerNorm) ?[]const u8 {
@@ -138,6 +166,7 @@ pub const BatchNorm2d = struct {
     running_mean: *Tensor,
     running_var: *Tensor,
     name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator, num_features: usize, eps: f32, momentum: f32) !BatchNorm2d {
         const gamma = try createPersistentTensor(allocator, 1, num_features, true);
@@ -177,11 +206,24 @@ pub const BatchNorm2d = struct {
     }
 
     pub fn setName(self: *BatchNorm2d, name: []const u8) void {
-        self.name = name;
-        self.gamma.setNameFormatted("{s}.gamma", .{name});
-        self.beta.setNameFormatted("{s}.beta", .{name});
-        self.running_mean.setNameFormatted("{s}.running_mean", .{name});
-        self.running_var.setNameFormatted("{s}.running_var", .{name});
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.gamma.setNameFormatted("{s}.gamma", .{self.name.?});
+        self.beta.setNameFormatted("{s}.beta", .{self.name.?});
+        self.running_mean.setNameFormatted("{s}.running_mean", .{self.name.?});
+        self.running_var.setNameFormatted("{s}.running_var", .{self.name.?});
+    }
+
+    pub fn setNameFormatted(self: *BatchNorm2d, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("batchnorm");
+        }
     }
 
     pub fn getName(self: *const BatchNorm2d) ?[]const u8 {
