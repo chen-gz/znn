@@ -911,24 +911,25 @@
   </header>
 
   <!-- KPI Stats Grid -->
-  <div class="stats-grid">    <div class="stat-card">
+  <div class="stats-grid">
+    <div class="stat-card">
       <div class="stat-label">Total Parameters</div>
-      <div class="stat-value">49856</div>
-      <div class="stat-sub">~0.36 MB Memory Footprint</div>
+      <div class="stat-value" id="kpi-total-params">0</div>
+      <div class="stat-sub" id="kpi-memory-mb">~0.00 MB Memory Footprint</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Param Tensors</div>
-      <div class="stat-value">14</div>
-      <div class="stat-sub">2 Auto-Graph / 12 Custom</div>
+      <div class="stat-value" id="kpi-param-nodes">0</div>
+      <div class="stat-sub" id="kpi-init-stats">0 Auto-Graph / 0 Custom</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Graph Nodes</div>
-      <div class="stat-value">52</div>
-      <div class="stat-sub">2 Inputs · 36 Activations</div>
+      <div class="stat-value" id="kpi-total-nodes">0</div>
+      <div class="stat-sub" id="kpi-node-breakdown">0 Inputs · 0 Activations</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Memory Buffers</div>
-      <div class="stat-value">52</div>
+      <div class="stat-value" id="kpi-buffers">0</div>
       <div class="stat-sub">Tracked by Graph Arena</div>
     </div>
   </div>
@@ -955,10 +956,10 @@
         <input type="text" id="search-input" class="search-input" placeholder="Search by module path, node name, op, or shape..." oninput="filterNodes()">
       </div>
       <div class="btn-group">
-        <button class="btn active" onclick="setKindFilter('all', this)">All Nodes (52)</button>
-        <button class="btn" onclick="setKindFilter('Param', this)">Params (14)</button>
-        <button class="btn" onclick="setKindFilter('Input', this)">Inputs (2)</button>
-        <button class="btn" onclick="setKindFilter('Activation', this)">Activations (36)</button>
+        <button class="btn active" id="btn-filter-all" onclick="setKindFilter('all', this)">All Nodes</button>
+        <button class="btn" id="btn-filter-param" onclick="setKindFilter('Param', this)">Params</button>
+        <button class="btn" id="btn-filter-input" onclick="setKindFilter('Input', this)">Inputs</button>
+        <button class="btn" id="btn-filter-act" onclick="setKindFilter('Activation', this)">Activations</button>
         <button class="btn" onclick="expandAll()">Expand All</button>
         <button class="btn" onclick="collapseAll()">Collapse All</button>
       </div>
@@ -999,7 +1000,8 @@
     <div class="inspector-body" id="insp-body"></div>
   </div>
 </div>
-<script id="znn-model-graph-data" type="application/json">{
+<script id="znn-model-graph-data" type="application/json">
+{
   "version": "1.0",
   "summary": { "total_params": 49856, "total_bytes": 381696, "param_nodes": 14, "input_nodes": 2, "activation_nodes": 36, "custom_init_count": 12, "auto_graph_count": 2, "total_nodes": 52},
   "root": {"name": "root","path": "","kind": "module","total_params": 49856,"total_bytes": 381696,"param_count": 0,"node_count": 52,"children": [{"name": "inputs","path": "inputs","kind": "module","total_params": 0,"total_bytes": 4096,"param_count": 0,"node_count": 1,"children": [],"nodes": [{"name": "inputs.token_embeddings","kind": "Input","shape": "[2, 8, 64]","elements": 1024,"bytes": 4096,"status": "INPUT","act": "N/A","strategy": "user input / constant"}]},{"name": "gpt","path": "gpt","kind": "module","total_params": 49856,"total_bytes": 373504,"param_count": 0,"node_count": 50,"children": [{"name": "layers","path": "gpt.layers","kind": "module","total_params": 49856,"total_bytes": 373504,"param_count": 0,"node_count": 50,"children": [{"name": "0","path": "gpt.layers.0","kind": "module","total_params": 49856,"total_bytes": 373504,"param_count": 0,"node_count": 50,"children": [{"name": "ln_1","path": "gpt.layers.0.ln_1","kind": "module","total_params": 64,"total_bytes": 8448,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.0.ln_1.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.0.ln_1.act_RmsNorm_0","kind": "Activation","shape": "[2, 8, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.0.ln_1.act_Reshape_1","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "attn","path": "gpt.layers.0.attn","kind": "module","total_params": 16640,"total_bytes": 158720,"param_count": 0,"node_count": 33,"children": [{"name": "q_attn","path": "gpt.layers.0.attn.q_attn","kind": "module","total_params": 4160,"total_bytes": 33024,"param_count": 2,"node_count": 6,"children": [],"nodes": [{"name": "gpt.layers.0.attn.q_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.q_attn.act_MatMul_2","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.q_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.q_attn.act_Add_3","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.q_attn.act_Reshape_8","kind": "Activation","shape": "[2, 8, 4, 16]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.q_attn.act_Transpose_11","kind": "Activation","shape": "[2, 4, 8, 16]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "k_attn","path": "gpt.layers.0.attn.k_attn","kind": "module","total_params": 4160,"total_bytes": 37120,"param_count": 2,"node_count": 7,"children": [],"nodes": [{"name": "gpt.layers.0.attn.k_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.k_attn.act_MatMul_4","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.k_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.k_attn.act_Add_5","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.k_attn.act_Reshape_9","kind": "Activation","shape": "[2, 8, 4, 16]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.k_attn.act_Transpose_12","kind": "Activation","shape": "[2, 4, 8, 16]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"},{"name": "gpt.layers.0.attn.k_attn.act_Transpose_14","kind": "Activation","shape": "[2, 4, 16, 8]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "v_attn","path": "gpt.layers.0.attn.v_attn","kind": "module","total_params": 4160,"total_bytes": 33024,"param_count": 2,"node_count": 6,"children": [],"nodes": [{"name": "gpt.layers.0.attn.v_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.v_attn.act_MatMul_6","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.v_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.v_attn.act_Add_7","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.v_attn.act_Reshape_10","kind": "Activation","shape": "[2, 8, 4, 16]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.v_attn.act_Transpose_13","kind": "Activation","shape": "[2, 4, 8, 16]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "c_proj","path": "gpt.layers.0.attn.c_proj","kind": "module","total_params": 4160,"total_bytes": 28928,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.0.attn.c_proj.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.c_proj.act_MatMul_23","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.c_proj.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.c_proj.act_Add_24","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.c_proj.act_Reshape_25","kind": "Activation","shape": "[2, 8, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": [{"name": "gpt.layers.0.attn.act_BatchMatMul_15","kind": "Activation","shape": "[2, 4, 8, 8]","elements": 512,"bytes": 2048,"status": "OP_OUTPUT","act": "BatchMatMul","strategy": "produced by BatchMatMul"},{"name": "gpt.layers.0.attn.act_MulScalar_16","kind": "Activation","shape": "[2, 4, 8, 8]","elements": 512,"bytes": 2048,"status": "OP_OUTPUT","act": "MulScalar","strategy": "produced by MulScalar"},{"name": "gpt.layers.0.attn.causal_mask","kind": "Input","shape": "[2, 4, 8, 8]","elements": 512,"bytes": 2048,"status": "INPUT","act": "N/A","strategy": "user input / constant"},{"name": "gpt.layers.0.attn.act_Add_17","kind": "Activation","shape": "[2, 4, 8, 8]","elements": 512,"bytes": 2048,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.act_Softmax_18","kind": "Activation","shape": "[2, 4, 8, 8]","elements": 512,"bytes": 2048,"status": "OP_OUTPUT","act": "Softmax","strategy": "produced by Softmax"},{"name": "gpt.layers.0.attn.act_BatchMatMul_19","kind": "Activation","shape": "[2, 4, 8, 16]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "BatchMatMul","strategy": "produced by BatchMatMul"},{"name": "gpt.layers.0.attn.act_Transpose_20","kind": "Activation","shape": "[2, 8, 4, 16]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"},{"name": "gpt.layers.0.attn.act_Reshape_21","kind": "Activation","shape": "[2, 8, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.act_Reshape_22","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "ln_2","path": "gpt.layers.0.ln_2","kind": "module","total_params": 64,"total_bytes": 8448,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.0.ln_2.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.0.ln_2.act_RmsNorm_27","kind": "Activation","shape": "[2, 8, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.0.ln_2.act_Reshape_28","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "mlp","path": "gpt.layers.0.mlp","kind": "module","total_params": 33088,"total_bytes": 193792,"param_count": 0,"node_count": 10,"children": [{"name": "c_fc","path": "gpt.layers.0.mlp.c_fc","kind": "module","total_params": 16640,"total_bytes": 115712,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.0.mlp.c_fc.weight","kind": "Param","shape": "[64, 256]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_fc.act_MatMul_29","kind": "Activation","shape": "[16, 256]","elements": 4096,"bytes": 16384,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.mlp.c_fc.bias","kind": "Param","shape": "[1, 256]","elements": 256,"bytes": 1024,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_fc.act_Add_30","kind": "Activation","shape": "[16, 256]","elements": 4096,"bytes": 16384,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.mlp.c_fc.act_Gelu_31","kind": "Activation","shape": "[16, 256]","elements": 4096,"bytes": 16384,"status": "OP_OUTPUT","act": "Gelu","strategy": "produced by Gelu"}]},{"name": "c_proj","path": "gpt.layers.0.mlp.c_proj","kind": "module","total_params": 16448,"total_bytes": 78080,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.0.mlp.c_proj.weight","kind": "Param","shape": "[256, 64]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_proj.act_MatMul_32","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.mlp.c_proj.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_proj.act_Add_33","kind": "Activation","shape": "[16, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.mlp.c_proj.act_Reshape_34","kind": "Activation","shape": "[2, 8, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": []}],"nodes": [{"name": "gpt.layers.0.residual_attn","kind": "Activation","shape": "[2, 8, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"}]}],"nodes": []}],"nodes": []},{"name": "activations","path": "activations","kind": "module","total_params": 0,"total_bytes": 4096,"param_count": 0,"node_count": 1,"children": [],"nodes": [{"name": "activations.block_0_out","kind": "Activation","shape": "[2, 8, 64]","elements": 1024,"bytes": 4096,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"}]}],"nodes": []},
@@ -1056,13 +1058,12 @@
     {"name": "gpt.layers.0.mlp.c_proj.act_Reshape_34", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
     {"name": "activations.block_0_out", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"}
   ],
-  "edges": [    {"from": "inputs.token_embeddings", "to": "gpt.layers.0", "shape": "[2, 8, 64]", "is_skip": false},
-    {"from": "gpt.layers.0", "to": "gpt.layers.0.attn", "shape": "[16, 64]", "is_skip": false},
-    {"from": "gpt.layers.0.attn", "to": "gpt.layers.0", "shape": "[2, 4, 8, 16]", "is_skip": false},
+  "edges": [    {"from": "inputs.token_embeddings", "to": "gpt.layers.0.ln_1", "shape": "[2, 8, 64]", "is_skip": false},
+    {"from": "gpt.layers.0.ln_1", "to": "gpt.layers.0.attn", "shape": "[16, 64]", "is_skip": false},
     {"from": "inputs.token_embeddings", "to": "gpt.layers.0.residual_attn", "shape": "[2, 8, 64]", "is_skip": true},
     {"from": "gpt.layers.0.attn", "to": "gpt.layers.0.residual_attn", "shape": "[2, 8, 64]", "is_skip": false},
-    {"from": "gpt.layers.0.residual_attn", "to": "gpt.layers.0", "shape": "[2, 8, 64]", "is_skip": false},
-    {"from": "gpt.layers.0", "to": "gpt.layers.0.mlp", "shape": "[16, 64]", "is_skip": false},
+    {"from": "gpt.layers.0.residual_attn", "to": "gpt.layers.0.ln_2", "shape": "[2, 8, 64]", "is_skip": false},
+    {"from": "gpt.layers.0.ln_2", "to": "gpt.layers.0.mlp", "shape": "[16, 64]", "is_skip": false},
     {"from": "gpt.layers.0.residual_attn", "to": "activations", "shape": "[2, 8, 64]", "is_skip": false},
     {"from": "gpt.layers.0.mlp", "to": "activations", "shape": "[2, 8, 64]", "is_skip": false}
   ],
@@ -1506,7 +1507,6 @@ function renderDagView() {
   const container = document.getElementById('dag-container');
   if (!container) return;
 
-  // Map module to total parameters and primary tensor info
   const modParams = {};
   NODES_DATA.forEach(n => {
     const mod = n.name.split('.').slice(0, -1).join('.');
@@ -1514,39 +1514,29 @@ function renderDagView() {
     if (n.kind === 'Param') modParams[mod] += n.elements;
   });
 
-  // Group edges into incoming lists per target
   const incoming = {};
   EDGES_DATA.forEach(e => {
     if (!incoming[e.to]) incoming[e.to] = [];
     incoming[e.to].push(e);
   });
 
-  // Step sequence of key target checkpoints in topological order
   const stageTargets = [
-    'gpt.wte',
     'gpt.embeddings_sum',
     'gpt.layers.0.residual_attn',
     'gpt.layers.0.output',
     'gpt.layers.1.residual_attn',
     'gpt.layers.1.output',
-    'gpt.ln_f',
+    'gpt.layers.ln_f',
     'gpt.lm_head',
     'outputs.logits'
   ];
 
-  // If model has different layers, dynamically find all convergence/checkpoint nodes
   const seenTargets = new Set();
   const stages = [];
   stageTargets.forEach(st => {
     if (incoming[st] || EDGES_DATA.some(e => e.from === st)) {
       stages.push(st);
       seenTargets.add(st);
-    }
-  });
-  EDGES_DATA.forEach(e => {
-    if (!seenTargets.has(e.to)) {
-      stages.push(e.to);
-      seenTargets.add(e.to);
     }
   });
 
@@ -1559,7 +1549,6 @@ function renderDagView() {
     const isMultiBranch = inc.length > 1;
 
     if (isMultiBranch && hasSkip) {
-      // Render parallel branch stage: [Module A (Skip / Shortcut)] | [Module B (Transform)]
       const skipEdge = inc.find(e => e.is_skip);
       const transformEdge = inc.find(e => !e.is_skip);
 
@@ -1575,7 +1564,6 @@ function renderDagView() {
             <span class="flow-card-shape">${skipEdge ? skipEdge.shape : ''}</span>
           </div>
           <div class="parallel-branches-row">
-            <!-- Branch 1: Skip Connection -->
             <div class="parallel-branch-col skip-branch">
               <span class="branch-badge skip">⚡ Shortcut (Skip)</span>
               <div style="margin-top: 8px;">
@@ -1587,7 +1575,6 @@ function renderDagView() {
 
             <div class="branch-divider">|</div>
 
-            <!-- Branch 2: Transform Sub-Layer -->
             <div class="parallel-branch-col transform-branch">
               <span class="branch-badge transform">⚙️ Transform Branch</span>
               <div style="margin-top: 8px;">
@@ -1598,7 +1585,6 @@ function renderDagView() {
             </div>
           </div>
 
-          <!-- Convergence / Merge Downward -->
           <div class="converge-arrow-box">
             <div class="flow-arrow-down">
               <span class="flow-arrow-head">▼</span>
@@ -1618,7 +1604,6 @@ function renderDagView() {
       `;
       renderedModules.add(target);
     } else if (target === 'gpt.embeddings_sum') {
-      // Embedding combine stage: Token Embeddings | Positional Embeddings -> embeddings_sum
       const wteEdge = inc.find(e => e.from.includes('wte'));
       const wpeEdge = inc.find(e => e.from.includes('wpe'));
       html += `
@@ -1661,7 +1646,6 @@ function renderDagView() {
       `;
       renderedModules.add(target);
     } else {
-      // Linear stage card
       const pCount = modParams[target] || 0;
       const pMeta = pCount > 0 ? `${formatNumber(pCount)} params` : '';
       const edge = inc[0];
@@ -1682,7 +1666,6 @@ function renderDagView() {
       renderedModules.add(target);
     }
 
-    // Downward arrow connector to next stage
     if (sIdx < stages.length - 1) {
       html += `
         <div class="flow-arrow-down">
@@ -1705,14 +1688,12 @@ function renderMermaidView() {
   const nodeMap = new Map();
   NODES_DATA.forEach(n => nodeMap.set(n.name, n));
 
-  // Collect all unique DAG entities involved in EDGES_DATA
   const dagNodes = new Set();
   EDGES_DATA.forEach(e => {
     dagNodes.add(e.from);
     dagNodes.add(e.to);
   });
 
-  // If no edges, fallback to all nodes
   if (dagNodes.size === 0) {
     NODES_DATA.forEach(n => dagNodes.add(n.name));
   }
@@ -1729,48 +1710,52 @@ function renderMermaidView() {
       return `${safeId}(["📥 ${leafName}${shapeText}"])`;
     } else if (kind === 'Param') {
       return `${safeId}["⚖️ ${leafName}${shapeText}"]`;
-    } else if (name.includes('residual') || name.includes('add') || name.includes('skip')) {
+    } else if (name.includes('residual') || name.includes('add') || name.includes('skip') || name.includes('sum')) {
       return `${safeId}["⊕ ${leafName}${shapeText}"]`;
     } else {
       return `${safeId}["⚡ ${leafName}${shapeText}"]`;
     }
   }
 
-  // Group nodes by module scope for subgraphs
-  const subgraphs = new Map();
-  const rootNodes = [];
-
-  dagNodes.forEach(name => {
-    const parts = name.split('.');
-    if (parts.length > 1) {
-      const scope = parts.slice(0, -1).join('.');
-      if (!subgraphs.has(scope)) subgraphs.set(scope, []);
-      subgraphs.get(scope).push(name);
-    } else {
-      rootNodes.push(name);
-    }
-  });
-
-  // Render Subgraphs
-  subgraphs.forEach((nodesInSub, scope) => {
-    const subId = 'sg_' + scope.replace(/[^a-zA-Z0-9_]/g, '_');
-    const cleanScope = scope.replace(/"/g, "'");
-    code += `  subgraph ${subId} ["📁 ${cleanScope}"]\n`;
-    nodesInSub.forEach(n => {
-      code += `    ${formatNodeDef(n)}\n`;
+  function buildScopeTree(names) {
+    const root = { _nodes: [], _children: {} };
+    names.forEach(name => {
+      const parts = name.split('.');
+      let curr = root;
+      for (let i = 0; i < parts.length - 1; i++) {
+        const p = parts[i];
+        if (!curr._children[p]) {
+          curr._children[p] = { _nodes: [], _children: {} };
+        }
+        curr = curr._children[p];
+      }
+      curr._nodes.push(name);
     });
-    code += '  end\n\n';
-  });
-
-  // Render Root level nodes
-  if (rootNodes.length > 0) {
-    rootNodes.forEach(n => {
-      code += `  ${formatNodeDef(n)}\n`;
-    });
-    code += '\n';
+    return root;
   }
 
-  // Render Edges
+  const scopeTree = buildScopeTree(Array.from(dagNodes));
+
+  function renderSubgraphsRecursive(node, currentPath, indent) {
+    const ind = '  '.repeat(indent);
+    let out = '';
+    Object.keys(node._children).sort().forEach(k => {
+      const child = node._children[k];
+      const childPath = currentPath ? `${currentPath}.${k}` : k;
+      const sgId = 'sg_' + childPath.replace(/[^a-zA-Z0-9_]/g, '_');
+      const cleanK = k.replace(/"/g, "'");
+      out += `${ind}subgraph ${sgId} ["📁 ${cleanK}"]\n`;
+      out += renderSubgraphsRecursive(child, childPath, indent + 1);
+      out += `${ind}end\n\n`;
+    });
+    node._nodes.sort().forEach(n => {
+      out += `${ind}${formatNodeDef(n)}\n`;
+    });
+    return out;
+  }
+
+  code += renderSubgraphsRecursive(scopeTree, '', 1);
+
   const edgesSeen = new Set();
   EDGES_DATA.forEach(e => {
     const fromSafe = 'n_' + e.from.replace(/[^a-zA-Z0-9_]/g, '_');
@@ -1795,7 +1780,6 @@ function renderMermaidView() {
 
   container.textContent = code;
 
-  // Render Mermaid SVG diagram if mermaid is available
   if (window.mermaid) {
     const renderTarget = document.getElementById('mermaid-diagram-target');
     if (renderTarget) {
@@ -2251,7 +2235,55 @@ function collapseAll() {
   document.querySelectorAll('details.module-group').forEach(d => d.open = false);
 }
 
+// Populate KPIs from RAW_GRAPH summary or NODES_DATA
+function initKpis() {
+  const sum = (RAW_GRAPH && RAW_GRAPH.summary) ? RAW_GRAPH.summary : {};
+  let totalParams = sum.total_params || 0;
+  let totalBytes = sum.total_bytes || 0;
+  let paramNodes = sum.param_nodes || 0;
+  let inputNodes = sum.input_nodes || 0;
+  let actNodes = sum.activation_nodes || 0;
+  let customInit = sum.custom_init_count || 0;
+  let autoGraph = sum.auto_graph_count || 0;
+  let totalNodes = sum.total_nodes || NODES_DATA.length;
+
+  if (totalParams === 0) {
+    NODES_DATA.forEach(n => {
+      if (n.kind === 'Param') totalParams += (n.elements || 0);
+      totalBytes += (n.bytes || 0);
+      if (n.kind === 'Param') paramNodes++;
+      else if (n.kind === 'Input') inputNodes++;
+      else actNodes++;
+    });
+  }
+
+  const elParams = document.getElementById('kpi-total-params');
+  if (elParams) elParams.textContent = formatNumber(totalParams);
+  const elMem = document.getElementById('kpi-memory-mb');
+  if (elMem) elMem.textContent = ;
+  const elParamNodes = document.getElementById('kpi-param-nodes');
+  if (elParamNodes) elParamNodes.textContent = formatNumber(paramNodes);
+  const elInit = document.getElementById('kpi-init-stats');
+  if (elInit) elInit.textContent = ;
+  const elTotalNodes = document.getElementById('kpi-total-nodes');
+  if (elTotalNodes) elTotalNodes.textContent = formatNumber(totalNodes);
+  const elBreak = document.getElementById('kpi-node-breakdown');
+  if (elBreak) elBreak.textContent = ;
+  const elBuf = document.getElementById('kpi-buffers');
+  if (elBuf) elBuf.textContent = formatNumber(totalNodes);
+
+  const btnAll = document.getElementById('btn-filter-all');
+  if (btnAll) btnAll.textContent = ;
+  const btnParam = document.getElementById('btn-filter-param');
+  if (btnParam) btnParam.textContent = ;
+  const btnInput = document.getElementById('btn-filter-input');
+  if (btnInput) btnInput.textContent = ;
+  const btnAct = document.getElementById('btn-filter-act');
+  if (btnAct) btnAct.textContent = ;
+}
+
 // Initial Render
+initKpis();
 renderDagView();
 renderTree();
 renderMermaidView();
