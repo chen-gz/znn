@@ -1023,6 +1023,247 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\      overflow-x: auto;
         \\    }
         \\
+        \\    /* TensorBoard-like Node Styling */
+        \\    .tb-node-card {
+        \\      background: #1e293b;
+        \\      border: 1px solid #334155;
+        \\      border-radius: 8px;
+        \\      padding: 10px 14px;
+        \\      transition: all 0.2s ease;
+        \\      cursor: pointer;
+        \\      position: relative;
+        \\    }
+        \\    .tb-node-card:hover {
+        \\      border-color: #38bdf8;
+        \\      box-shadow: 0 4px 16px rgba(56, 189, 248, 0.15);
+        \\      transform: translateY(-1px);
+        \\    }
+        \\    .tb-node-header {
+        \\      display: flex;
+        \\      align-items: center;
+        \\      justify-content: space-between;
+        \\      gap: 10px;
+        \\    }
+        \\    .tb-node-title {
+        \\      display: flex;
+        \\      align-items: center;
+        \\      gap: 8px;
+        \\      font-family: var(--font-mono);
+        \\      font-weight: 700;
+        \\      font-size: 13px;
+        \\      color: #f1f5f9;
+        \\    }
+        \\    .tb-stage-card {
+        \\      background: rgba(15, 23, 42, 0.55);
+        \\      border: 1px dashed #334155;
+        \\      border-radius: 10px;
+        \\      padding: 12px;
+        \\      display: flex;
+        \\      flex-direction: column;
+        \\      gap: 10px;
+        \\      margin-bottom: 8px;
+        \\    }
+        \\    .tb-stage-header {
+        \\      display: flex;
+        \\      align-items: center;
+        \\      justify-content: space-between;
+        \\      padding: 2px 4px 8px 4px;
+        \\      border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+        \\    }
+        \\    .tb-stage-badge {
+        \\      font-size: 10px;
+        \\      font-weight: 800;
+        \\      font-family: var(--font-mono);
+        \\      background: #4f46e5;
+        \\      color: #fff;
+        \\      padding: 2px 7px;
+        \\      border-radius: 4px;
+        \\      text-transform: uppercase;
+        \\      letter-spacing: 0.5px;
+        \\    }
+        \\    .tb-stage-name {
+        \\      font-size: 12px;
+        \\      font-weight: 700;
+        \\      color: #cbd5e1;
+        \\      margin-left: 8px;
+        \\      flex: 1;
+        \\    }
+        \\    .tb-op-icon {
+        \\      display: inline-flex;
+        \\      align-items: center;
+        \\      justify-content: center;
+        \\      width: 22px;
+        \\      height: 22px;
+        \\      border-radius: 4px;
+        \\      font-size: 12px;
+        \\      font-weight: 700;
+        \\    }
+        \\    .tb-op-icon.norm { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.4); }
+        \\    .tb-op-icon.linear { background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); }
+        \\    .tb-op-icon.attn { background: rgba(99, 102, 241, 0.2); color: #818cf8; border: 1px solid rgba(99, 102, 241, 0.4); }
+        \\    .tb-op-icon.mlp { background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.4); }
+        \\    .tb-op-icon.add { background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); }
+        \\    .tb-op-icon.emb { background: rgba(236, 72, 153, 0.2); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.4); }
+        \\    .tb-type-pill {
+        \\      font-size: 10px;
+        \\      font-weight: 700;
+        \\      font-family: var(--font-mono);
+        \\      text-transform: uppercase;
+        \\      padding: 1px 6px;
+        \\      border-radius: 3px;
+        \\      background: rgba(148, 163, 184, 0.15);
+        \\      color: #cbd5e1;
+        \\      border: 1px solid rgba(148, 163, 184, 0.3);
+        \\    }
+        \\    .tb-param-chip {
+        \\      font-size: 11px;
+        \\      font-family: var(--font-mono);
+        \\      color: #94a3b8;
+        \\      background: rgba(15, 23, 42, 0.6);
+        \\      padding: 2px 7px;
+        \\      border-radius: 4px;
+        \\      border: 1px solid rgba(51, 65, 85, 0.5);
+        \\    }
+        \\    .tb-shape-chip {
+        \\      font-size: 11px;
+        \\      font-family: var(--font-mono);
+        \\      color: #38bdf8;
+        \\      background: rgba(2, 132, 199, 0.12);
+        \\      padding: 2px 7px;
+        \\      border-radius: 4px;
+        \\      border: 1px solid rgba(56, 189, 248, 0.3);
+        \\    }
+        \\    .tb-inspect-btn {
+        \\      background: rgba(56, 189, 248, 0.1);
+        \\      border: 1px solid #38bdf8;
+        \\      color: #38bdf8;
+        \\      font-size: 11px;
+        \\      font-weight: 600;
+        \\      padding: 3px 8px;
+        \\      border-radius: 4px;
+        \\      cursor: pointer;
+        \\      display: inline-flex;
+        \\      align-items: center;
+        \\      gap: 4px;
+        \\      transition: all 0.2s;
+        \\    }
+        \\    .tb-inspect-btn:hover {
+        \\      background: #0284c7;
+        \\      color: #fff;
+        \\    }
+        \\
+        \\    /* Standalone Inspector Modal Window */
+        \\    .inspector-overlay {
+        \\      position: fixed;
+        \\      top: 0;
+        \\      left: 0;
+        \\      width: 100vw;
+        \\      height: 100vh;
+        \\      background: rgba(4, 7, 15, 0.75);
+        \\      backdrop-filter: blur(8px);
+        \\      z-index: 9999;
+        \\      display: none;
+        \\      align-items: center;
+        \\      justify-content: center;
+        \\      padding: 24px;
+        \\      box-sizing: border-box;
+        \\      opacity: 0;
+        \\      transition: opacity 0.2s ease;
+        \\    }
+        \\    .inspector-overlay.open {
+        \\      display: flex;
+        \\      opacity: 1;
+        \\    }
+        \\    .inspector-modal {
+        \\      background: #0f172a;
+        \\      border: 1px solid #38bdf8;
+        \\      border-radius: 12px;
+        \\      width: 100%;
+        \\      max-width: 960px;
+        \\      max-height: 88vh;
+        \\      display: flex;
+        \\      flex-direction: column;
+        \\      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.7), 0 0 24px rgba(56, 189, 248, 0.25);
+        \\      overflow: hidden;
+        \\      transform: translateY(12px);
+        \\      transition: transform 0.2s ease;
+        \\    }
+        \\    .inspector-overlay.open .inspector-modal {
+        \\      transform: translateY(0);
+        \\    }
+        \\    .inspector-header {
+        \\      background: #1e293b;
+        \\      padding: 16px 20px;
+        \\      border-bottom: 1px solid #334155;
+        \\      display: flex;
+        \\      align-items: center;
+        \\      justify-content: space-between;
+        \\    }
+        \\    .inspector-title-box {
+        \\      display: flex;
+        \\      align-items: center;
+        \\      gap: 12px;
+        \\    }
+        \\    .inspector-icon {
+        \\      font-size: 22px;
+        \\      line-height: 1;
+        \\    }
+        \\    .inspector-title {
+        \\      font-family: var(--font-mono);
+        \\      font-size: 16px;
+        \\      font-weight: 700;
+        \\      color: #38bdf8;
+        \\    }
+        \\    .inspector-subtitle {
+        \\      font-size: 12px;
+        \\      color: #94a3b8;
+        \\      margin-top: 3px;
+        \\    }
+        \\    .inspector-close-btn {
+        \\      background: transparent;
+        \\      border: 1px solid #475569;
+        \\      color: #94a3b8;
+        \\      font-size: 20px;
+        \\      line-height: 1;
+        \\      width: 32px;
+        \\      height: 32px;
+        \\      border-radius: 6px;
+        \\      cursor: pointer;
+        \\      display: flex;
+        \\      align-items: center;
+        \\      justify-content: center;
+        \\      transition: all 0.2s;
+        \\    }
+        \\    .inspector-close-btn:hover {
+        \\      background: #334155;
+        \\      color: #fff;
+        \\      border-color: #38bdf8;
+        \\    }
+        \\    .inspector-body {
+        \\      padding: 20px;
+        \\      overflow-y: auto;
+        \\      flex: 1;
+        \\      display: flex;
+        \\      flex-direction: column;
+        \\      gap: 16px;
+        \\    }
+        \\    .insp-section {
+        \\      background: #131d2e;
+        \\      border: 1px solid var(--border-color);
+        \\      border-radius: 8px;
+        \\      padding: 14px 16px;
+        \\    }
+        \\    .insp-section-title {
+        \\      font-size: 13px;
+        \\      font-weight: 700;
+        \\      color: #f1f5f9;
+        \\      margin-bottom: 10px;
+        \\      display: flex;
+        \\      align-items: center;
+        \\      justify-content: space-between;
+        \\    }
+        \\    tr.node-row { cursor: pointer; }
+        \\
         \\    footer { margin-top: 36px; text-align: center; font-size: 12px; color: #64748b; }
         \\  </style>
         \\</head>
@@ -1108,6 +1349,23 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\  <footer>Generated automatically by ZNN Autodiff Engine</footer>
         \\</div>
         \\
+        \\<!-- Standalone Node Inspector Modal Window -->
+        \\<div id="inspector-overlay" class="inspector-overlay" onclick="closeInspector(event)">
+        \\  <div class="inspector-modal" onclick="event.stopPropagation()">
+        \\    <div class="inspector-header">
+        \\      <div class="inspector-title-box">
+        \\        <span class="inspector-icon" id="insp-icon">🔍</span>
+        \\        <div>
+        \\          <div class="inspector-title" id="insp-title">Node Inspector</div>
+        \\          <div class="inspector-subtitle" id="insp-subtitle">Detailed Inputs, Parameters & Activations</div>
+        \\        </div>
+        \\      </div>
+        \\      <button class="inspector-close-btn" onclick="closeInspector()">&times;</button>
+        \\    </div>
+        \\    <div class="inspector-body" id="insp-body"></div>
+        \\  </div>
+        \\</div>
+        \\
     , .{
         total_params,
         mb_est,
@@ -1185,6 +1443,138 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\function formatNumber(num) {
         \\  return num.toLocaleString();
         \\}
+        \\
+        \\function formatBytes(bytes) {
+        \\  if (!bytes || bytes === 0) return '0 B';
+        \\  if (bytes < 1024) return bytes + ' B';
+        \\  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        \\  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+        \\}
+        \\
+        \\function getNodeOpType(name) {
+        \\  const n = name.toLowerCase();
+        \\  if (n.includes('ln_') || n.includes('norm')) return { icon: '📐', type: 'RMSNorm / LayerNorm', cls: 'norm' };
+        \\  if (n.includes('wte') || n.includes('wpe') || n.includes('emb')) return { icon: '🔲', type: 'Embedding Table', cls: 'emb' };
+        \\  if (n.includes('attn') && !n.includes('q_') && !n.includes('k_') && !n.includes('v_')) return { icon: '🔀', type: 'Causal Self-Attention', cls: 'attn' };
+        \\  if (n.includes('mlp')) return { icon: '⚡', type: 'MLP / SwiGLU Block', cls: 'mlp' };
+        \\  if (n.includes('q_attn') || n.includes('k_attn') || n.includes('v_attn')) return { icon: '⚙️', type: 'Multi-Head Linear Proj', cls: 'linear' };
+        \\  if (n.includes('c_proj') || n.includes('c_fc') || n.includes('lm_head') || n.includes('linear')) return { icon: '⚙️', type: 'Linear (Dense)', cls: 'linear' };
+        \\  if (n.includes('add') || n.includes('residual')) return { icon: '⊕', type: 'Residual Add', cls: 'add' };
+        \\  return { icon: '📦', type: 'Module Block', cls: 'linear' };
+        \\}
+        \\
+        \\function openInspector(key) {
+        \\  const modal = document.getElementById('inspector-overlay');
+        \\  const titleEl = document.getElementById('insp-title');
+        \\  const subEl = document.getElementById('insp-subtitle');
+        \\  const iconEl = document.getElementById('insp-icon');
+        \\  const bodyEl = document.getElementById('insp-body');
+        \\  if (!modal || !bodyEl) return;
+        \\
+        \\  const matchedNodes = NODES_DATA.filter(n => n.name === key || n.name.startsWith(key + '.'));
+        \\  const opInfo = getNodeOpType(key);
+        \\  if (iconEl) iconEl.textContent = opInfo.icon;
+        \\  if (titleEl) titleEl.textContent = key;
+        \\
+        \\  let totalParams = 0;
+        \\  let totalBytes = 0;
+        \\  matchedNodes.forEach(n => {
+        \\    if (n.kind === 'Param') totalParams += n.elements;
+        \\    totalBytes += n.bytes;
+        \\  });
+        \\
+        \\  const paramStr = totalParams > 0 ? `${formatNumber(totalParams)} params (${formatBytes(totalBytes)})` : '0 params (Parameter-free)';
+        \\  if (subEl) subEl.textContent = `${opInfo.type} · ${paramStr}`;
+        \\
+        \\  // 1. Inputs Section
+        \\  const incoming = EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.') || (key.startsWith(e.to) && e.to.length > 5));
+        \\  const inputNodes = matchedNodes.filter(n => n.kind === 'Input');
+        \\
+        \\  let inputsHtml = '<div class="insp-section"><div class="insp-section-title"><span>📥 Inputs (节点输入具体内容)</span></div>';
+        \\  if (incoming.length > 0 || inputNodes.length > 0) {
+        \\    inputsHtml += '<table class="node-table"><thead><tr><th>Source Tensor / Predecessor</th><th>Target Port</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
+        \\    incoming.forEach(e => {
+        \\      const typeBadge = e.is_skip 
+        \\        ? '<span class="badge" style="background:#0284c7;color:#fff;">⚡ Residual Skip Highway</span>'
+        \\        : '<span class="badge" style="background:#334155;color:#94a3b8;">▼ Sequential Flow</span>';
+        \\      inputsHtml += `<tr><td class="node-name">${e.from}</td><td class="node-name">${e.to}</td><td class="node-shape">${e.shape}</td><td>${typeBadge}</td></tr>`;
+        \\    });
+        \\    inputNodes.forEach(inp => {
+        \\      inputsHtml += `<tr><td class="node-name">${inp.name}</td><td class="node-name">${key}</td><td class="node-shape">${inp.shape}</td><td><span class="badge badge-input">User / Model Input</span></td></tr>`;
+        \\    });
+        \\    inputsHtml += '</tbody></table>';
+        \\  } else {
+        \\    let impliedInp = 'Inherits sequential output from predecessor module in forward graph.';
+        \\    if (key.includes('ln_1')) impliedInp = 'Input tensor <code>x</code> (Transformer block input [2, 16, 64])';
+        \\    else if (key.includes('attn')) impliedInp = 'Normalized tensor from <code>ln_1</code> [2, 16, 64]';
+        \\    else if (key.includes('ln_2')) impliedInp = 'Stage 1 attention residual sum <code>x1</code> [2, 16, 64]';
+        \\    else if (key.includes('mlp')) impliedInp = 'Normalized tensor from <code>ln_2</code> [2, 16, 64]';
+        \\    else if (key.includes('wte') || key.includes('wpe')) impliedInp = 'Integer token IDs / Position indices <code>[2, 16]</code>';
+        \\    else if (key.includes('ln_f')) impliedInp = 'Final transformer block output [2, 16, 64]';
+        \\    else if (key.includes('lm_head')) impliedInp = 'Normalized representation from <code>ln_f</code> [2, 16, 64]';
+        \\    inputsHtml += `<div style="font-size: 12px; color: #cbd5e1; padding: 6px 0;">${impliedInp}</div>`;
+        \\  }
+        \\  inputsHtml += '</div>';
+        \\
+        \\  // 2. Parameters Section
+        \\  const paramNodes = matchedNodes.filter(n => n.kind === 'Param');
+        \\  let paramsHtml = `<div class="insp-section"><div class="insp-section-title"><span>⚙️ Parameters (权重与偏置参数详情)</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">Total: ${formatNumber(totalParams)}</span></div>`;
+        \\  if (paramNodes.length > 0) {
+        \\    paramsHtml += '<table class="node-table"><thead><tr><th>Parameter Name</th><th>Shape</th><th>Elements</th><th>Memory</th><th>Init Strategy</th><th>Status</th></tr></thead><tbody>';
+        \\    paramNodes.forEach(p => {
+        \\      const statusBadge = p.status === 'CUSTOM_INIT' ? 'badge-custom' : 'badge-auto';
+        \\      paramsHtml += `<tr><td class="node-name">${p.name}</td><td class="node-shape">${p.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(p.elements)}</td><td style="font-family:var(--font-mono);">${formatBytes(p.bytes)}</td><td class="strategy-col">${p.strategy}</td><td><span class="badge ${statusBadge}">${p.status}</span></td></tr>`;
+        \\    });
+        \\    paramsHtml += '</tbody></table>';
+        \\  } else {
+        \\    paramsHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">No trainable parameters (stateless / parameter-free operation).</div>';
+        \\  }
+        \\  paramsHtml += '</div>';
+        \\
+        \\  // 3. Outputs & Activations Section
+        \\  const actNodes = matchedNodes.filter(n => n.kind === 'Activation' || n.kind === 'Output');
+        \\  let actsHtml = `<div class="insp-section"><div class="insp-section-title"><span>📤 Outputs & Activations (输出与计算特征图)</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">${actNodes.length} tensors</span></div>`;
+        \\  if (actNodes.length > 0) {
+        \\    actsHtml += '<table class="node-table"><thead><tr><th>Tensor Name</th><th>Shape</th><th>Elements</th><th>Inferred Op</th><th>Memory</th></tr></thead><tbody>';
+        \\    actNodes.forEach(a => {
+        \\      actsHtml += `<tr><td class="node-name">${a.name}</td><td class="node-shape">${a.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(a.elements)}</td><td style="font-family:var(--font-mono);"><span class="badge badge-op">${a.act}</span></td><td style="font-family:var(--font-mono);">${formatBytes(a.bytes)}</td></tr>`;
+        \\    });
+        \\    actsHtml += '</tbody></table>';
+        \\  } else {
+        \\    actsHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">Outputs flow directly to subsequent operator without standalone intermediate caching.</div>';
+        \\  }
+        \\  actsHtml += '</div>';
+        \\
+        \\  // 4. Downstream Connections
+        \\  const outgoing = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
+        \\  let outHtml = '';
+        \\  if (outgoing.length > 0) {
+        \\    outHtml += '<div class="insp-section"><div class="insp-section-title"><span>🔀 Downstream Flow (下游流向)</span></div><table class="node-table"><thead><tr><th>Consumer Node</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
+        \\    outgoing.forEach(e => {
+        \\      const typeBadge = e.is_skip 
+        \\        ? '<span class="badge" style="background:#0284c7;color:#fff;">⚡ Residual Skip Highway</span>'
+        \\        : '<span class="badge" style="background:#334155;color:#94a3b8;">▼ Sequential Flow</span>';
+        \\      outHtml += `<tr><td class="node-name">${e.to}</td><td class="node-shape">${e.shape}</td><td>${typeBadge}</td></tr>`;
+        \\    });
+        \\    outHtml += '</tbody></table></div>';
+        \\  }
+        \\
+        \\  bodyEl.innerHTML = inputsHtml + paramsHtml + actsHtml + outHtml;
+        \\  modal.classList.add('open');
+        \\}
+        \\
+        \\function closeInspector(e) {
+        \\  if (e && e.target && e.target.id !== 'inspector-overlay' && !e.target.classList.contains('inspector-close-btn')) return;
+        \\  const modal = document.getElementById('inspector-overlay');
+        \\  if (modal) modal.classList.remove('open');
+        \\}
+        \\
+        \\document.addEventListener('keydown', (e) => {
+        \\  if (e.key === 'Escape') {
+        \\    const modal = document.getElementById('inspector-overlay');
+        \\    if (modal) modal.classList.remove('open');
+        \\  }
+        \\});
         \\
         \\function renderDagView() {
         \\  const container = document.getElementById('dag-container');
@@ -1440,7 +1830,7 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\    const kindBadge = n.kind === 'Param' ? 'badge-param' : (n.kind === 'Input' ? 'badge-input' : 'badge-act');
         \\    const statusBadge = n.status === 'CUSTOM_INIT' ? 'badge-custom' : (n.status === 'AUTO_GRAPH' ? 'badge-auto' : 'badge-op');
         \\    return `
-        \\      <tr class="node-row" data-name="${n.name.toLowerCase()}" data-kind="${n.kind}" data-act="${n.act.toLowerCase()}" data-shape="${n.shape}">
+        \\      <tr class="node-row" onclick="openInspector('${n.name}')" title="Click to view inputs, parameters & outputs in standalone window" data-name="${n.name.toLowerCase()}" data-kind="${n.kind}" data-act="${n.act.toLowerCase()}" data-shape="${n.shape}">
         \\        <td class="node-name">${n.name}</td>
         \\        <td><span class="badge ${kindBadge}">${n.kind}</span></td>
         \\        <td class="node-shape">${n.shape}</td>
@@ -1479,6 +1869,28 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\
         \\    const isDecoderLayer = /^gpt\.layers\.\d+$/.test(prefix) || /layers\.\d+$/.test(prefix);
         \\    const isAttentionLayer = prefix.endsWith('.attn') || (node._children['q_attn'] && node._children['k_attn'] && node._children['v_attn']);
+        \\    const isLeafOrSpecial = !isDecoderLayer && !isAttentionLayer && (node._nodes.length > 0 || childKeys.length === 0);
+        \\
+        \\    // TensorBoard node card for leaf/op modules
+        \\    if (isLeafOrSpecial) {
+        \\      const opInfo = getNodeOpType(prefix);
+        \\      html += `
+        \\        <div class="tb-node-card" onclick="openInspector('${prefix}')" title="Click to view inputs, parameters & outputs in standalone window" style="margin-bottom: 10px;">
+        \\          <div class="tb-node-header">
+        \\            <div class="tb-node-title">
+        \\              <span class="tb-op-icon ${opInfo.cls}">${opInfo.icon}</span>
+        \\              <span>${prefix}</span>
+        \\            </div>
+        \\            <div style="display: flex; align-items: center; gap: 8px;">
+        \\              <span class="tb-type-pill">${opInfo.type}</span>
+        \\              ${node._paramCount > 0 ? `<span class="tb-param-chip">⚙️ ${formatNumber(node._paramCount)} params</span>` : ''}
+        \\              <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${prefix}')">🔍 Inspect</button>
+        \\            </div>
+        \\          </div>
+        \\        </div>
+        \\      `;
+        \\    }
+        \\
         \\    const tableNodes = (isDecoderLayer || isAttentionLayer)
         \\      ? []
         \\      : node._nodes;
@@ -1509,6 +1921,22 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\      const kChild = node._children['k_attn'];
         \\      const vChild = node._children['v_attn'];
         \\      const cprojChild = node._children['c_proj'];
+        \\
+        \\      html += `
+        \\        <div class="tb-node-card" onclick="openInspector('${prefix}')" title="Click to inspect Causal Self-Attention module" style="margin-bottom: 12px;">
+        \\          <div class="tb-node-header">
+        \\            <div class="tb-node-title">
+        \\              <span class="tb-op-icon attn">🔀</span>
+        \\              <span>${prefix}</span>
+        \\            </div>
+        \\            <div style="display: flex; align-items: center; gap: 8px;">
+        \\              <span class="tb-type-pill">Causal Self-Attention</span>
+        \\              ${node._paramCount > 0 ? `<span class="tb-param-chip">⚙️ ${formatNumber(node._paramCount)} params</span>` : ''}
+        \\              <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${prefix}')">🔍 Inspect</button>
+        \\            </div>
+        \\          </div>
+        \\        </div>
+        \\      `;
         \\
         \\      if (qChild || kChild || vChild) {
         \\        html += `
@@ -1559,35 +1987,34 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\
         \\      if (node._nodes.length > 0) {
         \\        html += `
-        \\          <details class="module-group" open style="border-color: #818cf8; background: rgba(99, 102, 241, 0.03);">
-        \\            <summary class="module-header" style="background: rgba(99, 102, 241, 0.12);">
-        \\              <div class="module-title-box">
-        \\                <span class="chevron">▶</span>
-        \\                <span class="module-name" style="color: #a5b4fc; font-size: 13px;">🎯 Step 2: Scaled Dot-Product Attention Core · Softmax((Q · Kᵀ)/√d + Causal Mask) · V</span>
+        \\          <div class="tb-node-card" onclick="openInspector('${prefix}')" title="Click to inspect attention core activations" style="border-color: #818cf8; background: rgba(99, 102, 241, 0.06); margin: 6px 0;">
+        \\            <div class="tb-node-header">
+        \\              <div class="tb-node-title">
+        \\                <span class="tb-op-icon attn">🎯</span>
+        \\                <span style="color: #a5b4fc; font-size: 13px;">Step 2: Scaled Dot-Product Attention Core</span>
         \\              </div>
-        \\              <div class="module-meta">
-        \\                <span>${node._nodes.length} ops</span>
+        \\              <div style="display: flex; align-items: center; gap: 8px;">
+        \\                <span class="tb-type-pill" style="border-color: #818cf8; color: #a5b4fc;">Softmax((Q·Kᵀ)/√d + Mask)·V</span>
+        \\                <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${prefix}')">🔍 Inspect</button>
         \\              </div>
-        \\            </summary>
-        \\            <div class="module-content">
-        \\              <table class="node-table">
-        \\                <thead>
-        \\                  <tr>
-        \\                    <th>Node Name</th>
-        \\                    <th>Kind</th>
-        \\                    <th>Shape</th>
-        \\                    <th>Elements</th>
-        \\                    <th>Status</th>
-        \\                    <th>Inferred Act / Op</th>
-        \\                    <th>Initialization Strategy</th>
-        \\                  </tr>
-        \\                </thead>
-        \\                <tbody>
-        \\                  ${renderTableRows(node._nodes)}
-        \\                </tbody>
-        \\              </table>
         \\            </div>
-        \\          </details>
+        \\          </div>
+        \\          <table class="node-table" style="margin-bottom: 10px;">
+        \\            <thead>
+        \\              <tr>
+        \\                <th>Node Name</th>
+        \\                <th>Kind</th>
+        \\                <th>Shape</th>
+        \\                <th>Elements</th>
+        \\                <th>Status</th>
+        \\                <th>Inferred Act / Op</th>
+        \\                <th>Initialization Strategy</th>
+        \\              </tr>
+        \\            </thead>
+        \\            <tbody>
+        \\              ${renderTableRows(node._nodes)}
+        \\            </tbody>
+        \\          </table>
         \\        `;
         \\      }
         \\
@@ -1604,7 +2031,6 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\      }
         \\    }
         \\
-        \\    let prevSublayerOutput = '';
         \\    if (isDecoderLayer) {
         \\      const attnChild = node._children['attn'];
         \\      const ln1Child = node._children['ln_1'];
@@ -1617,71 +2043,72 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\      if (attnChild) {
         \\        const attnShape = resAttnNode ? resAttnNode.shape : '[2, 16, 64]';
         \\        html += `
-        \\          <details class="module-group tree-sublayer-block" open>
-        \\            <summary class="module-header tree-sublayer-header">
-        \\              <div class="module-title-box">
-        \\                <span class="chevron">▶</span>
-        \\                <span class="module-name" style="color: #e2e8f0; font-size: 13px;">🔀 Sub-Layer 1: Causal Self-Attention Residual Block</span>
+        \\          <div class="tb-stage-card">
+        \\            <div class="tb-stage-header">
+        \\              <div style="display: flex; align-items: center; gap: 8px;">
+        \\                <span class="tb-stage-badge">Stage 1</span>
+        \\                <span class="tb-stage-name">Self-Attention Residual Sublayer</span>
         \\              </div>
-        \\              <div class="module-meta">
-        \\                <span class="flow-card-shape">${attnShape}</span>
-        \\              </div>
-        \\            </summary>
-        \\            <div class="tree-sublayer-body">
-        \\              <div class="tree-branches-row">
-        \\                <!-- Branch A: Skip / Shortcut Connection -->
-        \\                <div class="tree-branch-col tree-branch-skip">
-        \\                  <span class="tree-branch-badge skip">⚡ Shortcut (Skip)</span>
-        \\                  <div style="font-family: var(--font-mono); font-weight: 700; color: #38bdf8; font-size: 13px; margin-top: 6px;">
-        \\                    Direct Identity Highway
-        \\                  </div>
-        \\                  <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">
-        \\                    Input Identity Tensor <code>x</code>
-        \\                  </div>
-        \\                  <div style="margin-top: auto; padding-top: 8px; font-family: var(--font-mono); font-size: 11px; color: #94a3b8;">
-        \\                    Shape: ${attnShape}
-        \\                  </div>
+        \\              <span class="tb-shape-chip">${attnShape}</span>
+        \\            </div>
+        \\            <div class="tree-branches-row">
+        \\              <!-- Branch A: Shortcut (Skip) x -->
+        \\              <div class="tree-branch-col tree-branch-skip" onclick="openInspector('${prefix}.residual_attn')" title="Click to inspect Shortcut connection" style="cursor: pointer;">
+        \\                <span class="tree-branch-badge skip">⚡ Shortcut (Skip) x</span>
+        \\                <div style="font-family: var(--font-mono); font-weight: 700; color: #38bdf8; font-size: 12px; margin-top: 6px;">
+        \\                  Identity Highway
         \\                </div>
-        \\
-        \\                <div class="tree-divider">|</div>
-        \\
-        \\                <!-- Branch B: Transform Sub-Layer (ln_1 + attn) -->
-        \\                <div class="tree-branch-col tree-branch-transform">
-        \\                  <span class="tree-branch-badge transform">⚙️ Transform Branch F(x)</span>
-        \\                  <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
-        \\                    ${ln1Child ? renderBranch(`${prefix}.ln_1`, ln1Child) : ''}
-        \\                    <div class="tree-flow-connector" style="padding: 2px 8px;">
-        \\                      <span class="flow-arrow-text"><span class="arrow-symbol">▼</span> Normalized Activation to Attention</span>
-        \\                    </div>
-        \\                    ${renderBranch(`${prefix}.attn`, attnChild)}
-        \\                  </div>
+        \\                <div style="font-size: 11px; color: var(--text-sub); margin-top: 3px;">
+        \\                  Preserves input tensor <code>x</code>
+        \\                </div>
+        \\                <div style="margin-top: auto; padding-top: 8px;">
+        \\                  <span class="tb-shape-chip">${attnShape}</span>
         \\                </div>
         \\              </div>
         \\
-        \\              <!-- Downward Convergence -->
-        \\              <div class="tree-converge-box">
-        \\                <div class="flow-arrow-down" style="padding: 2px 0;">
-        \\                  <span class="flow-arrow-head">▼</span>
-        \\                  <span class="flow-arrow-label">⊕ Element-wise Add: x + F(x)</span>
+        \\              <div class="tree-divider">|</div>
+        \\
+        \\              <!-- Branch B: Transform Branch F(x) (ln_1 -> attn) -->
+        \\              <div class="tree-branch-col tree-branch-transform">
+        \\                <span class="tree-branch-badge transform">⚙️ Transform Branch F(x)</span>
+        \\                <div style="font-size: 11px; color: #a5b4fc; margin: 4px 0 8px 0; font-family: var(--font-mono);">
+        \\                  (RMSNorm ➔ Attention)
         \\                </div>
-        \\                <div class="tree-converge-card">
-        \\                  <span>⊕</span>
-        \\                  <span>${resAttnNode ? resAttnNode.name : `${prefix}.residual_attn`}</span>
-        \\                  <span class="flow-card-shape" style="margin-left: 8px;">${attnShape}</span>
+        \\                <div style="display: flex; flex-direction: column; gap: 8px;">
+        \\                  ${ln1Child ? renderBranch(`${prefix}.ln_1`, ln1Child) : ''}
+        \\                  <div class="tree-flow-connector" style="padding: 2px 8px;">
+        \\                    <span class="flow-arrow-text"><span class="arrow-symbol">▼</span> Normalized Activation to Attention</span>
+        \\                  </div>
+        \\                  ${attnChild ? renderBranch(`${prefix}.attn`, attnChild) : ''}
         \\                </div>
         \\              </div>
         \\            </div>
-        \\          </details>
+        \\
+        \\            <!-- Downward Convergence: x + F(x) -->
+        \\            <div class="tree-converge-box" onclick="openInspector('${resAttnNode ? resAttnNode.name : prefix + '.residual_attn'}')" style="cursor: pointer;">
+        \\              <div class="flow-arrow-down" style="padding: 2px 0;">
+        \\                <span class="flow-arrow-head">▼</span>
+        \\                <span class="flow-arrow-label">⊕ Element-wise Add: x + F(x)</span>
+        \\              </div>
+        \\              <div class="tree-converge-card" style="width: 100%; justify-content: space-between;">
+        \\                <div style="display: flex; align-items: center; gap: 8px;">
+        \\                  <span>⊕</span>
+        \\                  <span>Residual Add: x + F(x)</span>
+        \\                  <span class="flow-card-shape">${attnShape}</span>
+        \\                </div>
+        \\                <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${resAttnNode ? resAttnNode.name : prefix + '.residual_attn'}')">🔍 Inspect</button>
+        \\              </div>
+        \\            </div>
+        \\          </div>
         \\        `;
         \\      }
         \\
         \\      if (attnChild && mlpChild) {
         \\        html += `
-        \\          <div class="tree-flow-connector">
-        \\            <div class="flow-line"></div>
+        \\          <div class="tree-flow-connector" style="justify-content: center; margin: 8px 0;">
         \\            <span class="flow-arrow-text">
         \\              <span class="arrow-symbol">▼</span>
-        \\              <span>Output of Sub-Layer 1 feeds into Sub-Layer 2 input</span>
+        \\              <span>Output x feeds into Stage 2 (MLP Block)</span>
         \\            </span>
         \\          </div>
         \\        `;
@@ -1690,61 +2117,63 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\      if (mlpChild) {
         \\        const mlpShape = outputNode ? outputNode.shape : '[2, 16, 64]';
         \\        html += `
-        \\          <details class="module-group tree-sublayer-block" open>
-        \\            <summary class="module-header tree-sublayer-header">
-        \\              <div class="module-title-box">
-        \\                <span class="chevron">▶</span>
-        \\                <span class="module-name" style="color: #e2e8f0; font-size: 13px;">🔀 Sub-Layer 2: Feed-Forward (MLP) Residual Block</span>
+        \\          <div class="tb-stage-card">
+        \\            <div class="tb-stage-header">
+        \\              <div style="display: flex; align-items: center; gap: 8px;">
+        \\                <span class="tb-stage-badge" style="background: #7c3aed;">Stage 2</span>
+        \\                <span class="tb-stage-name">Feed-Forward (MLP) Residual Sublayer</span>
         \\              </div>
-        \\              <div class="module-meta">
-        \\                <span class="flow-card-shape">${mlpShape}</span>
-        \\              </div>
-        \\            </summary>
-        \\            <div class="tree-sublayer-body">
-        \\              <div class="tree-branches-row">
-        \\                <!-- Branch A: Skip / Shortcut Connection -->
-        \\                <div class="tree-branch-col tree-branch-skip">
-        \\                  <span class="tree-branch-badge skip">⚡ Shortcut (Skip)</span>
-        \\                  <div style="font-family: var(--font-mono); font-weight: 700; color: #38bdf8; font-size: 13px; margin-top: 6px;">
-        \\                    Attn Residual Highway
-        \\                  </div>
-        \\                  <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">
-        \\                    Sub-Layer 1 Output <code>x'</code>
-        \\                  </div>
-        \\                  <div style="margin-top: auto; padding-top: 8px; font-family: var(--font-mono); font-size: 11px; color: #94a3b8;">
-        \\                    Shape: ${mlpShape}
-        \\                  </div>
+        \\              <span class="tb-shape-chip">${mlpShape}</span>
+        \\            </div>
+        \\            <div class="tree-branches-row">
+        \\              <!-- Branch A: Shortcut (Skip) x -->
+        \\              <div class="tree-branch-col tree-branch-skip" onclick="openInspector('${prefix}.output')" title="Click to inspect Shortcut connection" style="cursor: pointer;">
+        \\                <span class="tree-branch-badge skip">⚡ Shortcut (Skip) x</span>
+        \\                <div style="font-family: var(--font-mono); font-weight: 700; color: #38bdf8; font-size: 12px; margin-top: 6px;">
+        \\                  Attn Residual Highway
         \\                </div>
-        \\
-        \\                <div class="tree-divider">|</div>
-        \\
-        \\                <!-- Branch B: Transform Sub-Layer (ln_2 + mlp) -->
-        \\                <div class="tree-branch-col tree-branch-transform">
-        \\                  <span class="tree-branch-badge transform">⚙️ Transform Branch F(x')</span>
-        \\                  <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 6px;">
-        \\                    ${ln2Child ? renderBranch(`${prefix}.ln_2`, ln2Child) : ''}
-        \\                    <div class="tree-flow-connector" style="padding: 2px 8px;">
-        \\                      <span class="flow-arrow-text"><span class="arrow-symbol">▼</span> Normalized Activation to MLP</span>
-        \\                    </div>
-        \\                    ${renderBranch(`${prefix}.mlp`, mlpChild)}
-        \\                  </div>
+        \\                <div style="font-size: 11px; color: var(--text-sub); margin-top: 3px;">
+        \\                  Stage 1 output tensor <code>x</code>
+        \\                </div>
+        \\                <div style="margin-top: auto; padding-top: 8px;">
+        \\                  <span class="tb-shape-chip">${mlpShape}</span>
         \\                </div>
         \\              </div>
         \\
-        \\              <!-- Downward Convergence -->
-        \\              <div class="tree-converge-box">
-        \\                <div class="flow-arrow-down" style="padding: 2px 0;">
-        \\                  <span class="flow-arrow-head">▼</span>
-        \\                  <span class="flow-arrow-label">⊕ Element-wise Add: x' + F(x')</span>
+        \\              <div class="tree-divider">|</div>
+        \\
+        \\              <!-- Branch B: Transform Branch F(x) (ln_2 -> mlp) -->
+        \\              <div class="tree-branch-col tree-branch-transform">
+        \\                <span class="tree-branch-badge transform">⚙️ Transform Branch F(x)</span>
+        \\                <div style="font-size: 11px; color: #a5b4fc; margin: 4px 0 8px 0; font-family: var(--font-mono);">
+        \\                  (RMSNorm ➔ MLP)
         \\                </div>
-        \\                <div class="tree-converge-card">
-        \\                  <span>⊕</span>
-        \\                  <span>${outputNode ? outputNode.name : `${prefix}.output`}</span>
-        \\                  <span class="flow-card-shape" style="margin-left: 8px;">${mlpShape}</span>
+        \\                <div style="display: flex; flex-direction: column; gap: 8px;">
+        \\                  ${ln2Child ? renderBranch(`${prefix}.ln_2`, ln2Child) : ''}
+        \\                  <div class="tree-flow-connector" style="padding: 2px 8px;">
+        \\                    <span class="flow-arrow-text"><span class="arrow-symbol">▼</span> Normalized Activation to MLP</span>
+        \\                  </div>
+        \\                  ${mlpChild ? renderBranch(`${prefix}.mlp`, mlpChild) : ''}
         \\                </div>
         \\              </div>
         \\            </div>
-        \\          </details>
+        \\
+        \\            <!-- Downward Convergence: x + F(x) -->
+        \\            <div class="tree-converge-box" onclick="openInspector('${outputNode ? outputNode.name : prefix + '.output'}')" style="cursor: pointer;">
+        \\              <div class="flow-arrow-down" style="padding: 2px 0;">
+        \\                <span class="flow-arrow-head">▼</span>
+        \\                <span class="flow-arrow-label">⊕ Element-wise Add: x + F(x)</span>
+        \\              </div>
+        \\              <div class="tree-converge-card" style="width: 100%; justify-content: space-between;">
+        \\                <div style="display: flex; align-items: center; gap: 8px;">
+        \\                  <span>⊕</span>
+        \\                  <span>Residual Add: x + F(x)</span>
+        \\                  <span class="flow-card-shape">${mlpShape}</span>
+        \\                </div>
+        \\                <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${outputNode ? outputNode.name : prefix + '.output'}')">🔍 Inspect</button>
+        \\              </div>
+        \\            </div>
+        \\          </div>
         \\        `;
         \\      }
         \\    }
