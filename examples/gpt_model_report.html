@@ -990,229 +990,250 @@
     <div class="inspector-body" id="insp-body"></div>
   </div>
 </div>
+<script id="znn-model-graph-data" type="application/json">{
+  "version": "1.0",
+  "summary": { "total_params": 134848, "total_bytes": 1432576, "param_nodes": 33, "input_nodes": 4, "activation_nodes": 80, "custom_init_count": 28, "auto_graph_count": 5, "total_nodes": 117},
+  "root": {"name": "root","path": "","kind": "module","total_params": 134848,"total_bytes": 1432576,"param_count": 0,"node_count": 117,"children": [{"name": "gpt","path": "gpt","kind": "module","total_params": 134848,"total_bytes": 1399680,"param_count": 0,"node_count": 115,"children": [{"name": "wte","path": "gpt.wte","kind": "module","total_params": 16384,"total_bytes": 73728,"param_count": 1,"node_count": 2,"children": [],"nodes": [{"name": "gpt.wte.weight","kind": "Param","shape": "[256, 64]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.wte.act_Embedding_0","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Embedding","strategy": "produced by Embedding"}]},{"name": "wpe","path": "gpt.wpe","kind": "module","total_params": 2048,"total_bytes": 16512,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.wpe.weight","kind": "Param","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.wpe.pos_indices","kind": "Input","shape": "[2, 16]","elements": 32,"bytes": 128,"status": "INPUT","act": "N/A","strategy": "user input / constant"},{"name": "gpt.wpe.act_Embedding_1","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Embedding","strategy": "produced by Embedding"}]},{"name": "layers","path": "gpt.layers","kind": "module","total_params": 99776,"total_bytes": 1169152,"param_count": 0,"node_count": 105,"children": [{"name": "0","path": "gpt.layers.0","kind": "module","total_params": 49856,"total_bytes": 576256,"param_count": 0,"node_count": 51,"children": [{"name": "ln_1","path": "gpt.layers.0.ln_1","kind": "module","total_params": 64,"total_bytes": 16640,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.0.ln_1.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.0.ln_1.act_RmsNorm_3","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.0.ln_1.act_Reshape_4","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "attn","path": "gpt.layers.0.attn","kind": "module","total_params": 16640,"total_bytes": 271360,"param_count": 0,"node_count": 33,"children": [{"name": "q_attn","path": "gpt.layers.0.attn.q_attn","kind": "module","total_params": 4160,"total_bytes": 49408,"param_count": 2,"node_count": 6,"children": [],"nodes": [{"name": "gpt.layers.0.attn.q_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.q_attn.act_MatMul_5","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.q_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.q_attn.act_Add_6","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.q_attn.act_Reshape_11","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.q_attn.act_Transpose_14","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "k_attn","path": "gpt.layers.0.attn.k_attn","kind": "module","total_params": 4160,"total_bytes": 57600,"param_count": 2,"node_count": 7,"children": [],"nodes": [{"name": "gpt.layers.0.attn.k_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.k_attn.act_MatMul_7","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.k_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.k_attn.act_Add_8","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.k_attn.act_Reshape_12","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.k_attn.act_Transpose_15","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"},{"name": "gpt.layers.0.attn.k_attn.act_Transpose_17","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "v_attn","path": "gpt.layers.0.attn.v_attn","kind": "module","total_params": 4160,"total_bytes": 49408,"param_count": 2,"node_count": 6,"children": [],"nodes": [{"name": "gpt.layers.0.attn.v_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.v_attn.act_MatMul_9","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.v_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.v_attn.act_Add_10","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.v_attn.act_Reshape_13","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.v_attn.act_Transpose_16","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "c_proj","path": "gpt.layers.0.attn.c_proj","kind": "module","total_params": 4160,"total_bytes": 41216,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.0.attn.c_proj.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.c_proj.act_MatMul_26","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.c_proj.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.c_proj.act_Add_27","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.c_proj.act_Reshape_28","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": [{"name": "gpt.layers.0.attn.act_BatchMatMul_18","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "BatchMatMul","strategy": "produced by BatchMatMul"},{"name": "gpt.layers.0.attn.act_MulScalar_19","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MulScalar","strategy": "produced by MulScalar"},{"name": "gpt.layers.0.attn.causal_mask","kind": "Input","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "INPUT","act": "N/A","strategy": "user input / constant"},{"name": "gpt.layers.0.attn.act_Add_20","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.act_Softmax_21","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Softmax","strategy": "produced by Softmax"},{"name": "gpt.layers.0.attn.act_BatchMatMul_22","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "BatchMatMul","strategy": "produced by BatchMatMul"},{"name": "gpt.layers.0.attn.act_Transpose_23","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"},{"name": "gpt.layers.0.attn.act_Reshape_24","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.act_Reshape_25","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "ln_2","path": "gpt.layers.0.ln_2","kind": "module","total_params": 64,"total_bytes": 16640,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.0.ln_2.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.0.ln_2.act_RmsNorm_30","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.0.ln_2.act_Reshape_31","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "mlp","path": "gpt.layers.0.mlp","kind": "module","total_params": 33088,"total_bytes": 255232,"param_count": 0,"node_count": 10,"children": [{"name": "c_fc","path": "gpt.layers.0.mlp.c_fc","kind": "module","total_params": 16640,"total_bytes": 164864,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.0.mlp.c_fc.weight","kind": "Param","shape": "[64, 256]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_fc.act_MatMul_32","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.mlp.c_fc.bias","kind": "Param","shape": "[1, 256]","elements": 256,"bytes": 1024,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_fc.act_Add_33","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.mlp.c_fc.act_Gelu_34","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Gelu","strategy": "produced by Gelu"}]},{"name": "c_proj","path": "gpt.layers.0.mlp.c_proj","kind": "module","total_params": 16448,"total_bytes": 90368,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.0.mlp.c_proj.weight","kind": "Param","shape": "[256, 64]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_proj.act_MatMul_35","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.mlp.c_proj.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_proj.act_Add_36","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.mlp.c_proj.act_Reshape_37","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": []}],"nodes": [{"name": "gpt.layers.0.residual_attn","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.output","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"}]},{"name": "1","path": "gpt.layers.1","kind": "module","total_params": 49856,"total_bytes": 576256,"param_count": 0,"node_count": 51,"children": [{"name": "ln_1","path": "gpt.layers.1.ln_1","kind": "module","total_params": 64,"total_bytes": 16640,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.1.ln_1.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.1.ln_1.act_RmsNorm_39","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.1.ln_1.act_Reshape_40","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "attn","path": "gpt.layers.1.attn","kind": "module","total_params": 16640,"total_bytes": 271360,"param_count": 0,"node_count": 33,"children": [{"name": "q_attn","path": "gpt.layers.1.attn.q_attn","kind": "module","total_params": 4160,"total_bytes": 49408,"param_count": 2,"node_count": 6,"children": [],"nodes": [{"name": "gpt.layers.1.attn.q_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.q_attn.act_MatMul_41","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.attn.q_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.q_attn.act_Add_42","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.attn.q_attn.act_Reshape_47","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.1.attn.q_attn.act_Transpose_50","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "k_attn","path": "gpt.layers.1.attn.k_attn","kind": "module","total_params": 4160,"total_bytes": 57600,"param_count": 2,"node_count": 7,"children": [],"nodes": [{"name": "gpt.layers.1.attn.k_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.k_attn.act_MatMul_43","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.attn.k_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.k_attn.act_Add_44","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.attn.k_attn.act_Reshape_48","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.1.attn.k_attn.act_Transpose_51","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"},{"name": "gpt.layers.1.attn.k_attn.act_Transpose_53","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "v_attn","path": "gpt.layers.1.attn.v_attn","kind": "module","total_params": 4160,"total_bytes": 49408,"param_count": 2,"node_count": 6,"children": [],"nodes": [{"name": "gpt.layers.1.attn.v_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.v_attn.act_MatMul_45","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.attn.v_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.v_attn.act_Add_46","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.attn.v_attn.act_Reshape_49","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.1.attn.v_attn.act_Transpose_52","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "c_proj","path": "gpt.layers.1.attn.c_proj","kind": "module","total_params": 4160,"total_bytes": 41216,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.1.attn.c_proj.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.c_proj.act_MatMul_62","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.attn.c_proj.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.c_proj.act_Add_63","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.attn.c_proj.act_Reshape_64","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": [{"name": "gpt.layers.1.attn.act_BatchMatMul_54","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "BatchMatMul","strategy": "produced by BatchMatMul"},{"name": "gpt.layers.1.attn.act_MulScalar_55","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MulScalar","strategy": "produced by MulScalar"},{"name": "gpt.layers.1.attn.causal_mask","kind": "Input","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "INPUT","act": "N/A","strategy": "user input / constant"},{"name": "gpt.layers.1.attn.act_Add_56","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.attn.act_Softmax_57","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Softmax","strategy": "produced by Softmax"},{"name": "gpt.layers.1.attn.act_BatchMatMul_58","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "BatchMatMul","strategy": "produced by BatchMatMul"},{"name": "gpt.layers.1.attn.act_Transpose_59","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"},{"name": "gpt.layers.1.attn.act_Reshape_60","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.1.attn.act_Reshape_61","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "ln_2","path": "gpt.layers.1.ln_2","kind": "module","total_params": 64,"total_bytes": 16640,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.1.ln_2.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.1.ln_2.act_RmsNorm_66","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.1.ln_2.act_Reshape_67","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "mlp","path": "gpt.layers.1.mlp","kind": "module","total_params": 33088,"total_bytes": 255232,"param_count": 0,"node_count": 10,"children": [{"name": "c_fc","path": "gpt.layers.1.mlp.c_fc","kind": "module","total_params": 16640,"total_bytes": 164864,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.1.mlp.c_fc.weight","kind": "Param","shape": "[64, 256]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.mlp.c_fc.act_MatMul_68","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.mlp.c_fc.bias","kind": "Param","shape": "[1, 256]","elements": 256,"bytes": 1024,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.mlp.c_fc.act_Add_69","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.mlp.c_fc.act_Gelu_70","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Gelu","strategy": "produced by Gelu"}]},{"name": "c_proj","path": "gpt.layers.1.mlp.c_proj","kind": "module","total_params": 16448,"total_bytes": 90368,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.1.mlp.c_proj.weight","kind": "Param","shape": "[256, 64]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.mlp.c_proj.act_MatMul_71","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.mlp.c_proj.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.mlp.c_proj.act_Add_72","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.mlp.c_proj.act_Reshape_73","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": []}],"nodes": [{"name": "gpt.layers.1.residual_attn","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.output","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"}]},{"name": "ln_f","path": "gpt.layers.ln_f","kind": "module","total_params": 64,"total_bytes": 16640,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.ln_f.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.ln_f.act_RmsNorm_75","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.ln_f.act_Reshape_76","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": []},{"name": "lm_head","path": "gpt.lm_head","kind": "module","total_params": 16640,"total_bytes": 132096,"param_count": 2,"node_count": 4,"children": [],"nodes": [{"name": "gpt.lm_head.weight","kind": "Param","shape": "[64, 256]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.lm_head.act_MatMul_77","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.lm_head.bias","kind": "Param","shape": "[1, 256]","elements": 256,"bytes": 1024,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.lm_head.act_Add_78","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"}]}],"nodes": [{"name": "gpt.embeddings_sum","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"}]},{"name": "inputs","path": "inputs","kind": "module","total_params": 0,"total_bytes": 128,"param_count": 0,"node_count": 1,"children": [],"nodes": [{"name": "inputs.token_ids","kind": "Input","shape": "[2, 16]","elements": 32,"bytes": 128,"status": "INPUT","act": "N/A","strategy": "user input / constant"}]},{"name": "outputs","path": "outputs","kind": "module","total_params": 0,"total_bytes": 32768,"param_count": 0,"node_count": 1,"children": [],"nodes": [{"name": "outputs.logits","kind": "Activation","shape": "[2, 16, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": []},
+  "nodes": [    {"name": "gpt.wte.weight", "kind": "Param", "shape": "[256, 64]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "inputs.token_ids", "kind": "Input", "shape": "[2, 16]", "elements": 32, "bytes": 128, "status": "INPUT", "act": "N/A", "strategy": "user input / constant"},
+    {"name": "gpt.wte.act_Embedding_0", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Embedding", "strategy": "produced by Embedding"},
+    {"name": "gpt.wpe.weight", "kind": "Param", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.wpe.pos_indices", "kind": "Input", "shape": "[2, 16]", "elements": 32, "bytes": 128, "status": "INPUT", "act": "N/A", "strategy": "user input / constant"},
+    {"name": "gpt.wpe.act_Embedding_1", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Embedding", "strategy": "produced by Embedding"},
+    {"name": "gpt.embeddings_sum", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.0.ln_1.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)"},
+    {"name": "gpt.layers.0.ln_1.act_RmsNorm_3", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm"},
+    {"name": "gpt.layers.0.ln_1.act_Reshape_4", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.0.attn.q_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.attn.q_attn.act_MatMul_5", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.0.attn.q_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.attn.q_attn.act_Add_6", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.0.attn.k_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.attn.k_attn.act_MatMul_7", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.0.attn.k_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.attn.k_attn.act_Add_8", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.0.attn.v_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.attn.v_attn.act_MatMul_9", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.0.attn.v_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.attn.v_attn.act_Add_10", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.0.attn.q_attn.act_Reshape_11", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.0.attn.k_attn.act_Reshape_12", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.0.attn.v_attn.act_Reshape_13", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.0.attn.q_attn.act_Transpose_14", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose"},
+    {"name": "gpt.layers.0.attn.k_attn.act_Transpose_15", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose"},
+    {"name": "gpt.layers.0.attn.v_attn.act_Transpose_16", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose"},
+    {"name": "gpt.layers.0.attn.k_attn.act_Transpose_17", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose"},
+    {"name": "gpt.layers.0.attn.act_BatchMatMul_18", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul"},
+    {"name": "gpt.layers.0.attn.act_MulScalar_19", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MulScalar", "strategy": "produced by MulScalar"},
+    {"name": "gpt.layers.0.attn.causal_mask", "kind": "Input", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "INPUT", "act": "N/A", "strategy": "user input / constant"},
+    {"name": "gpt.layers.0.attn.act_Add_20", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.0.attn.act_Softmax_21", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Softmax", "strategy": "produced by Softmax"},
+    {"name": "gpt.layers.0.attn.act_BatchMatMul_22", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul"},
+    {"name": "gpt.layers.0.attn.act_Transpose_23", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose"},
+    {"name": "gpt.layers.0.attn.act_Reshape_24", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.0.attn.act_Reshape_25", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.0.attn.c_proj.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.attn.c_proj.act_MatMul_26", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.0.attn.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.attn.c_proj.act_Add_27", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.0.attn.c_proj.act_Reshape_28", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.0.residual_attn", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.0.ln_2.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)"},
+    {"name": "gpt.layers.0.ln_2.act_RmsNorm_30", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm"},
+    {"name": "gpt.layers.0.ln_2.act_Reshape_31", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.0.mlp.c_fc.weight", "kind": "Param", "shape": "[64, 256]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.mlp.c_fc.act_MatMul_32", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.0.mlp.c_fc.bias", "kind": "Param", "shape": "[1, 256]", "elements": 256, "bytes": 1024, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.mlp.c_fc.act_Add_33", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.0.mlp.c_fc.act_Gelu_34", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Gelu", "strategy": "produced by Gelu"},
+    {"name": "gpt.layers.0.mlp.c_proj.weight", "kind": "Param", "shape": "[256, 64]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.mlp.c_proj.act_MatMul_35", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.0.mlp.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.0.mlp.c_proj.act_Add_36", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.0.mlp.c_proj.act_Reshape_37", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.0.output", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.1.ln_1.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)"},
+    {"name": "gpt.layers.1.ln_1.act_RmsNorm_39", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm"},
+    {"name": "gpt.layers.1.ln_1.act_Reshape_40", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.1.attn.q_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.attn.q_attn.act_MatMul_41", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.1.attn.q_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.attn.q_attn.act_Add_42", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.1.attn.k_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.attn.k_attn.act_MatMul_43", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.1.attn.k_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.attn.k_attn.act_Add_44", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.1.attn.v_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.attn.v_attn.act_MatMul_45", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.1.attn.v_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.attn.v_attn.act_Add_46", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.1.attn.q_attn.act_Reshape_47", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.1.attn.k_attn.act_Reshape_48", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.1.attn.v_attn.act_Reshape_49", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.1.attn.q_attn.act_Transpose_50", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose"},
+    {"name": "gpt.layers.1.attn.k_attn.act_Transpose_51", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose"},
+    {"name": "gpt.layers.1.attn.v_attn.act_Transpose_52", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose"},
+    {"name": "gpt.layers.1.attn.k_attn.act_Transpose_53", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose"},
+    {"name": "gpt.layers.1.attn.act_BatchMatMul_54", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul"},
+    {"name": "gpt.layers.1.attn.act_MulScalar_55", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MulScalar", "strategy": "produced by MulScalar"},
+    {"name": "gpt.layers.1.attn.causal_mask", "kind": "Input", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "INPUT", "act": "N/A", "strategy": "user input / constant"},
+    {"name": "gpt.layers.1.attn.act_Add_56", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.1.attn.act_Softmax_57", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Softmax", "strategy": "produced by Softmax"},
+    {"name": "gpt.layers.1.attn.act_BatchMatMul_58", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul"},
+    {"name": "gpt.layers.1.attn.act_Transpose_59", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose"},
+    {"name": "gpt.layers.1.attn.act_Reshape_60", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.1.attn.act_Reshape_61", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.1.attn.c_proj.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.attn.c_proj.act_MatMul_62", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.1.attn.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.attn.c_proj.act_Add_63", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.1.attn.c_proj.act_Reshape_64", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.1.residual_attn", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.1.ln_2.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)"},
+    {"name": "gpt.layers.1.ln_2.act_RmsNorm_66", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm"},
+    {"name": "gpt.layers.1.ln_2.act_Reshape_67", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.1.mlp.c_fc.weight", "kind": "Param", "shape": "[64, 256]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.mlp.c_fc.act_MatMul_68", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.1.mlp.c_fc.bias", "kind": "Param", "shape": "[1, 256]", "elements": 256, "bytes": 1024, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.mlp.c_fc.act_Add_69", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.1.mlp.c_fc.act_Gelu_70", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Gelu", "strategy": "produced by Gelu"},
+    {"name": "gpt.layers.1.mlp.c_proj.weight", "kind": "Param", "shape": "[256, 64]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.mlp.c_proj.act_MatMul_71", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.layers.1.mlp.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.layers.1.mlp.c_proj.act_Add_72", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.1.mlp.c_proj.act_Reshape_73", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.layers.1.output", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "gpt.layers.ln_f.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)"},
+    {"name": "gpt.layers.ln_f.act_RmsNorm_75", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm"},
+    {"name": "gpt.layers.ln_f.act_Reshape_76", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
+    {"name": "gpt.lm_head.weight", "kind": "Param", "shape": "[64, 256]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.lm_head.act_MatMul_77", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul"},
+    {"name": "gpt.lm_head.bias", "kind": "Param", "shape": "[1, 256]", "elements": 256, "bytes": 1024, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit"},
+    {"name": "gpt.lm_head.act_Add_78", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
+    {"name": "outputs.logits", "kind": "Activation", "shape": "[2, 16, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"}
+  ],
+  "edges": [    {"from": "gpt.embeddings_sum", "to": "gpt.layers.0.residual_attn", "shape": "[2, 16, 64]", "is_skip": true},
+    {"from": "gpt.layers.0.residual_attn", "to": "gpt.layers.0.output", "shape": "[2, 16, 64]", "is_skip": true},
+    {"from": "gpt.layers.0.output", "to": "gpt.layers.1.residual_attn", "shape": "[2, 16, 64]", "is_skip": true},
+    {"from": "gpt.layers.1.residual_attn", "to": "gpt.layers.1.output", "shape": "[2, 16, 64]", "is_skip": true}
+  ],
+  "ops": [    {"op_type": "Embedding", "name": "gpt.wte.act_Embedding_0", "module": "gpt.wte", "input_shape": "[2, 16]", "param_shape": "weight: [256, 64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Embedding", "name": "gpt.wpe.act_Embedding_1", "module": "gpt.wpe", "input_shape": "[2, 16]", "param_shape": "weight: [32, 64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.embeddings_sum", "module": "gpt", "input_shape": "[2, 16, 64], [2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "RmsNorm", "name": "gpt.layers.0.ln_1.act_RmsNorm_3", "module": "gpt.layers.0.ln_1", "input_shape": "[2, 16, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.0.ln_1.act_Reshape_4", "module": "gpt.layers.0.ln_1", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.layers.0.attn.q_attn.act_MatMul_5", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.0.attn.q_attn.act_Add_6", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.layers.0.attn.k_attn.act_MatMul_7", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.0.attn.k_attn.act_Add_8", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.layers.0.attn.v_attn.act_MatMul_9", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.0.attn.v_attn.act_Add_10", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.0.attn.q_attn.act_Reshape_11", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.0.attn.k_attn.act_Reshape_12", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.0.attn.v_attn.act_Reshape_13", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Transpose", "name": "gpt.layers.0.attn.q_attn.act_Transpose_14", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Transpose", "name": "gpt.layers.0.attn.k_attn.act_Transpose_15", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Transpose", "name": "gpt.layers.0.attn.v_attn.act_Transpose_16", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Transpose", "name": "gpt.layers.0.attn.k_attn.act_Transpose_17", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "BatchMatMul", "name": "gpt.layers.0.attn.act_BatchMatMul_18", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MulScalar", "name": "gpt.layers.0.attn.act_MulScalar_19", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.0.attn.act_Add_20", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Softmax", "name": "gpt.layers.0.attn.act_Softmax_21", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "BatchMatMul", "name": "gpt.layers.0.attn.act_BatchMatMul_22", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Transpose", "name": "gpt.layers.0.attn.act_Transpose_23", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.0.attn.act_Reshape_24", "module": "gpt.layers.0.attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.0.attn.act_Reshape_25", "module": "gpt.layers.0.attn", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.layers.0.attn.c_proj.act_MatMul_26", "module": "gpt.layers.0.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.0.attn.c_proj.act_Add_27", "module": "gpt.layers.0.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.0.attn.c_proj.act_Reshape_28", "module": "gpt.layers.0.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.0.residual_attn", "module": "gpt.layers.0", "input_shape": "[2, 16, 64], [2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "RmsNorm", "name": "gpt.layers.0.ln_2.act_RmsNorm_30", "module": "gpt.layers.0.ln_2", "input_shape": "[2, 16, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.0.ln_2.act_Reshape_31", "module": "gpt.layers.0.ln_2", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.layers.0.mlp.c_fc.act_MatMul_32", "module": "gpt.layers.0.mlp.c_fc", "input_shape": "[32, 64]", "param_shape": "weight: [64, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768},
+    {"op_type": "Add", "name": "gpt.layers.0.mlp.c_fc.act_Add_33", "module": "gpt.layers.0.mlp.c_fc", "input_shape": "[32, 256]", "param_shape": "bias: [1, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768},
+    {"op_type": "Gelu", "name": "gpt.layers.0.mlp.c_fc.act_Gelu_34", "module": "gpt.layers.0.mlp.c_fc", "input_shape": "[32, 256]", "param_shape": "None (Stateless)", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768},
+    {"op_type": "MatMul", "name": "gpt.layers.0.mlp.c_proj.act_MatMul_35", "module": "gpt.layers.0.mlp.c_proj", "input_shape": "[32, 256]", "param_shape": "weight: [256, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.0.mlp.c_proj.act_Add_36", "module": "gpt.layers.0.mlp.c_proj", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.0.mlp.c_proj.act_Reshape_37", "module": "gpt.layers.0.mlp.c_proj", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.0.output", "module": "gpt.layers.0", "input_shape": "[2, 16, 64], [2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "RmsNorm", "name": "gpt.layers.1.ln_1.act_RmsNorm_39", "module": "gpt.layers.1.ln_1", "input_shape": "[2, 16, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.1.ln_1.act_Reshape_40", "module": "gpt.layers.1.ln_1", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.layers.1.attn.q_attn.act_MatMul_41", "module": "gpt.layers.1.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.1.attn.q_attn.act_Add_42", "module": "gpt.layers.1.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.layers.1.attn.k_attn.act_MatMul_43", "module": "gpt.layers.1.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.1.attn.k_attn.act_Add_44", "module": "gpt.layers.1.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.layers.1.attn.v_attn.act_MatMul_45", "module": "gpt.layers.1.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.1.attn.v_attn.act_Add_46", "module": "gpt.layers.1.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.1.attn.q_attn.act_Reshape_47", "module": "gpt.layers.1.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.1.attn.k_attn.act_Reshape_48", "module": "gpt.layers.1.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.1.attn.v_attn.act_Reshape_49", "module": "gpt.layers.1.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Transpose", "name": "gpt.layers.1.attn.q_attn.act_Transpose_50", "module": "gpt.layers.1.attn.q_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Transpose", "name": "gpt.layers.1.attn.k_attn.act_Transpose_51", "module": "gpt.layers.1.attn.k_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Transpose", "name": "gpt.layers.1.attn.v_attn.act_Transpose_52", "module": "gpt.layers.1.attn.v_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Transpose", "name": "gpt.layers.1.attn.k_attn.act_Transpose_53", "module": "gpt.layers.1.attn.k_attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "BatchMatMul", "name": "gpt.layers.1.attn.act_BatchMatMul_54", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MulScalar", "name": "gpt.layers.1.attn.act_MulScalar_55", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.1.attn.act_Add_56", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Softmax", "name": "gpt.layers.1.attn.act_Softmax_57", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "BatchMatMul", "name": "gpt.layers.1.attn.act_BatchMatMul_58", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Transpose", "name": "gpt.layers.1.attn.act_Transpose_59", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.1.attn.act_Reshape_60", "module": "gpt.layers.1.attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.1.attn.act_Reshape_61", "module": "gpt.layers.1.attn", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.layers.1.attn.c_proj.act_MatMul_62", "module": "gpt.layers.1.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.1.attn.c_proj.act_Add_63", "module": "gpt.layers.1.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.1.attn.c_proj.act_Reshape_64", "module": "gpt.layers.1.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.1.residual_attn", "module": "gpt.layers.1", "input_shape": "[2, 16, 64], [2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "RmsNorm", "name": "gpt.layers.1.ln_2.act_RmsNorm_66", "module": "gpt.layers.1.ln_2", "input_shape": "[2, 16, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.1.ln_2.act_Reshape_67", "module": "gpt.layers.1.ln_2", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.layers.1.mlp.c_fc.act_MatMul_68", "module": "gpt.layers.1.mlp.c_fc", "input_shape": "[32, 64]", "param_shape": "weight: [64, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768},
+    {"op_type": "Add", "name": "gpt.layers.1.mlp.c_fc.act_Add_69", "module": "gpt.layers.1.mlp.c_fc", "input_shape": "[32, 256]", "param_shape": "bias: [1, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768},
+    {"op_type": "Gelu", "name": "gpt.layers.1.mlp.c_fc.act_Gelu_70", "module": "gpt.layers.1.mlp.c_fc", "input_shape": "[32, 256]", "param_shape": "None (Stateless)", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768},
+    {"op_type": "MatMul", "name": "gpt.layers.1.mlp.c_proj.act_MatMul_71", "module": "gpt.layers.1.mlp.c_proj", "input_shape": "[32, 256]", "param_shape": "weight: [256, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.1.mlp.c_proj.act_Add_72", "module": "gpt.layers.1.mlp.c_proj", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.1.mlp.c_proj.act_Reshape_73", "module": "gpt.layers.1.mlp.c_proj", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Add", "name": "gpt.layers.1.output", "module": "gpt.layers.1", "input_shape": "[2, 16, 64], [2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "RmsNorm", "name": "gpt.layers.ln_f.act_RmsNorm_75", "module": "gpt.layers.ln_f", "input_shape": "[2, 16, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "Reshape", "name": "gpt.layers.ln_f.act_Reshape_76", "module": "gpt.layers.ln_f", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192},
+    {"op_type": "MatMul", "name": "gpt.lm_head.act_MatMul_77", "module": "gpt.lm_head", "input_shape": "[32, 64]", "param_shape": "weight: [64, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768},
+    {"op_type": "Add", "name": "gpt.lm_head.act_Add_78", "module": "gpt.lm_head", "input_shape": "[32, 256]", "param_shape": "bias: [1, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768},
+    {"op_type": "Reshape", "name": "outputs.logits", "module": "outputs", "input_shape": "[32, 256]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 256]", "elements": 8192, "bytes": 32768}
+  ],
+  "formulas": {
+    "gpt.layers.0.attn.v_attn": "V = x_{2D} W_v^T + b_v \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
+
+    "gpt.layers.0.ln_2": "y = \\text{RMSNorm}(x_1; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
+
+    "gpt.layers.ln_f": "y = \\text{RMSNorm}(x_{\\text{last}}; \\gamma \\in \\mathbb{R}^{64}) \\rightarrow [2, 16, 64]",
+
+    "gpt.lm_head": "\\text{logits} = x_{\\text{norm}} \\cdot W_{head}^T \\quad ([2, 16, 64] \\times [256, 64]^T \\rightarrow [2, 16, 256])",
+
+    "gpt.layers.0.attn.c_proj": "y = (\\text{HeadsConcat}) \\cdot W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]",
+
+    "gpt": "\\text{logits} = \\text{GPT}(\\text{tokens}; \\theta) \\rightarrow [2, 16, 256]",
+
+    "gpt.wpe": "y = \\text{PosEmbedding}(\\text{pos}; W_p \\in \\mathbb{R}^{32 \\times 64}) \\rightarrow [2, 16, 64]",
+
+    "gpt.layers.0.ln_1": "y = \\text{RMSNorm}(x; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
+
+    "gpt.layers.0.attn.k_attn": "K = x_{2D} W_k^T + b_k \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
+
+    "gpt.layers.0.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o \\rightarrow [2, 16, 64]",
+
+    "gpt.wte": "y = \\text{TokenEmbedding}(\\text{ids}; W_e \\in \\mathbb{R}^{256 \\times 64}) \\rightarrow [2, 16, 64]",
+
+    "gpt.layers.0.attn.q_attn": "Q = x_{2D} W_q^T + b_q \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
+
+    "gpt.layers.0.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]"
+  }
+}
+</script>
 <script>
-const NODES_DATA = [  { "name": "gpt.wte.weight", "kind": "Param", "shape": "[256, 64]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "inputs.token_ids", "kind": "Input", "shape": "[2, 16]", "elements": 32, "bytes": 128, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
-  { "name": "gpt.wte.act_Embedding_0", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Embedding", "strategy": "produced by Embedding" },
-  { "name": "gpt.wpe.weight", "kind": "Param", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.wpe.pos_indices", "kind": "Input", "shape": "[2, 16]", "elements": 32, "bytes": 128, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
-  { "name": "gpt.wpe.act_Embedding_1", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Embedding", "strategy": "produced by Embedding" },
-  { "name": "gpt.embeddings_sum", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.0.ln_1.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
-  { "name": "gpt.layers.0.ln_1.act_RmsNorm_3", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
-  { "name": "gpt.layers.0.ln_1.act_Reshape_4", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.0.attn.q_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.attn.q_attn.act_MatMul_5", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.0.attn.q_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.attn.q_attn.act_Add_6", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.0.attn.k_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.attn.k_attn.act_MatMul_7", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.0.attn.k_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.attn.k_attn.act_Add_8", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.0.attn.v_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.attn.v_attn.act_MatMul_9", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.0.attn.v_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.attn.v_attn.act_Add_10", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.0.attn.q_attn.act_Reshape_11", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.0.attn.k_attn.act_Reshape_12", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.0.attn.v_attn.act_Reshape_13", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.0.attn.q_attn.act_Transpose_14", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "gpt.layers.0.attn.k_attn.act_Transpose_15", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "gpt.layers.0.attn.v_attn.act_Transpose_16", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "gpt.layers.0.attn.k_attn.act_Transpose_17", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "gpt.layers.0.attn.act_BatchMatMul_18", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
-  { "name": "gpt.layers.0.attn.act_MulScalar_19", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MulScalar", "strategy": "produced by MulScalar" },
-  { "name": "gpt.layers.0.attn.causal_mask", "kind": "Input", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
-  { "name": "gpt.layers.0.attn.act_Add_20", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.0.attn.act_Softmax_21", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Softmax", "strategy": "produced by Softmax" },
-  { "name": "gpt.layers.0.attn.act_BatchMatMul_22", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
-  { "name": "gpt.layers.0.attn.act_Transpose_23", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "gpt.layers.0.attn.act_Reshape_24", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.0.attn.act_Reshape_25", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.0.attn.c_proj.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.attn.c_proj.act_MatMul_26", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.0.attn.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.attn.c_proj.act_Add_27", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.0.attn.c_proj.act_Reshape_28", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.0.residual_attn", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.0.ln_2.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
-  { "name": "gpt.layers.0.ln_2.act_RmsNorm_30", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
-  { "name": "gpt.layers.0.ln_2.act_Reshape_31", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.0.mlp.c_fc.weight", "kind": "Param", "shape": "[64, 256]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.mlp.c_fc.act_MatMul_32", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.0.mlp.c_fc.bias", "kind": "Param", "shape": "[1, 256]", "elements": 256, "bytes": 1024, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.mlp.c_fc.act_Add_33", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.0.mlp.c_fc.act_Gelu_34", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Gelu", "strategy": "produced by Gelu" },
-  { "name": "gpt.layers.0.mlp.c_proj.weight", "kind": "Param", "shape": "[256, 64]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.mlp.c_proj.act_MatMul_35", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.0.mlp.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.0.mlp.c_proj.act_Add_36", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.0.mlp.c_proj.act_Reshape_37", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.0.output", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.1.ln_1.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
-  { "name": "gpt.layers.1.ln_1.act_RmsNorm_39", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
-  { "name": "gpt.layers.1.ln_1.act_Reshape_40", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.1.attn.q_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.attn.q_attn.act_MatMul_41", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.1.attn.q_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.attn.q_attn.act_Add_42", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.1.attn.k_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.attn.k_attn.act_MatMul_43", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.1.attn.k_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.attn.k_attn.act_Add_44", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.1.attn.v_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.attn.v_attn.act_MatMul_45", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.1.attn.v_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.attn.v_attn.act_Add_46", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.1.attn.q_attn.act_Reshape_47", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.1.attn.k_attn.act_Reshape_48", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.1.attn.v_attn.act_Reshape_49", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.1.attn.q_attn.act_Transpose_50", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "gpt.layers.1.attn.k_attn.act_Transpose_51", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "gpt.layers.1.attn.v_attn.act_Transpose_52", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "gpt.layers.1.attn.k_attn.act_Transpose_53", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "gpt.layers.1.attn.act_BatchMatMul_54", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
-  { "name": "gpt.layers.1.attn.act_MulScalar_55", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MulScalar", "strategy": "produced by MulScalar" },
-  { "name": "gpt.layers.1.attn.causal_mask", "kind": "Input", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
-  { "name": "gpt.layers.1.attn.act_Add_56", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.1.attn.act_Softmax_57", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Softmax", "strategy": "produced by Softmax" },
-  { "name": "gpt.layers.1.attn.act_BatchMatMul_58", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
-  { "name": "gpt.layers.1.attn.act_Transpose_59", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "gpt.layers.1.attn.act_Reshape_60", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.1.attn.act_Reshape_61", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.1.attn.c_proj.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.attn.c_proj.act_MatMul_62", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.1.attn.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.attn.c_proj.act_Add_63", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.1.attn.c_proj.act_Reshape_64", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.1.residual_attn", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.1.ln_2.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
-  { "name": "gpt.layers.1.ln_2.act_RmsNorm_66", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
-  { "name": "gpt.layers.1.ln_2.act_Reshape_67", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.1.mlp.c_fc.weight", "kind": "Param", "shape": "[64, 256]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.mlp.c_fc.act_MatMul_68", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.1.mlp.c_fc.bias", "kind": "Param", "shape": "[1, 256]", "elements": 256, "bytes": 1024, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.mlp.c_fc.act_Add_69", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.1.mlp.c_fc.act_Gelu_70", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Gelu", "strategy": "produced by Gelu" },
-  { "name": "gpt.layers.1.mlp.c_proj.weight", "kind": "Param", "shape": "[256, 64]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.mlp.c_proj.act_MatMul_71", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.layers.1.mlp.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.layers.1.mlp.c_proj.act_Add_72", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.1.mlp.c_proj.act_Reshape_73", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.layers.1.output", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "gpt.layers.ln_f.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
-  { "name": "gpt.layers.ln_f.act_RmsNorm_75", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
-  { "name": "gpt.layers.ln_f.act_Reshape_76", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "gpt.lm_head.weight", "kind": "Param", "shape": "[64, 256]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.lm_head.act_MatMul_77", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
-  { "name": "gpt.lm_head.bias", "kind": "Param", "shape": "[1, 256]", "elements": 256, "bytes": 1024, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "gpt.lm_head.act_Add_78", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "outputs.logits", "kind": "Activation", "shape": "[2, 16, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" }
-];
-
-const EDGES_DATA = [  { "from": "gpt.embeddings_sum", "to": "gpt.layers.0.residual_attn", "shape": "[2, 16, 64]", "is_skip": true },
-  { "from": "gpt.layers.0.residual_attn", "to": "gpt.layers.0.output", "shape": "[2, 16, 64]", "is_skip": true },
-  { "from": "gpt.layers.0.output", "to": "gpt.layers.1.residual_attn", "shape": "[2, 16, 64]", "is_skip": true },
-  { "from": "gpt.layers.1.residual_attn", "to": "gpt.layers.1.output", "shape": "[2, 16, 64]", "is_skip": true }
-];
-
-const OPS_DATA = [  { "op_type": "Embedding", "name": "gpt.wte.act_Embedding_0", "module": "gpt.wte", "input_shape": "[2, 16]", "param_shape": "weight: [256, 64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Embedding", "name": "gpt.wpe.act_Embedding_1", "module": "gpt.wpe", "input_shape": "[2, 16]", "param_shape": "weight: [32, 64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.embeddings_sum", "module": "gpt", "input_shape": "[2, 16, 64], [2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "RmsNorm", "name": "gpt.layers.0.ln_1.act_RmsNorm_3", "module": "gpt.layers.0.ln_1", "input_shape": "[2, 16, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.0.ln_1.act_Reshape_4", "module": "gpt.layers.0.ln_1", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.layers.0.attn.q_attn.act_MatMul_5", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.0.attn.q_attn.act_Add_6", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.layers.0.attn.k_attn.act_MatMul_7", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.0.attn.k_attn.act_Add_8", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.layers.0.attn.v_attn.act_MatMul_9", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.0.attn.v_attn.act_Add_10", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.0.attn.q_attn.act_Reshape_11", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.0.attn.k_attn.act_Reshape_12", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.0.attn.v_attn.act_Reshape_13", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Transpose", "name": "gpt.layers.0.attn.q_attn.act_Transpose_14", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Transpose", "name": "gpt.layers.0.attn.k_attn.act_Transpose_15", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Transpose", "name": "gpt.layers.0.attn.v_attn.act_Transpose_16", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Transpose", "name": "gpt.layers.0.attn.k_attn.act_Transpose_17", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "BatchMatMul", "name": "gpt.layers.0.attn.act_BatchMatMul_18", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MulScalar", "name": "gpt.layers.0.attn.act_MulScalar_19", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.0.attn.act_Add_20", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Softmax", "name": "gpt.layers.0.attn.act_Softmax_21", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "BatchMatMul", "name": "gpt.layers.0.attn.act_BatchMatMul_22", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Transpose", "name": "gpt.layers.0.attn.act_Transpose_23", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.0.attn.act_Reshape_24", "module": "gpt.layers.0.attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.0.attn.act_Reshape_25", "module": "gpt.layers.0.attn", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.layers.0.attn.c_proj.act_MatMul_26", "module": "gpt.layers.0.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.0.attn.c_proj.act_Add_27", "module": "gpt.layers.0.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.0.attn.c_proj.act_Reshape_28", "module": "gpt.layers.0.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.0.residual_attn", "module": "gpt.layers.0", "input_shape": "[2, 16, 64], [2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "RmsNorm", "name": "gpt.layers.0.ln_2.act_RmsNorm_30", "module": "gpt.layers.0.ln_2", "input_shape": "[2, 16, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.0.ln_2.act_Reshape_31", "module": "gpt.layers.0.ln_2", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.layers.0.mlp.c_fc.act_MatMul_32", "module": "gpt.layers.0.mlp.c_fc", "input_shape": "[32, 64]", "param_shape": "weight: [64, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768 },
-  { "op_type": "Add", "name": "gpt.layers.0.mlp.c_fc.act_Add_33", "module": "gpt.layers.0.mlp.c_fc", "input_shape": "[32, 256]", "param_shape": "bias: [1, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768 },
-  { "op_type": "Gelu", "name": "gpt.layers.0.mlp.c_fc.act_Gelu_34", "module": "gpt.layers.0.mlp.c_fc", "input_shape": "[32, 256]", "param_shape": "None (Stateless)", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768 },
-  { "op_type": "MatMul", "name": "gpt.layers.0.mlp.c_proj.act_MatMul_35", "module": "gpt.layers.0.mlp.c_proj", "input_shape": "[32, 256]", "param_shape": "weight: [256, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.0.mlp.c_proj.act_Add_36", "module": "gpt.layers.0.mlp.c_proj", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.0.mlp.c_proj.act_Reshape_37", "module": "gpt.layers.0.mlp.c_proj", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.0.output", "module": "gpt.layers.0", "input_shape": "[2, 16, 64], [2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "RmsNorm", "name": "gpt.layers.1.ln_1.act_RmsNorm_39", "module": "gpt.layers.1.ln_1", "input_shape": "[2, 16, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.1.ln_1.act_Reshape_40", "module": "gpt.layers.1.ln_1", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.layers.1.attn.q_attn.act_MatMul_41", "module": "gpt.layers.1.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.1.attn.q_attn.act_Add_42", "module": "gpt.layers.1.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.layers.1.attn.k_attn.act_MatMul_43", "module": "gpt.layers.1.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.1.attn.k_attn.act_Add_44", "module": "gpt.layers.1.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.layers.1.attn.v_attn.act_MatMul_45", "module": "gpt.layers.1.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.1.attn.v_attn.act_Add_46", "module": "gpt.layers.1.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.1.attn.q_attn.act_Reshape_47", "module": "gpt.layers.1.attn.q_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.1.attn.k_attn.act_Reshape_48", "module": "gpt.layers.1.attn.k_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.1.attn.v_attn.act_Reshape_49", "module": "gpt.layers.1.attn.v_attn", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Transpose", "name": "gpt.layers.1.attn.q_attn.act_Transpose_50", "module": "gpt.layers.1.attn.q_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Transpose", "name": "gpt.layers.1.attn.k_attn.act_Transpose_51", "module": "gpt.layers.1.attn.k_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Transpose", "name": "gpt.layers.1.attn.v_attn.act_Transpose_52", "module": "gpt.layers.1.attn.v_attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Transpose", "name": "gpt.layers.1.attn.k_attn.act_Transpose_53", "module": "gpt.layers.1.attn.k_attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "BatchMatMul", "name": "gpt.layers.1.attn.act_BatchMatMul_54", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MulScalar", "name": "gpt.layers.1.attn.act_MulScalar_55", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.1.attn.act_Add_56", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Softmax", "name": "gpt.layers.1.attn.act_Softmax_57", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "BatchMatMul", "name": "gpt.layers.1.attn.act_BatchMatMul_58", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16], [2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Transpose", "name": "gpt.layers.1.attn.act_Transpose_59", "module": "gpt.layers.1.attn", "input_shape": "[2, 4, 16, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.1.attn.act_Reshape_60", "module": "gpt.layers.1.attn", "input_shape": "[2, 16, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.1.attn.act_Reshape_61", "module": "gpt.layers.1.attn", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.layers.1.attn.c_proj.act_MatMul_62", "module": "gpt.layers.1.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.1.attn.c_proj.act_Add_63", "module": "gpt.layers.1.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.1.attn.c_proj.act_Reshape_64", "module": "gpt.layers.1.attn.c_proj", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.1.residual_attn", "module": "gpt.layers.1", "input_shape": "[2, 16, 64], [2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "RmsNorm", "name": "gpt.layers.1.ln_2.act_RmsNorm_66", "module": "gpt.layers.1.ln_2", "input_shape": "[2, 16, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.1.ln_2.act_Reshape_67", "module": "gpt.layers.1.ln_2", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.layers.1.mlp.c_fc.act_MatMul_68", "module": "gpt.layers.1.mlp.c_fc", "input_shape": "[32, 64]", "param_shape": "weight: [64, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768 },
-  { "op_type": "Add", "name": "gpt.layers.1.mlp.c_fc.act_Add_69", "module": "gpt.layers.1.mlp.c_fc", "input_shape": "[32, 256]", "param_shape": "bias: [1, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768 },
-  { "op_type": "Gelu", "name": "gpt.layers.1.mlp.c_fc.act_Gelu_70", "module": "gpt.layers.1.mlp.c_fc", "input_shape": "[32, 256]", "param_shape": "None (Stateless)", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768 },
-  { "op_type": "MatMul", "name": "gpt.layers.1.mlp.c_proj.act_MatMul_71", "module": "gpt.layers.1.mlp.c_proj", "input_shape": "[32, 256]", "param_shape": "weight: [256, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.1.mlp.c_proj.act_Add_72", "module": "gpt.layers.1.mlp.c_proj", "input_shape": "[32, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.1.mlp.c_proj.act_Reshape_73", "module": "gpt.layers.1.mlp.c_proj", "input_shape": "[32, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Add", "name": "gpt.layers.1.output", "module": "gpt.layers.1", "input_shape": "[2, 16, 64], [2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "RmsNorm", "name": "gpt.layers.ln_f.act_RmsNorm_75", "module": "gpt.layers.ln_f", "input_shape": "[2, 16, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "Reshape", "name": "gpt.layers.ln_f.act_Reshape_76", "module": "gpt.layers.ln_f", "input_shape": "[2, 16, 64]", "param_shape": "None (Stateless)", "output_shape": "[32, 64]", "elements": 2048, "bytes": 8192 },
-  { "op_type": "MatMul", "name": "gpt.lm_head.act_MatMul_77", "module": "gpt.lm_head", "input_shape": "[32, 64]", "param_shape": "weight: [64, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768 },
-  { "op_type": "Add", "name": "gpt.lm_head.act_Add_78", "module": "gpt.lm_head", "input_shape": "[32, 256]", "param_shape": "bias: [1, 256]", "output_shape": "[32, 256]", "elements": 8192, "bytes": 32768 },
-  { "op_type": "Reshape", "name": "outputs.logits", "module": "outputs", "input_shape": "[32, 256]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 256]", "elements": 8192, "bytes": 32768 }
-];
-
-const FORMULAS_DATA = {  "gpt.layers.0.attn.v_attn": "V = x_{2D} W_v^T + b_v \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
-  "gpt.layers.0.ln_2": "y = \\text{RMSNorm}(x_1; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
-  "gpt.layers.ln_f": "y = \\text{RMSNorm}(x_{\\text{last}}; \\gamma \\in \\mathbb{R}^{64}) \\rightarrow [2, 16, 64]",
-  "gpt.layers.0.attn.c_proj": "y = (\\text{HeadsConcat}) \\cdot W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]",
-  "gpt.lm_head": "\\text{logits} = x_{\\text{norm}} \\cdot W_{head}^T \\quad ([2, 16, 64] \\times [256, 64]^T \\rightarrow [2, 16, 256])",
-  "gpt": "\\text{logits} = \\text{GPT}(\\text{tokens}; \\theta) \\rightarrow [2, 16, 256]",
-  "gpt.wpe": "y = \\text{PosEmbedding}(\\text{pos}; W_p \\in \\mathbb{R}^{32 \\times 64}) \\rightarrow [2, 16, 64]",
-  "gpt.layers.0.ln_1": "y = \\text{RMSNorm}(x; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
-  "gpt.layers.0.attn.k_attn": "K = x_{2D} W_k^T + b_k \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
-  "gpt.layers.0.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o \\rightarrow [2, 16, 64]",
-  "gpt.wte": "y = \\text{TokenEmbedding}(\\text{ids}; W_e \\in \\mathbb{R}^{256 \\times 64}) \\rightarrow [2, 16, 64]",
-  "gpt.layers.0.attn.q_attn": "Q = x_{2D} W_q^T + b_q \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
-  "gpt.layers.0.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]"
-};
-
+const RAW_GRAPH = JSON.parse(document.getElementById('znn-model-graph-data').textContent);
+const RAW_DATA = RAW_GRAPH;
+const NODES_DATA = RAW_GRAPH.nodes || [];
+const EDGES_DATA = RAW_GRAPH.edges || [];
+const OPS_DATA = RAW_GRAPH.ops || [];
+const FORMULAS_DATA = RAW_GRAPH.formulas || {};
 let currentKindFilter = 'all';
 let currentQuery = '';
 
@@ -1238,6 +1259,7 @@ function formatBytes(bytes) {
 
 function getNodeOpType(name) {
   const n = name.toLowerCase();
+  if (n.endsWith('.core') || n.includes('dot_product') || n.includes('attention_core')) return { icon: '🎯', type: 'Scaled Dot-Product Attention Core', cls: 'attn' };
   if (n.includes('ln_') || n.includes('norm')) return { icon: '📐', type: 'RMSNorm / LayerNorm', cls: 'norm' };
   if (n.includes('wte') || n.includes('wpe') || n.includes('emb')) return { icon: '🔲', type: 'Embedding Table', cls: 'emb' };
   if (n.includes('attn') && !n.includes('q_') && !n.includes('k_') && !n.includes('v_')) return { icon: '🔀', type: 'Causal Self-Attention', cls: 'attn' };
@@ -1257,6 +1279,9 @@ function getEffectiveFormula(key) {
     if (key.startsWith(k + '.')) return { formula: FORMULAS_DATA[k], source: 'CODE_SPECIFIED' };
   }
   const k = key.toLowerCase();
+  if (k.endsWith('.core') || k.includes('dot_product') || k.includes('attention_core')) {
+    return { formula: '\\\\text{Attention}(Q, K, V) = \\\\text{softmax}\\\\left(\\\\frac{Q K^T}{\\\\sqrt{d_k}} + M\\\\right) V \\\\rightarrow [B, T, D]', source: 'INFERRED' };
+  }
   if (k === 'gpt' || k === 'model' || k === 'network' || k === 'transformer') {
     return { formula: '\\\\text{logits} = \\\\text{GPT}(\\\\text{TokenIDs}; \\\\theta) \\\\rightarrow [B, T, V]', source: 'INFERRED' };
   }
@@ -1288,11 +1313,26 @@ function openInspector(key) {
   const bodyEl = document.getElementById('insp-body');
   if (!modal || !bodyEl) return;
 
-  const matchedNodes = NODES_DATA.filter(n => n.name === key || n.name.startsWith(key + '.'));
-  const matchedOps = OPS_DATA.filter(o => o.module === key || o.module.startsWith(key + '.') || o.name.startsWith(key + '.'));
+  const isAttentionCore = key.endsWith('.core');
+  const baseKey = isAttentionCore ? key.slice(0, -5) : key;
+
+  let matchedNodes;
+  let matchedOps;
+  if (isAttentionCore) {
+    matchedNodes = NODES_DATA.filter(n => {
+      if (!n.name.startsWith(baseKey + '.')) return false;
+      const sub = n.name.slice(baseKey.length + 1);
+      return !sub.startsWith('q_attn.') && !sub.startsWith('k_attn.') && !sub.startsWith('v_attn.') && !sub.startsWith('c_proj.');
+    });
+    matchedOps = OPS_DATA.filter(o => o.module === baseKey);
+  } else {
+    matchedNodes = NODES_DATA.filter(n => n.name === key || n.name.startsWith(key + '.'));
+    matchedOps = OPS_DATA.filter(o => o.module === key || o.module.startsWith(key + '.') || o.name.startsWith(key + '.'));
+  }
+
   const opInfo = getNodeOpType(key);
   if (iconEl) iconEl.textContent = opInfo.icon;
-  if (titleEl) titleEl.textContent = key;
+  if (titleEl) titleEl.textContent = isAttentionCore ? `${baseKey} · Attention Core` : key;
 
   let totalParams = 0;
   let totalBytes = 0;
@@ -1305,14 +1345,20 @@ function openInspector(key) {
   if (subEl) subEl.textContent = `${opInfo.type} · ${paramStr}`;
 
   // 0. Module Overall Input & Output Shape Banner
-  const isRootModule = (key === 'gpt' || key === 'model' || !key.includes('.'));
-  const incEdges = EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.'));
-  const outEdges = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
+  const isRootModule = (!isAttentionCore && (key === 'gpt' || key === 'model' || !key.includes('.')));
+  const incEdges = isAttentionCore ? [] : EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.'));
+  const outEdges = isAttentionCore ? [] : EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
 
   let modInpShape = 'Unknown';
   let modOutShape = 'Unknown';
 
-  if (isRootModule) {
+  if (isAttentionCore) {
+    const firstOp = matchedOps.length > 0 ? matchedOps[0] : null;
+    const lastOp = matchedOps.length > 0 ? matchedOps[matchedOps.length - 1] : null;
+    const shapeMatch = firstOp && firstOp.input_shape ? firstOp.input_shape.match(/\[[^\]]+\]/) : null;
+    modInpShape = shapeMatch ? `Q, K, V: ${shapeMatch[0]} & Mask` : 'Q, K, V Heads & Mask';
+    modOutShape = lastOp ? `${lastOp.output_shape} (Concatenated Context)` : '[B, T, D]';
+  } else if (isRootModule) {
     const inputNode = NODES_DATA.find(n => n.kind === 'Input' && (n.name.includes('token') || n.name.includes('input')));
     if (inputNode) modInpShape = `${inputNode.shape} (Token IDs)`;
     const outputNode = NODES_DATA.find(n => n.name.includes('logits') || n.name.includes('output'));
@@ -1342,13 +1388,13 @@ function openInspector(key) {
       <div class="insp-io-card input">
         <div class="insp-io-label">📥 Module Input Shape (模块输入维度)</div>
         <div class="insp-io-shape">${modInpShape}</div>
-        <div class="insp-io-sub">Incoming tensor fed into ${key}</div>
+        <div class="insp-io-sub">Incoming tensor fed into ${isAttentionCore ? baseKey + ' core' : key}</div>
       </div>
       <div class="insp-io-arrow">➔</div>
       <div class="insp-io-card output">
         <div class="insp-io-label">📤 Module Output Shape (模块输出维度)</div>
         <div class="insp-io-shape">${modOutShape}</div>
-        <div class="insp-io-sub">Final tensor output from ${key}</div>
+        <div class="insp-io-sub">Final tensor output from ${isAttentionCore ? baseKey + ' core' : key}</div>
       </div>
     </div>
   `;
@@ -1396,7 +1442,8 @@ function openInspector(key) {
           <tbody>
     `;
     matchedOps.forEach((op, idx) => {
-      const shortName = op.name.startsWith(key + '.') ? op.name.slice(key.length + 1) : op.name;
+      const matchPrefix = isAttentionCore ? baseKey + '.' : key + '.';
+      const shortName = op.name.startsWith(matchPrefix) ? op.name.slice(matchPrefix.length) : op.name;
       opsHtml += `
         <tr>
           <td style="font-family:var(--font-mono); color:#64748b;">${idx + 1}</td>
@@ -1428,11 +1475,38 @@ function openInspector(key) {
   paramsHtml += '</div>';
 
   // 3. Inputs Section (Incoming Graph Edges)
-  const incoming = EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.') || (key.startsWith(e.to) && e.to.length > 5));
-  const inputNodes = matchedNodes.filter(n => n.kind === 'Input');
+  const incoming = isAttentionCore ? [] : EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.') || (key.startsWith(e.to) && e.to.length > 5));
+  const inputNodes = isAttentionCore ? [] : matchedNodes.filter(n => n.kind === 'Input');
 
   let inputsHtml = '<div class="insp-section"><div class="insp-section-title"><span>📥 Inbound Connections (外部输入依赖流)</span></div>';
-  if (incoming.length > 0 || inputNodes.length > 0) {
+  if (isAttentionCore) {
+    let coreInbound = [
+      { from: `${baseKey}.q_attn`, to: `${key} (Query)`, shape: '[2, 4, 8, 16]', type: 'Q Projections (Heads)' },
+      { from: `${baseKey}.k_attn`, to: `${key} (Key)`, shape: '[2, 4, 16, 8]', type: 'K Projections (Transposed)' },
+      { from: `${baseKey}.v_attn`, to: `${key} (Value)`, shape: '[2, 4, 8, 16]', type: 'V Projections (Heads)' },
+      { from: `${baseKey}.causal_mask`, to: `${key} (Mask)`, shape: '[2, 4, 8, 8]', type: 'Triangular Causal Mask' }
+    ];
+    if (matchedOps.length > 0) {
+      const qkOp = matchedOps[0];
+      const shapes = qkOp.input_shape.split(',').map(s => s.trim());
+      if (shapes.length >= 2) {
+        coreInbound[0].shape = shapes[0];
+        coreInbound[1].shape = shapes[1];
+      }
+      const maskNode = matchedNodes.find(n => n.name.includes('mask'));
+      if (maskNode) coreInbound[3].shape = maskNode.shape;
+      const vOp = matchedOps.find(o => o.op_type === 'BatchMatMul' && o !== qkOp);
+      if (vOp) {
+        const vShapes = vOp.input_shape.split(',').map(s => s.trim());
+        if (vShapes.length >= 2) coreInbound[2].shape = vShapes[1];
+      }
+    }
+    inputsHtml += '<table class="node-table"><thead><tr><th>Source Tensor / Predecessor</th><th>Target Port</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
+    coreInbound.forEach(e => {
+      inputsHtml += `<tr><td class="node-name">${e.from}</td><td class="node-name">${e.to}</td><td class="node-shape">${e.shape}</td><td><span class="badge" style="background:#4f46e5;color:#fff;">🎯 ${e.type}</span></td></tr>`;
+    });
+    inputsHtml += '</tbody></table>';
+  } else if (incoming.length > 0 || inputNodes.length > 0) {
     inputsHtml += '<table class="node-table"><thead><tr><th>Source Tensor / Predecessor</th><th>Target Port</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
     incoming.forEach(e => {
       const typeBadge = e.is_skip 
@@ -1463,7 +1537,8 @@ function openInspector(key) {
   if (actNodes.length > 0) {
     actsHtml += '<table class="node-table"><thead><tr><th>Tensor Name</th><th>Shape</th><th>Elements</th><th>Inferred Op</th><th>Memory</th></tr></thead><tbody>';
     actNodes.forEach(a => {
-      actsHtml += `<tr><td class="node-name">${a.name}</td><td class="node-shape">${a.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(a.elements)}</td><td style="font-family:var(--font-mono);"><span class="badge badge-op">${a.act}</span></td><td style="font-family:var(--font-mono);">${formatBytes(a.bytes)}</td></tr>`;
+      const actShortName = isAttentionCore && a.name.startsWith(baseKey + '.') ? a.name.slice(baseKey.length + 1) : a.name;
+      actsHtml += `<tr><td class="node-name" title="${a.name}">${actShortName}</td><td class="node-shape">${a.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(a.elements)}</td><td style="font-family:var(--font-mono);"><span class="badge badge-op">${a.act}</span></td><td style="font-family:var(--font-mono);">${formatBytes(a.bytes)}</td></tr>`;
     });
     actsHtml += '</tbody></table>';
   } else {
@@ -1472,17 +1547,37 @@ function openInspector(key) {
   actsHtml += '</div>';
 
   // 5. Downstream Connections
-  const outgoing = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
   let outHtml = '';
-  if (outgoing.length > 0) {
-    outHtml += '<div class="insp-section"><div class="insp-section-title"><span>🔀 Downstream Flow (下游流向)</span></div><table class="node-table"><thead><tr><th>Consumer Node</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
-    outgoing.forEach(e => {
-      const typeBadge = e.is_skip 
-        ? '<span class="badge" style="background:#0284c7;color:#fff;">⚡ Residual Skip Highway</span>'
-        : '<span class="badge" style="background:#334155;color:#94a3b8;">▼ Sequential Flow</span>';
-      outHtml += `<tr><td class="node-name">${e.to}</td><td class="node-shape">${e.shape}</td><td>${typeBadge}</td></tr>`;
-    });
-    outHtml += '</tbody></table></div>';
+  if (isAttentionCore) {
+    const lastOp = matchedOps.length > 0 ? matchedOps[matchedOps.length - 1] : null;
+    const outShape = lastOp ? lastOp.output_shape : '[16, 64]';
+    outHtml += `
+      <div class="insp-section">
+        <div class="insp-section-title"><span>🔀 Downstream Flow (下游流向)</span></div>
+        <table class="node-table">
+          <thead><tr><th>Consumer Node</th><th>Shape</th><th>Connection Type</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="node-name">${baseKey}.c_proj</td>
+              <td class="node-shape">${outShape}</td>
+              <td><span class="badge" style="background:#334155;color:#94a3b8;">▼ Sequential Flow (Multi-Head Linear Output Projection)</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+  } else {
+    const outgoing = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
+    if (outgoing.length > 0) {
+      outHtml += '<div class="insp-section"><div class="insp-section-title"><span>🔀 Downstream Flow (下游流向)</span></div><table class="node-table"><thead><tr><th>Consumer Node</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
+      outgoing.forEach(e => {
+        const typeBadge = e.is_skip 
+          ? '<span class="badge" style="background:#0284c7;color:#fff;">⚡ Residual Skip Highway</span>'
+          : '<span class="badge" style="background:#334155;color:#94a3b8;">▼ Sequential Flow</span>';
+        outHtml += `<tr><td class="node-name">${e.to}</td><td class="node-shape">${e.shape}</td><td>${typeBadge}</td></tr>`;
+      });
+      outHtml += '</tbody></table></div>';
+    }
   }
 
   bodyEl.innerHTML = ioBannerHtml + formulaHtml + opsHtml + paramsHtml + inputsHtml + actsHtml + outHtml;
@@ -1905,7 +2000,7 @@ function renderBranch(prefix, node) {
 
       if (node._nodes.length > 0) {
         html += `
-          <div class="tb-node-card" onclick="openInspector('${prefix}')" title="Click to inspect attention core activations in standalone window" style="border-color: #818cf8; background: rgba(99, 102, 241, 0.06); margin: 6px 0;">
+          <div class="tb-node-card" onclick="openInspector('${prefix}.core')" title="Click to inspect Scaled Dot-Product Attention Core activations in standalone window" style="border-color: #818cf8; background: rgba(99, 102, 241, 0.06); margin: 6px 0;">
             <div class="tb-node-header">
               <div class="tb-node-title">
                 <span class="tb-op-icon attn">🎯</span>
@@ -1913,8 +2008,11 @@ function renderBranch(prefix, node) {
               </div>
               <div style="display: flex; align-items: center; gap: 8px;">
                 <span class="tb-type-pill" style="border-color: #818cf8; color: #a5b4fc;">Softmax((Q·Kᵀ)/√d + Mask)·V</span>
-                <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${prefix}')">🔍 Inspect</button>
+                <button class="tb-inspect-btn" onclick="event.stopPropagation(); openInspector('${prefix}.core')">🔍 Inspect</button>
               </div>
+            </div>
+            <div style="margin-top: 6px; font-size: 11px; color: #c7d2fe; display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); opacity: 0.85;">
+              <span>Q·Kᵀ ➔ ÷√d ➔ +Mask ➔ Softmax ➔ ·V ➔ Merge Heads</span>
             </div>
           </div>
         `;
