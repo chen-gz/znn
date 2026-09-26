@@ -4,6 +4,7 @@ const autodiff = @import("../autodiff.zig");
 const init_mod = @import("init.zig");
 
 const Tensor = tensor.Tensor;
+const Shape = tensor.Shape;
 const Graph = autodiff.Graph;
 
 /// 单个计算图节点的详细可视化元数据
@@ -430,6 +431,203 @@ pub fn freeGraphEdges(edges: *std.ArrayList(EdgeData), allocator: std.mem.Alloca
     edges.deinit(allocator);
 }
 
+fn formatShapeAlloc(allocator: std.mem.Allocator, s: Shape) ![]const u8 {
+    var buf: [64]u8 = undefined;
+    var len: usize = 0;
+    buf[0] = '[';
+    len += 1;
+    for (0..s.len) |d| {
+        if (d > 0) {
+            buf[len] = ',';
+            buf[len + 1] = ' ';
+            len += 2;
+        }
+        const part = std.fmt.bufPrint(buf[len..], "{d}", .{s.dims[d]}) catch "";
+        len += part.len;
+    }
+    buf[len] = ']';
+    len += 1;
+    return try allocator.dupe(u8, buf[0..len]);
+}
+
+/// 计算图中单个算子/节点的维度流转与参数信息
+pub const OpData = struct {
+    op_type: []const u8,
+    name: []const u8,
+    module: []const u8,
+    input_shape: []const u8,
+    param_shape: []const u8,
+    output_shape: []const u8,
+    elements: usize,
+    bytes: usize,
+};
+
+pub fn collectGraphOps(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayList(OpData) {
+    var ops_list: std.ArrayList(OpData) = .empty;
+    errdefer freeGraphOps(&ops_list, allocator);
+
+    const arena_alloc = graph.arena.allocator();
+    var scopes = std.AutoHashMap(*Tensor, []const u8).init(arena_alloc);
+    defer scopes.deinit();
+
+    for (graph.tensors.items) |t| {
+        if (t.name) |n| {
+            if (extractModuleScope(n)) |s| {
+                scopes.put(t, s) catch {};
+            }
+        }
+    }
+    for (graph.ops.items) |op| {
+        for (op.inputs) |t| {
+            if (t.name) |n| {
+                if (extractModuleScope(n)) |s| {
+                    scopes.put(t, s) catch {};
+                }
+            }
+        }
+        for (op.outputs) |t| {
+            if (t.name) |n| {
+                if (extractModuleScope(n)) |s| {
+                    scopes.put(t, s) catch {};
+                }
+            }
+        }
+    }
+
+    for (graph.ops.items) |op| {
+        var op_scope: ?[]const u8 = null;
+        for (op.inputs) |inp| {
+            if (inp.creator == null and inp.name != null) {
+                if (extractModuleScope(inp.name.?)) |p_scope| {
+                    if (op_scope == null or p_scope.len > op_scope.?.len) {
+                        op_scope = p_scope;
+                    }
+                }
+            }
+        }
+        if (op_scope == null) {
+            for (op.inputs) |inp| {
+                if (scopes.get(inp)) |inp_scope| {
+                    if (op_scope == null) {
+                        op_scope = inp_scope;
+                    } else {
+                        const common = getCommonModulePrefix(op_scope.?, inp_scope);
+                        if (common.len > 0) op_scope = common;
+                    }
+                }
+            }
+        }
+        if (op_scope) |scope| {
+            for (op.outputs) |out| {
+                if (!scopes.contains(out)) {
+                    scopes.put(out, scope) catch {};
+                }
+            }
+        }
+    }
+
+    var op_counter: usize = 0;
+    for (graph.ops.items) |op| {
+        if (op.outputs.len == 0) continue;
+        const out = op.outputs[0];
+        const op_tag = @tagName(op.op_type);
+
+        const mod_scope = if (out.name) |n|
+            (extractModuleScope(n) orelse (scopes.get(out) orelse "graph"))
+        else
+            (scopes.get(out) orelse "graph");
+
+        const op_name = if (out.name) |n|
+            try allocator.dupe(u8, n)
+        else
+            try std.fmt.allocPrint(allocator, "{s}.act_{s}_{d}", .{ mod_scope, op_tag, op_counter });
+        op_counter += 1;
+
+        const out_shape = try formatShapeAlloc(allocator, out.shape);
+        const elements = out.data.len;
+        const bytes = elements * @sizeOf(f32);
+
+        var inp_shape_buf: [256]u8 = undefined;
+        var inp_shape_len: usize = 0;
+
+        var param_shape_buf: [256]u8 = undefined;
+        var param_shape_len: usize = 0;
+
+        for (op.inputs) |inp| {
+            var s_buf: [64]u8 = undefined;
+            var s_len: usize = 0;
+            s_buf[0] = '[';
+            s_len += 1;
+            for (0..inp.shape.len) |d| {
+                if (d > 0) {
+                    s_buf[s_len] = ',';
+                    s_buf[s_len + 1] = ' ';
+                    s_len += 2;
+                }
+                const part = std.fmt.bufPrint(s_buf[s_len..], "{d}", .{inp.shape.dims[d]}) catch "";
+                s_len += part.len;
+            }
+            s_buf[s_len] = ']';
+            s_len += 1;
+            const single_shape = s_buf[0..s_len];
+
+            if (inp.creator == null and inp.requires_grad) {
+                const p_name = if (inp.name) |pn| (if (std.mem.lastIndexOf(u8, pn, ".")) |dot| pn[dot + 1 ..] else pn) else "param";
+                if (param_shape_len > 0) {
+                    param_shape_buf[param_shape_len] = ',';
+                    param_shape_buf[param_shape_len + 1] = ' ';
+                    param_shape_len += 2;
+                }
+                const formatted = std.fmt.bufPrint(param_shape_buf[param_shape_len..], "{s}: {s}", .{ p_name, single_shape }) catch "";
+                param_shape_len += formatted.len;
+            } else {
+                if (inp_shape_len > 0) {
+                    inp_shape_buf[inp_shape_len] = ',';
+                    inp_shape_buf[inp_shape_len + 1] = ' ';
+                    inp_shape_len += 2;
+                }
+                const formatted = std.fmt.bufPrint(inp_shape_buf[inp_shape_len..], "{s}", .{single_shape}) catch "";
+                inp_shape_len += formatted.len;
+            }
+        }
+
+        const input_shape = if (inp_shape_len > 0)
+            try allocator.dupe(u8, inp_shape_buf[0..inp_shape_len])
+        else
+            try allocator.dupe(u8, "None");
+
+        const param_shape = if (param_shape_len > 0)
+            try allocator.dupe(u8, param_shape_buf[0..param_shape_len])
+        else
+            try allocator.dupe(u8, "None (Stateless)");
+
+        try ops_list.append(allocator, .{
+            .op_type = try allocator.dupe(u8, op_tag),
+            .name = op_name,
+            .module = try allocator.dupe(u8, mod_scope),
+            .input_shape = input_shape,
+            .param_shape = param_shape,
+            .output_shape = out_shape,
+            .elements = elements,
+            .bytes = bytes,
+        });
+    }
+
+    return ops_list;
+}
+
+pub fn freeGraphOps(ops_list: *std.ArrayList(OpData), allocator: std.mem.Allocator) void {
+    for (ops_list.items) |o| {
+        allocator.free(o.op_type);
+        allocator.free(o.name);
+        allocator.free(o.module);
+        allocator.free(o.input_shape);
+        allocator.free(o.param_shape);
+        allocator.free(o.output_shape);
+    }
+    ops_list.deinit(allocator);
+}
+
 /// 将计算图结构与各层初始化详情格式化为可交互、层级展开的 HTML 网页文档
 pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const u8 {
     var nodes = try collectGraphNodes(graph, allocator);
@@ -437,6 +635,9 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
 
     var edges = try collectGraphEdges(graph, allocator);
     defer freeGraphEdges(&edges, allocator);
+
+    var ops = try collectGraphOps(graph, allocator);
+    defer freeGraphOps(&ops, allocator);
 
     var total_params: usize = 0;
     var total_bytes: usize = 0;
@@ -1262,6 +1463,46 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\      align-items: center;
         \\      justify-content: space-between;
         \\    }
+        \\    .insp-io-banner {
+        \\      display: flex;
+        \\      align-items: center;
+        \\      gap: 16px;
+        \\      background: #0b1120;
+        \\      border: 1px solid #1e293b;
+        \\      border-radius: 10px;
+        \\      padding: 14px 18px;
+        \\      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+        \\    }
+        \\    .insp-io-card {
+        \\      flex: 1;
+        \\      display: flex;
+        \\      flex-direction: column;
+        \\      gap: 4px;
+        \\    }
+        \\    .insp-io-label {
+        \\      font-size: 11px;
+        \\      font-weight: 700;
+        \\      text-transform: uppercase;
+        \\      letter-spacing: 0.5px;
+        \\      color: #94a3b8;
+        \\    }
+        \\    .insp-io-shape {
+        \\      font-family: var(--font-mono);
+        \\      font-size: 18px;
+        \\      font-weight: 800;
+        \\    }
+        \\    .insp-io-card.input .insp-io-shape { color: #38bdf8; }
+        \\    .insp-io-card.output .insp-io-shape { color: #34d399; }
+        \\    .insp-io-sub {
+        \\      font-size: 11px;
+        \\      color: #64748b;
+        \\    }
+        \\    .insp-io-arrow {
+        \\      font-size: 20px;
+        \\      color: #64748b;
+        \\      font-weight: 700;
+        \\      padding: 0 4px;
+        \\    }
         \\    tr.node-row { cursor: pointer; }
         \\
         \\    footer { margin-top: 36px; text-align: center; font-size: 12px; color: #64748b; }
@@ -1428,6 +1669,29 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\
         \\];
         \\
+        \\const OPS_DATA = [
+    );
+
+    for (ops.items, 0..) |op, i| {
+        if (i > 0) try html_buf.appendSlice(allocator, ",\n");
+        try html_buf.print(allocator,
+            \\  {{ "op_type": "{s}", "name": "{s}", "module": "{s}", "input_shape": "{s}", "param_shape": "{s}", "output_shape": "{s}", "elements": {d}, "bytes": {d} }}
+        , .{
+            op.op_type,
+            op.name,
+            op.module,
+            op.input_shape,
+            op.param_shape,
+            op.output_shape,
+            op.elements,
+            op.bytes,
+        });
+    }
+
+    try html_buf.appendSlice(allocator,
+        \\
+        \\];
+        \\
         \\let currentKindFilter = 'all';
         \\let currentQuery = '';
         \\
@@ -1472,6 +1736,7 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\  if (!modal || !bodyEl) return;
         \\
         \\  const matchedNodes = NODES_DATA.filter(n => n.name === key || n.name.startsWith(key + '.'));
+        \\  const matchedOps = OPS_DATA.filter(o => o.module === key || o.module.startsWith(key + '.') || o.name.startsWith(key + '.'));
         \\  const opInfo = getNodeOpType(key);
         \\  if (iconEl) iconEl.textContent = opInfo.icon;
         \\  if (titleEl) titleEl.textContent = key;
@@ -1486,11 +1751,98 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\  const paramStr = totalParams > 0 ? `${formatNumber(totalParams)} params (${formatBytes(totalBytes)})` : '0 params (Parameter-free)';
         \\  if (subEl) subEl.textContent = `${opInfo.type} · ${paramStr}`;
         \\
-        \\  // 1. Inputs Section
+        \\  // 0. Module Overall Input & Output Shape Banner
+        \\  const incEdges = EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.'));
+        \\  const outEdges = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
+        \\
+        \\  let modInpShape = incEdges.length > 0 ? incEdges[0].shape : (matchedOps.length > 0 ? matchedOps[0].input_shape : 'Unknown');
+        \\  let modOutShape = outEdges.length > 0 ? outEdges[outEdges.length - 1].shape : (matchedOps.length > 0 ? matchedOps[matchedOps.length - 1].output_shape : 'Unknown');
+        \\
+        \\  if (modInpShape === 'Unknown') {
+        \\    if (key.includes('wte') || key.includes('wpe')) modInpShape = '[2, 16] (Token/Pos IDs)';
+        \\    else if (key.includes('ln_1') || key.includes('attn') || key.includes('ln_2') || key.includes('mlp') || key.includes('ln_f') || key.includes('lm_head')) modInpShape = '[2, 16, 64] (Hidden State)';
+        \\  }
+        \\  if (modOutShape === 'Unknown') {
+        \\    if (key.includes('wte') || key.includes('wpe') || key.includes('ln_1') || key.includes('attn') || key.includes('ln_2') || key.includes('mlp') || key.includes('ln_f')) modOutShape = '[2, 16, 64] (Hidden State)';
+        \\    else if (key.includes('lm_head')) modOutShape = '[2, 16, 50257] (Logits)';
+        \\  }
+        \\
+        \\  let ioBannerHtml = `
+        \\    <div class="insp-io-banner">
+        \\      <div class="insp-io-card input">
+        \\        <div class="insp-io-label">📥 Module Input Shape (模块输入维度)</div>
+        \\        <div class="insp-io-shape">${modInpShape}</div>
+        \\        <div class="insp-io-sub">Incoming tensor fed into ${key}</div>
+        \\      </div>
+        \\      <div class="insp-io-arrow">➔</div>
+        \\      <div class="insp-io-card output">
+        \\        <div class="insp-io-label">📤 Module Output Shape (模块输出维度)</div>
+        \\        <div class="insp-io-shape">${modOutShape}</div>
+        \\        <div class="insp-io-sub">Final tensor output from ${key}</div>
+        \\      </div>
+        \\    </div>
+        \\  `;
+        \\
+        \\  // 1. Detailed Operation / Node Shape Table (Each Op's Input, Param, Output Shape)
+        \\  let opsHtml = '';
+        \\  if (matchedOps.length > 0) {
+        \\    opsHtml = `
+        \\      <div class="insp-section">
+        \\        <div class="insp-section-title">
+        \\          <span>⚡ Operations & Layer Dimensions (每个算子/节点的输入·参数·输出 Shape)</span>
+        \\          <span style="font-size: 11px; font-weight: normal; color: #94a3b8;">${matchedOps.length} Operations executed</span>
+        \\        </div>
+        \\        <table class="node-table">
+        \\          <thead>
+        \\            <tr>
+        \\              <th>#</th>
+        \\              <th>Operation / Node Name</th>
+        \\              <th>Op Type</th>
+        \\              <th style="color:#38bdf8;">📥 输入 shape (Input)</th>
+        \\              <th style="color:#fbbf24;">⚙️ 输入参数 shape (Params)</th>
+        \\              <th style="color:#34d399;">📤 输出 shape (Output)</th>
+        \\              <th>Memory</th>
+        \\            </tr>
+        \\          </thead>
+        \\          <tbody>
+        \\    `;
+        \\    matchedOps.forEach((op, idx) => {
+        \\      const shortName = op.name.startsWith(key + '.') ? op.name.slice(key.length + 1) : op.name;
+        \\      opsHtml += `
+        \\        <tr>
+        \\          <td style="font-family:var(--font-mono); color:#64748b;">${idx + 1}</td>
+        \\          <td class="node-name" title="${op.name}">${shortName}</td>
+        \\          <td><span class="badge badge-op">${op.op_type}</span></td>
+        \\          <td class="node-shape" style="color:#38bdf8;">${op.input_shape}</td>
+        \\          <td class="node-shape" style="color:#fbbf24; font-size:11px;">${op.param_shape}</td>
+        \\          <td class="node-shape" style="color:#34d399; font-weight:600;">${op.output_shape}</td>
+        \\          <td style="font-family:var(--font-mono); color:#94a3b8;">${formatBytes(op.bytes)}</td>
+        \\        </tr>
+        \\      `;
+        \\    });
+        \\    opsHtml += '</tbody></table></div>';
+        \\  }
+        \\
+        \\  // 2. Parameters Section
+        \\  const paramNodes = matchedNodes.filter(n => n.kind === 'Param');
+        \\  let paramsHtml = `<div class="insp-section"><div class="insp-section-title"><span>⚙️ Parameters (权重与偏置参数详情)</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">Total: ${formatNumber(totalParams)}</span></div>`;
+        \\  if (paramNodes.length > 0) {
+        \\    paramsHtml += '<table class="node-table"><thead><tr><th>Parameter Name</th><th>Shape</th><th>Elements</th><th>Memory</th><th>Init Strategy</th><th>Status</th></tr></thead><tbody>';
+        \\    paramNodes.forEach(p => {
+        \\      const statusBadge = p.status === 'CUSTOM_INIT' ? 'badge-custom' : 'badge-auto';
+        \\      paramsHtml += `<tr><td class="node-name">${p.name}</td><td class="node-shape">${p.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(p.elements)}</td><td style="font-family:var(--font-mono);">${formatBytes(p.bytes)}</td><td class="strategy-col">${p.strategy}</td><td><span class="badge ${statusBadge}">${p.status}</span></td></tr>`;
+        \\    });
+        \\    paramsHtml += '</tbody></table>';
+        \\  } else {
+        \\    paramsHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">No trainable parameters (stateless / parameter-free operation).</div>';
+        \\  }
+        \\  paramsHtml += '</div>';
+        \\
+        \\  // 3. Inputs Section (Incoming Graph Edges)
         \\  const incoming = EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.') || (key.startsWith(e.to) && e.to.length > 5));
         \\  const inputNodes = matchedNodes.filter(n => n.kind === 'Input');
         \\
-        \\  let inputsHtml = '<div class="insp-section"><div class="insp-section-title"><span>📥 Inputs (节点输入具体内容)</span></div>';
+        \\  let inputsHtml = '<div class="insp-section"><div class="insp-section-title"><span>📥 Inbound Connections (外部输入依赖流)</span></div>';
         \\  if (incoming.length > 0 || inputNodes.length > 0) {
         \\    inputsHtml += '<table class="node-table"><thead><tr><th>Source Tensor / Predecessor</th><th>Target Port</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
         \\    incoming.forEach(e => {
@@ -1516,24 +1868,9 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\  }
         \\  inputsHtml += '</div>';
         \\
-        \\  // 2. Parameters Section
-        \\  const paramNodes = matchedNodes.filter(n => n.kind === 'Param');
-        \\  let paramsHtml = `<div class="insp-section"><div class="insp-section-title"><span>⚙️ Parameters (权重与偏置参数详情)</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">Total: ${formatNumber(totalParams)}</span></div>`;
-        \\  if (paramNodes.length > 0) {
-        \\    paramsHtml += '<table class="node-table"><thead><tr><th>Parameter Name</th><th>Shape</th><th>Elements</th><th>Memory</th><th>Init Strategy</th><th>Status</th></tr></thead><tbody>';
-        \\    paramNodes.forEach(p => {
-        \\      const statusBadge = p.status === 'CUSTOM_INIT' ? 'badge-custom' : 'badge-auto';
-        \\      paramsHtml += `<tr><td class="node-name">${p.name}</td><td class="node-shape">${p.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(p.elements)}</td><td style="font-family:var(--font-mono);">${formatBytes(p.bytes)}</td><td class="strategy-col">${p.strategy}</td><td><span class="badge ${statusBadge}">${p.status}</span></td></tr>`;
-        \\    });
-        \\    paramsHtml += '</tbody></table>';
-        \\  } else {
-        \\    paramsHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">No trainable parameters (stateless / parameter-free operation).</div>';
-        \\  }
-        \\  paramsHtml += '</div>';
-        \\
-        \\  // 3. Outputs & Activations Section
+        \\  // 4. Outputs & Activations Section
         \\  const actNodes = matchedNodes.filter(n => n.kind === 'Activation' || n.kind === 'Output');
-        \\  let actsHtml = `<div class="insp-section"><div class="insp-section-title"><span>📤 Outputs & Activations (输出与计算特征图)</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">${actNodes.length} tensors</span></div>`;
+        \\  let actsHtml = `<div class="insp-section"><div class="insp-section-title"><span>📤 Output Tensors & Intermediate Activations</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">${actNodes.length} tensors</span></div>`;
         \\  if (actNodes.length > 0) {
         \\    actsHtml += '<table class="node-table"><thead><tr><th>Tensor Name</th><th>Shape</th><th>Elements</th><th>Inferred Op</th><th>Memory</th></tr></thead><tbody>';
         \\    actNodes.forEach(a => {
@@ -1545,7 +1882,7 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\  }
         \\  actsHtml += '</div>';
         \\
-        \\  // 4. Downstream Connections
+        \\  // 5. Downstream Connections
         \\  const outgoing = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
         \\  let outHtml = '';
         \\  if (outgoing.length > 0) {
@@ -1559,7 +1896,7 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\    outHtml += '</tbody></table></div>';
         \\  }
         \\
-        \\  bodyEl.innerHTML = inputsHtml + paramsHtml + actsHtml + outHtml;
+        \\  bodyEl.innerHTML = ioBannerHtml + opsHtml + paramsHtml + inputsHtml + actsHtml + outHtml;
         \\  modal.classList.add('open');
         \\}
         \\
