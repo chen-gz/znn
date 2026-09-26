@@ -1718,19 +1718,19 @@ function renderMermaidView() {
   }
 
   function formatNodeDef(name) {
-    const safeId = name.replace(/[^a-zA-Z0-9_]/g, '_');
+    const safeId = 'n_' + name.replace(/[^a-zA-Z0-9_]/g, '_');
     const node = nodeMap.get(name);
-    const leafName = name.split('.').pop() || name;
-    const shape = node ? node.shape : '';
-    const shapeText = shape ? `<br/><code>${shape}</code>` : '';
+    const leafName = (name.split('.').pop() || name).replace(/"/g, "'");
+    const shape = node ? (node.shape || '').replace(/"/g, "'") : '';
+    const shapeText = shape ? `<br>${shape}` : '';
     const kind = node ? node.kind : '';
 
     if (kind === 'Input' || name.startsWith('inputs.') || name.includes('input')) {
       return `${safeId}(["📥 ${leafName}${shapeText}"])`;
     } else if (kind === 'Param') {
-      return `${safeId}[/"⚖️ ${leafName}${shapeText}"/]`;
+      return `${safeId}["⚖️ ${leafName}${shapeText}"]`;
     } else if (name.includes('residual') || name.includes('add') || name.includes('skip')) {
-      return `${safeId}{"⊕ ${leafName}${shapeText}"}`;
+      return `${safeId}["⊕ ${leafName}${shapeText}"]`;
     } else {
       return `${safeId}["⚡ ${leafName}${shapeText}"]`;
     }
@@ -1754,7 +1754,8 @@ function renderMermaidView() {
   // Render Subgraphs
   subgraphs.forEach((nodesInSub, scope) => {
     const subId = 'sg_' + scope.replace(/[^a-zA-Z0-9_]/g, '_');
-    code += `  subgraph ${subId} ["📁 ${scope}"]\n`;
+    const cleanScope = scope.replace(/"/g, "'");
+    code += `  subgraph ${subId} ["📁 ${cleanScope}"]\n`;
     nodesInSub.forEach(n => {
       code += `    ${formatNodeDef(n)}\n`;
     });
@@ -1772,17 +1773,21 @@ function renderMermaidView() {
   // Render Edges
   const edgesSeen = new Set();
   EDGES_DATA.forEach(e => {
-    const fromSafe = e.from.replace(/[^a-zA-Z0-9_]/g, '_');
-    const toSafe = e.to.replace(/[^a-zA-Z0-9_]/g, '_');
+    const fromSafe = 'n_' + e.from.replace(/[^a-zA-Z0-9_]/g, '_');
+    const toSafe = 'n_' + e.to.replace(/[^a-zA-Z0-9_]/g, '_');
     const edgeKey = fromSafe + '->' + toSafe;
     if (edgesSeen.has(edgeKey)) return;
     edgesSeen.add(edgeKey);
 
-    const label = e.shape || '';
+    const label = (e.shape || '').replace(/"/g, "'");
     if (e.is_skip) {
-      code += `  ${fromSafe} -.->|⚡ Skip: ${label}| ${toSafe}\n`;
+      if (label) {
+        code += `  ${fromSafe} -.->|"⚡ Skip: ${label}"| ${toSafe}\n`;
+      } else {
+        code += `  ${fromSafe} -.->|"⚡ Skip"| ${toSafe}\n`;
+      }
     } else if (label) {
-      code += `  ${fromSafe} -->|${label}| ${toSafe}\n`;
+      code += `  ${fromSafe} -->|"${label}"| ${toSafe}\n`;
     } else {
       code += `  ${fromSafe} --> ${toSafe}\n`;
     }
