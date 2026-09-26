@@ -792,6 +792,46 @@
       align-items: center;
       justify-content: space-between;
     }
+    .insp-io-banner {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      background: #0b1120;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      padding: 14px 18px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    }
+    .insp-io-card {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .insp-io-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #94a3b8;
+    }
+    .insp-io-shape {
+      font-family: var(--font-mono);
+      font-size: 18px;
+      font-weight: 800;
+    }
+    .insp-io-card.input .insp-io-shape { color: #38bdf8; }
+    .insp-io-card.output .insp-io-shape { color: #34d399; }
+    .insp-io-sub {
+      font-size: 11px;
+      color: #64748b;
+    }
+    .insp-io-arrow {
+      font-size: 20px;
+      color: #64748b;
+      font-weight: 700;
+      padding: 0 4px;
+    }
     tr.node-row { cursor: pointer; }
 
     footer { margin-top: 36px; text-align: center; font-size: 12px; color: #64748b; }
@@ -948,6 +988,44 @@ const EDGES_DATA = [  { "from": "inputs.token_embeddings", "to": "gpt.layers.0.r
   { "from": "gpt.layers.0.residual_attn", "to": "activations", "shape": "[2, 8, 64]", "is_skip": false }
 ];
 
+const OPS_DATA = [  { "op_type": "RmsNorm", "name": "gpt.layers.0.ln_1.act_RmsNorm_0", "module": "gpt.layers.0.ln_1", "input_shape": "[2, 8, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Reshape", "name": "gpt.layers.0.ln_1.act_Reshape_1", "module": "gpt.layers.0.ln_1", "input_shape": "[2, 8, 64]", "param_shape": "None (Stateless)", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "MatMul", "name": "gpt.layers.0.attn.q_attn.act_MatMul_2", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[16, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Add", "name": "gpt.layers.0.attn.q_attn.act_Add_3", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[16, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "MatMul", "name": "gpt.layers.0.attn.k_attn.act_MatMul_4", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[16, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Add", "name": "gpt.layers.0.attn.k_attn.act_Add_5", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[16, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "MatMul", "name": "gpt.layers.0.attn.v_attn.act_MatMul_6", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[16, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Add", "name": "gpt.layers.0.attn.v_attn.act_Add_7", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[16, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Reshape", "name": "gpt.layers.0.attn.q_attn.act_Reshape_8", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Reshape", "name": "gpt.layers.0.attn.k_attn.act_Reshape_9", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Reshape", "name": "gpt.layers.0.attn.v_attn.act_Reshape_10", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Transpose", "name": "gpt.layers.0.attn.q_attn.act_Transpose_11", "module": "gpt.layers.0.attn.q_attn", "input_shape": "[2, 8, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Transpose", "name": "gpt.layers.0.attn.k_attn.act_Transpose_12", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[2, 8, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Transpose", "name": "gpt.layers.0.attn.v_attn.act_Transpose_13", "module": "gpt.layers.0.attn.v_attn", "input_shape": "[2, 8, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Transpose", "name": "gpt.layers.0.attn.k_attn.act_Transpose_14", "module": "gpt.layers.0.attn.k_attn", "input_shape": "[2, 4, 8, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 16, 8]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "BatchMatMul", "name": "gpt.layers.0.attn.act_BatchMatMul_15", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 8, 16], [2, 4, 16, 8]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048 },
+  { "op_type": "MulScalar", "name": "gpt.layers.0.attn.act_MulScalar_16", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 8, 8]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048 },
+  { "op_type": "Add", "name": "gpt.layers.0.attn.act_Add_17", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 8, 8], [2, 4, 8, 8]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048 },
+  { "op_type": "Softmax", "name": "gpt.layers.0.attn.act_Softmax_18", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 8, 8]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048 },
+  { "op_type": "BatchMatMul", "name": "gpt.layers.0.attn.act_BatchMatMul_19", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 8, 8], [2, 4, 8, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Transpose", "name": "gpt.layers.0.attn.act_Transpose_20", "module": "gpt.layers.0.attn", "input_shape": "[2, 4, 8, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Reshape", "name": "gpt.layers.0.attn.act_Reshape_21", "module": "gpt.layers.0.attn", "input_shape": "[2, 8, 4, 16]", "param_shape": "None (Stateless)", "output_shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Reshape", "name": "gpt.layers.0.attn.act_Reshape_22", "module": "gpt.layers.0.attn", "input_shape": "[2, 8, 64]", "param_shape": "None (Stateless)", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "MatMul", "name": "gpt.layers.0.attn.c_proj.act_MatMul_23", "module": "gpt.layers.0.attn.c_proj", "input_shape": "[16, 64]", "param_shape": "weight: [64, 64]", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Add", "name": "gpt.layers.0.attn.c_proj.act_Add_24", "module": "gpt.layers.0.attn.c_proj", "input_shape": "[16, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Reshape", "name": "gpt.layers.0.attn.c_proj.act_Reshape_25", "module": "gpt.layers.0.attn.c_proj", "input_shape": "[16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Add", "name": "gpt.layers.0.residual_attn", "module": "gpt.layers.0", "input_shape": "[2, 8, 64], [2, 8, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "RmsNorm", "name": "gpt.layers.0.ln_2.act_RmsNorm_27", "module": "gpt.layers.0.ln_2", "input_shape": "[2, 8, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Reshape", "name": "gpt.layers.0.ln_2.act_Reshape_28", "module": "gpt.layers.0.ln_2", "input_shape": "[2, 8, 64]", "param_shape": "None (Stateless)", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "MatMul", "name": "gpt.layers.0.mlp.c_fc.act_MatMul_29", "module": "gpt.layers.0.mlp.c_fc", "input_shape": "[16, 64]", "param_shape": "weight: [64, 256]", "output_shape": "[16, 256]", "elements": 4096, "bytes": 16384 },
+  { "op_type": "Add", "name": "gpt.layers.0.mlp.c_fc.act_Add_30", "module": "gpt.layers.0.mlp.c_fc", "input_shape": "[16, 256]", "param_shape": "bias: [1, 256]", "output_shape": "[16, 256]", "elements": 4096, "bytes": 16384 },
+  { "op_type": "Gelu", "name": "gpt.layers.0.mlp.c_fc.act_Gelu_31", "module": "gpt.layers.0.mlp.c_fc", "input_shape": "[16, 256]", "param_shape": "None (Stateless)", "output_shape": "[16, 256]", "elements": 4096, "bytes": 16384 },
+  { "op_type": "MatMul", "name": "gpt.layers.0.mlp.c_proj.act_MatMul_32", "module": "gpt.layers.0.mlp.c_proj", "input_shape": "[16, 256]", "param_shape": "weight: [256, 64]", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Add", "name": "gpt.layers.0.mlp.c_proj.act_Add_33", "module": "gpt.layers.0.mlp.c_proj", "input_shape": "[16, 64]", "param_shape": "bias: [1, 64]", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Reshape", "name": "gpt.layers.0.mlp.c_proj.act_Reshape_34", "module": "gpt.layers.0.mlp.c_proj", "input_shape": "[16, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096 },
+  { "op_type": "Add", "name": "activations.block_0_out", "module": "activations", "input_shape": "[2, 8, 64], [2, 8, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096 }
+];
+
 let currentKindFilter = 'all';
 let currentQuery = '';
 
@@ -992,6 +1070,7 @@ function openInspector(key) {
   if (!modal || !bodyEl) return;
 
   const matchedNodes = NODES_DATA.filter(n => n.name === key || n.name.startsWith(key + '.'));
+  const matchedOps = OPS_DATA.filter(o => o.module === key || o.module.startsWith(key + '.') || o.name.startsWith(key + '.'));
   const opInfo = getNodeOpType(key);
   if (iconEl) iconEl.textContent = opInfo.icon;
   if (titleEl) titleEl.textContent = key;
@@ -1006,11 +1085,98 @@ function openInspector(key) {
   const paramStr = totalParams > 0 ? `${formatNumber(totalParams)} params (${formatBytes(totalBytes)})` : '0 params (Parameter-free)';
   if (subEl) subEl.textContent = `${opInfo.type} · ${paramStr}`;
 
-  // 1. Inputs Section
+  // 0. Module Overall Input & Output Shape Banner
+  const incEdges = EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.'));
+  const outEdges = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
+
+  let modInpShape = incEdges.length > 0 ? incEdges[0].shape : (matchedOps.length > 0 ? matchedOps[0].input_shape : 'Unknown');
+  let modOutShape = outEdges.length > 0 ? outEdges[outEdges.length - 1].shape : (matchedOps.length > 0 ? matchedOps[matchedOps.length - 1].output_shape : 'Unknown');
+
+  if (modInpShape === 'Unknown') {
+    if (key.includes('wte') || key.includes('wpe')) modInpShape = '[2, 16] (Token/Pos IDs)';
+    else if (key.includes('ln_1') || key.includes('attn') || key.includes('ln_2') || key.includes('mlp') || key.includes('ln_f') || key.includes('lm_head')) modInpShape = '[2, 16, 64] (Hidden State)';
+  }
+  if (modOutShape === 'Unknown') {
+    if (key.includes('wte') || key.includes('wpe') || key.includes('ln_1') || key.includes('attn') || key.includes('ln_2') || key.includes('mlp') || key.includes('ln_f')) modOutShape = '[2, 16, 64] (Hidden State)';
+    else if (key.includes('lm_head')) modOutShape = '[2, 16, 50257] (Logits)';
+  }
+
+  let ioBannerHtml = `
+    <div class="insp-io-banner">
+      <div class="insp-io-card input">
+        <div class="insp-io-label">📥 Module Input Shape (模块输入维度)</div>
+        <div class="insp-io-shape">${modInpShape}</div>
+        <div class="insp-io-sub">Incoming tensor fed into ${key}</div>
+      </div>
+      <div class="insp-io-arrow">➔</div>
+      <div class="insp-io-card output">
+        <div class="insp-io-label">📤 Module Output Shape (模块输出维度)</div>
+        <div class="insp-io-shape">${modOutShape}</div>
+        <div class="insp-io-sub">Final tensor output from ${key}</div>
+      </div>
+    </div>
+  `;
+
+  // 1. Detailed Operation / Node Shape Table (Each Op's Input, Param, Output Shape)
+  let opsHtml = '';
+  if (matchedOps.length > 0) {
+    opsHtml = `
+      <div class="insp-section">
+        <div class="insp-section-title">
+          <span>⚡ Operations & Layer Dimensions (每个算子/节点的输入·参数·输出 Shape)</span>
+          <span style="font-size: 11px; font-weight: normal; color: #94a3b8;">${matchedOps.length} Operations executed</span>
+        </div>
+        <table class="node-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Operation / Node Name</th>
+              <th>Op Type</th>
+              <th style="color:#38bdf8;">📥 输入 shape (Input)</th>
+              <th style="color:#fbbf24;">⚙️ 输入参数 shape (Params)</th>
+              <th style="color:#34d399;">📤 输出 shape (Output)</th>
+              <th>Memory</th>
+            </tr>
+          </thead>
+          <tbody>
+    `;
+    matchedOps.forEach((op, idx) => {
+      const shortName = op.name.startsWith(key + '.') ? op.name.slice(key.length + 1) : op.name;
+      opsHtml += `
+        <tr>
+          <td style="font-family:var(--font-mono); color:#64748b;">${idx + 1}</td>
+          <td class="node-name" title="${op.name}">${shortName}</td>
+          <td><span class="badge badge-op">${op.op_type}</span></td>
+          <td class="node-shape" style="color:#38bdf8;">${op.input_shape}</td>
+          <td class="node-shape" style="color:#fbbf24; font-size:11px;">${op.param_shape}</td>
+          <td class="node-shape" style="color:#34d399; font-weight:600;">${op.output_shape}</td>
+          <td style="font-family:var(--font-mono); color:#94a3b8;">${formatBytes(op.bytes)}</td>
+        </tr>
+      `;
+    });
+    opsHtml += '</tbody></table></div>';
+  }
+
+  // 2. Parameters Section
+  const paramNodes = matchedNodes.filter(n => n.kind === 'Param');
+  let paramsHtml = `<div class="insp-section"><div class="insp-section-title"><span>⚙️ Parameters (权重与偏置参数详情)</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">Total: ${formatNumber(totalParams)}</span></div>`;
+  if (paramNodes.length > 0) {
+    paramsHtml += '<table class="node-table"><thead><tr><th>Parameter Name</th><th>Shape</th><th>Elements</th><th>Memory</th><th>Init Strategy</th><th>Status</th></tr></thead><tbody>';
+    paramNodes.forEach(p => {
+      const statusBadge = p.status === 'CUSTOM_INIT' ? 'badge-custom' : 'badge-auto';
+      paramsHtml += `<tr><td class="node-name">${p.name}</td><td class="node-shape">${p.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(p.elements)}</td><td style="font-family:var(--font-mono);">${formatBytes(p.bytes)}</td><td class="strategy-col">${p.strategy}</td><td><span class="badge ${statusBadge}">${p.status}</span></td></tr>`;
+    });
+    paramsHtml += '</tbody></table>';
+  } else {
+    paramsHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">No trainable parameters (stateless / parameter-free operation).</div>';
+  }
+  paramsHtml += '</div>';
+
+  // 3. Inputs Section (Incoming Graph Edges)
   const incoming = EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.') || (key.startsWith(e.to) && e.to.length > 5));
   const inputNodes = matchedNodes.filter(n => n.kind === 'Input');
 
-  let inputsHtml = '<div class="insp-section"><div class="insp-section-title"><span>📥 Inputs (节点输入具体内容)</span></div>';
+  let inputsHtml = '<div class="insp-section"><div class="insp-section-title"><span>📥 Inbound Connections (外部输入依赖流)</span></div>';
   if (incoming.length > 0 || inputNodes.length > 0) {
     inputsHtml += '<table class="node-table"><thead><tr><th>Source Tensor / Predecessor</th><th>Target Port</th><th>Shape</th><th>Connection Type</th></tr></thead><tbody>';
     incoming.forEach(e => {
@@ -1036,24 +1202,9 @@ function openInspector(key) {
   }
   inputsHtml += '</div>';
 
-  // 2. Parameters Section
-  const paramNodes = matchedNodes.filter(n => n.kind === 'Param');
-  let paramsHtml = `<div class="insp-section"><div class="insp-section-title"><span>⚙️ Parameters (权重与偏置参数详情)</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">Total: ${formatNumber(totalParams)}</span></div>`;
-  if (paramNodes.length > 0) {
-    paramsHtml += '<table class="node-table"><thead><tr><th>Parameter Name</th><th>Shape</th><th>Elements</th><th>Memory</th><th>Init Strategy</th><th>Status</th></tr></thead><tbody>';
-    paramNodes.forEach(p => {
-      const statusBadge = p.status === 'CUSTOM_INIT' ? 'badge-custom' : 'badge-auto';
-      paramsHtml += `<tr><td class="node-name">${p.name}</td><td class="node-shape">${p.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(p.elements)}</td><td style="font-family:var(--font-mono);">${formatBytes(p.bytes)}</td><td class="strategy-col">${p.strategy}</td><td><span class="badge ${statusBadge}">${p.status}</span></td></tr>`;
-    });
-    paramsHtml += '</tbody></table>';
-  } else {
-    paramsHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">No trainable parameters (stateless / parameter-free operation).</div>';
-  }
-  paramsHtml += '</div>';
-
-  // 3. Outputs & Activations Section
+  // 4. Outputs & Activations Section
   const actNodes = matchedNodes.filter(n => n.kind === 'Activation' || n.kind === 'Output');
-  let actsHtml = `<div class="insp-section"><div class="insp-section-title"><span>📤 Outputs & Activations (输出与计算特征图)</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">${actNodes.length} tensors</span></div>`;
+  let actsHtml = `<div class="insp-section"><div class="insp-section-title"><span>📤 Output Tensors & Intermediate Activations</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">${actNodes.length} tensors</span></div>`;
   if (actNodes.length > 0) {
     actsHtml += '<table class="node-table"><thead><tr><th>Tensor Name</th><th>Shape</th><th>Elements</th><th>Inferred Op</th><th>Memory</th></tr></thead><tbody>';
     actNodes.forEach(a => {
@@ -1065,7 +1216,7 @@ function openInspector(key) {
   }
   actsHtml += '</div>';
 
-  // 4. Downstream Connections
+  // 5. Downstream Connections
   const outgoing = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
   let outHtml = '';
   if (outgoing.length > 0) {
@@ -1079,7 +1230,7 @@ function openInspector(key) {
     outHtml += '</tbody></table></div>';
   }
 
-  bodyEl.innerHTML = inputsHtml + paramsHtml + actsHtml + outHtml;
+  bodyEl.innerHTML = ioBannerHtml + opsHtml + paramsHtml + inputsHtml + actsHtml + outHtml;
   modal.classList.add('open');
 }
 
