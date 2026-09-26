@@ -367,13 +367,59 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
     var edge_set = std.StringHashMap(void).init(arena_alloc);
     defer edge_set.deinit();
 
+    var scopes = std.AutoHashMap(*Tensor, []const u8).init(arena_alloc);
+    defer scopes.deinit();
+
+    for (graph.tensors.items) |t| {
+        if (t.name) |n| {
+            if (extractModuleScope(n)) |s| scopes.put(t, s) catch {};
+        }
+    }
+    for (graph.ops.items) |op| {
+        for (op.inputs) |t| {
+            if (t.name) |n| {
+                if (extractModuleScope(n)) |s| scopes.put(t, s) catch {};
+            }
+        }
+        for (op.outputs) |t| {
+            if (t.name) |n| {
+                if (extractModuleScope(n)) |s| scopes.put(t, s) catch {};
+            }
+        }
+    }
+    for (graph.ops.items) |op| {
+        var op_scope: ?[]const u8 = null;
+        for (op.inputs) |inp| {
+            if (inp.creator == null and inp.name != null) {
+                if (extractModuleScope(inp.name.?)) |p_scope| {
+                    if (op_scope == null or p_scope.len > op_scope.?.len) op_scope = p_scope;
+                }
+            }
+        }
+        if (op_scope == null) {
+            for (op.inputs) |inp| {
+                if (scopes.get(inp)) |inp_scope| {
+                    if (op_scope == null) op_scope = inp_scope else {
+                        const common = getCommonModulePrefix(op_scope.?, inp_scope);
+                        if (common.len > 0) op_scope = common;
+                    }
+                }
+            }
+        }
+        if (op_scope) |scope| {
+            for (op.outputs) |out| {
+                if (!scopes.contains(out)) scopes.put(out, scope) catch {};
+            }
+        }
+    }
+
     for (graph.ops.items) |op| {
         for (op.outputs) |out| {
-            const out_name = out.name orelse continue;
+            const out_name = if (out.name) |n| n else if (scopes.get(out)) |s| s else continue;
             const to_mod = getLogicalModule(out_name);
 
             for (op.inputs) |inp| {
-                const inp_name = inp.name orelse continue;
+                const inp_name = if (inp.name) |n| n else if (scopes.get(inp)) |s| s else continue;
                 if (inp.creator == null and inp.requires_grad) continue;
                 if (std.mem.endsWith(u8, inp_name, ".causal_mask")) continue;
                 if (std.mem.endsWith(u8, inp_name, ".pos_indices") and std.mem.eql(u8, to_mod, "gpt.wpe")) continue;
@@ -1059,6 +1105,9 @@ pub const html_report = struct {
         \\  <!-- KaTeX for high-performance LaTeX math formula rendering -->
         \\  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
         \\  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+        \\  <!-- Mermaid for interactive SVG flowchart diagrams -->
+        \\  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+        \\  <script>if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });</script>
         \\  <style>
         \\    :root {
         \\      --bg-primary: #090d16;
@@ -2023,6 +2072,12 @@ pub const html_report = struct {
         \\
         \\  <!-- View 3: Mermaid Diagram -->
         \\  <div class="tab-view" id="view-mermaid">
+        \\    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+        \\      <span style="font-size: 13px; color: var(--text-sub);">Dynamic Computation Flowchart rendered from JSON DAG nodes</span>
+        \\      <button class="btn btn-secondary" onclick="copyMermaidCode()">📋 Copy Mermaid Markdown</button>
+        \\    </div>
+        \\    <div id="mermaid-diagram-target" style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; padding: 24px; margin-bottom: 16px; overflow-x: auto; text-align: center;"></div>
+        \\    <div style="font-size: 12px; font-weight: 600; color: var(--text-sub); margin-bottom: 6px;">MERMAID FLOWCHART SOURCE CODE:</div>
         \\    <div class="mermaid-box" id="mermaid-code"></div>
         \\  </div>
         \\
@@ -2093,6 +2148,18 @@ pub const html_report = struct {
         \\  const view = document.getElementById('view-' + tab);
         \\  if (btn) btn.classList.add('active');
         \\  if (view) view.classList.add('active');
+        \\  if (tab === 'mermaid') renderMermaidView();
+        \\  if (tab === 'dag') renderDagView();
+        \\  if (tab === 'tree') renderTree();
+        \\}
+        \\
+        \\function copyMermaidCode() {
+        \\  const code = document.getElementById('mermaid-code').textContent;
+        \\  navigator.clipboard.writeText('```mermaid\n' + code + '```').then(() => {
+        \\    alert('✅ Mermaid Markdown copied to clipboard!');
+        \\  }).catch(() => {
+        \\    alert('Failed to copy to clipboard.');
+        \\  });
         \\}
         \\
         \\function formatNumber(num) {
@@ -2658,10 +2725,75 @@ pub const html_report = struct {
         \\  if (!container) return;
         \\
         \\  let code = 'flowchart TD\n';
-        \\  code += '  subgraph Inputs["Inputs"]\n';
-        \\  code += '    token_ids["inputs.token_ids"]\n';
-        \\  code += '  end\n\n';
         \\
+        \\  const nodeMap = new Map();
+        \\  NODES_DATA.forEach(n => nodeMap.set(n.name, n));
+        \\
+        \\  // Collect all unique DAG entities involved in EDGES_DATA
+        \\  const dagNodes = new Set();
+        \\  EDGES_DATA.forEach(e => {
+        \\    dagNodes.add(e.from);
+        \\    dagNodes.add(e.to);
+        \\  });
+        \\
+        \\  // If no edges, fallback to all nodes
+        \\  if (dagNodes.size === 0) {
+        \\    NODES_DATA.forEach(n => dagNodes.add(n.name));
+        \\  }
+        \\
+        \\  function formatNodeDef(name) {
+        \\    const safeId = name.replace(/[^a-zA-Z0-9_]/g, '_');
+        \\    const node = nodeMap.get(name);
+        \\    const leafName = name.split('.').pop() || name;
+        \\    const shape = node ? node.shape : '';
+        \\    const shapeText = shape ? `<br/><code>${shape}</code>` : '';
+        \\    const kind = node ? node.kind : '';
+        \\
+        \\    if (kind === 'Input' || name.startsWith('inputs.') || name.includes('input')) {
+        \\      return `${safeId}(["📥 ${leafName}${shapeText}"])`;
+        \\    } else if (kind === 'Param') {
+        \\      return `${safeId}[/"⚖️ ${leafName}${shapeText}"/]`;
+        \\    } else if (name.includes('residual') || name.includes('add') || name.includes('skip')) {
+        \\      return `${safeId}{"⊕ ${leafName}${shapeText}"}`;
+        \\    } else {
+        \\      return `${safeId}["⚡ ${leafName}${shapeText}"]`;
+        \\    }
+        \\  }
+        \\
+        \\  // Group nodes by module scope for subgraphs
+        \\  const subgraphs = new Map();
+        \\  const rootNodes = [];
+        \\
+        \\  dagNodes.forEach(name => {
+        \\    const parts = name.split('.');
+        \\    if (parts.length > 1) {
+        \\      const scope = parts.slice(0, -1).join('.');
+        \\      if (!subgraphs.has(scope)) subgraphs.set(scope, []);
+        \\      subgraphs.get(scope).push(name);
+        \\    } else {
+        \\      rootNodes.push(name);
+        \\    }
+        \\  });
+        \\
+        \\  // Render Subgraphs
+        \\  subgraphs.forEach((nodesInSub, scope) => {
+        \\    const subId = 'sg_' + scope.replace(/[^a-zA-Z0-9_]/g, '_');
+        \\    code += `  subgraph ${subId} ["📁 ${scope}"]\n`;
+        \\    nodesInSub.forEach(n => {
+        \\      code += `    ${formatNodeDef(n)}\n`;
+        \\    });
+        \\    code += '  end\n\n';
+        \\  });
+        \\
+        \\  // Render Root level nodes
+        \\  if (rootNodes.length > 0) {
+        \\    rootNodes.forEach(n => {
+        \\      code += `  ${formatNodeDef(n)}\n`;
+        \\    });
+        \\    code += '\n';
+        \\  }
+        \\
+        \\  // Render Edges
         \\  const edgesSeen = new Set();
         \\  EDGES_DATA.forEach(e => {
         \\    const fromSafe = e.from.replace(/[^a-zA-Z0-9_]/g, '_');
@@ -2670,14 +2802,33 @@ pub const html_report = struct {
         \\    if (edgesSeen.has(edgeKey)) return;
         \\    edgesSeen.add(edgeKey);
         \\
+        \\    const label = e.shape || '';
         \\    if (e.is_skip) {
-        \\      code += `  ${fromSafe}["${e.from}"] -.->|⚡ Skip Shortcut| ${toSafe}["${e.to}"]\n`;
+        \\      code += `  ${fromSafe} -.->|⚡ Skip: ${label}| ${toSafe}\n`;
+        \\    } else if (label) {
+        \\      code += `  ${fromSafe} -->|${label}| ${toSafe}\n`;
         \\    } else {
-        \\      code += `  ${fromSafe}["${e.from}"] -->|${e.shape}| ${toSafe}["${e.to}"]\n`;
+        \\      code += `  ${fromSafe} --> ${toSafe}\n`;
         \\    }
         \\  });
         \\
         \\  container.textContent = code;
+        \\
+        \\  // Render Mermaid SVG diagram if mermaid is available
+        \\  if (window.mermaid) {
+        \\    const renderTarget = document.getElementById('mermaid-diagram-target');
+        \\    if (renderTarget) {
+        \\      try {
+        \\        mermaid.render('mermaid-svg-chart-' + Date.now(), code).then(({ svg }) => {
+        \\          renderTarget.innerHTML = svg;
+        \\        }).catch(err => {
+        \\          console.warn('Mermaid SVG render fallback:', err);
+        \\        });
+        \\      } catch(err) {
+        \\        console.warn('Mermaid execution:', err);
+        \\      }
+        \\    }
+        \\  }
         \\}
         \\
         \\function buildHierarchy(data) {

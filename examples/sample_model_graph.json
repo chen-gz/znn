@@ -55,8 +55,15 @@
     {"name": "gpt.layers.0.mlp.c_proj.act_Reshape_34", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"},
     {"name": "activations.block_0_out", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"}
   ],
-  "edges": [    {"from": "inputs.token_embeddings", "to": "gpt.layers.0.residual_attn", "shape": "[2, 8, 64]", "is_skip": true},
-    {"from": "gpt.layers.0.residual_attn", "to": "activations", "shape": "[2, 8, 64]", "is_skip": false}
+  "edges": [    {"from": "inputs.token_embeddings", "to": "gpt.layers.0", "shape": "[2, 8, 64]", "is_skip": false},
+    {"from": "gpt.layers.0", "to": "gpt.layers.0.attn", "shape": "[16, 64]", "is_skip": false},
+    {"from": "gpt.layers.0.attn", "to": "gpt.layers.0", "shape": "[2, 4, 8, 16]", "is_skip": false},
+    {"from": "inputs.token_embeddings", "to": "gpt.layers.0.residual_attn", "shape": "[2, 8, 64]", "is_skip": true},
+    {"from": "gpt.layers.0.attn", "to": "gpt.layers.0.residual_attn", "shape": "[2, 8, 64]", "is_skip": false},
+    {"from": "gpt.layers.0.residual_attn", "to": "gpt.layers.0", "shape": "[2, 8, 64]", "is_skip": false},
+    {"from": "gpt.layers.0", "to": "gpt.layers.0.mlp", "shape": "[16, 64]", "is_skip": false},
+    {"from": "gpt.layers.0.residual_attn", "to": "activations", "shape": "[2, 8, 64]", "is_skip": false},
+    {"from": "gpt.layers.0.mlp", "to": "activations", "shape": "[2, 8, 64]", "is_skip": false}
   ],
   "ops": [    {"op_type": "RmsNorm", "name": "gpt.layers.0.ln_1.act_RmsNorm_0", "module": "gpt.layers.0.ln_1", "input_shape": "[2, 8, 64]", "param_shape": "weight: [64]", "output_shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096},
     {"op_type": "Reshape", "name": "gpt.layers.0.ln_1.act_Reshape_1", "module": "gpt.layers.0.ln_1", "input_shape": "[2, 8, 64]", "param_shape": "None (Stateless)", "output_shape": "[16, 64]", "elements": 1024, "bytes": 4096},
