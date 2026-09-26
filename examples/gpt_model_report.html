@@ -1121,9 +1121,9 @@
     {"name": "gpt.lm_head.act_Add_78", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add"},
     {"name": "outputs.logits", "kind": "Activation", "shape": "[2, 16, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape"}
   ],
-  "edges": [    {"from": "inputs.token_ids", "to": "gpt", "shape": "[2, 16]", "is_skip": false},
-    {"from": "gpt.wpe", "to": "gpt", "shape": "[2, 16]", "is_skip": false},
-    {"from": "gpt", "to": "gpt.embeddings_sum", "shape": "[2, 16, 64]", "is_skip": false},
+  "edges": [    {"from": "inputs.token_ids", "to": "gpt.wte", "shape": "[2, 16]", "is_skip": false},
+    {"from": "gpt.wte", "to": "gpt.embeddings_sum", "shape": "[2, 16, 64]", "is_skip": false},
+    {"from": "gpt.wpe", "to": "gpt.embeddings_sum", "shape": "[2, 16, 64]", "is_skip": false},
     {"from": "gpt.embeddings_sum", "to": "gpt.layers.0", "shape": "[2, 16, 64]", "is_skip": false},
     {"from": "gpt.layers.0", "to": "gpt.layers.0.attn", "shape": "[32, 64]", "is_skip": false},
     {"from": "gpt.layers.0.attn", "to": "gpt.layers.0", "shape": "[2, 4, 16, 16]", "is_skip": false},
@@ -1143,8 +1143,8 @@
     {"from": "gpt.layers.1.residual_attn", "to": "gpt.layers.1.output", "shape": "[2, 16, 64]", "is_skip": true},
     {"from": "gpt.layers.1.mlp", "to": "gpt.layers.1.output", "shape": "[2, 16, 64]", "is_skip": false},
     {"from": "gpt.layers.1.output", "to": "gpt.layers", "shape": "[2, 16, 64]", "is_skip": false},
-    {"from": "gpt.layers", "to": "gpt", "shape": "[32, 64]", "is_skip": false},
-    {"from": "gpt", "to": "outputs.logits", "shape": "[32, 256]", "is_skip": false}
+    {"from": "gpt.layers", "to": "gpt.lm_head", "shape": "[32, 64]", "is_skip": false},
+    {"from": "gpt.lm_head", "to": "outputs.logits", "shape": "[32, 256]", "is_skip": false}
   ],
   "ops": [    {"op_type": "Embedding", "name": "gpt.wte.act_Embedding_0", "module": "gpt.wte", "input_shape": "[2, 16]", "param_shape": "weight: [256, 64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
     {"op_type": "Embedding", "name": "gpt.wpe.act_Embedding_1", "module": "gpt.wpe", "input_shape": "[2, 16]", "param_shape": "weight: [32, 64]", "output_shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192},
