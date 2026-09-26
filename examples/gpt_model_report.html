@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZNN Computation Graph & Model Hierarchy Report</title>
+  <style>
+    :root {
+      --bg-primary: #090d16;
+      --bg-secondary: #0f172a;
+      --bg-card: #1e293b;
+      --bg-card-hover: #273549;
+      --border-color: #334155;
+      --border-focus: #38bdf8;
+      --text-main: #f8fafc;
+      --text-sub: #94a3b8;
+      --badge-param: #0284c7;
+      --badge-input: #d97706;
+      --badge-act: #7c3aed;
+      --badge-auto: #059669;
+      --badge-custom: #e11d48;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg-primary);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      padding: 32px 24px;
+      line-height: 1.5;
+    }
+    .container { max-width: 1380px; margin: 0 auto; }
+    header { margin-bottom: 28px; }
+    .title-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin-bottom: 8px; }
+    h1 { font-size: 26px; font-weight: 700; color: #38bdf8; display: flex; align-items: center; gap: 10px; }
+    .subtitle { color: var(--text-sub); font-size: 14px; }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .stat-label { font-size: 12px; text-transform: uppercase; color: var(--text-sub); font-weight: 600; letter-spacing: 0.5px; }
+    .stat-value { font-size: 24px; font-weight: 700; color: var(--text-main); font-family: var(--font-mono); }
+    .stat-sub { font-size: 12px; color: #38bdf8; }
+
+    /* Controls Bar */
+    .controls-bar {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .search-box {
+      position: relative;
+      flex: 1;
+      min-width: 260px;
+    }
+    .search-input {
+      width: 100%;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 8px 12px 8px 34px;
+      color: var(--text-main);
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    .search-input:focus { border-color: var(--border-focus); }
+    .search-icon { position: absolute; left: 10px; top: 9px; color: var(--text-sub); font-size: 14px; }
+    .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn:hover { background: var(--bg-card-hover); border-color: #475569; }
+    .btn.active { background: #0284c7; border-color: #38bdf8; color: #fff; }
+
+    /* Tree & Group Styling */
+    .hierarchy-container { display: flex; flex-direction: column; gap: 12px; }
+    details.module-group {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      overflow: hidden;
+      transition: border-color 0.2s;
+    }
+    details.module-group[open] { border-color: #475569; }
+    summary.module-header {
+      background: var(--bg-card);
+      padding: 10px 16px;
+      cursor: pointer;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      user-select: none;
+      list-style: none;
+    }
+    summary.module-header::-webkit-details-marker { display: none; }
+    .module-title-box { display: flex; align-items: center; gap: 8px; }
+    .chevron { transition: transform 0.2s; font-size: 11px; color: var(--text-sub); }
+    details[open] > summary .chevron { transform: rotate(90deg); }
+    .module-name { color: #38bdf8; font-family: var(--font-mono); font-size: 14px; }
+    .module-meta { font-size: 12px; color: var(--text-sub); display: flex; gap: 12px; font-family: var(--font-mono); }
+    .module-content { padding: 10px 16px; display: flex; flex-direction: column; gap: 8px; }
+
+    /* Table */
+    table.node-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    th {
+      background: #131d2e;
+      color: var(--text-sub);
+      font-weight: 600;
+      text-align: left;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border-color);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    td {
+      padding: 9px 12px;
+      border-bottom: 1px solid rgba(51, 65, 85, 0.4);
+      vertical-align: middle;
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(56, 189, 248, 0.04); }
+    .node-name { font-family: var(--font-mono); font-weight: 600; color: #f1f5f9; }
+    .node-shape { font-family: var(--font-mono); color: #cbd5e1; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      font-family: var(--font-mono);
+      text-align: center;
+    }
+    .badge-param { background: rgba(2, 132, 199, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
+    .badge-input { background: rgba(217, 119, 6, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.3); }
+    .badge-act { background: rgba(124, 58, 237, 0.2); color: #c084fc; border: 1px solid rgba(192, 132, 252, 0.3); }
+    .badge-auto { background: rgba(5, 150, 105, 0.2); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.3); }
+    .badge-custom { background: rgba(225, 29, 72, 0.2); color: #fb7185; border: 1px solid rgba(251, 113, 133, 0.3); }
+    .badge-op { background: rgba(99, 102, 241, 0.2); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.3); }
+    .strategy-col { font-family: var(--font-mono); font-size: 12px; color: #94a3b8; }
+    footer { margin-top: 36px; text-align: center; font-size: 12px; color: #64748b; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="title-row">
+      <h1>⚡ ZNN Model Architecture & Computation Graph</h1>
+      <span class="subtitle">Interactive Hierarchical Inspection & Weight Initialization Report</span>
+    </div>
+  </header>
+
+  <!-- KPI Stats Grid -->
+  <div class="stats-grid">    <div class="stat-card">
+      <div class="stat-label">Total Parameters</div>
+      <div class="stat-value">134848</div>
+      <div class="stat-sub">~1.37 MB Memory Footprint</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Param Tensors</div>
+      <div class="stat-value">33</div>
+      <div class="stat-sub">5 Auto-Graph / 28 Custom</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Graph Nodes</div>
+      <div class="stat-value">117</div>
+      <div class="stat-sub">4 Inputs · 80 Activations</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Memory Buffers</div>
+      <div class="stat-value">117</div>
+      <div class="stat-sub">Tracked by Graph Arena</div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls-bar">
+    <div class="search-box">
+      <span class="search-icon">🔍</span>
+      <input type="text" id="search-input" class="search-input" placeholder="Search by module path, node name, op, or shape..." oninput="filterNodes()">
+    </div>
+    <div class="btn-group">
+      <button class="btn active" onclick="setKindFilter('all', this)">All Nodes (117)</button>
+      <button class="btn" onclick="setKindFilter('Param', this)">Params (33)</button>
+      <button class="btn" onclick="setKindFilter('Input', this)">Inputs (4)</button>
+      <button class="btn" onclick="setKindFilter('Activation', this)">Activations (80)</button>
+      <button class="btn" onclick="expandAll()">Expand All</button>
+      <button class="btn" onclick="collapseAll()">Collapse All</button>
+    </div>
+  </div>
+
+  <!-- Hierarchical Container -->
+  <div class="hierarchy-container" id="tree-container">
+  </div>
+  <footer>Generated automatically by ZNN Autodiff Engine</footer>
+</div>
+
+<script>
+const NODES_DATA = [  { "name": "gpt.wte.weight", "kind": "Param", "shape": "[256, 64]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "inputs.token_ids", "kind": "Input", "shape": "[2, 16]", "elements": 32, "bytes": 128, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
+  { "name": "gpt.wte.act_Embedding_0", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Embedding", "strategy": "produced by Embedding" },
+  { "name": "gpt.wpe.weight", "kind": "Param", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.wpe.pos_indices", "kind": "Input", "shape": "[2, 16]", "elements": 32, "bytes": 128, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
+  { "name": "gpt.wpe.act_Embedding_1", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Embedding", "strategy": "produced by Embedding" },
+  { "name": "gpt.embeddings_sum", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.ln_1.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
+  { "name": "gpt.layers.0.ln_1.act_RmsNorm_3", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
+  { "name": "gpt.layers.0.ln_1.act_Reshape_4", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.q_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.attn.q_attn.act_MatMul_5", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.attn.q_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.attn.q_attn.act_Add_6", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.k_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.attn.k_attn.act_MatMul_7", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.attn.k_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.attn.k_attn.act_Add_8", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.v_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.attn.v_attn.act_MatMul_9", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.attn.v_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.attn.v_attn.act_Add_10", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.q_attn.act_Reshape_11", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.k_attn.act_Reshape_12", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.v_attn.act_Reshape_13", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.q_attn.act_Transpose_14", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.0.attn.k_attn.act_Transpose_15", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.0.attn.v_attn.act_Transpose_16", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.0.attn.k_attn.act_Transpose_17", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.0.attn.act_BatchMatMul_18", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
+  { "name": "gpt.layers.0.attn.act_MulScalar_19", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MulScalar", "strategy": "produced by MulScalar" },
+  { "name": "gpt.layers.0.attn.causal_mask", "kind": "Input", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
+  { "name": "gpt.layers.0.attn.act_Add_20", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.act_Softmax_21", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Softmax", "strategy": "produced by Softmax" },
+  { "name": "gpt.layers.0.attn.act_BatchMatMul_22", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
+  { "name": "gpt.layers.0.attn.act_Transpose_23", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.0.attn.act_Reshape_24", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.act_Reshape_25", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.c_proj.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.attn.c_proj.act_MatMul_26", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.attn.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.attn.c_proj.act_Add_27", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.c_proj.act_Reshape_28", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.residual_attn", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.ln_2.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
+  { "name": "gpt.layers.0.ln_2.act_RmsNorm_30", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
+  { "name": "gpt.layers.0.ln_2.act_Reshape_31", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.mlp.c_fc.weight", "kind": "Param", "shape": "[64, 256]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.mlp.c_fc.act_MatMul_32", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.mlp.c_fc.bias", "kind": "Param", "shape": "[1, 256]", "elements": 256, "bytes": 1024, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.mlp.c_fc.act_Add_33", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.mlp.c_fc.act_Gelu_34", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Gelu", "strategy": "produced by Gelu" },
+  { "name": "gpt.layers.0.mlp.c_proj.weight", "kind": "Param", "shape": "[256, 64]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.mlp.c_proj.act_MatMul_35", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.mlp.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.0.mlp.c_proj.act_Add_36", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.mlp.c_proj.act_Reshape_37", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.output", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.1.ln_1.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
+  { "name": "gpt.layers.1.ln_1.act_RmsNorm_39", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
+  { "name": "gpt.layers.1.ln_1.act_Reshape_40", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.1.attn.q_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.attn.q_attn.act_MatMul_41", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.1.attn.q_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.attn.q_attn.act_Add_42", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.1.attn.k_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.attn.k_attn.act_MatMul_43", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.1.attn.k_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.attn.k_attn.act_Add_44", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.1.attn.v_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.attn.v_attn.act_MatMul_45", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.1.attn.v_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.attn.v_attn.act_Add_46", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.1.attn.q_attn.act_Reshape_47", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.1.attn.k_attn.act_Reshape_48", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.1.attn.v_attn.act_Reshape_49", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.1.attn.q_attn.act_Transpose_50", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.1.attn.k_attn.act_Transpose_51", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.1.attn.v_attn.act_Transpose_52", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.1.attn.k_attn.act_Transpose_53", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.1.attn.act_BatchMatMul_54", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
+  { "name": "gpt.layers.1.attn.act_MulScalar_55", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MulScalar", "strategy": "produced by MulScalar" },
+  { "name": "gpt.layers.1.attn.causal_mask", "kind": "Input", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
+  { "name": "gpt.layers.1.attn.act_Add_56", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.1.attn.act_Softmax_57", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Softmax", "strategy": "produced by Softmax" },
+  { "name": "gpt.layers.1.attn.act_BatchMatMul_58", "kind": "Activation", "shape": "[2, 4, 16, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
+  { "name": "gpt.layers.1.attn.act_Transpose_59", "kind": "Activation", "shape": "[2, 16, 4, 16]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.1.attn.act_Reshape_60", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.1.attn.act_Reshape_61", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.1.attn.c_proj.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.attn.c_proj.act_MatMul_62", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.1.attn.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.attn.c_proj.act_Add_63", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.1.attn.c_proj.act_Reshape_64", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.1.residual_attn", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.1.ln_2.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
+  { "name": "gpt.layers.1.ln_2.act_RmsNorm_66", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
+  { "name": "gpt.layers.1.ln_2.act_Reshape_67", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.1.mlp.c_fc.weight", "kind": "Param", "shape": "[64, 256]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.mlp.c_fc.act_MatMul_68", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.1.mlp.c_fc.bias", "kind": "Param", "shape": "[1, 256]", "elements": 256, "bytes": 1024, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.mlp.c_fc.act_Add_69", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.1.mlp.c_fc.act_Gelu_70", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Gelu", "strategy": "produced by Gelu" },
+  { "name": "gpt.layers.1.mlp.c_proj.weight", "kind": "Param", "shape": "[256, 64]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.mlp.c_proj.act_MatMul_71", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.1.mlp.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.layers.1.mlp.c_proj.act_Add_72", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.1.mlp.c_proj.act_Reshape_73", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.1.output", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.ln_f.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
+  { "name": "gpt.layers.ln_f.act_RmsNorm_75", "kind": "Activation", "shape": "[2, 16, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
+  { "name": "gpt.layers.ln_f.act_Reshape_76", "kind": "Activation", "shape": "[32, 64]", "elements": 2048, "bytes": 8192, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.lm_head.weight", "kind": "Param", "shape": "[64, 256]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.lm_head.act_MatMul_77", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.lm_head.bias", "kind": "Param", "shape": "[1, 256]", "elements": 256, "bytes": 1024, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
+  { "name": "gpt.lm_head.act_Add_78", "kind": "Activation", "shape": "[32, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "outputs.logits", "kind": "Activation", "shape": "[2, 16, 256]", "elements": 8192, "bytes": 32768, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" }
+];
+
+let currentKindFilter = 'all';
+let currentQuery = '';
+
+function formatNumber(num) {
+  return num.toLocaleString();
+}
+
+function buildHierarchy(data) {
+  const root = { _children: {}, _nodes: [], _paramCount: 0, _bytes: 0 };
+
+  data.forEach(item => {
+    const parts = item.name.split('.');
+    if (parts.length === 1) {
+      root._nodes.push(item);
+      if (item.kind === 'Param') root._paramCount += item.elements;
+      root._bytes += item.bytes;
+      return;
+    }
+
+    let curr = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const p = parts[i];
+      if (!curr._children[p]) {
+        curr._children[p] = { _children: {}, _nodes: [], _paramCount: 0, _bytes: 0 };
+      }
+      if (item.kind === 'Param') curr._children[p]._paramCount += item.elements;
+      curr._children[p]._bytes += item.bytes;
+      curr = curr._children[p];
+    }
+    curr._nodes.push(item);
+  });
+
+  return root;
+}
+
+function renderTableRows(nodes) {
+  return nodes.map(n => {
+    const kindBadge = n.kind === 'Param' ? 'badge-param' : (n.kind === 'Input' ? 'badge-input' : 'badge-act');
+    const statusBadge = n.status === 'CUSTOM_INIT' ? 'badge-custom' : (n.status === 'AUTO_GRAPH' ? 'badge-auto' : 'badge-op');
+    return `
+      <tr class="node-row" data-name="${n.name.toLowerCase()}" data-kind="${n.kind}" data-act="${n.act.toLowerCase()}" data-shape="${n.shape}">
+        <td class="node-name">${n.name}</td>
+        <td><span class="badge ${kindBadge}">${n.kind}</span></td>
+        <td class="node-shape">${n.shape}</td>
+        <td style="font-family: var(--font-mono);">${formatNumber(n.elements)}</td>
+        <td><span class="badge ${statusBadge}">${n.status}</span></td>
+        <td style="font-family: var(--font-mono);">${n.act}</td>
+        <td class="strategy-col">${n.strategy}</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderBranch(prefix, node) {
+  let html = '';
+  const childKeys = Object.keys(node._children);
+  
+  if (node._nodes.length > 0 || childKeys.length > 0) {
+    const hasParams = node._paramCount > 0;
+    const metaInfo = hasParams ? `${formatNumber(node._paramCount)} params` : `${node._nodes.length} nodes`;
+    const isRoot = prefix.includes('Root') || prefix.includes('Global');
+    const titleDisplay = isRoot ? `🌐 ${prefix}` : `📁 ${prefix}`;
+    
+    html += `
+      <details class="module-group" open data-module="${prefix.toLowerCase()}">
+        <summary class="module-header">
+          <div class="module-title-box">
+            <span class="chevron">▶</span>
+            <span class="module-name">${titleDisplay}</span>
+          </div>
+          <div class="module-meta">
+            <span>${metaInfo}</span>
+          </div>
+        </summary>
+        <div class="module-content">
+    `;
+
+    if (node._nodes.length > 0) {
+      html += `
+        <table class="node-table">
+          <thead>
+            <tr>
+              <th>Node Name</th>
+              <th>Kind</th>
+              <th>Shape</th>
+              <th>Elements</th>
+              <th>Status</th>
+              <th>Inferred Act / Op</th>
+              <th>Initialization Strategy</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${renderTableRows(node._nodes)}
+          </tbody>
+        </table>
+      `;
+    }
+
+    for (const childKey of childKeys) {
+      const fullChildName = isRoot ? childKey : `${prefix}.${childKey}`;
+      html += renderBranch(fullChildName, node._children[childKey]);
+    }
+
+    html += `
+        </div>
+      </details>
+    `;
+  }
+  return html;
+}
+
+function renderTree() {
+  const filtered = NODES_DATA.filter(item => {
+    const matchesKind = (currentKindFilter === 'all' || item.kind === currentKindFilter);
+    const matchesQuery = (currentQuery === '' || 
+      item.name.toLowerCase().includes(currentQuery) ||
+      item.shape.toLowerCase().includes(currentQuery) ||
+      item.act.toLowerCase().includes(currentQuery) ||
+      item.strategy.toLowerCase().includes(currentQuery)
+    );
+    return matchesKind && matchesQuery;
+  });
+
+  const container = document.getElementById('tree-container');
+  if (filtered.length === 0) {
+    container.innerHTML = '<div style="text-align: center; padding: 48px; color: var(--text-sub);">No nodes matched the filter criteria.</div>';
+    return;
+  }
+
+  const hierarchy = buildHierarchy(filtered);
+  let outputHtml = '';
+
+  if (hierarchy._nodes.length > 0) {
+    outputHtml += renderBranch('(Root / Global Scope)', { _children: {}, _nodes: hierarchy._nodes, _paramCount: hierarchy._paramCount, _bytes: hierarchy._bytes });
+  }
+
+  for (const modKey of Object.keys(hierarchy._children)) {
+    outputHtml += renderBranch(modKey, hierarchy._children[modKey]);
+  }
+
+  container.innerHTML = outputHtml;
+}
+
+function setKindFilter(kind, btn) {
+  currentKindFilter = kind;
+  document.querySelectorAll('.btn-group .btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTree();
+}
+
+function filterNodes() {
+  currentQuery = document.getElementById('search-input').value.trim().toLowerCase();
+  renderTree();
+}
+
+function expandAll() {
+  document.querySelectorAll('details.module-group').forEach(d => d.open = true);
+}
+
+function collapseAll() {
+  document.querySelectorAll('details.module-group').forEach(d => d.open = false);
+}
+
+// Initial Render
+renderTree();
+</script>
+</body>
+</html>

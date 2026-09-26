@@ -18,6 +18,35 @@ pub const NodeData = struct {
     strategy: []const u8,
 };
 
+/// 从节点名称中提取父模块路径 (以 '.' 分隔)
+fn extractModuleScope(name: []const u8) ?[]const u8 {
+    if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot_idx| {
+        if (dot_idx > 0) return name[0..dot_idx];
+    }
+    return null;
+}
+
+/// 计算两个模块路径在点号边界处的最长公共前缀
+fn getCommonModulePrefix(a: []const u8, b: []const u8) []const u8 {
+    if (std.mem.eql(u8, a, b)) return a;
+    const min_len = @min(a.len, b.len);
+    var matched_len: usize = 0;
+    while (matched_len < min_len and a[matched_len] == b[matched_len]) : (matched_len += 1) {}
+
+    if (matched_len == min_len) {
+        if (a.len > min_len and a[min_len] == '.') return b;
+        if (b.len > min_len and b[min_len] == '.') return a;
+    }
+
+    var i = matched_len;
+    while (i > 0) : (i -= 1) {
+        if (a[i - 1] == '.') {
+            return a[0 .. i - 1];
+        }
+    }
+    return "";
+}
+
 /// 收集计算图中所有节点的详细元数据
 pub fn collectGraphNodes(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayList(NodeData) {
     var nodes: std.ArrayList(NodeData) = .empty;
@@ -27,6 +56,72 @@ pub fn collectGraphNodes(graph: *Graph, allocator: std.mem.Allocator) !std.Array
     var visited = std.AutoHashMap(*Tensor, void).init(arena_alloc);
     defer visited.deinit();
 
+    var scopes = std.AutoHashMap(*Tensor, []const u8).init(arena_alloc);
+    defer scopes.deinit();
+
+    // 1. 预扫描：注册所有显式命名且包含点号分层的张量作用域
+    for (graph.tensors.items) |t| {
+        if (t.name) |n| {
+            if (extractModuleScope(n)) |s| {
+                scopes.put(t, s) catch {};
+            }
+        }
+    }
+    for (graph.ops.items) |op| {
+        for (op.inputs) |t| {
+            if (t.name) |n| {
+                if (extractModuleScope(n)) |s| {
+                    scopes.put(t, s) catch {};
+                }
+            }
+        }
+        for (op.outputs) |t| {
+            if (t.name) |n| {
+                if (extractModuleScope(n)) |s| {
+                    scopes.put(t, s) catch {};
+                }
+            }
+        }
+    }
+
+    // 2. 拓扑扫描：自动将算子输入参数的模块前缀推导并级联传播至各中间激活节点
+    for (graph.ops.items) |op| {
+        var op_scope: ?[]const u8 = null;
+        // 优先从输入中的底层参数（叶子节点，如 weight, bias）继承最具体的子模块层级所属
+        for (op.inputs) |inp| {
+            if (inp.creator == null and inp.name != null) {
+                if (extractModuleScope(inp.name.?)) |p_scope| {
+                    if (op_scope == null or p_scope.len > op_scope.?.len) {
+                        op_scope = p_scope;
+                    }
+                }
+            }
+        }
+        // 若无直接参数输入，则寻找所有已有作用域输入的公共最长模块前缀
+        if (op_scope == null) {
+            for (op.inputs) |inp| {
+                if (scopes.get(inp)) |inp_scope| {
+                    if (op_scope == null) {
+                        op_scope = inp_scope;
+                    } else {
+                        const common = getCommonModulePrefix(op_scope.?, inp_scope);
+                        if (common.len > 0) {
+                            op_scope = common;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (op_scope) |scope| {
+            for (op.outputs) |out| {
+                if (!scopes.contains(out)) {
+                    scopes.put(out, scope) catch {};
+                }
+            }
+        }
+    }
+
     var param_idx: usize = 0;
     var input_idx: usize = 0;
     var op_idx: usize = 0;
@@ -35,19 +130,19 @@ pub fn collectGraphNodes(graph: *Graph, allocator: std.mem.Allocator) !std.Array
         for (op.inputs) |t| {
             if (visited.contains(t)) continue;
             visited.put(t, {}) catch continue;
-            try appendNodeData(graph, t, &param_idx, &input_idx, &op_idx, &nodes, allocator);
+            try appendNodeData(graph, t, &param_idx, &input_idx, &op_idx, &scopes, &nodes, allocator);
         }
         for (op.outputs) |t| {
             if (visited.contains(t)) continue;
             visited.put(t, {}) catch continue;
-            try appendNodeData(graph, t, &param_idx, &input_idx, &op_idx, &nodes, allocator);
+            try appendNodeData(graph, t, &param_idx, &input_idx, &op_idx, &scopes, &nodes, allocator);
         }
     }
 
     for (graph.tensors.items) |t| {
         if (visited.contains(t)) continue;
         visited.put(t, {}) catch continue;
-        try appendNodeData(graph, t, &param_idx, &input_idx, &op_idx, &nodes, allocator);
+        try appendNodeData(graph, t, &param_idx, &input_idx, &op_idx, &scopes, &nodes, allocator);
     }
 
     return nodes;
@@ -59,6 +154,7 @@ fn appendNodeData(
     param_idx: *usize,
     input_idx: *usize,
     op_idx: *usize,
+    scopes: *const std.AutoHashMap(*Tensor, []const u8),
     nodes: *std.ArrayList(NodeData),
     allocator: std.mem.Allocator,
 ) !void {
@@ -86,8 +182,12 @@ fn appendNodeData(
     // 2. 判断节点分类
     if (t.creator) |creator_op| {
         const op_name = @tagName(creator_op.op_type);
-        var name_buf: [64]u8 = undefined;
-        const name = if (t.name) |n| try allocator.dupe(u8, n) else try allocator.dupe(u8, std.fmt.bufPrint(&name_buf, "Node_{s}_{d}", .{ op_name, op_idx.* }) catch "Node_Op");
+        const name = if (t.name) |n|
+            try allocator.dupe(u8, n)
+        else if (scopes.get(t)) |scope|
+            try std.fmt.allocPrint(allocator, "{s}.act_{s}_{d}", .{ scope, op_name, op_idx.* })
+        else
+            try std.fmt.allocPrint(allocator, "computation_graph.{s}_{d}", .{ op_name, op_idx.* });
         op_idx.* += 1;
 
         var strat_buf: [64]u8 = undefined;
@@ -107,8 +207,12 @@ fn appendNodeData(
     }
 
     if (!t.requires_grad) {
-        var name_buf: [64]u8 = undefined;
-        const name = if (t.name) |n| try allocator.dupe(u8, n) else try allocator.dupe(u8, std.fmt.bufPrint(&name_buf, "Input_{d}", .{input_idx.*}) catch "Input");
+        const name = if (t.name) |n|
+            try allocator.dupe(u8, n)
+        else if (scopes.get(t)) |scope|
+            try std.fmt.allocPrint(allocator, "{s}.input_{d}", .{ scope, input_idx.* })
+        else
+            try std.fmt.allocPrint(allocator, "inputs.input_{d}", .{input_idx.*});
         input_idx.* += 1;
 
         try nodes.append(allocator, .{
@@ -125,8 +229,12 @@ fn appendNodeData(
     }
 
     // 模型可学习参数
-    var name_buf: [64]u8 = undefined;
-    const name = if (t.name) |n| try allocator.dupe(u8, n) else try allocator.dupe(u8, std.fmt.bufPrint(&name_buf, "Param_{d}", .{param_idx.*}) catch "Param");
+    const name = if (t.name) |n|
+        try allocator.dupe(u8, n)
+    else if (scopes.get(t)) |scope|
+        try std.fmt.allocPrint(allocator, "{s}.param_{d}", .{ scope, param_idx.* })
+    else
+        try std.fmt.allocPrint(allocator, "parameters.param_{d}", .{param_idx.*});
     param_idx.* += 1;
 
     if (t.is_custom_initialized) {
@@ -582,13 +690,15 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\  if (node._nodes.length > 0 || childKeys.length > 0) {
         \\    const hasParams = node._paramCount > 0;
         \\    const metaInfo = hasParams ? `${formatNumber(node._paramCount)} params` : `${node._nodes.length} nodes`;
+        \\    const isRoot = prefix.includes('Root') || prefix.includes('Global');
+        \\    const titleDisplay = isRoot ? `🌐 ${prefix}` : `📁 ${prefix}`;
         \\    
         \\    html += `
         \\      <details class="module-group" open data-module="${prefix.toLowerCase()}">
         \\        <summary class="module-header">
         \\          <div class="module-title-box">
         \\            <span class="chevron">▶</span>
-        \\            <span class="module-name">📁 ${prefix}</span>
+        \\            <span class="module-name">${titleDisplay}</span>
         \\          </div>
         \\          <div class="module-meta">
         \\            <span>${metaInfo}</span>
@@ -619,7 +729,7 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\    }
         \\
         \\    for (const childKey of childKeys) {
-        \\      const fullChildName = prefix === '(Root / Unscoped)' ? childKey : `${prefix}.${childKey}`;
+        \\      const fullChildName = isRoot ? childKey : `${prefix}.${childKey}`;
         \\      html += renderBranch(fullChildName, node._children[childKey]);
         \\    }
         \\
@@ -653,7 +763,7 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\  let outputHtml = '';
         \\
         \\  if (hierarchy._nodes.length > 0) {
-        \\    outputHtml += renderBranch('(Root / Unscoped)', { _children: {}, _nodes: hierarchy._nodes, _paramCount: hierarchy._paramCount, _bytes: hierarchy._bytes });
+        \\    outputHtml += renderBranch('(Root / Global Scope)', { _children: {}, _nodes: hierarchy._nodes, _paramCount: hierarchy._paramCount, _bytes: hierarchy._bytes });
         \\  }
         \\
         \\  for (const modKey of Object.keys(hierarchy._children)) {

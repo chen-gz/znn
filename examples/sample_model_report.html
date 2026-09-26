@@ -232,55 +232,55 @@
 <script>
 const NODES_DATA = [  { "name": "inputs.token_embeddings", "kind": "Input", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
   { "name": "gpt.layers.0.ln_1.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
-  { "name": "Node_RmsNorm_0", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
-  { "name": "Node_Reshape_1", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.ln_1.act_RmsNorm_0", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
+  { "name": "gpt.layers.0.ln_1.act_Reshape_1", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
   { "name": "gpt.layers.0.attn.q_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_MatMul_2", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.attn.q_attn.act_MatMul_2", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
   { "name": "gpt.layers.0.attn.q_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_Add_3", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.q_attn.act_Add_3", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
   { "name": "gpt.layers.0.attn.k_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_MatMul_4", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.attn.k_attn.act_MatMul_4", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
   { "name": "gpt.layers.0.attn.k_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_Add_5", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.k_attn.act_Add_5", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
   { "name": "gpt.layers.0.attn.v_attn.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_MatMul_6", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.attn.v_attn.act_MatMul_6", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
   { "name": "gpt.layers.0.attn.v_attn.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_Add_7", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "Node_Reshape_8", "kind": "Activation", "shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "Node_Reshape_9", "kind": "Activation", "shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "Node_Reshape_10", "kind": "Activation", "shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "Node_Transpose_11", "kind": "Activation", "shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "Node_Transpose_12", "kind": "Activation", "shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "Node_Transpose_13", "kind": "Activation", "shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "Node_Transpose_14", "kind": "Activation", "shape": "[2, 4, 16, 8]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "Node_BatchMatMul_15", "kind": "Activation", "shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
-  { "name": "Node_MulScalar_16", "kind": "Activation", "shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048, "status": "OP_OUTPUT", "act": "MulScalar", "strategy": "produced by MulScalar" },
-  { "name": "Input_1", "kind": "Input", "shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
-  { "name": "Node_Add_17", "kind": "Activation", "shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "Node_Softmax_18", "kind": "Activation", "shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048, "status": "OP_OUTPUT", "act": "Softmax", "strategy": "produced by Softmax" },
-  { "name": "Node_BatchMatMul_19", "kind": "Activation", "shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
-  { "name": "Node_Transpose_20", "kind": "Activation", "shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
-  { "name": "Node_Reshape_21", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "Node_Reshape_22", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.v_attn.act_Add_7", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.q_attn.act_Reshape_8", "kind": "Activation", "shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.k_attn.act_Reshape_9", "kind": "Activation", "shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.v_attn.act_Reshape_10", "kind": "Activation", "shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.q_attn.act_Transpose_11", "kind": "Activation", "shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.0.attn.k_attn.act_Transpose_12", "kind": "Activation", "shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.0.attn.v_attn.act_Transpose_13", "kind": "Activation", "shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.0.attn.k_attn.act_Transpose_14", "kind": "Activation", "shape": "[2, 4, 16, 8]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.0.attn.act_BatchMatMul_15", "kind": "Activation", "shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
+  { "name": "gpt.layers.0.attn.act_MulScalar_16", "kind": "Activation", "shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048, "status": "OP_OUTPUT", "act": "MulScalar", "strategy": "produced by MulScalar" },
+  { "name": "gpt.layers.0.attn.causal_mask", "kind": "Input", "shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048, "status": "INPUT", "act": "N/A", "strategy": "user input / constant" },
+  { "name": "gpt.layers.0.attn.act_Add_17", "kind": "Activation", "shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.act_Softmax_18", "kind": "Activation", "shape": "[2, 4, 8, 8]", "elements": 512, "bytes": 2048, "status": "OP_OUTPUT", "act": "Softmax", "strategy": "produced by Softmax" },
+  { "name": "gpt.layers.0.attn.act_BatchMatMul_19", "kind": "Activation", "shape": "[2, 4, 8, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "BatchMatMul", "strategy": "produced by BatchMatMul" },
+  { "name": "gpt.layers.0.attn.act_Transpose_20", "kind": "Activation", "shape": "[2, 8, 4, 16]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Transpose", "strategy": "produced by Transpose" },
+  { "name": "gpt.layers.0.attn.act_Reshape_21", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.attn.act_Reshape_22", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
   { "name": "gpt.layers.0.attn.c_proj.weight", "kind": "Param", "shape": "[64, 64]", "elements": 4096, "bytes": 16384, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_MatMul_23", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.attn.c_proj.act_MatMul_23", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
   { "name": "gpt.layers.0.attn.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_Add_24", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "Node_Reshape_25", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
-  { "name": "Node_Add_26", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.c_proj.act_Add_24", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.attn.c_proj.act_Reshape_25", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.residual_attn", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
   { "name": "gpt.layers.0.ln_2.weight", "kind": "Param", "shape": "[64]", "elements": 64, "bytes": 256, "status": "AUTO_GRAPH", "act": "bias", "strategy": "zeros (0.0)" },
-  { "name": "Node_RmsNorm_27", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
-  { "name": "Node_Reshape_28", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.ln_2.act_RmsNorm_27", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "RmsNorm", "strategy": "produced by RmsNorm" },
+  { "name": "gpt.layers.0.ln_2.act_Reshape_28", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
   { "name": "gpt.layers.0.mlp.c_fc.weight", "kind": "Param", "shape": "[64, 256]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_MatMul_29", "kind": "Activation", "shape": "[16, 256]", "elements": 4096, "bytes": 16384, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.mlp.c_fc.act_MatMul_29", "kind": "Activation", "shape": "[16, 256]", "elements": 4096, "bytes": 16384, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
   { "name": "gpt.layers.0.mlp.c_fc.bias", "kind": "Param", "shape": "[1, 256]", "elements": 256, "bytes": 1024, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_Add_30", "kind": "Activation", "shape": "[16, 256]", "elements": 4096, "bytes": 16384, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "Node_Gelu_31", "kind": "Activation", "shape": "[16, 256]", "elements": 4096, "bytes": 16384, "status": "OP_OUTPUT", "act": "Gelu", "strategy": "produced by Gelu" },
+  { "name": "gpt.layers.0.mlp.c_fc.act_Add_30", "kind": "Activation", "shape": "[16, 256]", "elements": 4096, "bytes": 16384, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.mlp.c_fc.act_Gelu_31", "kind": "Activation", "shape": "[16, 256]", "elements": 4096, "bytes": 16384, "status": "OP_OUTPUT", "act": "Gelu", "strategy": "produced by Gelu" },
   { "name": "gpt.layers.0.mlp.c_proj.weight", "kind": "Param", "shape": "[256, 64]", "elements": 16384, "bytes": 65536, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_MatMul_32", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
+  { "name": "gpt.layers.0.mlp.c_proj.act_MatMul_32", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "MatMul", "strategy": "produced by MatMul" },
   { "name": "gpt.layers.0.mlp.c_proj.bias", "kind": "Param", "shape": "[1, 64]", "elements": 64, "bytes": 256, "status": "CUSTOM_INIT", "act": "N/A", "strategy": "user-defined customInit" },
-  { "name": "Node_Add_33", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
-  { "name": "Node_Reshape_34", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
+  { "name": "gpt.layers.0.mlp.c_proj.act_Add_33", "kind": "Activation", "shape": "[16, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" },
+  { "name": "gpt.layers.0.mlp.c_proj.act_Reshape_34", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Reshape", "strategy": "produced by Reshape" },
   { "name": "activations.block_0_out", "kind": "Activation", "shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096, "status": "OP_OUTPUT", "act": "Add", "strategy": "produced by Add" }
 ];
 
@@ -344,13 +344,15 @@ function renderBranch(prefix, node) {
   if (node._nodes.length > 0 || childKeys.length > 0) {
     const hasParams = node._paramCount > 0;
     const metaInfo = hasParams ? `${formatNumber(node._paramCount)} params` : `${node._nodes.length} nodes`;
+    const isRoot = prefix.includes('Root') || prefix.includes('Global');
+    const titleDisplay = isRoot ? `🌐 ${prefix}` : `📁 ${prefix}`;
     
     html += `
       <details class="module-group" open data-module="${prefix.toLowerCase()}">
         <summary class="module-header">
           <div class="module-title-box">
             <span class="chevron">▶</span>
-            <span class="module-name">📁 ${prefix}</span>
+            <span class="module-name">${titleDisplay}</span>
           </div>
           <div class="module-meta">
             <span>${metaInfo}</span>
@@ -381,7 +383,7 @@ function renderBranch(prefix, node) {
     }
 
     for (const childKey of childKeys) {
-      const fullChildName = prefix === '(Root / Unscoped)' ? childKey : `${prefix}.${childKey}`;
+      const fullChildName = isRoot ? childKey : `${prefix}.${childKey}`;
       html += renderBranch(fullChildName, node._children[childKey]);
     }
 
@@ -415,7 +417,7 @@ function renderTree() {
   let outputHtml = '';
 
   if (hierarchy._nodes.length > 0) {
-    outputHtml += renderBranch('(Root / Unscoped)', { _children: {}, _nodes: hierarchy._nodes, _paramCount: hierarchy._paramCount, _bytes: hierarchy._bytes });
+    outputHtml += renderBranch('(Root / Global Scope)', { _children: {}, _nodes: hierarchy._nodes, _paramCount: hierarchy._paramCount, _bytes: hierarchy._bytes });
   }
 
   for (const modKey of Object.keys(hierarchy._children)) {
