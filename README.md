@@ -1,6 +1,10 @@
-# Zig ML (`znn`) `v0.1.0`
+# Zig ML (`znn`) `v0.2.0`
 
-This project is a high-performance, modular deep learning and modern LLM library built entirely from scratch in **Zig 0.16.0**.
+[![Zig](https://img.shields.io/badge/Zig-0.16.0-orange.svg)](https://ziglang.org/)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](file:///Users/guangzong/Documents/znn/CHANGELOG.md)
+[![Changelog](https://img.shields.io/badge/docs-CHANGELOG.md-brightgreen.svg)](file:///Users/guangzong/Documents/znn/CHANGELOG.md)
+
+This project is a high-performance, modular deep learning and modern LLM library built entirely from scratch in **Zig 0.16.0**. See [`CHANGELOG.md`](file:///Users/guangzong/Documents/znn/CHANGELOG.md) for full release history and version migration guides.
 
 It spans the full continuum of machine learning:
 1. **Classical Machine Learning**: Closed-form & iterative Linear Regression, Ridge, Lasso, ElasticNet, and K-Fold Cross-Validation.
