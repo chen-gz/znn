@@ -28,6 +28,17 @@ const mean = tensor.mean;
 const variance = tensor.variance;
 const stdDev = tensor.stdDev;
 const where = tensor.where;
+const arange = tensor.arange;
+const linspace = tensor.linspace;
+const eye = tensor.eye;
+const identity = tensor.identity;
+const stack = tensor.stack;
+const repeat = tensor.repeat;
+const tile = tensor.tile;
+const sqrt = tensor.sqrt;
+const exp = tensor.exp;
+const log = tensor.log;
+const abs = tensor.abs;
 const applyRoPE = tensor.applyRoPE;
 const solveLinearSystem = tensor.solveLinearSystem;
 
@@ -722,5 +733,155 @@ test "Tensor strided view slicing, contiguous, clip, sort, argsort, nonzero" {
     try std.testing.expectEqual(@as(usize, 1), nz.get(&.{ 2, 0 }));
     try std.testing.expectEqual(@as(usize, 2), nz.get(&.{ 2, 1 }));
 }
+
+test "NumPy Tier 1 creation routines: arange, linspace, eye, identity, full" {
+    const allocator = std.testing.allocator;
+
+    // 1. arange
+    const a1 = try arange(allocator, 5.0, null, null); // 0, 1, 2, 3, 4
+    defer free(allocator, a1);
+    try std.testing.expectEqual(@as(usize, 5), a1.shape.dims[0]);
+    try std.testing.expectEqual(@as(f32, 0.0), a1.data[0]);
+    try std.testing.expectEqual(@as(f32, 4.0), a1.data[4]);
+
+    const a2 = try arange(allocator, 2.0, 7.0, 1.5); // 2.0, 3.5, 5.0, 6.5
+    defer free(allocator, a2);
+    try std.testing.expectEqual(@as(usize, 4), a2.shape.dims[0]);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), a2.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.5), a2.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), a2.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.5), a2.data[3], 1e-5);
+
+    // 2. linspace
+    const l1 = try linspace(allocator, 0.0, 1.0, 5); // 0.0, 0.25, 0.5, 0.75, 1.0
+    defer free(allocator, l1);
+    try std.testing.expectEqual(@as(usize, 5), l1.shape.dims[0]);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), l1.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), l1.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), l1.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.75), l1.data[3], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), l1.data[4], 1e-5);
+
+    // 3. eye and identity
+    const e1 = try eye(allocator, 3, null, null); // 3x3 identity
+    defer free(allocator, e1);
+    try std.testing.expectEqual(@as(usize, 3), e1.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), e1.shape.dims[1]);
+    try std.testing.expectEqual(@as(f32, 1.0), e1.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 0.0), e1.get(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 1.0), e1.get(&.{ 1, 1 }));
+    try std.testing.expectEqual(@as(f32, 1.0), e1.get(&.{ 2, 2 }));
+
+    const e2 = try eye(allocator, 2, 4, 1); // 2x4 with diagonal offset +1
+    defer free(allocator, e2);
+    try std.testing.expectEqual(@as(f32, 1.0), e2.get(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 1.0), e2.get(&.{ 1, 2 }));
+    try std.testing.expectEqual(@as(f32, 0.0), e2.get(&.{ 0, 0 }));
+
+    const id = try identity(allocator, 2);
+    defer free(allocator, id);
+    try std.testing.expectEqual(@as(f32, 1.0), id.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 0.0), id.get(&.{ 0, 1 }));
+
+    // 4. full
+    const f1 = try full(allocator, &.{ 2, 2 }, 3.14);
+    defer free(allocator, f1);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.14), f1.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.14), f1.data[3], 1e-5);
+}
+
+test "NumPy Tier 1 dimension operations: stack, repeat, tile" {
+    const allocator = std.testing.allocator;
+
+    // 1. stack
+    const t1 = try array(allocator, &.{ 2, 3 }, &.{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 });
+    defer free(allocator, t1);
+    const t2 = try array(allocator, &.{ 2, 3 }, &.{ 7.0, 8.0, 9.0, 10.0, 11.0, 12.0 });
+    defer free(allocator, t2);
+
+    // Stack along axis 0 -> [2, 2, 3]
+    const s0 = try stack(allocator, &.{ t1, t2 }, 0);
+    defer free(allocator, s0);
+    try std.testing.expectEqual(@as(usize, 3), s0.shape.len);
+    try std.testing.expectEqual(@as(usize, 2), s0.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), s0.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 3), s0.shape.dims[2]);
+    try std.testing.expectEqual(@as(f32, 1.0), s0.data[0]);
+    try std.testing.expectEqual(@as(f32, 7.0), s0.data[6]);
+
+    // Stack along axis 1 -> [2, 2, 3]
+    const s1 = try stack(allocator, &.{ t1, t2 }, 1);
+    defer free(allocator, s1);
+    try std.testing.expectEqual(@as(usize, 2), s1.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), s1.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 3), s1.shape.dims[2]);
+
+    // 2. repeat
+    const r_flat = try repeat(t1, 2, null, allocator); // flatten then repeat: [1, 1, 2, 2, ...]
+    defer free(allocator, r_flat);
+    try std.testing.expectEqual(@as(usize, 12), r_flat.shape.dims[0]);
+    try std.testing.expectEqual(@as(f32, 1.0), r_flat.data[0]);
+    try std.testing.expectEqual(@as(f32, 1.0), r_flat.data[1]);
+    try std.testing.expectEqual(@as(f32, 2.0), r_flat.data[2]);
+    try std.testing.expectEqual(@as(f32, 2.0), r_flat.data[3]);
+
+    // Repeat along axis 0 -> [4, 3]
+    const r_ax0 = try t1.repeat(2, 0, allocator);
+    defer free(allocator, r_ax0);
+    try std.testing.expectEqual(@as(usize, 4), r_ax0.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), r_ax0.shape.dims[1]);
+    // Row 0 and Row 1 are both [1, 2, 3]
+    try std.testing.expectEqual(@as(f32, 1.0), r_ax0.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 1.0), r_ax0.get(&.{ 1, 0 }));
+    // Row 2 and Row 3 are both [4, 5, 6]
+    try std.testing.expectEqual(@as(f32, 4.0), r_ax0.get(&.{ 2, 0 }));
+    try std.testing.expectEqual(@as(f32, 4.0), r_ax0.get(&.{ 3, 0 }));
+
+    // 3. tile
+    const tiled = try t1.tile(&.{ 2, 1 }, allocator); // [4, 3]
+    defer free(allocator, tiled);
+    try std.testing.expectEqual(@as(usize, 4), tiled.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), tiled.shape.dims[1]);
+    try std.testing.expectEqual(@as(f32, 1.0), tiled.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 4.0), tiled.get(&.{ 1, 0 }));
+    try std.testing.expectEqual(@as(f32, 1.0), tiled.get(&.{ 2, 0 }));
+    try std.testing.expectEqual(@as(f32, 4.0), tiled.get(&.{ 3, 0 }));
+}
+
+test "NumPy Tier 1 element-wise ufuncs: sqrt, exp, log, abs" {
+    const allocator = std.testing.allocator;
+
+    const t = try array(allocator, &.{4}, &.{ -4.0, 0.0, 4.0, 9.0 });
+    defer free(allocator, t);
+
+    // 1. abs
+    const t_abs = try abs(t, allocator);
+    defer free(allocator, t_abs);
+    try std.testing.expectEqual(@as(f32, 4.0), t_abs.data[0]);
+    try std.testing.expectEqual(@as(f32, 0.0), t_abs.data[1]);
+    try std.testing.expectEqual(@as(f32, 4.0), t_abs.data[2]);
+    try std.testing.expectEqual(@as(f32, 9.0), t_abs.data[3]);
+
+    // 2. sqrt
+    const t_pos = try array(allocator, &.{3}, &.{ 1.0, 4.0, 9.0 });
+    defer free(allocator, t_pos);
+    const t_sqrt = try sqrt(t_pos, allocator);
+    defer free(allocator, t_sqrt);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), t_sqrt.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), t_sqrt.data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), t_sqrt.data[2], 1e-5);
+
+    // 3. exp and log
+    const t_zero = try zeros(allocator, &.{1});
+    defer free(allocator, t_zero);
+    const t_exp = try exp(t_zero, allocator); // exp(0) = 1
+    defer free(allocator, t_exp);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), t_exp.data[0], 1e-5);
+
+    const t_log = try log(t_exp, allocator); // log(1) = 0
+    defer free(allocator, t_log);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), t_log.data[0], 1e-5);
+}
+
 
 
