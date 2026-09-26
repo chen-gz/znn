@@ -1069,8 +1069,12 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     const z2 = try graph.addBias(try graph.matmul(a1, fc_tanh.weight), fc_tanh.bias);
     const a2 = try graph.tanh(z2); // 后续接 Tanh
 
+    var fc_out = try Linear.initClean(allocator, 10, 2);
+    defer fc_out.deinit(allocator);
+
     const logits = try graph.addBias(try graph.matmul(a2, fc_custom.weight), fc_custom.bias);
-    _ = logits;
+    const final_out = try graph.addBias(try graph.matmul(logits, fc_out.weight), fc_out.bias);
+    _ = final_out;
 
     // 4. 一键初始化全图！
     graph.initWeights(random);
@@ -1103,7 +1107,98 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     for (fc_custom.bias.data) |b| {
         try std.testing.expectApproxEqAbs(@as(f32, 3.14), b, 1e-5);
     }
+
+    // 6. 测试 formatInitReport 能够正常输出并展示 CUSTOM_INIT 状态
+    const report_str = try graph.formatInitReport(allocator);
+    defer allocator.free(report_str);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "CUSTOM_INIT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "AUTO_GRAPH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "ReLU") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "Tanh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report_str, "Linear (None)") != null);
 }
+
+test "Comprehensive coverage of all InitMethod strategies" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(54321);
+    const random = prng.random();
+
+    const n = 10000;
+    const buf = try allocator.alloc(f32, n);
+    defer allocator.free(buf);
+
+    const calcStats = struct {
+        fn run(slice: []const f32) struct { mean: f32, variance: f32, min: f32, max: f32 } {
+            var sum: f64 = 0.0;
+            var min_v: f32 = slice[0];
+            var max_v: f32 = slice[0];
+            for (slice) |v| {
+                sum += v;
+                if (v < min_v) min_v = v;
+                if (v > max_v) max_v = v;
+            }
+            const mean = sum / @as(f64, @floatFromInt(slice.len));
+            var var_sum: f64 = 0.0;
+            for (slice) |v| {
+                const diff = @as(f64, v) - mean;
+                var_sum += diff * diff;
+            }
+            return .{
+                .mean = @floatCast(mean),
+                .variance = @floatCast(var_sum / @as(f64, @floatFromInt(slice.len))),
+                .min = min_v,
+                .max = max_v,
+            };
+        }
+    }.run;
+
+    // 1. Zeros, Ones, Constant
+    initWeights(random, buf, 100, 100, .zeros);
+    for (buf) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
+
+    initWeights(random, buf, 100, 100, .ones);
+    for (buf) |v| try std.testing.expectEqual(@as(f32, 1.0), v);
+
+    initWeights(random, buf, 100, 100, .{ .constant = 42.0 });
+    for (buf) |v| try std.testing.expectEqual(@as(f32, 42.0), v);
+
+    // 2. Normal (mean=2.0, std=0.5)
+    initWeights(random, buf, 100, 100, .{ .normal = .{ .mean = 2.0, .std = 0.5 } });
+    const norm_stats = calcStats(buf);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), norm_stats.mean, 0.03);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), norm_stats.variance, 0.02);
+
+    // 3. Uniform (min=-1.0, max=3.0) -> mean=1.0, var=(3 - (-1))^2 / 12 = 16/12 ~ 1.3333
+    initWeights(random, buf, 100, 100, .{ .uniform = .{ .min = -1.0, .max = 3.0 } });
+    const uni_stats = calcStats(buf);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), uni_stats.mean, 0.05);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.3333), uni_stats.variance, 0.05);
+    try std.testing.expect(uni_stats.min >= -1.0);
+    try std.testing.expect(uni_stats.max <= 3.0);
+
+    // 4. Xavier Uniform: limit = gain * sqrt(6 / (100 + 100)) = sqrt(6/200) = sqrt(0.03) ~ 0.1732
+    // Var = limit^2 / 3 = 0.03 / 3 = 0.01
+    initWeights(random, buf, 100, 100, .{ .xavier_uniform = .{} });
+    const xu_stats = calcStats(buf);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), xu_stats.mean, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.01), xu_stats.variance, 0.002);
+    try std.testing.expect(xu_stats.max <= 0.1733);
+    try std.testing.expect(xu_stats.min >= -0.1733);
+
+    // 5. He Uniform: limit = gain * sqrt(3 / 100) = sqrt(2) * sqrt(0.03) = sqrt(0.06) ~ 0.2449
+    // Var = limit^2 / 3 = 0.06 / 3 = 0.02
+    initWeights(random, buf, 100, 100, .{ .he_uniform = .{} });
+    const hu_stats = calcStats(buf);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), hu_stats.mean, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.02), hu_stats.variance, 0.003);
+
+    // 6. LeCun Uniform: limit = sqrt(3 / 100) ~ 0.1732, Var = 0.03 / 3 = 0.01
+    initWeights(random, buf, 100, 100, .lecun_uniform);
+    const lu_stats = calcStats(buf);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), lu_stats.mean, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.01), lu_stats.variance, 0.002);
+}
+
 
 
 
