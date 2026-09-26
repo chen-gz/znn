@@ -500,6 +500,7 @@ pub const Tensor = struct {
     requires_grad: bool,  // 是否需要求梯度（如模型参数为 true，输入数据为 false）
     creator: ?*Op,        // 产生此张量的算子节点（前向图中的父节点，用于追踪计算路径）
     is_view: bool = false, // 是否为零拷贝视图切片（若为 true，deinit 时不释放 data/grad）
+    is_custom_initialized: bool = false, // 是否已被层专属自定义初始化 (避免被 Graph 自动初始化重写)
 
 
 

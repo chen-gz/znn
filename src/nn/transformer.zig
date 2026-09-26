@@ -36,29 +36,35 @@ pub const Embedding = struct {
         }
     };
 
-    /// 初始化嵌入层 (默认使用标准预训练 NLP / Transformer 推荐的 N(0, 0.02) 初始化)
-    /// vocab_size: 词表大小（可索引的最大整数范围）
-    /// embedding_dim: 映射出的隐藏嵌入维度大小
-    pub fn init(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize, random: std.Random) !Embedding {
-        return initWithOptions(allocator, vocab_size, embedding_dim, random, Options.default);
+    /// 构造嵌入层：默认只分配词表张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
+    pub fn init(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize, random_opt: anytype) !Embedding {
+        var emb = try initClean(allocator, vocab_size, embedding_dim);
+        const ArgT = @TypeOf(random_opt);
+        if (ArgT == std.Random) {
+            emb.customInit(random_opt, Options.default);
+        } else if (ArgT == ?std.Random) {
+            if (random_opt) |rnd| {
+                emb.customInit(rnd, Options.default);
+            }
+        }
+        return emb;
     }
 
-    /// 携带自定义选项初始化嵌入层
-    pub fn initWithOptions(
-        allocator: std.mem.Allocator,
-        vocab_size: usize,
-        embedding_dim: usize,
-        random: std.Random,
-        options: Options,
-    ) !Embedding {
+    /// 纯结构与内存初始化 (无随机数，交由 Graph.initWeights 自动探查推导)
+    pub fn initClean(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize) !Embedding {
         const weight = try createPersistentTensor(allocator, vocab_size, embedding_dim, true);
-        errdefer freePersistentTensor(allocator, weight);
-
-        initWeights(random, weight.data, vocab_size, embedding_dim, options.init_method);
-
         return Embedding{
             .weight = weight,
         };
+    }
+
+    /// 显式自定义初始化后门：由用户手动指定策略或在模型 customInit 中调用，
+    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
+    pub fn customInit(self: *Embedding, random: std.Random, options: Options) void {
+        const vocab_size = self.weight.shape.dims[0];
+        const embedding_dim = self.weight.shape.dims[1];
+        initWeights(random, self.weight.data, vocab_size, embedding_dim, options.init_method);
+        self.weight.is_custom_initialized = true;
     }
 
     /// 释放层内所有关联的 Tensor 内存资源
@@ -1642,11 +1648,13 @@ pub const LoRALinear = struct {
         const lora_a = try createPersistentTensor(allocator, in_features, r, true);
         errdefer freePersistentTensor(allocator, lora_a);
         initializeWeights(random, lora_a.data, in_features);
+        lora_a.is_custom_initialized = true;
 
         // 可微调低秩旁路 B：全 0 初始化以保证初始状态等价于 Base 模型
         const lora_b = try createPersistentTensor(allocator, r, out_features, true);
         errdefer freePersistentTensor(allocator, lora_b);
         @memset(lora_b.data, 0.0);
+        lora_b.is_custom_initialized = true;
 
         return LoRALinear{
             .weight = weight,

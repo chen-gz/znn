@@ -52,8 +52,23 @@ pub const Linear = struct {
     weight: *Tensor,
     bias: *Tensor,
 
-    pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize, random: std.Random) !Linear {
-        return initWithOptions(allocator, in_features, out_features, random, InitOptions.default);
+    /// 构造线性层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
+    pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize, random_opt: anytype) !Linear {
+        var l = try initUninitialized(allocator, in_features, out_features);
+        const ArgT = @TypeOf(random_opt);
+        if (ArgT == std.Random) {
+            l.customInit(random_opt, InitOptions.default);
+        } else if (ArgT == ?std.Random) {
+            if (random_opt) |rnd| {
+                l.customInit(rnd, InitOptions.default);
+            }
+        }
+        return l;
+    }
+
+    /// 纯结构与内存初始化 (无随机数，交由 Graph.initWeights 自动探查推导)
+    pub fn initClean(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !Linear {
+        return initUninitialized(allocator, in_features, out_features);
     }
 
     pub fn initUninitialized(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !Linear {
@@ -68,24 +83,20 @@ pub const Linear = struct {
         };
     }
 
-    pub fn reinit(self: *Linear, random: std.Random, options: InitOptions) void {
+    /// 显式自定义初始化后门：由用户手动指定策略或在模型 customInit 中调用，
+    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
+    pub fn customInit(self: *Linear, random: std.Random, options: InitOptions) void {
         const in_features = self.weight.shape.dims[0];
         const out_features = self.weight.shape.dims[1];
         const w_init = options.resolveWeightInit();
         initWeights(random, self.weight.data, in_features, out_features, w_init);
         initWeights(random, self.bias.data, in_features, out_features, options.bias_init);
+        self.weight.is_custom_initialized = true;
+        self.bias.is_custom_initialized = true;
     }
 
-    pub fn initWithOptions(
-        allocator: std.mem.Allocator,
-        in_features: usize,
-        out_features: usize,
-        random: std.Random,
-        options: InitOptions,
-    ) !Linear {
-        var linear = try initUninitialized(allocator, in_features, out_features);
-        linear.reinit(random, options);
-        return linear;
+    pub fn reinit(self: *Linear, random: std.Random, options: InitOptions) void {
+        self.customInit(random, options);
     }
 
     pub fn deinit(self: Linear, allocator: std.mem.Allocator) void {
@@ -112,8 +123,23 @@ pub const Conv2D = struct {
     weight: *Tensor,
     bias: *Tensor,
 
-    pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random: std.Random) !Conv2D {
-        return initWithOptions(allocator, in_channels, out_channels, kernel_size, random, InitOptions.default);
+    /// 构造卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
+    pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random_opt: anytype) !Conv2D {
+        var c = try initUninitialized(allocator, in_channels, out_channels, kernel_size);
+        const ArgT = @TypeOf(random_opt);
+        if (ArgT == std.Random) {
+            c.customInit(random_opt, InitOptions.default);
+        } else if (ArgT == ?std.Random) {
+            if (random_opt) |rnd| {
+                c.customInit(rnd, InitOptions.default);
+            }
+        }
+        return c;
+    }
+
+    /// 纯结构与内存初始化 (无随机数，交由 Graph.initWeights 自动探查推导)
+    pub fn initClean(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize) !Conv2D {
+        return initUninitialized(allocator, in_channels, out_channels, kernel_size);
     }
 
     pub fn initUninitialized(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize) !Conv2D {
@@ -133,7 +159,9 @@ pub const Conv2D = struct {
         };
     }
 
-    pub fn reinit(self: *Conv2D, random: std.Random, options: InitOptions) void {
+    /// 显式自定义初始化后门：由用户手动指定策略或在模型 customInit 中调用，
+    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
+    pub fn customInit(self: *Conv2D, random: std.Random, options: InitOptions) void {
         const out_channels = self.weight.shape.dims[0];
         const in_channels = self.weight.shape.dims[1];
         const kernel_size = self.weight.shape.dims[2];
@@ -142,19 +170,12 @@ pub const Conv2D = struct {
         const w_init = options.resolveWeightInit();
         initWeights(random, self.weight.data, fan_in, fan_out, w_init);
         initWeights(random, self.bias.data, fan_in, fan_out, options.bias_init);
+        self.weight.is_custom_initialized = true;
+        self.bias.is_custom_initialized = true;
     }
 
-    pub fn initWithOptions(
-        allocator: std.mem.Allocator,
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: usize,
-        random: std.Random,
-        options: InitOptions,
-    ) !Conv2D {
-        var conv = try initUninitialized(allocator, in_channels, out_channels, kernel_size);
-        conv.reinit(random, options);
-        return conv;
+    pub fn reinit(self: *Conv2D, random: std.Random, options: InitOptions) void {
+        self.customInit(random, options);
     }
 
     pub fn deinit(self: Conv2D, allocator: std.mem.Allocator) void {
@@ -184,6 +205,7 @@ pub const ConvTranspose2D = struct {
     weight: *Tensor,
     bias: ?*Tensor,
 
+    /// 构造反卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(
         allocator: std.mem.Allocator,
         in_channels: usize,
@@ -192,9 +214,31 @@ pub const ConvTranspose2D = struct {
         stride: usize,
         padding: usize,
         use_bias: bool,
-        random: std.Random,
+        random_opt: anytype,
     ) !ConvTranspose2D {
-        return initWithOptions(allocator, in_channels, out_channels, kernel_size, stride, padding, use_bias, random, InitOptions.default);
+        var c = try initUninitialized(allocator, in_channels, out_channels, kernel_size, stride, padding, use_bias);
+        const ArgT = @TypeOf(random_opt);
+        if (ArgT == std.Random) {
+            c.customInit(random_opt, InitOptions.default);
+        } else if (ArgT == ?std.Random) {
+            if (random_opt) |rnd| {
+                c.customInit(rnd, InitOptions.default);
+            }
+        }
+        return c;
+    }
+
+    /// 纯结构与内存初始化 (无随机数，交由 Graph.initWeights 自动探查推导)
+    pub fn initClean(
+        allocator: std.mem.Allocator,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        use_bias: bool,
+    ) !ConvTranspose2D {
+        return initUninitialized(allocator, in_channels, out_channels, kernel_size, stride, padding, use_bias);
     }
 
     pub fn initUninitialized(
@@ -231,30 +275,22 @@ pub const ConvTranspose2D = struct {
         };
     }
 
-    pub fn reinit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
+    /// 显式自定义初始化后门：由用户手动指定策略或在模型 customInit 中调用，
+    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
+    pub fn customInit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
         const fan_in = self.in_channels * self.kernel_size * self.kernel_size;
         const fan_out = self.out_channels * self.kernel_size * self.kernel_size;
         const w_init = options.resolveWeightInit();
         initWeights(random, self.weight.data, fan_in, fan_out, w_init);
+        self.weight.is_custom_initialized = true;
         if (self.bias) |b| {
             initWeights(random, b.data, fan_in, fan_out, options.bias_init);
+            b.is_custom_initialized = true;
         }
     }
 
-    pub fn initWithOptions(
-        allocator: std.mem.Allocator,
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: usize,
-        stride: usize,
-        padding: usize,
-        use_bias: bool,
-        random: std.Random,
-        options: InitOptions,
-    ) !ConvTranspose2D {
-        var conv = try initUninitialized(allocator, in_channels, out_channels, kernel_size, stride, padding, use_bias);
-        conv.reinit(random, options);
-        return conv;
+    pub fn reinit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
+        self.customInit(random, options);
     }
 
     pub fn deinit(self: ConvTranspose2D, allocator: std.mem.Allocator) void {

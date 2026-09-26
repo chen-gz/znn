@@ -17,10 +17,10 @@ pub const RNNCell = struct {
     weight_ih: Linear,
     weight_hh: Linear,
 
-    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random: std.Random) !RNNCell {
-        const weight_ih = try Linear.init(allocator, input_dim, hidden_dim, random);
+    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random_opt: anytype) !RNNCell {
+        const weight_ih = try Linear.init(allocator, input_dim, hidden_dim, random_opt);
         errdefer weight_ih.deinit(allocator);
-        const weight_hh = try Linear.init(allocator, hidden_dim, hidden_dim, random);
+        const weight_hh = try Linear.init(allocator, hidden_dim, hidden_dim, random_opt);
         errdefer weight_hh.deinit(allocator);
 
         return RNNCell{
@@ -68,8 +68,8 @@ pub const RNN = struct {
     input_dim: usize,
     hidden_dim: usize,
 
-    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random: std.Random) !RNN {
-        const cell = try RNNCell.init(allocator, input_dim, hidden_dim, random);
+    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random_opt: anytype) !RNN {
+        const cell = try RNNCell.init(allocator, input_dim, hidden_dim, random_opt);
         return RNN{
             .cell = cell,
             .input_dim = input_dim,
@@ -148,29 +148,30 @@ pub const LSTMCell = struct {
     w_ih_o: Linear,
     w_hh_o: Linear,
 
-    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random: std.Random) !LSTMCell {
-        const w_ih_f = try Linear.init(allocator, input_dim, hidden_dim, random);
+    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random_opt: anytype) !LSTMCell {
+        const w_ih_f = try Linear.init(allocator, input_dim, hidden_dim, random_opt);
         errdefer w_ih_f.deinit(allocator);
-        const w_hh_f = try Linear.init(allocator, hidden_dim, hidden_dim, random);
+        const w_hh_f = try Linear.init(allocator, hidden_dim, hidden_dim, random_opt);
         errdefer w_hh_f.deinit(allocator);
 
-        const w_ih_i = try Linear.init(allocator, input_dim, hidden_dim, random);
+        const w_ih_i = try Linear.init(allocator, input_dim, hidden_dim, random_opt);
         errdefer w_ih_i.deinit(allocator);
-        const w_hh_i = try Linear.init(allocator, hidden_dim, hidden_dim, random);
+        const w_hh_i = try Linear.init(allocator, hidden_dim, hidden_dim, random_opt);
         errdefer w_hh_i.deinit(allocator);
 
-        const w_ih_c = try Linear.init(allocator, input_dim, hidden_dim, random);
+        const w_ih_c = try Linear.init(allocator, input_dim, hidden_dim, random_opt);
         errdefer w_ih_c.deinit(allocator);
-        const w_hh_c = try Linear.init(allocator, hidden_dim, hidden_dim, random);
+        const w_hh_c = try Linear.init(allocator, hidden_dim, hidden_dim, random_opt);
         errdefer w_hh_c.deinit(allocator);
 
-        const w_ih_o = try Linear.init(allocator, input_dim, hidden_dim, random);
+        const w_ih_o = try Linear.init(allocator, input_dim, hidden_dim, random_opt);
         errdefer w_ih_o.deinit(allocator);
-        const w_hh_o = try Linear.init(allocator, hidden_dim, hidden_dim, random);
+        const w_hh_o = try Linear.init(allocator, hidden_dim, hidden_dim, random_opt);
         errdefer w_hh_o.deinit(allocator);
 
         // 关键技巧：将遗忘门偏置初始化为 +1.0，促进长程梯度回传 (Gers et al., 2000)
         @memset(w_ih_f.bias.data, 1.0);
+        w_ih_f.bias.is_custom_initialized = true;
 
         return LSTMCell{
             .input_dim = input_dim,
@@ -285,8 +286,8 @@ pub const LSTM = struct {
     input_dim: usize,
     hidden_dim: usize,
 
-    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random: std.Random) !LSTM {
-        const cell = try LSTMCell.init(allocator, input_dim, hidden_dim, random);
+    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random_opt: anytype) !LSTM {
+        const cell = try LSTMCell.init(allocator, input_dim, hidden_dim, random_opt);
         return LSTM{
             .cell = cell,
             .input_dim = input_dim,
@@ -365,7 +366,7 @@ pub const StackedLSTM = struct {
         input_dim: usize,
         hidden_dim: usize,
         num_layers: usize,
-        random: std.Random,
+        random_opt: anytype,
     ) !StackedLSTM {
         const layers = try allocator.alloc(LSTMCell, num_layers);
         errdefer allocator.free(layers);
@@ -377,7 +378,7 @@ pub const StackedLSTM = struct {
         }
         for (0..num_layers) |i| {
             const in_d = if (i == 0) input_dim else hidden_dim;
-            layers[i] = try LSTMCell.init(allocator, in_d, hidden_dim, random);
+            layers[i] = try LSTMCell.init(allocator, in_d, hidden_dim, random_opt);
             initialized_count += 1;
         }
         return StackedLSTM{
@@ -496,20 +497,20 @@ pub const GRUCell = struct {
     w_ih_h: Linear,
     w_hh_h: Linear,
 
-    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random: std.Random) !GRUCell {
-        const w_ih_r = try Linear.init(allocator, input_dim, hidden_dim, random);
+    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random_opt: anytype) !GRUCell {
+        const w_ih_r = try Linear.init(allocator, input_dim, hidden_dim, random_opt);
         errdefer w_ih_r.deinit(allocator);
-        const w_hh_r = try Linear.init(allocator, hidden_dim, hidden_dim, random);
+        const w_hh_r = try Linear.init(allocator, hidden_dim, hidden_dim, random_opt);
         errdefer w_hh_r.deinit(allocator);
 
-        const w_ih_z = try Linear.init(allocator, input_dim, hidden_dim, random);
+        const w_ih_z = try Linear.init(allocator, input_dim, hidden_dim, random_opt);
         errdefer w_ih_z.deinit(allocator);
-        const w_hh_z = try Linear.init(allocator, hidden_dim, hidden_dim, random);
+        const w_hh_z = try Linear.init(allocator, hidden_dim, hidden_dim, random_opt);
         errdefer w_hh_z.deinit(allocator);
 
-        const w_ih_h = try Linear.init(allocator, input_dim, hidden_dim, random);
+        const w_ih_h = try Linear.init(allocator, input_dim, hidden_dim, random_opt);
         errdefer w_ih_h.deinit(allocator);
-        const w_hh_h = try Linear.init(allocator, hidden_dim, hidden_dim, random);
+        const w_hh_h = try Linear.init(allocator, hidden_dim, hidden_dim, random_opt);
         errdefer w_hh_h.deinit(allocator);
 
         return GRUCell{
@@ -602,8 +603,8 @@ pub const GRU = struct {
     input_dim: usize,
     hidden_dim: usize,
 
-    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random: std.Random) !GRU {
-        const cell = try GRUCell.init(allocator, input_dim, hidden_dim, random);
+    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize, random_opt: anytype) !GRU {
+        const cell = try GRUCell.init(allocator, input_dim, hidden_dim, random_opt);
         return GRU{
             .cell = cell,
             .input_dim = input_dim,
