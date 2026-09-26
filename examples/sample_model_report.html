@@ -2260,26 +2260,26 @@ function initKpis() {
   const elParams = document.getElementById('kpi-total-params');
   if (elParams) elParams.textContent = formatNumber(totalParams);
   const elMem = document.getElementById('kpi-memory-mb');
-  if (elMem) elMem.textContent = ;
+  if (elMem) elMem.textContent = `~${(totalBytes / (1024 * 1024)).toFixed(2)} MB Memory Footprint`;
   const elParamNodes = document.getElementById('kpi-param-nodes');
   if (elParamNodes) elParamNodes.textContent = formatNumber(paramNodes);
   const elInit = document.getElementById('kpi-init-stats');
-  if (elInit) elInit.textContent = ;
+  if (elInit) elInit.textContent = `${autoGraph} Auto-Graph / ${customInit} Custom`;
   const elTotalNodes = document.getElementById('kpi-total-nodes');
   if (elTotalNodes) elTotalNodes.textContent = formatNumber(totalNodes);
   const elBreak = document.getElementById('kpi-node-breakdown');
-  if (elBreak) elBreak.textContent = ;
+  if (elBreak) elBreak.textContent = `${inputNodes} Inputs · ${actNodes} Activations`;
   const elBuf = document.getElementById('kpi-buffers');
   if (elBuf) elBuf.textContent = formatNumber(totalNodes);
 
   const btnAll = document.getElementById('btn-filter-all');
-  if (btnAll) btnAll.textContent = ;
+  if (btnAll) btnAll.textContent = `All Nodes (${totalNodes})`;
   const btnParam = document.getElementById('btn-filter-param');
-  if (btnParam) btnParam.textContent = ;
+  if (btnParam) btnParam.textContent = `Params (${paramNodes})`;
   const btnInput = document.getElementById('btn-filter-input');
-  if (btnInput) btnInput.textContent = ;
+  if (btnInput) btnInput.textContent = `Inputs (${inputNodes})`;
   const btnAct = document.getElementById('btn-filter-act');
-  if (btnAct) btnAct.textContent = ;
+  if (btnAct) btnAct.textContent = `Activations (${actNodes})`;
 }
 
 // Initial Render
