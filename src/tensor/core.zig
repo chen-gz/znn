@@ -374,6 +374,42 @@ pub const Tensor = struct {
         return C;
     }
 
+    /// 逐元素开平方 (np.sqrt)
+    pub fn sqrt(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, a_val| {
+            c_val.* = @sqrt(a_val);
+        }
+        return C;
+    }
+
+    /// 逐元素自然指数 (np.exp)
+    pub fn exp(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, a_val| {
+            c_val.* = @exp(a_val);
+        }
+        return C;
+    }
+
+    /// 逐元素自然对数 (np.log)
+    pub fn log(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, a_val| {
+            c_val.* = @log(a_val);
+        }
+        return C;
+    }
+
+    /// 逐元素绝对值 (np.abs)
+    pub fn abs(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (C.data, self.data) |*c_val, a_val| {
+            c_val.* = @abs(a_val);
+        }
+        return C;
+    }
+
     pub fn bceWithLogitsLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.bceWithLogitsLoss(self, targets);
@@ -588,6 +624,106 @@ pub const Tensor = struct {
             }
         }
         return C;
+    }
+
+    /// 沿指定轴重复张量元素 repeats 次 (np.repeat)
+    /// axis 若为 null，则先将张量展平后重复
+    pub fn repeat(self: *Tensor, repeats: usize, axis: ?usize, allocator: std.mem.Allocator) !*Tensor {
+        if (repeats == 0) return try zeros(allocator, &.{0});
+        if (axis) |ax| {
+            if (ax >= self.shape.len) return error.DimensionOutOfBounds;
+            if (repeats == 1) return self.clone(allocator);
+
+            var out_shape = self.shape;
+            out_shape.dims[ax] = self.shape.dims[ax] * repeats;
+            const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
+
+            const dim_size = self.shape.dims[ax];
+            var outer_size: usize = 1;
+            for (0..ax) |d| outer_size *= self.shape.dims[d];
+            var inner_size: usize = 1;
+            for (ax + 1..self.shape.len) |d| inner_size *= self.shape.dims[d];
+
+            const src_contig = try self.contiguous(allocator);
+            defer free(allocator, src_contig);
+
+            for (0..outer_size) |outer| {
+                for (0..dim_size) |idx| {
+                    const src_offset = (outer * dim_size + idx) * inner_size;
+                    const src_slice = src_contig.data[src_offset .. src_offset + inner_size];
+                    for (0..repeats) |r| {
+                        const dest_offset = (outer * (dim_size * repeats) + (idx * repeats + r)) * inner_size;
+                        @memcpy(C.data[dest_offset .. dest_offset + inner_size], src_slice);
+                    }
+                }
+            }
+            return C;
+        } else {
+            // Flatten first
+            const total = self.data.len;
+            const C = try zeros(allocator, &.{ total * repeats });
+            const src_contig = try self.contiguous(allocator);
+            defer free(allocator, src_contig);
+
+            for (0..total) |i| {
+                const val = src_contig.data[i];
+                for (0..repeats) |r| {
+                    C.data[i * repeats + r] = val;
+                }
+            }
+            return C;
+        }
+    }
+
+    /// 构造通过沿各维度重复 reps 次平铺的新张量 (np.tile)
+    pub fn tile(self: *Tensor, reps: []const usize, allocator: std.mem.Allocator) !*Tensor {
+        if (reps.len == 0) return self.clone(allocator);
+        const rank = @max(self.shape.len, reps.len);
+        if (rank > 8) return error.MaxDimensionsExceeded;
+
+        var full_self_shape = [_]usize{1} ** 8;
+        var full_reps = [_]usize{1} ** 8;
+        var out_shape_dims = [_]usize{1} ** 8;
+
+        const self_offset = rank - self.shape.len;
+        for (0..self.shape.len) |i| {
+            full_self_shape[self_offset + i] = self.shape.dims[i];
+        }
+
+        const reps_offset = rank - reps.len;
+        for (0..reps.len) |i| {
+            full_reps[reps_offset + i] = reps[i];
+        }
+
+        for (0..rank) |d| {
+            out_shape_dims[d] = full_self_shape[d] * full_reps[d];
+        }
+
+        const out = try zeros(allocator, out_shape_dims[0..rank]);
+        const src_contig = try self.contiguous(allocator);
+        defer free(allocator, src_contig);
+
+        const src_full_shape = try Shape.fromSlice(full_self_shape[0..rank]);
+        const src_strides = computeContiguousStrides(src_full_shape);
+
+        var coord = [_]usize{0} ** 8;
+        for (0..out.data.len) |dest_i| {
+            var src_flat: usize = 0;
+            for (0..rank) |d| {
+                const src_dim_idx = coord[d] % full_self_shape[d];
+                src_flat += src_dim_idx * src_strides.dims[d];
+            }
+            out.data[dest_i] = src_contig.data[src_flat];
+
+            var d = rank;
+            while (d > 0) {
+                d -= 1;
+                coord[d] += 1;
+                if (coord[d] < out_shape_dims[d]) break;
+                coord[d] = 0;
+            }
+        }
+        return out;
     }
 
     pub fn conv2d(self: *Tensor, weight: *Tensor, bias: ?*Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {

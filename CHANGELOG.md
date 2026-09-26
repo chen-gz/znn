@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `src/tensor/tests.zig`: 多维张量、切片、广播、降维与线性代数测试集。
     - `src/tensor.zig` 作为顶层 Facade 门面完整重新导出所有张量组件与全局函数，无破坏性变更。
 
+### Added
+- **对齐 NumPy Tier 1 核心数组与数学 API (`src/tensor/`)**:
+  - **数值序列与矩阵创建**：
+    - `tensor.arange(allocator, start, stop, step)`: 生成等差数列张量。
+    - `tensor.linspace(allocator, start, stop, num)`: 生成指定点数的线性等分序列。
+    - `tensor.eye(allocator, N, M, k)` / `tensor.identity(allocator, n)`: 生成单位矩阵与带偏置对角线矩阵。
+    - `tensor.full(allocator, shape, val)`: 快速生成指定标量值填充的张量。
+  - **多维堆叠与平铺重复**：
+    - `tensor.stack(allocator, inputs, axis)`: 沿新维度堆叠多个形状一致的张量。
+    - `tensor.repeat(repeats, axis, allocator)`: 沿轴重复或展平重复张量元素。
+    - `tensor.tile(reps, allocator)`: 沿多维复制平铺张量。
+  - **逐元素向量化数学超越函数 (ufuncs)**:
+    - `tensor.sqrt()`: 逐元素开平方根。
+    - `tensor.exp()`: 逐元素自然指数函数。
+    - `tensor.log()`: 逐元素自然对数函数。
+    - `tensor.abs()`: 逐元素绝对值函数。
+
 ---
 
 ## [0.2.0] - 2026-09-26

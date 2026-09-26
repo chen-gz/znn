@@ -89,6 +89,86 @@ pub fn ones(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
     return t;
 }
 
+/// 创建所有元素初始化为指定标量值的张量 (np.full)
+pub fn full(allocator: std.mem.Allocator, shape_slice: []const usize, val: f32) !*Tensor {
+    const t = try zeros(allocator, shape_slice);
+    @memset(t.data, val);
+    return t;
+}
+
+/// 生成等差数列张量 (np.arange)
+/// 如果只传 1 个参数（step 默认为 1.0），生成 [0, stop)；
+/// 如果传 start、stop、step，生成从 start 到 stop 步长为 step 的数列。
+pub fn arange(allocator: std.mem.Allocator, start: f32, stop: ?f32, step: ?f32) !*Tensor {
+    var actual_start: f32 = 0.0;
+    var actual_stop: f32 = start;
+    const actual_step: f32 = step orelse 1.0;
+
+    if (actual_step == 0.0) return error.InvalidStep;
+
+    if (stop) |st| {
+        actual_start = start;
+        actual_stop = st;
+    }
+
+    if ((actual_step > 0.0 and actual_start >= actual_stop) or (actual_step < 0.0 and actual_start <= actual_stop)) {
+        return try zeros(allocator, &.{0});
+    }
+
+    const count_f = @ceil((actual_stop - actual_start) / actual_step);
+    const count: usize = @intFromFloat(@max(0.0, count_f));
+
+    const t = try zeros(allocator, &.{count});
+    var cur = actual_start;
+    for (0..count) |i| {
+        t.data[i] = cur;
+        cur += actual_step;
+    }
+    return t;
+}
+
+/// 生成指定区间内均匀间隔的浮点序列 (np.linspace)
+/// num 为生成的点数 (默认需 >= 2，若为 1 则返回 start)
+pub fn linspace(allocator: std.mem.Allocator, start: f32, stop: f32, num: usize) !*Tensor {
+    if (num == 0) return try zeros(allocator, &.{0});
+    const t = try zeros(allocator, &.{num});
+    if (num == 1) {
+        t.data[0] = start;
+        return t;
+    }
+
+    const step = (stop - start) / @as(f32, @floatFromInt(num - 1));
+    for (0..num) |i| {
+        if (i == num - 1) {
+            t.data[i] = stop; // 避免累加浮点精度误差
+        } else {
+            t.data[i] = start + @as(f32, @floatFromInt(i)) * step;
+        }
+    }
+    return t;
+}
+
+/// 生成单位矩阵或指定对角线偏置矩阵 (np.eye)
+/// N 为行数，M 为列数 (若传 null 则与 N 相同)，k 为对角线偏置 (0 为主对角线，正数为主对角线上方，负数为主对角线下方)
+pub fn eye(allocator: std.mem.Allocator, N: usize, M: ?usize, k: ?i32) !*Tensor {
+    const cols = M orelse N;
+    const diag_offset = k orelse 0;
+
+    const t = try zeros(allocator, &.{ N, cols });
+    for (0..N) |r| {
+        const c_idx: i64 = @as(i64, @intCast(r)) + @as(i64, diag_offset);
+        if (c_idx >= 0 and c_idx < @as(i64, @intCast(cols))) {
+            t.data[r * cols + @as(usize, @intCast(c_idx))] = 1.0;
+        }
+    }
+    return t;
+}
+
+/// 生成方阵单位矩阵 (np.identity)
+pub fn identity(allocator: std.mem.Allocator, n: usize) !*Tensor {
+    return eye(allocator, n, n, 0);
+}
+
 
 var default_prng = std.Random.DefaultPrng.init(12345);
 
@@ -157,6 +237,60 @@ pub fn concat(allocator: std.mem.Allocator, inputs: []const *Tensor, dim: usize,
     }
 
     return out;
+}
+
+/// 沿新维度堆叠多个张量 (np.stack)
+/// axis 取值范围为 0..rank+1，所有输入张量必须具有完全相同的形状
+pub fn stack(allocator: std.mem.Allocator, inputs: []const *Tensor, axis: usize) !*Tensor {
+    if (inputs.len == 0) return error.EmptyInputs;
+    const base_shape = inputs[0].shape;
+    const in_rank = base_shape.len;
+    if (axis > in_rank) return error.DimensionOutOfBounds;
+    if (in_rank >= 8) return error.MaxDimensionsExceeded;
+
+    for (inputs[1..]) |t| {
+        if (!t.shape.eq(base_shape)) return error.ShapeMismatch;
+    }
+
+    // 首先对每一个输入张量在其 axis 处执行 unsqueeze
+    const unsqueezed = try allocator.alloc(*Tensor, inputs.len);
+    defer allocator.free(unsqueezed);
+
+    for (inputs, 0..) |t, i| {
+        unsqueezed[i] = try t.unsqueeze(axis, allocator);
+    }
+    defer {
+        for (unsqueezed) |u| {
+            free(allocator, u);
+        }
+    }
+
+    // 沿 axis 拼接
+    return try concat(allocator, unsqueezed, axis, null);
+}
+
+pub fn repeat(t: *Tensor, repeats: usize, axis: ?usize, allocator: std.mem.Allocator) !*Tensor {
+    return t.repeat(repeats, axis, allocator);
+}
+
+pub fn tile(t: *Tensor, reps: []const usize, allocator: std.mem.Allocator) !*Tensor {
+    return t.tile(reps, allocator);
+}
+
+pub fn sqrt(t: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+    return t.sqrt(allocator);
+}
+
+pub fn exp(t: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+    return t.exp(allocator);
+}
+
+pub fn log(t: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+    return t.log(allocator);
+}
+
+pub fn abs(t: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+    return t.abs(allocator);
 }
 
 /// 沿指定维度将张量均等切分为 num_splits 个子张量 (Split)
