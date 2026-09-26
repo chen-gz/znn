@@ -628,6 +628,22 @@ pub fn freeGraphOps(ops_list: *std.ArrayList(OpData), allocator: std.mem.Allocat
     ops_list.deinit(allocator);
 }
 
+fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (input) |c| {
+        switch (c) {
+            '\\' => try out.appendSlice(allocator, "\\\\"),
+            '"' => try out.appendSlice(allocator, "\\\""),
+            '\n' => try out.appendSlice(allocator, "\\n"),
+            '\r' => try out.appendSlice(allocator, "\\r"),
+            '\t' => try out.appendSlice(allocator, "\\t"),
+            else => try out.append(allocator, c),
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 /// 将计算图结构与各层初始化详情格式化为可交互、层级展开的 HTML 网页文档
 pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const u8 {
     var nodes = try collectGraphNodes(graph, allocator);
@@ -675,6 +691,9 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\  <meta charset="UTF-8">
         \\  <meta name="viewport" content="width=device-width, initial-scale=1.0">
         \\  <title>ZNN Computation Graph & Model Hierarchy Report</title>
+        \\  <!-- KaTeX for high-performance LaTeX math formula rendering -->
+        \\  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+        \\  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
         \\  <style>
         \\    :root {
         \\      --bg-primary: #090d16;
@@ -1527,26 +1546,34 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\    .insp-formula-badge {
         \\      font-size: 10px;
         \\      font-weight: 600;
-        \\      padding: 2px 7px;
+        \\      padding: 2px 8px;
         \\      border-radius: 4px;
+        \\      font-family: var(--font-mono);
+        \\    }
+        \\    .insp-formula-badge.specified {
+        \\      background: rgba(16, 185, 129, 0.18);
+        \\      color: #34d399;
+        \\      border: 1px solid rgba(52, 211, 153, 0.4);
+        \\    }
+        \\    .insp-formula-badge.inferred {
         \\      background: rgba(56, 189, 248, 0.15);
         \\      color: #38bdf8;
         \\      border: 1px solid rgba(56, 189, 248, 0.3);
-        \\      font-family: var(--font-mono);
         \\    }
         \\    .insp-formula-display {
         \\      background: #090d16;
         \\      border: 1px solid #1e293b;
         \\      border-radius: 6px;
-        \\      padding: 10px 14px;
-        \\      font-family: var(--font-mono);
-        \\      font-size: 13.5px;
-        \\      font-weight: 600;
-        \\      color: #38bdf8;
+        \\      padding: 12px 16px;
+        \\      font-size: 15px;
+        \\      color: #f8fafc;
         \\      display: flex;
         \\      align-items: center;
-        \\      gap: 10px;
-        \\      word-break: break-all;
+        \\      gap: 12px;
+        \\      overflow-x: auto;
+        \\    }
+        \\    .insp-formula-display .katex {
+        \\      font-size: 1.15em;
         \\    }
         \\    .insp-formula-desc {
         \\      font-size: 11.5px;
@@ -1749,9 +1776,13 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
     var f_idx: usize = 0;
     while (formula_it.next()) |entry| {
         if (f_idx > 0) try html_buf.appendSlice(allocator, ",\n");
+        const escaped_key = try escapeJsonString(allocator, entry.key_ptr.*);
+        defer allocator.free(escaped_key);
+        const escaped_val = try escapeJsonString(allocator, entry.value_ptr.*);
+        defer allocator.free(escaped_val);
         try html_buf.print(allocator,
             \\  "{s}": "{s}"
-        , .{ entry.key_ptr.*, entry.value_ptr.* });
+        , .{ escaped_key, escaped_val });
         f_idx += 1;
     }
 
@@ -1875,16 +1906,18 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\
         \\  // 0.5 Mathematical Vector Transformation Formula Section (代码中指定的数学运算公式)
         \\  const formObj = getEffectiveFormula(key);
-        \\  const badgeLabel = formObj.source === 'CODE_SPECIFIED' ? 'CODE SPECIFIED (代码显式定义)' : 'INFERRED (框架推导公式)';
+        \\  const isSpecified = formObj.source === 'CODE_SPECIFIED';
+        \\  const badgeLabel = isSpecified ? 'CODE SPECIFIED (代码显式定义)' : 'INFERRED (框架推导公式)';
+        \\  const badgeCls = isSpecified ? 'insp-formula-badge specified' : 'insp-formula-badge inferred';
         \\  let formulaHtml = `
         \\    <div class="insp-formula-box">
         \\      <div class="insp-formula-header">
         \\        <span>📐 向量变换与运算数学公式 (Mathematical Vector Transformation Formula)</span>
-        \\        <span class="insp-formula-badge">${badgeLabel}</span>
+        \\        <span class="${badgeCls}">${badgeLabel}</span>
         \\      </div>
         \\      <div class="insp-formula-display">
-        \\        <span>📐</span>
-        \\        <span>${formObj.formula}</span>
+        \\        <span style="font-size:18px;">📐</span>
+        \\        <span id="insp-katex-target" style="flex:1;">${formObj.formula}</span>
         \\      </div>
         \\      <div class="insp-formula-desc">此公式清晰反映本模块在正向传播时对输入张量所执行的线性投影、非线性激活或注意力加权变换关系。</div>
         \\    </div>
@@ -2005,6 +2038,19 @@ pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const 
         \\
         \\  bodyEl.innerHTML = ioBannerHtml + formulaHtml + opsHtml + paramsHtml + inputsHtml + actsHtml + outHtml;
         \\  modal.classList.add('open');
+        \\
+        \\  // KaTeX LaTeX Math Rendering
+        \\  try {
+        \\    const target = document.getElementById('insp-katex-target');
+        \\    if (target && window.katex) {
+        \\      katex.render(formObj.formula, target, {
+        \\        throwOnError: false,
+        \\        displayMode: true
+        \\      });
+        \\    }
+        \\  } catch(err) {
+        \\    console.warn('KaTeX render fallback:', err);
+        \\  }
         \\}
         \\
         \\function closeInspector(e) {
