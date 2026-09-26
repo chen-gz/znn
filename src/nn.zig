@@ -16,6 +16,9 @@ pub const normalization = @import("nn/normalization.zig");
 pub const recurrent = @import("nn/recurrent.zig");
 pub const transformer = @import("nn/transformer.zig");
 pub const serialization = @import("nn/serialization.zig");
+pub const visualization = @import("nn/visualization.zig");
+pub const generateHtmlReport = visualization.generateHtmlReport;
+pub const exportHtmlReport = visualization.exportHtmlReport;
 
 // ============================================================================
 // 门面层导出 (Facade Re-exports) - 确保 100% 向上兼容
@@ -1221,6 +1224,66 @@ test "Comprehensive coverage of all InitMethod strategies" {
     const lu_stats = calcStats(buf);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), lu_stats.mean, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 0.01), lu_stats.variance, 0.002);
+}
+
+test "Hierarchical module naming and interactive HTML report export" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(13579);
+    const random = prng.random();
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    // 1. 创建 Embedding 模块并设置顶级层次命名
+    var emb = try transformer.Embedding.init(allocator, 1000, 64, random);
+    defer emb.deinit(allocator);
+    emb.setName("gpt.wte");
+
+    // 2. 创建 TransformerBlock 并分层命名为 "gpt.layers.0"
+    var block = try transformer.TransformerBlock.init(allocator, 64, 4, random);
+    defer block.deinit(allocator);
+    block.setName("gpt.layers.0");
+
+    // 验证子层参数名称是否按层次正确拼接
+    try std.testing.expectEqualStrings("gpt.wte.weight", emb.weight.name.?);
+    try std.testing.expectEqualStrings("gpt.layers.0.ln_1.weight", block.ln_1.weight.name.?);
+    try std.testing.expectEqualStrings("gpt.layers.0.attn.q_attn.weight", block.attn.q_attn.weight.name.?);
+    try std.testing.expectEqualStrings("gpt.layers.0.attn.k_attn.weight", block.attn.k_attn.weight.name.?);
+    try std.testing.expectEqualStrings("gpt.layers.0.attn.v_attn.weight", block.attn.v_attn.weight.name.?);
+    try std.testing.expectEqualStrings("gpt.layers.0.attn.c_proj.weight", block.attn.c_proj.weight.name.?);
+    try std.testing.expectEqualStrings("gpt.layers.0.mlp.c_fc.weight", block.mlp.c_fc.weight.name.?);
+    try std.testing.expectEqualStrings("gpt.layers.0.mlp.c_proj.weight", block.mlp.c_proj.weight.name.?);
+
+    // 3. 构建前向计算图并命名输入与中间激活节点
+    const input_tokens = try graph.zeros(&.{ 2, 8, 64 }, false);
+    input_tokens.setName("inputs.token_embeddings");
+
+    const block_out = try block.forward(allocator, &graph, input_tokens);
+    block_out.setName("activations.block_0_out");
+
+    // 4. 生成可交互、层级展开的 HTML 网页报告
+    const html_report = try graph.formatHtmlReport(allocator);
+    defer allocator.free(html_report);
+
+    // 校验 HTML 内容中包含关键结构与样式
+    try std.testing.expect(std.mem.indexOf(u8, html_report, "<!DOCTYPE html>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html_report, "gpt.layers.0.attn.q_attn.weight") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html_report, "inputs.token_embeddings") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html_report, "activations.block_0_out") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html_report, "details class=\"module-group\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html_report, "buildHierarchy") != null);
+    try std.testing.expect(std.mem.indexOf(u8, html_report, "NODES_DATA") != null);
+
+    // 5. 测试导出到真实文件系统
+    const tmp_path = "examples/sample_model_report.html";
+    try graph.exportHtmlReport(tmp_path);
+    const tmp_z = try allocator.dupeZ(u8, tmp_path);
+    defer allocator.free(tmp_z);
+    const f = std.c.fopen(tmp_z.ptr, "rb") orelse return error.CannotOpenFile;
+    defer _ = std.c.fclose(f);
+    var check_buf: [1024]u8 = undefined;
+    const bytes_read = std.c.fread(&check_buf, 1, check_buf.len, f);
+    try std.testing.expect(bytes_read > 500);
 }
 
 

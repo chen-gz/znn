@@ -26,6 +26,7 @@ const InitMethod = core.InitMethod;
 pub const Embedding = struct {
     weight: *Tensor,        // 嵌入层权重矩阵表 (Shape: [vocab_size, embedding_dim])
     name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     /// 嵌入层初始化选项
     pub const Options = struct {
@@ -70,8 +71,22 @@ pub const Embedding = struct {
 
     /// 为嵌入层及权重张量设置人类可读的名称 (如传入 "wte"，自动设置 "wte.weight")
     pub fn setName(self: *Embedding, name: []const u8) void {
-        self.name = name;
-        self.weight.setNameFormatted("{s}.weight", .{name});
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
+    }
+
+    /// 使用格式化模板为嵌入层设置人类可读的名称 (如 "{s}.wte", parent_name)
+    pub fn setNameFormatted(self: *Embedding, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("embedding");
+        }
     }
 
     /// 获取嵌入层的人类可读名称
@@ -152,6 +167,8 @@ pub const KVCache = struct {
 pub const MLP = struct {
     c_fc: Linear,           // 升维投影层 (dim -> hidden_dim)
     c_proj: Linear,         // 降维投影层 (hidden_dim -> dim)
+    name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     /// 初始化 MLP 模块
     /// dim: 输入与输出隐藏维度
@@ -166,6 +183,30 @@ pub const MLP = struct {
             .c_fc = c_fc,
             .c_proj = c_proj,
         };
+    }
+
+    /// 为 MLP 模块及子层统一设置人类可读的名称 (自动设置 "{name}.c_fc" 与 "{name}.c_proj")
+    pub fn setName(self: *MLP, name: []const u8) void {
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.c_fc.setNameFormatted("{s}.c_fc", .{self.name.?});
+        self.c_proj.setNameFormatted("{s}.c_proj", .{self.name.?});
+    }
+
+    pub fn setNameFormatted(self: *MLP, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("mlp");
+        }
+    }
+
+    pub fn getName(self: *const MLP) ?[]const u8 {
+        return self.name;
     }
 
     /// 释放子层的所有内存资源
@@ -254,6 +295,8 @@ pub const SwiGLU = struct {
     w_gate: Linear,         // 门控投影层 (dim -> hidden_dim)
     w_up: Linear,           // 升维投影层 (dim -> hidden_dim)
     w_down: Linear,         // 降维投影层 (hidden_dim -> dim)
+    name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize, random: std.Random) !SwiGLU {
         const w_gate = try Linear.init(allocator, dim, hidden_dim, random);
@@ -268,6 +311,31 @@ pub const SwiGLU = struct {
             .w_up = w_up,
             .w_down = w_down,
         };
+    }
+
+    /// 为 SwiGLU 模块及子层统一设置人类可读的名称 (自动设置 "{name}.w_gate", "{name}.w_up", "{name}.w_down")
+    pub fn setName(self: *SwiGLU, name: []const u8) void {
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.w_gate.setNameFormatted("{s}.w_gate", .{self.name.?});
+        self.w_up.setNameFormatted("{s}.w_up", .{self.name.?});
+        self.w_down.setNameFormatted("{s}.w_down", .{self.name.?});
+    }
+
+    pub fn setNameFormatted(self: *SwiGLU, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("swiglu");
+        }
+    }
+
+    pub fn getName(self: *const SwiGLU) ?[]const u8 {
+        return self.name;
     }
 
     pub fn deinit(self: SwiGLU, allocator: std.mem.Allocator) void {
@@ -628,6 +696,8 @@ pub const CausalSelfAttention = struct {
     n_head: usize,          // 注意力头数 (Query heads)
     n_embd: usize,          // 嵌入维度 (n_embd)
     num_kv_heads: usize,    // Key / Value 头数 (1 = MQA, < n_head = GQA, == n_head = MHA)
+    name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     /// 初始化支持分组查询注意力 (GQA / MQA / MHA) 的自注意力层
     /// n_embd: 隐藏嵌入维度，必须能被 n_head 整除
@@ -662,6 +732,32 @@ pub const CausalSelfAttention = struct {
     /// 初始化传统多头自注意力层 (MHA: num_kv_heads == n_head)
     pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !CausalSelfAttention {
         return initGQA(allocator, n_embd, n_head, n_head, random);
+    }
+
+    /// 为注意力层及 4 个线性投影子层统一设置人类可读的名称 (如 "{name}.q_attn", "{name}.c_proj")
+    pub fn setName(self: *CausalSelfAttention, name: []const u8) void {
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.q_attn.setNameFormatted("{s}.q_attn", .{self.name.?});
+        self.k_attn.setNameFormatted("{s}.k_attn", .{self.name.?});
+        self.v_attn.setNameFormatted("{s}.v_attn", .{self.name.?});
+        self.c_proj.setNameFormatted("{s}.c_proj", .{self.name.?});
+    }
+
+    pub fn setNameFormatted(self: *CausalSelfAttention, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("attn");
+        }
+    }
+
+    pub fn getName(self: *const CausalSelfAttention) ?[]const u8 {
+        return self.name;
     }
 
     /// 释放所有线性投射子层的内存资源
@@ -1360,6 +1456,8 @@ pub const TransformerBlock = struct {
     attn: CausalSelfAttention, // 因果自注意力机制层
     ln_2: RMSNorm,          // 第二层归一化层，在 MLP 计算前执行
     mlp: MLP,               // 前馈多层感知机层
+    name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     /// 初始化 Transformer 块
     /// n_embd: 隐藏特征特征维度
@@ -1380,6 +1478,32 @@ pub const TransformerBlock = struct {
             .ln_2 = ln_2,
             .mlp = mlp,
         };
+    }
+
+    /// 为 Transformer Block 及内部各子层统一设置分层名称 (自动递归设置 ln_1, attn, ln_2, mlp)
+    pub fn setName(self: *TransformerBlock, name: []const u8) void {
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.ln_1.setNameFormatted("{s}.ln_1", .{self.name.?});
+        self.attn.setNameFormatted("{s}.attn", .{self.name.?});
+        self.ln_2.setNameFormatted("{s}.ln_2", .{self.name.?});
+        self.mlp.setNameFormatted("{s}.mlp", .{self.name.?});
+    }
+
+    pub fn setNameFormatted(self: *TransformerBlock, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("block");
+        }
+    }
+
+    pub fn getName(self: *const TransformerBlock) ?[]const u8 {
+        return self.name;
     }
 
     /// 释放所有内部子层的资源

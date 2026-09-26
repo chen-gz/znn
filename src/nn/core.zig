@@ -52,6 +52,7 @@ pub const Linear = struct {
     weight: *Tensor,
     bias: *Tensor,
     name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     /// 构造线性层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize, random_opt: anytype) !Linear {
@@ -102,9 +103,23 @@ pub const Linear = struct {
 
     /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "fc1"，自动设置 "fc1.weight" 与 "fc1.bias")
     pub fn setName(self: *Linear, name: []const u8) void {
-        self.name = name;
-        self.weight.setNameFormatted("{s}.weight", .{name});
-        self.bias.setNameFormatted("{s}.bias", .{name});
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
+        self.bias.setNameFormatted("{s}.bias", .{self.name.?});
+    }
+
+    /// 使用格式化模板为层设置人类可读的名称 (如 "{s}.fc1", parent_name)
+    pub fn setNameFormatted(self: *Linear, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("linear");
+        }
     }
 
     /// 获取层的人类可读名称
@@ -136,6 +151,7 @@ pub const Conv2D = struct {
     weight: *Tensor,
     bias: *Tensor,
     name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     /// 构造卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random_opt: anytype) !Conv2D {
@@ -194,9 +210,23 @@ pub const Conv2D = struct {
 
     /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "conv1"，自动设置 "conv1.weight" 与 "conv1.bias")
     pub fn setName(self: *Conv2D, name: []const u8) void {
-        self.name = name;
-        self.weight.setNameFormatted("{s}.weight", .{name});
-        self.bias.setNameFormatted("{s}.bias", .{name});
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
+        self.bias.setNameFormatted("{s}.bias", .{self.name.?});
+    }
+
+    /// 使用格式化模板为层设置人类可读的名称 (如 "{s}.conv1", parent_name)
+    pub fn setNameFormatted(self: *Conv2D, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("conv2d");
+        }
     }
 
     /// 获取层的人类可读名称
@@ -231,6 +261,7 @@ pub const ConvTranspose2D = struct {
     weight: *Tensor,
     bias: ?*Tensor,
     name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
 
     /// 构造反卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(
@@ -322,9 +353,23 @@ pub const ConvTranspose2D = struct {
 
     /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "deconv1"，自动设置 "deconv1.weight" 与 "deconv1.bias")
     pub fn setName(self: *ConvTranspose2D, name: []const u8) void {
-        self.name = name;
-        self.weight.setNameFormatted("{s}.weight", .{name});
-        if (self.bias) |b| b.setNameFormatted("{s}.bias", .{name});
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
+        if (self.bias) |b| b.setNameFormatted("{s}.bias", .{self.name.?});
+    }
+
+    /// 使用格式化模板为层设置人类可读的名称 (如 "{s}.deconv1", parent_name)
+    pub fn setNameFormatted(self: *ConvTranspose2D, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("deconv2d");
+        }
     }
 
     /// 获取层的人类可读名称

@@ -3412,6 +3412,18 @@ pub const Graph = struct {
         std.debug.print("{s}", .{report});
     }
 
+    /// 将计算图结构与各层初始化详情格式化为可交互、层级展开的 HTML 网页文档
+    pub fn formatHtmlReport(self: *Graph, allocator: std.mem.Allocator) ![]const u8 {
+        const vis = @import("nn/visualization.zig");
+        return vis.generateHtmlReport(self, allocator);
+    }
+
+    /// 将计算图结构与各层初始化详情输出并保存为独立的 HTML 报告文件 (如 "report.html")
+    pub fn exportHtmlReport(self: *Graph, file_path: []const u8) !void {
+        const vis = @import("nn/visualization.zig");
+        try vis.exportHtmlReport(self, file_path, self.backing_allocator);
+    }
+
     fn appendSingleTensorReport(
         self: *Graph,
         t: *Tensor,
