@@ -51,15 +51,24 @@ pub const Graph = struct {
             return form;
         }
 
-        // 2. 匹配子路径的前缀 (例如 "gpt.wte.sub" -> 继承 "gpt.wte")
+        // 2. 匹配子路径的最长前缀 (例如 "gpt.layers.0.output" -> 优先继承更长的 "gpt.layers.0" 而非根路径 "gpt")
+        var best_prefix_match: ?[]const u8 = null;
+        var best_prefix_len: usize = 0;
         var it = self.module_formulas.iterator();
         while (it.next()) |entry| {
-            if (module_path.len > entry.key_ptr.len and
+            const k_len = entry.key_ptr.len;
+            if (module_path.len > k_len and
                 std.mem.startsWith(u8, module_path, entry.key_ptr.*) and
-                module_path[entry.key_ptr.len] == '.')
+                module_path[k_len] == '.')
             {
-                return entry.value_ptr.*;
+                if (k_len > best_prefix_len) {
+                    best_prefix_len = k_len;
+                    best_prefix_match = entry.value_ptr.*;
+                }
             }
+        }
+        if (best_prefix_match) |form| {
+            return form;
         }
 
         // 3. 检查计算图中的算子 (Ops) 是否有输出匹配该模块名称
