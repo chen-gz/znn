@@ -1259,6 +1259,27 @@ tr:hover td {
   border-color: #fbbf24;
 }
 
+/* Modal Submodule Flowchart Container */
+.submod-flow-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 0 16px 0;
+}
+
+.submod-flow-container .flow-card-linear {
+  max-width: 580px;
+  width: 100%;
+}
+
+.submod-flow-container .flow-stage-parallel {
+  max-width: 720px;
+  width: 100%;
+}
+
 footer {
   margin-top: 36px;
   text-align: center;
@@ -1740,26 +1761,7 @@ function openInspector(key, initialTab = 'overview') {
 
   let submodulesHtml = '<div class="insp-section"><div class="insp-section-title"><span>📁 Direct Submodules & Internal Hierarchy</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">' + subModulesMap.size + ' Submodules</span></div>';
   if (subModulesMap.size > 0) {
-    submodulesHtml += '<div class="submod-grid">';
-    subModulesMap.forEach(sub => {
-      const subOp = getNodeOpType(sub.fullPath);
-      submodulesHtml += `
-        <div class="submod-card" onclick="openInspector('${sub.fullPath}')">
-          <div class="submod-card-header">
-            <div class="submod-card-title">
-              <span class="tb-op-icon ${subOp.cls}">${subOp.icon}</span>
-              <span>${sub.name}</span>
-            </div>
-            <span class="badge badge-op">${subOp.type.split('/')[0].trim()}</span>
-          </div>
-          <div class="submod-card-meta">
-            <span>${sub.params > 0 ? `⚙️ ${formatNumber(sub.params)} params` : '⚡ Stateless'}</span>
-            <span style="color:#38bdf8;">Explore ➔</span>
-          </div>
-        </div>
-      `;
-    });
-    submodulesHtml += '</div>';
+    submodulesHtml += renderSubmoduleFlowHtml(key, Array.from(subModulesMap.values()), matchedNodes, matchedOps);
   } else {
     submodulesHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">This node is a leaf operation or has no children.</div>';
   }
@@ -1827,6 +1829,378 @@ document.addEventListener('keydown', (e) => {
     if (modal) modal.classList.remove('open');
   }
 });
+
+// ---------------------------------------------------------------------------
+// 4.1 Internal Submodules DAG Flowchart Renderer (Matches Main Architecture DAG)
+// ---------------------------------------------------------------------------
+
+function renderSubmoduleFlowHtml(parentKey, submodulesList, matchedNodes, matchedOps) {
+  if (!submodulesList || submodulesList.length === 0) {
+    return '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">No submodules present.</div>';
+  }
+
+  // Map of submodule fullPath -> sub object
+  const subMap = new Map();
+  submodulesList.forEach(s => subMap.set(s.fullPath, s));
+
+  // Determine connections among direct submodules
+  // Check EDGES_DATA for direct connections or connections via internal operations
+  const subEdges = [];
+  const edgeKeysSeen = new Set();
+
+  EDGES_DATA.forEach(e => {
+    let fromSub = null;
+    let toSub = null;
+
+    if (subMap.has(e.from)) {
+      fromSub = e.from;
+    } else if (e.from.startsWith(parentKey + '.')) {
+      const rest = e.from.slice(parentKey.length + 1).split('.')[0];
+      const candidate = `${parentKey}.${rest}`;
+      if (subMap.has(candidate)) fromSub = candidate;
+    }
+
+    if (subMap.has(e.to)) {
+      toSub = e.to;
+    } else if (e.to.startsWith(parentKey + '.')) {
+      const rest = e.to.slice(parentKey.length + 1).split('.')[0];
+      const candidate = `${parentKey}.${rest}`;
+      if (subMap.has(candidate)) toSub = candidate;
+    }
+
+    if (fromSub && toSub && fromSub !== toSub) {
+      const ek = `${fromSub}->${toSub}`;
+      if (!edgeKeysSeen.has(ek)) {
+        edgeKeysSeen.add(ek);
+        subEdges.push({
+          from: fromSub,
+          to: toSub,
+          shape: e.shape,
+          is_skip: e.is_skip
+        });
+      }
+    }
+  });
+
+  // Also check if any submodule (e.g. residual_attn, output) acts as a converge node with skip connections
+  const incoming = {};
+  const outgoing = {};
+  const inDegree = new Map();
+  submodulesList.forEach(s => {
+    incoming[s.fullPath] = [];
+    outgoing[s.fullPath] = [];
+    inDegree.set(s.fullPath, 0);
+  });
+
+  subEdges.forEach(e => {
+    if (incoming[e.to]) incoming[e.to].push(e);
+    if (outgoing[e.from]) outgoing[e.from].push(e);
+    inDegree.set(e.to, (inDegree.get(e.to) || 0) + 1);
+  });
+
+  // Kahn's algorithm for topological ordering if edges exist
+  let orderedSubmodules = [];
+  if (subEdges.length > 0) {
+    const queue = [];
+    inDegree.forEach((deg, node) => {
+      if (deg === 0) queue.push(node);
+    });
+
+    const tempInDegree = new Map(inDegree);
+    while (queue.length > 0) {
+      const u = queue.shift();
+      if (subMap.has(u)) orderedSubmodules.push(subMap.get(u));
+      const neighbors = outgoing[u] || [];
+      neighbors.forEach(e => {
+        const v = e.to;
+        tempInDegree.set(v, tempInDegree.get(v) - 1);
+        if (tempInDegree.get(v) === 0) {
+          queue.push(v);
+        }
+      });
+    }
+
+    // Append any remaining disconnected submodules in natural order
+    submodulesList.forEach(s => {
+      if (!orderedSubmodules.some(o => o.fullPath === s.fullPath)) {
+        orderedSubmodules.push(s);
+      }
+    });
+  } else {
+    // If no direct edges, check specific architectural patterns (e.g. Q, K, V parallel branches in Attention)
+    const isAttnContainer = submodulesList.some(s => s.name.startsWith('q_') || s.name.startsWith('k_') || s.name.startsWith('v_'));
+    if (isAttnContainer) {
+      const q = submodulesList.find(s => s.name.startsWith('q_'));
+      const k = submodulesList.find(s => s.name.startsWith('k_'));
+      const v = submodulesList.find(s => s.name.startsWith('v_'));
+      const proj = submodulesList.find(s => s.name.includes('proj'));
+      const others = submodulesList.filter(s => s !== q && s !== k && s !== v && s !== proj);
+
+      // Render parallel Q/K/V branches followed by Attention Core / Proj
+      let html = '<div class="submod-flow-container">';
+      html += `
+        <div class="flow-stage-parallel">
+          <div class="parallel-header">
+            <span>⚡ Multi-Head Projections (Parallel Q, K, V)</span>
+            <span class="flow-card-shape">${q && q.params > 0 ? `${formatNumber(q.params)} params each` : 'Parallel'}</span>
+          </div>
+          <div class="parallel-branches-row">
+      `;
+      [q, k, v].filter(Boolean).forEach((bSub, bIdx) => {
+        if (bIdx > 0) html += '<div class="branch-divider">|</div>';
+        const bOp = getNodeOpType(bSub.fullPath);
+        html += `
+          <div class="parallel-branch-col transform-branch" onclick="openInspector('${bSub.fullPath}')">
+            <span class="branch-badge transform">${bSub.name.toUpperCase()} Branch</span>
+            <div style="margin-top: 8px;">
+              <div class="flow-card-title">${bSub.name}</div>
+              <div style="font-size: 11px; color: #a5b4fc; margin-top: 4px;">${bOp.type}</div>
+              <div style="font-size: 11px; color: var(--text-sub); margin-top: 2px;">
+                ${bSub.params > 0 ? `⚙️ ${formatNumber(bSub.params)} params` : '⚡ Stateless'}
+              </div>
+              <div class="dag-card-actions">
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${bSub.fullPath}', 'overview')">📐 Formula</button>
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${bSub.fullPath}', 'submodules')">📁 Submodules</button>
+                ${bSub.params > 0 ? `<button class="dag-action-btn param-btn" onclick="event.stopPropagation(); openInspector('${bSub.fullPath}', 'params')">⚙️ Params</button>` : ''}
+              </div>
+            </div>
+          </div>
+        `;
+      });
+      html += `
+          </div>
+          <div class="converge-arrow-box">
+            <div class="flow-arrow-down">
+              <span class="flow-arrow-head">▼</span>
+              <span class="flow-arrow-label">🎯 Scaled Dot-Product Core: Softmax(Q·Kᵀ / √d)·V</span>
+            </div>
+          </div>
+        </div>
+      `;
+
+      if (proj) {
+        html += `
+          <div class="flow-arrow-down">
+            <div class="flow-arrow-line"></div>
+            <span class="flow-arrow-head">▼</span>
+          </div>
+        `;
+        const projOp = getNodeOpType(proj.fullPath);
+        html += `
+          <div class="flow-card flow-card-linear" onclick="openInspector('${proj.fullPath}')">
+            <div class="flow-card-header">
+              <span class="flow-card-title">${proj.name}</span>
+              <span class="flow-card-shape">${proj.params > 0 ? `${formatNumber(proj.params)} params` : 'Linear'}</span>
+            </div>
+            <div class="flow-card-body">
+              <span>${projOp.type} · Output Projection</span>
+              <div class="dag-card-actions" style="margin-top: 0;">
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${proj.fullPath}', 'overview')">📐 Formula</button>
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${proj.fullPath}', 'submodules')">📁 Submodules</button>
+                ${proj.params > 0 ? `<button class="dag-action-btn param-btn" onclick="event.stopPropagation(); openInspector('${proj.fullPath}', 'params')">⚙️ Params</button>` : ''}
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      others.forEach(oth => {
+        html += `
+          <div class="flow-arrow-down">
+            <div class="flow-arrow-line"></div>
+            <span class="flow-arrow-head">▼</span>
+          </div>
+        `;
+        const othOp = getNodeOpType(oth.fullPath);
+        html += `
+          <div class="flow-card flow-card-linear" onclick="openInspector('${oth.fullPath}')">
+            <div class="flow-card-header">
+              <span class="flow-card-title">${oth.name}</span>
+              <span class="flow-card-shape">${oth.params > 0 ? `${formatNumber(oth.params)} params` : 'Module'}</span>
+            </div>
+            <div class="flow-card-body">
+              <span>${othOp.type}</span>
+              <div class="dag-card-actions" style="margin-top: 0;">
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${oth.fullPath}', 'overview')">📐 Formula</button>
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${oth.fullPath}', 'submodules')">📁 Submodules</button>
+                ${oth.params > 0 ? `<button class="dag-action-btn param-btn" onclick="event.stopPropagation(); openInspector('${oth.fullPath}', 'params')">⚙️ Params</button>` : ''}
+              </div>
+            </div>
+          </div>
+        `;
+      });
+
+      html += '</div>';
+      return html;
+    }
+
+    // Default sequential ordering if no graph edges
+    orderedSubmodules = submodulesList.slice();
+  }
+
+  // Render orderedSubmodules into DAG Flow Pipeline
+  let html = '<div class="submod-flow-container">';
+  orderedSubmodules.forEach((sub, sIdx) => {
+    const inc = incoming[sub.fullPath] || [];
+    const hasSkip = inc.some(e => e.is_skip);
+    const isMultiBranch = inc.length > 1;
+    const subOp = getNodeOpType(sub.fullPath);
+
+    if (isMultiBranch && hasSkip) {
+      const skipEdge = inc.find(e => e.is_skip);
+      const transformEdge = inc.find(e => !e.is_skip);
+      const skipFrom = skipEdge ? skipEdge.from : sub.fullPath;
+      const transFrom = transformEdge ? transformEdge.from : sub.fullPath;
+      const skipSubName = skipFrom.split('.').pop();
+      const transSubName = transFrom.split('.').pop();
+
+      html += `
+        <div class="flow-stage-parallel">
+          <div class="parallel-header">
+            <span>Residual Connection · ${sub.name}</span>
+            <span class="flow-card-shape">${skipEdge ? skipEdge.shape : ''}</span>
+          </div>
+          <div class="parallel-branches-row">
+            <div class="parallel-branch-col skip-branch" onclick="openInspector('${skipFrom}')">
+              <span class="branch-badge skip">⚡ Shortcut (Skip)</span>
+              <div style="margin-top: 8px;">
+                <div class="flow-card-title">${skipSubName}</div>
+                <div style="font-size: 11px; color: #38bdf8; margin-top: 4px;">Direct Identity Highway</div>
+                <div style="font-size: 11px; color: var(--text-sub); margin-top: 2px;">Preserves gradient flow</div>
+                <div class="dag-card-actions">
+                  <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${skipFrom}', 'overview')">📐 Formula</button>
+                  <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${skipFrom}', 'submodules')">📁 Submodules</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="branch-divider">|</div>
+
+            <div class="parallel-branch-col transform-branch" onclick="openInspector('${transFrom}')">
+              <span class="branch-badge transform">⚙️ Transform Branch</span>
+              <div style="margin-top: 8px;">
+                <div class="flow-card-title">${transSubName}</div>
+                <div style="font-size: 11px; color: #a5b4fc; margin-top: 4px;">Layer Transform</div>
+                <div style="font-size: 11px; color: var(--text-sub); margin-top: 2px;">F(x) Feature Extraction</div>
+                <div class="dag-card-actions">
+                  <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${transFrom}', 'overview')">📐 Formula</button>
+                  <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${transFrom}', 'submodules')">📁 Submodules</button>
+                  <button class="dag-action-btn param-btn" onclick="event.stopPropagation(); openInspector('${transFrom}', 'params')">⚙️ Params</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="converge-arrow-box">
+            <div class="flow-arrow-down">
+              <span class="flow-arrow-head">▼</span>
+              <span class="flow-arrow-label">⊕ Element-wise Add (x + F(x))</span>
+            </div>
+            <div class="converge-card" onclick="openInspector('${sub.fullPath}')">
+              <div class="converge-title">
+                <span>⊕</span>
+                <span>${sub.name}</span>
+              </div>
+              <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">
+                Residual Sum Output · Shape: <span class="flow-card-shape">${skipEdge ? skipEdge.shape : ''}</span>
+              </div>
+              <div class="dag-card-actions" style="justify-content: center; margin-top: 6px;">
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${sub.fullPath}', 'overview')">📐 View Formula</button>
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${sub.fullPath}', 'submodules')">📁 View Submodules</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    } else if (isMultiBranch && !hasSkip) {
+      html += `
+        <div class="flow-stage-parallel">
+          <div class="parallel-header">
+            <span>Parallel Inputs · ${sub.name} Convergence</span>
+            <span class="flow-card-shape">${inc[0] ? inc[0].shape : ''}</span>
+          </div>
+          <div class="parallel-branches-row">
+      `;
+      inc.forEach((e, bIdx) => {
+        if (bIdx > 0) html += '<div class="branch-divider">|</div>';
+        const fromSubName = e.from.split('.').pop();
+        html += `
+          <div class="parallel-branch-col" onclick="openInspector('${e.from}')">
+            <span class="branch-badge transform">Branch ${bIdx + 1}</span>
+            <div style="margin-top: 8px;">
+              <div class="flow-card-title">${fromSubName}</div>
+              <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">Shape: ${e.shape || '-'}</div>
+              <div class="dag-card-actions">
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${e.from}', 'overview')">📐 Formula</button>
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${e.from}', 'submodules')">📁 Submodules</button>
+                <button class="dag-action-btn param-btn" onclick="event.stopPropagation(); openInspector('${e.from}', 'params')">⚙️ Params</button>
+              </div>
+            </div>
+          </div>
+        `;
+      });
+      html += `
+          </div>
+          <div class="converge-arrow-box">
+            <div class="flow-arrow-down">
+              <span class="flow-arrow-head">▼</span>
+              <span class="flow-arrow-label">⊕ Converge / Sum</span>
+            </div>
+            <div class="converge-card" onclick="openInspector('${sub.fullPath}')">
+              <div class="converge-title">
+                <span>⊕</span>
+                <span>${sub.name}</span>
+              </div>
+              <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">Combined Output</div>
+              <div class="dag-card-actions" style="justify-content: center; margin-top: 6px;">
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${sub.fullPath}', 'overview')">📐 View Formula</button>
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${sub.fullPath}', 'submodules')">📁 View Submodules</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    } else {
+      // Sequential Stage Card
+      const pCount = sub.params || 0;
+      const pMeta = pCount > 0 ? `${formatNumber(pCount)} params (${formatBytes(sub.bytes || 0)})` : '⚡ Stateless';
+      const edge = inc[0];
+      const shapeText = edge ? edge.shape : '';
+
+      html += `
+        <div class="flow-card flow-card-linear" onclick="openInspector('${sub.fullPath}')">
+          <div class="flow-card-header">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="tb-op-icon ${subOp.cls}">${subOp.icon}</span>
+              <span class="flow-card-title">${sub.name}</span>
+            </div>
+            ${shapeText ? `<span class="flow-card-shape">${shapeText}</span>` : `<span class="badge badge-op">${subOp.type.split('/')[0].trim()}</span>`}
+          </div>
+          <div class="flow-card-body">
+            <span>${pMeta}</span>
+            <div class="dag-card-actions" style="margin-top: 0;">
+              <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${sub.fullPath}', 'overview')">📐 Formula</button>
+              <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${sub.fullPath}', 'submodules')">📁 Submodules</button>
+              ${pCount > 0 ? `<button class="dag-action-btn param-btn" onclick="event.stopPropagation(); openInspector('${sub.fullPath}', 'params')">⚙️ Params</button>` : ''}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    if (sIdx < orderedSubmodules.length - 1) {
+      html += `
+        <div class="flow-arrow-down">
+          <div class="flow-arrow-line"></div>
+          <span class="flow-arrow-head">▼</span>
+        </div>
+      `;
+    }
+  });
+
+  html += '</div>';
+  return html;
+}
 
 // ---------------------------------------------------------------------------
 // 5. Dynamic DAG Flow & Skip Connection Architecture View

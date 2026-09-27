@@ -1244,6 +1244,27 @@ tr:hover td {
   border-color: #fbbf24;
 }
 
+/* Modal Submodule Flowchart Container */
+.submod-flow-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 0 16px 0;
+}
+
+.submod-flow-container .flow-card-linear {
+  max-width: 580px;
+  width: 100%;
+}
+
+.submod-flow-container .flow-stage-parallel {
+  max-width: 720px;
+  width: 100%;
+}
+
 footer {
   margin-top: 36px;
   text-align: center;
