@@ -44,6 +44,47 @@ pub const OpType = enum {
     SoftmaxCrossEntropy, // 结合 Softmax 与交叉熵损失（数值稳定性更好）
     L1Loss, // L1 正则化 / Lasso Loss: lambda * sum(|w|)
     L2Loss, // L2 正则化 / Ridge Loss: 0.5 * lambda * sum(w^2)
+
+    /// 算子内置的标准 LaTeX 数学表达式
+    pub fn getFormula(self: OpType) []const u8 {
+        return switch (self) {
+            .Add => "C = A + B",
+            .AddBias => "y = x + b",
+            .AddScalar => "y = x + c",
+            .Sub => "C = A - B",
+            .SubScalar => "y = x - c",
+            .Mul => "C = A \\odot B",
+            .MulScalar => "y = c \\cdot x",
+            .Div => "C = A \\oslash B",
+            .DivScalar => "y = \\frac{x}{c}",
+            .MatMul => "C = A \\cdot B",
+            .BatchMatMul => "C_{b, h} = A_{b, h} \\cdot B_{b, h}",
+            .Reshape => "y = \\text{reshape}(x, \\text{new\\_shape})",
+            .Transpose => "y = x^T",
+            .Concat => "y = [x_1, x_2, \\dots, x_k]",
+            .Split => "[y_1, y_2, \\dots, y_k] = \\text{split}(x)",
+            .RepeatKV => "y = \\text{repeat\\_kv}(x, \\text{groups})",
+            .Relu => "y = \\max(0, x)",
+            .LeakyRelu => "y = \\max(\\alpha x, x)",
+            .Gelu => "y = 0.5 x \\left(1 + \\text{erf}\\left(\\frac{x}{\\sqrt{2}}\\right)\\right)",
+            .Silu => "y = x \\cdot \\sigma(x)",
+            .Sigmoid => "y = \\frac{1}{1 + e^{-x}}",
+            .Tanh => "y = \\tanh(x) = \\frac{e^x - e^{-x}}{e^x + e^{-x}}",
+            .Softmax => "P_i = \\frac{e^{z_i - \\max(z)}}{\\sum_j e^{z_j - \\max(z)}}",
+            .Conv2D => "y = x \\ast W + b",
+            .ConvTranspose2D => "y = x \\ast_{\\text{deconv}} W + b",
+            .MaxPool2D => "y = \\max_{k \\times k}(x)",
+            .RmsNorm => "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+            .Embedding => "y = W_e[\\text{indices}]",
+            .MseLoss => "\\mathcal{L} = \\frac{1}{N} \\sum (y - \\hat{y})^2",
+            .BceLoss => "\\mathcal{L} = -\\frac{1}{N} \\sum [y \\log \\hat{y} + (1-y) \\log(1-\\hat{y})]",
+            .BceWithLogitsLoss => "\\mathcal{L} = \\max(x, 0) - x \\cdot y + \\log(1 + e^{-|x|})",
+            .SigmoidCrossEntropy => "\\mathcal{L} = \\max(x, 0) - x \\cdot y + \\log(1 + e^{-|x|})",
+            .SoftmaxCrossEntropy => "\\mathcal{L} = -\\log \\left( \\frac{e^{z_y}}{\\sum_j e^{z_j}} \\right)",
+            .L1Loss => "\\mathcal{L}_{\\text{reg}} = \\lambda \\sum |w|",
+            .L2Loss => "\\mathcal{L}_{\\text{reg}} = \\frac{1}{2} \\lambda \\sum w^2",
+        };
+    }
 };
 
 // 各算子反向传播所需的上下文信息（如 Softmax 的概率输出与 Target 类别）
