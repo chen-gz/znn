@@ -1622,6 +1622,7 @@ pub const TransformerBlock = struct {
         defer if (graph == null) tensor.free(allocator, x1);
         if (graph != null and self.name != null) {
             x1.setNameFormatted("{s}.residual_attn", .{self.name.?});
+            _ = graph.?.setModuleFormula(x1.name.?, "x_1 = x + \\text{Attention}(\\text{RMSNorm}(x))") catch {};
         }
 
         // 3. 第二条支路: RMSNorm -> MLP
@@ -1636,6 +1637,7 @@ pub const TransformerBlock = struct {
             const out = try g.add(x1, x_mlp);
             if (self.name) |mod_name| {
                 out.setNameFormatted("{s}.output", .{mod_name});
+                _ = g.setModuleFormula(out.name.?, "x_{l+1} = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))") catch {};
             }
             return out;
         } else {

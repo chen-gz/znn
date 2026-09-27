@@ -807,6 +807,10 @@ pub const graph_ir = struct {
 
         // 自动遍历所有节点，为尚未显式注册公式的模块和算子从图与内置库中推导并注入公式
         for (nodes.items) |node| {
+            if (!formulas.contains(node.name)) {
+                const inferred = graph.inferModuleFormula(node.name);
+                try formulas.put(try arena_alloc.dupe(u8, node.name), try arena_alloc.dupe(u8, inferred));
+            }
             if (extractModuleScope(node.name)) |scope| {
                 if (!formulas.contains(scope)) {
                     const inferred = graph.inferModuleFormula(scope);
@@ -818,6 +822,10 @@ pub const graph_ir = struct {
             if (!formulas.contains(op.module)) {
                 const inferred = graph.inferModuleFormula(op.module);
                 try formulas.put(try arena_alloc.dupe(u8, op.module), try arena_alloc.dupe(u8, inferred));
+            }
+            if (!formulas.contains(op.name)) {
+                const inferred = graph.inferModuleFormula(op.name);
+                try formulas.put(try arena_alloc.dupe(u8, op.name), try arena_alloc.dupe(u8, inferred));
             }
         }
 

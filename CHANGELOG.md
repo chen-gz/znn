@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.5] - 2026-09-27
+
+### Added
+- **DAG 架构流子模块钻取与参数检查抽屉 (`web/` & `src/nn/visualization/template.html`)**:
+  - 在 **Architecture & Skip Connections (DAG 流程视图)** 中为每个并行分支与顺序卡片添加快捷操作按钮（`📐 Formula`、`📁 Submodules`、`⚙️ Params`）。
+  - 在检查器 (Inspector) 模态窗口中引入多 Tab 导航结构：
+    - `[📐 Formula & Shapes]`: 呈现输入输出张量形状及精准推导/指定的数学公式。
+    - `[📁 Submodule Structure]`: 展示当前节点的所有下级子模块层级、参数统计并支持一键向下深入检查（Drill-down）。
+    - `[⚙️ Parameters]`: 独立展示该模块下的全部可训练参数矩阵、元素量、内存占用与初始化策略。
+
+### Fixed
+- **模块数学公式前缀匹配与残差节点公式错乱修复 (`src/autodiff/graph.zig`, `src/nn/transformer.zig`, `web/js/app.js`)**:
+  - 修复 `inferModuleFormula` 与前端 `getEffectiveFormula` 采用粗糙前缀匹配导致深层残差节点（如 `gpt.layers.0.output`）错误继承顶层 `gpt` 的 `logits = GPT(...)` 公式的问题。
+  - 改为基于**最长公共前缀匹配 (Longest Prefix Match)**，并在 `TransformerBlock` 前向传播中为残差节点 `residual_attn` 与 `output` 内置精准数学公式：
+    - `residual_attn`: $x_1 = x + \text{Attention}(\text{RMSNorm}(x))$
+    - `output`: $x_{l+1} = x_1 + \text{MLP}(\text{RMSNorm}(x_1))$
+  - 在 `visualization.zig` 中对图中的所有具名张量节点进行全量公式推导与缓存注入。
+
 ## [0.2.4] - 2026-09-26
 
 ### Added

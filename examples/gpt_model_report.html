@@ -1131,6 +1131,134 @@ tr:hover td {
   line-height: 1.4;
 }
 
+/* Inspector Tabs Header */
+.insp-tabs-bar {
+  display: flex;
+  background: #1e293b;
+  border-bottom: 1px solid #334155;
+  padding: 0 16px;
+  gap: 8px;
+}
+
+.insp-tab-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #94a3b8;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 10px 14px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s;
+}
+
+.insp-tab-btn:hover {
+  color: #f1f5f9;
+}
+
+.insp-tab-btn.active {
+  color: #38bdf8;
+  border-bottom-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.05);
+}
+
+.insp-tab-view {
+  display: none;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.insp-tab-view.active {
+  display: flex;
+}
+
+/* Submodule Structure Cards */
+.submod-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.submod-card {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.submod-card:hover {
+  border-color: #38bdf8;
+  box-shadow: 0 4px 12px rgba(56, 189, 248, 0.15);
+  transform: translateY(-1px);
+}
+
+.submod-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.submod-card-title {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: #f8fafc;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.submod-card-meta {
+  font-size: 11px;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* DAG Card Action Buttons */
+.dag-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.dag-action-btn {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid #334155;
+  border-radius: 5px;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s ease;
+}
+
+.dag-action-btn:hover {
+  background: #1e293b;
+  color: #38bdf8;
+  border-color: #38bdf8;
+}
+
+.dag-action-btn.param-btn:hover {
+  color: #fbbf24;
+  border-color: #fbbf24;
+}
+
 footer {
   margin-top: 36px;
   text-align: center;
@@ -1240,13 +1368,17 @@ footer {
       </div>
       <button class="inspector-close-btn" onclick="closeInspector()">&times;</button>
     </div>
+    <div class="insp-tabs-bar">
+      <button class="insp-tab-btn active" id="btn-insp-overview" onclick="switchInspectorTab('overview')">📐 Formula & Shapes</button>
+      <button class="insp-tab-btn" id="btn-insp-submodules" onclick="switchInspectorTab('submodules')">📁 Submodule Structure</button>
+      <button class="insp-tab-btn" id="btn-insp-params" onclick="switchInspectorTab('params')">⚙️ Parameters (<span id="insp-tab-param-count">0</span>)</button>
+    </div>
     <div class="inspector-body" id="insp-body"></div>
   </div>
 </div>
 
 <!-- Optional embedded JSON hook for single-file self-contained bundle -->
-<script id="znn-model-graph-data" type="application/json">
-{
+<script id="znn-model-graph-data" type="application/json">{
   "version": "1.0",
   "summary": { "total_params": 134848, "total_bytes": 1432576, "param_nodes": 33, "input_nodes": 4, "activation_nodes": 80, "custom_init_count": 28, "auto_graph_count": 5, "total_nodes": 117},
   "root": {"name": "root","path": "","kind": "module","total_params": 134848,"total_bytes": 1432576,"param_count": 0,"node_count": 117,"children": [{"name": "gpt","path": "gpt","kind": "module","total_params": 134848,"total_bytes": 1399680,"param_count": 0,"node_count": 115,"children": [{"name": "wte","path": "gpt.wte","kind": "module","total_params": 16384,"total_bytes": 73728,"param_count": 1,"node_count": 2,"children": [],"nodes": [{"name": "gpt.wte.weight","kind": "Param","shape": "[256, 64]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.wte.act_Embedding_0","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Embedding","strategy": "produced by Embedding"}]},{"name": "wpe","path": "gpt.wpe","kind": "module","total_params": 2048,"total_bytes": 16512,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.wpe.weight","kind": "Param","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.wpe.pos_indices","kind": "Input","shape": "[2, 16]","elements": 32,"bytes": 128,"status": "INPUT","act": "N/A","strategy": "user input / constant"},{"name": "gpt.wpe.act_Embedding_1","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Embedding","strategy": "produced by Embedding"}]},{"name": "layers","path": "gpt.layers","kind": "module","total_params": 99776,"total_bytes": 1169152,"param_count": 0,"node_count": 105,"children": [{"name": "0","path": "gpt.layers.0","kind": "module","total_params": 49856,"total_bytes": 576256,"param_count": 0,"node_count": 51,"children": [{"name": "ln_1","path": "gpt.layers.0.ln_1","kind": "module","total_params": 64,"total_bytes": 16640,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.0.ln_1.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.0.ln_1.act_RmsNorm_3","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.0.ln_1.act_Reshape_4","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "attn","path": "gpt.layers.0.attn","kind": "module","total_params": 16640,"total_bytes": 271360,"param_count": 0,"node_count": 33,"children": [{"name": "q_attn","path": "gpt.layers.0.attn.q_attn","kind": "module","total_params": 4160,"total_bytes": 49408,"param_count": 2,"node_count": 6,"children": [],"nodes": [{"name": "gpt.layers.0.attn.q_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.q_attn.act_MatMul_5","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.q_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.q_attn.act_Add_6","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.q_attn.act_Reshape_11","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.q_attn.act_Transpose_14","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "k_attn","path": "gpt.layers.0.attn.k_attn","kind": "module","total_params": 4160,"total_bytes": 57600,"param_count": 2,"node_count": 7,"children": [],"nodes": [{"name": "gpt.layers.0.attn.k_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.k_attn.act_MatMul_7","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.k_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.k_attn.act_Add_8","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.k_attn.act_Reshape_12","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.k_attn.act_Transpose_15","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"},{"name": "gpt.layers.0.attn.k_attn.act_Transpose_17","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "v_attn","path": "gpt.layers.0.attn.v_attn","kind": "module","total_params": 4160,"total_bytes": 49408,"param_count": 2,"node_count": 6,"children": [],"nodes": [{"name": "gpt.layers.0.attn.v_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.v_attn.act_MatMul_9","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.v_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.v_attn.act_Add_10","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.v_attn.act_Reshape_13","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.v_attn.act_Transpose_16","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "c_proj","path": "gpt.layers.0.attn.c_proj","kind": "module","total_params": 4160,"total_bytes": 41216,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.0.attn.c_proj.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.c_proj.act_MatMul_26","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.attn.c_proj.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.attn.c_proj.act_Add_27","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.c_proj.act_Reshape_28","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": [{"name": "gpt.layers.0.attn.act_BatchMatMul_18","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "BatchMatMul","strategy": "produced by BatchMatMul"},{"name": "gpt.layers.0.attn.act_MulScalar_19","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MulScalar","strategy": "produced by MulScalar"},{"name": "gpt.layers.0.attn.causal_mask","kind": "Input","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "INPUT","act": "N/A","strategy": "user input / constant"},{"name": "gpt.layers.0.attn.act_Add_20","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.attn.act_Softmax_21","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Softmax","strategy": "produced by Softmax"},{"name": "gpt.layers.0.attn.act_BatchMatMul_22","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "BatchMatMul","strategy": "produced by BatchMatMul"},{"name": "gpt.layers.0.attn.act_Transpose_23","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"},{"name": "gpt.layers.0.attn.act_Reshape_24","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.0.attn.act_Reshape_25","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "ln_2","path": "gpt.layers.0.ln_2","kind": "module","total_params": 64,"total_bytes": 16640,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.0.ln_2.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.0.ln_2.act_RmsNorm_30","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.0.ln_2.act_Reshape_31","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "mlp","path": "gpt.layers.0.mlp","kind": "module","total_params": 33088,"total_bytes": 255232,"param_count": 0,"node_count": 10,"children": [{"name": "c_fc","path": "gpt.layers.0.mlp.c_fc","kind": "module","total_params": 16640,"total_bytes": 164864,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.0.mlp.c_fc.weight","kind": "Param","shape": "[64, 256]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_fc.act_MatMul_32","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.mlp.c_fc.bias","kind": "Param","shape": "[1, 256]","elements": 256,"bytes": 1024,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_fc.act_Add_33","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.mlp.c_fc.act_Gelu_34","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Gelu","strategy": "produced by Gelu"}]},{"name": "c_proj","path": "gpt.layers.0.mlp.c_proj","kind": "module","total_params": 16448,"total_bytes": 90368,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.0.mlp.c_proj.weight","kind": "Param","shape": "[256, 64]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_proj.act_MatMul_35","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.0.mlp.c_proj.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.0.mlp.c_proj.act_Add_36","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.mlp.c_proj.act_Reshape_37","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": []}],"nodes": [{"name": "gpt.layers.0.residual_attn","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.0.output","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"}]},{"name": "1","path": "gpt.layers.1","kind": "module","total_params": 49856,"total_bytes": 576256,"param_count": 0,"node_count": 51,"children": [{"name": "ln_1","path": "gpt.layers.1.ln_1","kind": "module","total_params": 64,"total_bytes": 16640,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.1.ln_1.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.1.ln_1.act_RmsNorm_39","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.1.ln_1.act_Reshape_40","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "attn","path": "gpt.layers.1.attn","kind": "module","total_params": 16640,"total_bytes": 271360,"param_count": 0,"node_count": 33,"children": [{"name": "q_attn","path": "gpt.layers.1.attn.q_attn","kind": "module","total_params": 4160,"total_bytes": 49408,"param_count": 2,"node_count": 6,"children": [],"nodes": [{"name": "gpt.layers.1.attn.q_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.q_attn.act_MatMul_41","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.attn.q_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.q_attn.act_Add_42","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.attn.q_attn.act_Reshape_47","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.1.attn.q_attn.act_Transpose_50","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "k_attn","path": "gpt.layers.1.attn.k_attn","kind": "module","total_params": 4160,"total_bytes": 57600,"param_count": 2,"node_count": 7,"children": [],"nodes": [{"name": "gpt.layers.1.attn.k_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.k_attn.act_MatMul_43","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.attn.k_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.k_attn.act_Add_44","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.attn.k_attn.act_Reshape_48","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.1.attn.k_attn.act_Transpose_51","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"},{"name": "gpt.layers.1.attn.k_attn.act_Transpose_53","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "v_attn","path": "gpt.layers.1.attn.v_attn","kind": "module","total_params": 4160,"total_bytes": 49408,"param_count": 2,"node_count": 6,"children": [],"nodes": [{"name": "gpt.layers.1.attn.v_attn.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.v_attn.act_MatMul_45","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.attn.v_attn.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.v_attn.act_Add_46","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.attn.v_attn.act_Reshape_49","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.1.attn.v_attn.act_Transpose_52","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"}]},{"name": "c_proj","path": "gpt.layers.1.attn.c_proj","kind": "module","total_params": 4160,"total_bytes": 41216,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.1.attn.c_proj.weight","kind": "Param","shape": "[64, 64]","elements": 4096,"bytes": 16384,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.c_proj.act_MatMul_62","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.attn.c_proj.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.attn.c_proj.act_Add_63","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.attn.c_proj.act_Reshape_64","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": [{"name": "gpt.layers.1.attn.act_BatchMatMul_54","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "BatchMatMul","strategy": "produced by BatchMatMul"},{"name": "gpt.layers.1.attn.act_MulScalar_55","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MulScalar","strategy": "produced by MulScalar"},{"name": "gpt.layers.1.attn.causal_mask","kind": "Input","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "INPUT","act": "N/A","strategy": "user input / constant"},{"name": "gpt.layers.1.attn.act_Add_56","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.attn.act_Softmax_57","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Softmax","strategy": "produced by Softmax"},{"name": "gpt.layers.1.attn.act_BatchMatMul_58","kind": "Activation","shape": "[2, 4, 16, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "BatchMatMul","strategy": "produced by BatchMatMul"},{"name": "gpt.layers.1.attn.act_Transpose_59","kind": "Activation","shape": "[2, 16, 4, 16]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Transpose","strategy": "produced by Transpose"},{"name": "gpt.layers.1.attn.act_Reshape_60","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"},{"name": "gpt.layers.1.attn.act_Reshape_61","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "ln_2","path": "gpt.layers.1.ln_2","kind": "module","total_params": 64,"total_bytes": 16640,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.1.ln_2.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.1.ln_2.act_RmsNorm_66","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.1.ln_2.act_Reshape_67","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]},{"name": "mlp","path": "gpt.layers.1.mlp","kind": "module","total_params": 33088,"total_bytes": 255232,"param_count": 0,"node_count": 10,"children": [{"name": "c_fc","path": "gpt.layers.1.mlp.c_fc","kind": "module","total_params": 16640,"total_bytes": 164864,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.1.mlp.c_fc.weight","kind": "Param","shape": "[64, 256]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.mlp.c_fc.act_MatMul_68","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.mlp.c_fc.bias","kind": "Param","shape": "[1, 256]","elements": 256,"bytes": 1024,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.mlp.c_fc.act_Add_69","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.mlp.c_fc.act_Gelu_70","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Gelu","strategy": "produced by Gelu"}]},{"name": "c_proj","path": "gpt.layers.1.mlp.c_proj","kind": "module","total_params": 16448,"total_bytes": 90368,"param_count": 2,"node_count": 5,"children": [],"nodes": [{"name": "gpt.layers.1.mlp.c_proj.weight","kind": "Param","shape": "[256, 64]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.mlp.c_proj.act_MatMul_71","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.layers.1.mlp.c_proj.bias","kind": "Param","shape": "[1, 64]","elements": 64,"bytes": 256,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.layers.1.mlp.c_proj.act_Add_72","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.mlp.c_proj.act_Reshape_73","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": []}],"nodes": [{"name": "gpt.layers.1.residual_attn","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"},{"name": "gpt.layers.1.output","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"}]},{"name": "ln_f","path": "gpt.layers.ln_f","kind": "module","total_params": 64,"total_bytes": 16640,"param_count": 1,"node_count": 3,"children": [],"nodes": [{"name": "gpt.layers.ln_f.weight","kind": "Param","shape": "[64]","elements": 64,"bytes": 256,"status": "AUTO_GRAPH","act": "bias","strategy": "zeros (0.0)"},{"name": "gpt.layers.ln_f.act_RmsNorm_75","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "RmsNorm","strategy": "produced by RmsNorm"},{"name": "gpt.layers.ln_f.act_Reshape_76","kind": "Activation","shape": "[32, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": []},{"name": "lm_head","path": "gpt.lm_head","kind": "module","total_params": 16640,"total_bytes": 132096,"param_count": 2,"node_count": 4,"children": [],"nodes": [{"name": "gpt.lm_head.weight","kind": "Param","shape": "[64, 256]","elements": 16384,"bytes": 65536,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.lm_head.act_MatMul_77","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "MatMul","strategy": "produced by MatMul"},{"name": "gpt.lm_head.bias","kind": "Param","shape": "[1, 256]","elements": 256,"bytes": 1024,"status": "CUSTOM_INIT","act": "N/A","strategy": "user-defined customInit"},{"name": "gpt.lm_head.act_Add_78","kind": "Activation","shape": "[32, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"}]}],"nodes": [{"name": "gpt.embeddings_sum","kind": "Activation","shape": "[2, 16, 64]","elements": 2048,"bytes": 8192,"status": "OP_OUTPUT","act": "Add","strategy": "produced by Add"}]},{"name": "inputs","path": "inputs","kind": "module","total_params": 0,"total_bytes": 128,"param_count": 0,"node_count": 1,"children": [],"nodes": [{"name": "inputs.token_ids","kind": "Input","shape": "[2, 16]","elements": 32,"bytes": 128,"status": "INPUT","act": "N/A","strategy": "user input / constant"}]},{"name": "outputs","path": "outputs","kind": "module","total_params": 0,"total_bytes": 32768,"param_count": 0,"node_count": 1,"children": [],"nodes": [{"name": "outputs.logits","kind": "Activation","shape": "[2, 16, 256]","elements": 8192,"bytes": 32768,"status": "OP_OUTPUT","act": "Reshape","strategy": "produced by Reshape"}]}],"nodes": []},
@@ -1473,72 +1605,305 @@ footer {
     {"op_type": "Reshape", "name": "outputs.logits", "module": "outputs", "input_shape": "[32, 256]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 256]", "elements": 8192, "bytes": 32768}
   ],
   "formulas": {
-    "gpt.layers.1.mlp.c_fc": "y = x W^T + b",
+    "gpt.layers.1.ln_2.act_Reshape_67": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.1.attn.c_proj": "y = x W^T + b",
+    "gpt.layers.0.attn.v_attn.weight": "y = x W^T + b",
+
+    "gpt.layers.0.mlp.c_fc.act_Gelu_34": "y = x W^T + b",
+
+    "gpt.layers.0.attn.q_attn.weight": "y = x W^T + b",
+
+    "gpt.layers.1.attn.c_proj.act_Add_63": "y = x W^T + b",
+
+    "gpt.layers.0.attn.q_attn.act_MatMul_5": "y = x W^T + b",
 
     "gpt.layers.0.ln_2": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "outputs": "y = \\text{reshape}(x, \\text{new\\_shape})",
+    "gpt.layers.1.mlp.c_fc.act_Gelu_70": "y = x W^T + b",
+
+    "gpt.wpe.act_Embedding_1": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
+
+    "gpt.layers.0.attn.v_attn.act_Transpose_16": "y = x W^T + b",
+
+    "gpt": "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]",
+
+    "gpt.layers.1.mlp.c_fc.act_Add_69": "y = x W^T + b",
+
+    "gpt.layers.0.attn.q_attn.act_Transpose_14": "y = x W^T + b",
+
+    "inputs": "y = f(x; \\theta)",
+
+    "gpt.layers.1.attn.q_attn": "y = x W^T + b",
+
+    "gpt.layers.1.attn.q_attn.act_Transpose_50": "y = x W^T + b",
+
+    "gpt.layers.1.attn.k_attn.act_Transpose_51": "y = x W^T + b",
+
+    "gpt.layers.0.ln_2.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.attn.k_attn.act_Transpose_17": "y = x W^T + b",
+
+    "gpt.layers.1.ln_1.act_RmsNorm_39": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.1.attn.act_BatchMatMul_58": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.1.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}",
+
+    "gpt.layers.0.attn.act_BatchMatMul_22": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.ln_f.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.lm_head.act_MatMul_77": "y = x W^T + b",
+
+    "gpt.layers.1.attn.k_attn": "y = x W^T + b",
+
+    "gpt.layers.0.attn.act_MulScalar_19": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.ln_f.act_RmsNorm_75": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.ln_2.act_Reshape_31": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.1.attn.act_Reshape_60": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.0.attn.act_Reshape_24": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.1.mlp.c_fc.weight": "y = x W^T + b",
+
+    "gpt.layers.1.mlp.c_proj.act_Reshape_73": "y = x W^T + b",
+
+    "gpt.layers.1.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.0.attn.v_attn.act_Reshape_13": "y = x W^T + b",
+
+    "gpt.layers.0.mlp.c_proj.act_Reshape_37": "y = x W^T + b",
+
+    "gpt.layers.1.attn.q_attn.bias": "y = x W^T + b",
+
+    "gpt.layers.1.attn.v_attn": "y = x W^T + b",
+
+    "gpt.layers.0.attn.v_attn.act_Add_10": "y = x W^T + b",
+
+    "gpt.layers.0.ln_1.act_Reshape_4": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.attn.k_attn.act_Add_8": "y = x W^T + b",
+
+    "gpt.layers.0.mlp.c_proj.weight": "y = x W^T + b",
+
+    "gpt.layers.1.mlp.c_fc": "y = x W^T + b",
+
+    "gpt.layers.1.attn.k_attn.act_MatMul_43": "y = x W^T + b",
+
+    "gpt.embeddings_sum": "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]",
+
+    "gpt.layers.0.attn.k_attn.weight": "y = x W^T + b",
+
+    "gpt.layers.0.mlp.c_fc.act_Add_33": "y = x W^T + b",
+
+    "gpt.layers.1.ln_2": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.ln_f.act_Reshape_76": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.mlp.c_fc.weight": "y = x W^T + b",
+
+    "gpt.wpe.weight": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
+
+    "gpt.layers.1.attn.act_Transpose_59": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.0.attn.q_attn": "y = x W^T + b",
+
+    "gpt.layers.0.attn.act_Add_20": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.1.mlp.c_fc.act_MatMul_68": "y = x W^T + b",
+
+    "gpt.layers.1.output": "x_{l+1} = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
+
+    "gpt.lm_head.weight": "y = x W^T + b",
+
+    "gpt.layers.1.attn.q_attn.act_Add_42": "y = x W^T + b",
+
+    "gpt.layers.0.attn.q_attn.bias": "y = x W^T + b",
+
+    "outputs.logits": "y = \\text{reshape}(x, \\text{new\\_shape})",
+
+    "gpt.layers.0.ln_1.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.attn.c_proj.bias": "y = x W^T + b",
+
+    "gpt.layers.1.attn.k_attn.bias": "y = x W^T + b",
+
+    "gpt.layers.1.attn.causal_mask": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.lm_head": "y = x W^T + b",
+
+    "gpt.layers.1.attn.v_attn.act_Reshape_49": "y = x W^T + b",
+
+    "gpt.layers.1.attn.c_proj.bias": "y = x W^T + b",
+
+    "gpt.layers.1.mlp.c_proj.weight": "y = x W^T + b",
+
+    "gpt.layers.0.attn.v_attn.bias": "y = x W^T + b",
+
+    "gpt.layers.1.residual_attn": "x_1 = x + \\text{Attention}(\\text{RMSNorm}(x))",
+
+    "gpt.wte.weight": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
+
+    "gpt.layers.0.attn.act_Softmax_21": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.0.ln_2.act_RmsNorm_30": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.attn.k_attn.bias": "y = x W^T + b",
+
+    "gpt.layers.1.attn.k_attn.act_Reshape_48": "y = x W^T + b",
+
+    "gpt.layers.1.attn.q_attn.weight": "y = x W^T + b",
+
+    "gpt.layers.1.mlp.c_fc.bias": "y = x W^T + b",
+
+    "gpt.layers.1.mlp.c_proj.act_Add_72": "y = x W^T + b",
+
+    "gpt.layers.0.attn.c_proj.act_Add_27": "y = x W^T + b",
+
+    "gpt.layers.1.attn.q_attn.act_MatMul_41": "y = x W^T + b",
+
+    "gpt.layers.1.attn.v_attn.weight": "y = x W^T + b",
+
+    "gpt.layers.1.attn.c_proj.weight": "y = x W^T + b",
+
+    "gpt.layers.1.attn.act_MulScalar_55": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.1.attn.c_proj": "y = x W^T + b",
 
     "gpt.layers.0.attn.c_proj": "y = x W^T + b",
 
-    "gpt": "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]",
+    "gpt.layers.0.attn.c_proj.act_MatMul_26": "y = x W^T + b",
 
     "gpt.layers.0.attn.core": "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V",
 
     "gpt.wpe": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
 
-    "gpt.layers.1.ln_2": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+    "gpt.layers.1.ln_1.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.0.ln_1": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+    "gpt.layers.1.attn.v_attn.act_Transpose_52": "y = x W^T + b",
 
-    "gpt.layers.1.attn.q_attn": "y = x W^T + b",
+    "gpt.layers.1.ln_2.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.lm_head.bias": "y = x W^T + b",
 
     "gpt.layers.0.attn.k_attn": "y = x W^T + b",
 
-    "inputs": "y = f(x; \\theta)",
+    "gpt.layers.0.mlp.c_fc.bias": "y = x W^T + b",
+
+    "gpt.layers.1.attn.k_attn.act_Add_44": "y = x W^T + b",
 
     "gpt.layers.0.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
 
-    "gpt.layers.1.attn.core": "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V",
-
     "gpt.wte": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
 
-    "gpt.layers.0.attn.q_attn": "y = x W^T + b",
+    "gpt.layers.0.attn.act_Reshape_25": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
 
-    "gpt.layers.1.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}",
-
-    "gpt.layers.1.attn.k_attn": "y = x W^T + b",
+    "gpt.layers.0.attn.c_proj.act_Reshape_28": "y = x W^T + b",
 
     "gpt.layers.0.attn.v_attn": "y = x W^T + b",
+
+    "gpt.layers.0.attn.act_Transpose_23": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.1.attn.v_attn.act_MatMul_45": "y = x W^T + b",
+
+    "gpt.layers.0.mlp.c_proj.bias": "y = x W^T + b",
+
+    "gpt.layers.1": "x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
+
+    "gpt.layers.1.mlp.c_proj.bias": "y = x W^T + b",
+
+    "gpt.layers.ln_f": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.1.attn.act_Softmax_57": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.0.attn.q_attn.act_Add_6": "y = x W^T + b",
+
+    "gpt.layers.1.attn.v_attn.bias": "y = x W^T + b",
+
+    "gpt.layers.1.ln_2.act_RmsNorm_66": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers": "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)",
+
+    "gpt.layers.1.attn.c_proj.act_Reshape_64": "y = x W^T + b",
+
+    "gpt.layers.1.ln_1": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.ln_1.act_RmsNorm_3": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.attn.k_attn.act_Reshape_12": "y = x W^T + b",
+
+    "gpt.layers.0.attn.k_attn.act_Transpose_15": "y = x W^T + b",
+
+    "gpt.layers.0.mlp.c_fc": "y = x W^T + b",
+
+    "gpt.layers.1.attn.k_attn.act_Transpose_53": "y = x W^T + b",
+
+    "gpt.layers.0.attn.act_BatchMatMul_18": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.0.mlp.c_proj.act_MatMul_35": "y = x W^T + b",
+
+    "gpt.layers.0.output": "x_{l+1} = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
+
+    "gpt.layers.1.attn.act_Reshape_61": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.0.attn.q_attn.act_Reshape_11": "y = x W^T + b",
+
+    "gpt.lm_head.act_Add_78": "y = x W^T + b",
+
+    "gpt.wpe.pos_indices": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
+
+    "outputs": "y = \\text{reshape}(x, \\text{new\\_shape})",
+
+    "gpt.layers.1.attn.act_BatchMatMul_54": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "inputs.token_ids": "y = f(x; \\theta)",
+
+    "gpt.wte.act_Embedding_0": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
+
+    "gpt.layers.1.attn.q_attn.act_Reshape_47": "y = x W^T + b",
+
+    "gpt.layers.0.ln_1": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.residual_attn": "x_1 = x + \\text{Attention}(\\text{RMSNorm}(x))",
+
+    "gpt.layers.1.attn.v_attn.act_Add_46": "y = x W^T + b",
+
+    "gpt.layers.0.attn.c_proj.weight": "y = x W^T + b",
+
+    "gpt.layers.1.attn.core": "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V",
+
+    "gpt.layers.0.mlp.c_proj.act_Add_36": "y = x W^T + b",
+
+    "gpt.layers.1.attn.k_attn.weight": "y = x W^T + b",
+
+    "gpt.layers.1.mlp.c_proj.act_MatMul_71": "y = x W^T + b",
 
     "gpt.layers.0.mlp.c_proj": "y = x W^T + b",
 
     "gpt.layers.1.mlp.c_proj": "y = x W^T + b",
 
-    "gpt.layers.1": "x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
+    "gpt.layers.1.ln_1.act_Reshape_40": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.ln_f": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+    "gpt.layers.1.attn.act_Add_56": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
 
-    "gpt.lm_head": "y = x W^T + b",
+    "gpt.layers.0.attn.v_attn.act_MatMul_9": "y = x W^T + b",
 
-    "gpt.layers": "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)",
-
-    "gpt.layers.1.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
-
-    "gpt.layers.1.ln_1": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
-
-    "gpt.layers.1.attn.v_attn": "y = x W^T + b",
-
-    "gpt.layers.0.mlp.c_fc": "y = x W^T + b",
+    "gpt.layers.0.mlp.c_fc.act_MatMul_32": "y = x W^T + b",
 
     "gpt.layers.0": "x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
 
-    "gpt.layers.0.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}"
+    "gpt.layers.0.attn.k_attn.act_MatMul_7": "y = x W^T + b",
+
+    "gpt.layers.0.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}",
+
+    "gpt.layers.0.attn.causal_mask": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.1.attn.c_proj.act_MatMul_62": "y = x W^T + b"
   }
-}
-</script>
+}</script>
 
 <!-- Modular App Logic -->
 <script>
@@ -1657,11 +2022,20 @@ function getEffectiveFormula(key) {
   // 1. Exact match from JSON metadata (generated by Zig backend)
   if (FORMULAS_DATA[key]) return { formula: FORMULAS_DATA[key], source: 'CODE_SPECIFIED' };
 
-  // 2. Sub-path prefix inheritance (e.g. key is 'gpt.wte.sub', matches parent 'gpt.wte')
+  // 2. Sub-path prefix inheritance: find LONGEST matching parent prefix
+  // e.g. key is 'gpt.layers.0.output', should match 'gpt.layers.0' rather than 'gpt'
+  let bestParent = null;
+  let bestParentLen = 0;
   for (const parentKey in FORMULAS_DATA) {
     if (key.startsWith(parentKey + '.')) {
-      return { formula: FORMULAS_DATA[parentKey], source: 'INHERITED' };
+      if (parentKey.length > bestParentLen) {
+        bestParentLen = parentKey.length;
+        bestParent = parentKey;
+      }
     }
+  }
+  if (bestParent) {
+    return { formula: FORMULAS_DATA[bestParent], source: 'INHERITED' };
   }
 
   // 3. Match from Ops data directly
@@ -1677,7 +2051,21 @@ function getEffectiveFormula(key) {
 // 4. Modal Node Inspector
 // ---------------------------------------------------------------------------
 
-function openInspector(key) {
+let CURRENT_INSP_KEY = null;
+let CURRENT_INSP_TAB = 'overview';
+
+function switchInspectorTab(tab) {
+  CURRENT_INSP_TAB = tab;
+  ['overview', 'submodules', 'params'].forEach(t => {
+    const btn = document.getElementById('btn-insp-' + t);
+    const view = document.getElementById('insp-view-' + t);
+    if (btn) btn.classList.toggle('active', t === tab);
+    if (view) view.classList.toggle('active', t === tab);
+  });
+}
+
+function openInspector(key, initialTab = 'overview') {
+  CURRENT_INSP_KEY = key;
   const modal = document.getElementById('inspector-overlay');
   const titleEl = document.getElementById('insp-title');
   const subEl = document.getElementById('insp-subtitle');
@@ -1715,6 +2103,10 @@ function openInspector(key) {
 
   const paramStr = totalParams > 0 ? `${formatNumber(totalParams)} params (${formatBytes(totalBytes)})` : '0 params (Parameter-free)';
   if (subEl) subEl.textContent = `${opInfo.type} · ${paramStr}`;
+
+  // Update tab param badge
+  const tabParamCount = document.getElementById('insp-tab-param-count');
+  if (tabParamCount) tabParamCount.textContent = formatNumber(totalParams);
 
   // Input & Output Shape Resolution from real graph data
   const isRootModule = (!isAttentionCore && (key === 'gpt' || key === 'model' || !key.includes('.')));
@@ -1783,7 +2175,7 @@ function openInspector(key) {
     </div>
   `;
 
-  // Detailed Operation Table
+  // Operations Table
   let opsHtml = '';
   if (matchedOps.length > 0) {
     opsHtml = `
@@ -1822,22 +2214,7 @@ function openInspector(key) {
     opsHtml += '</tbody></table></div>';
   }
 
-  // Parameters Section
-  const paramNodes = matchedNodes.filter(n => n.kind === 'Param');
-  let paramsHtml = `<div class="insp-section"><div class="insp-section-title"><span>⚙️ Parameters</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">Total: ${formatNumber(totalParams)}</span></div>`;
-  if (paramNodes.length > 0) {
-    paramsHtml += '<table class="node-table"><thead><tr><th>Parameter Name</th><th>Shape</th><th>Elements</th><th>Memory</th><th>Init Strategy</th><th>Status</th></tr></thead><tbody>';
-    paramNodes.forEach(p => {
-      const statusBadge = p.status === 'CUSTOM_INIT' ? 'badge-custom' : 'badge-auto';
-      paramsHtml += `<tr><td class="node-name">${p.name}</td><td class="node-shape">${p.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(p.elements)}</td><td style="font-family:var(--font-mono);">${formatBytes(p.bytes)}</td><td class="strategy-col">${p.strategy}</td><td><span class="badge ${statusBadge}">${p.status}</span></td></tr>`;
-    });
-    paramsHtml += '</tbody></table>';
-  } else {
-    paramsHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">No trainable parameters (stateless / parameter-free operation).</div>';
-  }
-  paramsHtml += '</div>';
-
-  // Inbound Connections
+  // Inbound & Downstream Connections
   const incoming = isAttentionCore ? [] : EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.') || (key.startsWith(e.to) && e.to.length > 5));
   let inputsHtml = '<div class="insp-section"><div class="insp-section-title"><span>📥 Inbound Connections</span></div>';
   if (incoming.length > 0) {
@@ -1854,7 +2231,6 @@ function openInspector(key) {
   }
   inputsHtml += '</div>';
 
-  // Downstream Flow
   let outHtml = '';
   if (!isAttentionCore) {
     const outgoing = EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
@@ -1870,8 +2246,85 @@ function openInspector(key) {
     }
   }
 
-  bodyEl.innerHTML = ioBannerHtml + formulaHtml + opsHtml + paramsHtml + inputsHtml + outHtml;
+  // --- Submodules Structure Drill-down ---
+  const subModulesMap = new Map();
+  NODES_DATA.forEach(n => {
+    if (n.name.startsWith(key + '.')) {
+      const remainder = n.name.slice(key.length + 1);
+      const childPart = remainder.split('.')[0];
+      const childFullPath = `${key}.${childPart}`;
+      if (!subModulesMap.has(childFullPath)) {
+        subModulesMap.set(childFullPath, { name: childPart, fullPath: childFullPath, params: 0, bytes: 0, count: 0 });
+      }
+      const item = subModulesMap.get(childFullPath);
+      item.count++;
+      item.bytes += n.bytes;
+      if (n.kind === 'Param') item.params += n.elements;
+    }
+  });
+
+  let submodulesHtml = '<div class="insp-section"><div class="insp-section-title"><span>📁 Direct Submodules & Internal Hierarchy</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">' + subModulesMap.size + ' Submodules</span></div>';
+  if (subModulesMap.size > 0) {
+    submodulesHtml += '<div class="submod-grid">';
+    subModulesMap.forEach(sub => {
+      const subOp = getNodeOpType(sub.fullPath);
+      submodulesHtml += `
+        <div class="submod-card" onclick="openInspector('${sub.fullPath}')">
+          <div class="submod-card-header">
+            <div class="submod-card-title">
+              <span class="tb-op-icon ${subOp.cls}">${subOp.icon}</span>
+              <span>${sub.name}</span>
+            </div>
+            <span class="badge badge-op">${subOp.type.split('/')[0].trim()}</span>
+          </div>
+          <div class="submod-card-meta">
+            <span>${sub.params > 0 ? `⚙️ ${formatNumber(sub.params)} params` : '⚡ Stateless'}</span>
+            <span style="color:#38bdf8;">Explore ➔</span>
+          </div>
+        </div>
+      `;
+    });
+    submodulesHtml += '</div>';
+  } else {
+    submodulesHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">This node is a leaf operation or has no children.</div>';
+  }
+  submodulesHtml += '</div>';
+
+  // --- Parameters Dedicated Inspector Tab ---
+  const paramNodes = matchedNodes.filter(n => n.kind === 'Param');
+  let paramsHtml = `<div class="insp-section"><div class="insp-section-title"><span>⚙️ Parameter Matrix & Initialization Details</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">Total Elements: ${formatNumber(totalParams)} (${formatBytes(totalBytes)})</span></div>`;
+  if (paramNodes.length > 0) {
+    paramsHtml += '<table class="node-table"><thead><tr><th>Parameter Name</th><th>Shape</th><th>Elements</th><th>Memory</th><th>Init Strategy</th><th>Status</th></tr></thead><tbody>';
+    paramNodes.forEach(p => {
+      const statusBadge = p.status === 'CUSTOM_INIT' ? 'badge-custom' : 'badge-auto';
+      paramsHtml += `<tr><td class="node-name">${p.name}</td><td class="node-shape">${p.shape}</td><td style="font-family:var(--font-mono);">${formatNumber(p.elements)}</td><td style="font-family:var(--font-mono);">${formatBytes(p.bytes)}</td><td class="strategy-col">${p.strategy}</td><td><span class="badge ${statusBadge}">${p.status}</span></td></tr>`;
+    });
+    paramsHtml += '</tbody></table>';
+  } else {
+    paramsHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">No trainable parameters (stateless / parameter-free operation).</div>';
+  }
+  paramsHtml += '</div>';
+
+  // Compose 3 Tabs
+  bodyEl.innerHTML = `
+    <div id="insp-view-overview" class="insp-tab-view ${initialTab === 'overview' ? 'active' : ''}">
+      ${ioBannerHtml}
+      ${formulaHtml}
+      ${opsHtml}
+      ${inputsHtml}
+      ${outHtml}
+    </div>
+    <div id="insp-view-submodules" class="insp-tab-view ${initialTab === 'submodules' ? 'active' : ''}">
+      ${submodulesHtml}
+      ${opsHtml}
+    </div>
+    <div id="insp-view-params" class="insp-tab-view ${initialTab === 'params' ? 'active' : ''}">
+      ${paramsHtml}
+    </div>
+  `;
+
   modal.classList.add('open');
+  switchInspectorTab(initialTab);
 
   // KaTeX Formula Render
   try {
@@ -1978,6 +2431,8 @@ function renderDagView() {
       const blockLabel = isAttnBlock ? 'Residual Attention Sub-Layer' : 'Residual Feed-Forward Sub-Layer';
       const layerMatch = target.match(/layers\.(\d+)/);
       const layerNum = layerMatch ? `Layer ${layerMatch[1]}` : 'Block';
+      const skipFrom = skipEdge ? skipEdge.from : target;
+      const transFrom = transformEdge ? transformEdge.from : target;
 
       html += `
         <div class="flow-stage-parallel">
@@ -1986,23 +2441,32 @@ function renderDagView() {
             <span class="flow-card-shape">${skipEdge ? skipEdge.shape : ''}</span>
           </div>
           <div class="parallel-branches-row">
-            <div class="parallel-branch-col skip-branch" onclick="openInspector('${skipEdge ? skipEdge.from : target}')">
+            <div class="parallel-branch-col skip-branch" onclick="openInspector('${skipFrom}')">
               <span class="branch-badge skip">⚡ Shortcut (Skip)</span>
               <div style="margin-top: 8px;">
-                <div class="flow-card-title">${skipEdge ? skipEdge.from : 'Identity'}</div>
+                <div class="flow-card-title">${skipFrom}</div>
                 <div style="font-size: 11px; color: #38bdf8; margin-top: 4px;">Direct Identity Highway</div>
                 <div style="font-size: 11px; color: var(--text-sub); margin-top: 2px;">Preserves gradient highway (x)</div>
+                <div class="dag-card-actions">
+                  <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${skipFrom}', 'overview')">📐 Formula</button>
+                  <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${skipFrom}', 'submodules')">📁 Submodules</button>
+                </div>
               </div>
             </div>
 
             <div class="branch-divider">|</div>
 
-            <div class="parallel-branch-col transform-branch" onclick="openInspector('${transformEdge ? transformEdge.from : target}')">
+            <div class="parallel-branch-col transform-branch" onclick="openInspector('${transFrom}')">
               <span class="branch-badge transform">⚙️ Transform Branch</span>
               <div style="margin-top: 8px;">
-                <div class="flow-card-title">${transformEdge ? transformEdge.from : 'Sublayer'}</div>
+                <div class="flow-card-title">${transFrom}</div>
                 <div style="font-size: 11px; color: #a5b4fc; margin-top: 4px;">Norm + ${isAttnBlock ? 'Multi-Head Attention' : 'Feed-Forward'}</div>
                 <div style="font-size: 11px; color: var(--text-sub); margin-top: 2px;">F(x) Feature Extraction</div>
+                <div class="dag-card-actions">
+                  <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${transFrom}', 'overview')">📐 Formula</button>
+                  <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${transFrom}', 'submodules')">📁 Submodules</button>
+                  <button class="dag-action-btn param-btn" onclick="event.stopPropagation(); openInspector('${transFrom}', 'params')">⚙️ Params</button>
+                </div>
               </div>
             </div>
           </div>
@@ -2019,6 +2483,10 @@ function renderDagView() {
               </div>
               <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">
                 Residual Sum Output · Shape: <span class="flow-card-shape">${skipEdge ? skipEdge.shape : ''}</span>
+              </div>
+              <div class="dag-card-actions" style="justify-content: center; margin-top: 6px;">
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${target}', 'overview')">📐 View Formula</button>
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${target}', 'submodules')">📁 View Submodules</button>
               </div>
             </div>
           </div>
@@ -2042,6 +2510,11 @@ function renderDagView() {
             <div style="margin-top: 8px;">
               <div class="flow-card-title">${e.from}</div>
               <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">Shape: ${e.shape || '-'}</div>
+              <div class="dag-card-actions">
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${e.from}', 'overview')">📐 Formula</button>
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${e.from}', 'submodules')">📁 Submodules</button>
+                <button class="dag-action-btn param-btn" onclick="event.stopPropagation(); openInspector('${e.from}', 'params')">⚙️ Params</button>
+              </div>
             </div>
           </div>
         `;
@@ -2059,6 +2532,10 @@ function renderDagView() {
                 <span>${target}</span>
               </div>
               <div style="font-size: 11px; color: var(--text-sub); margin-top: 4px;">Combined Representation</div>
+              <div class="dag-card-actions" style="justify-content: center; margin-top: 6px;">
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${target}', 'overview')">📐 View Formula</button>
+                <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${target}', 'submodules')">📁 View Submodules</button>
+              </div>
             </div>
           </div>
         </div>
@@ -2078,7 +2555,11 @@ function renderDagView() {
           </div>
           <div class="flow-card-body">
             <span>${pMeta ? `⚙️ ${pMeta}` : 'Forward checkpoint'}</span>
-            <span style="font-size: 11px; color: #38bdf8;">Sequential</span>
+            <div class="dag-card-actions" style="margin-top: 0;">
+              <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${target}', 'overview')">📐 Formula</button>
+              <button class="dag-action-btn" onclick="event.stopPropagation(); openInspector('${target}', 'submodules')">📁 Submodules</button>
+              ${pCount > 0 ? `<button class="dag-action-btn param-btn" onclick="event.stopPropagation(); openInspector('${target}', 'params')">⚙️ Params</button>` : ''}
+            </div>
           </div>
         </div>
       `;
