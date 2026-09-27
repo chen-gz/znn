@@ -51,7 +51,19 @@ pub const Graph = struct {
             return form;
         }
 
-        // 2. 匹配子路径的最长前缀 (例如 "gpt.layers.0.output" -> 优先继承更长的 "gpt.layers.0" 而非根路径 "gpt")
+        // 2. 检查计算图中的具体算子 (Ops) 是否有输出精确匹配该节点名称
+        // （必须先于模块前缀继承，避免像 gpt.layers.0.attn.act_Add_20 被继承为 Attention 的全局公式）
+        for (self.ops.items) |op| {
+            if (op.outputs.len > 0) {
+                if (op.outputs[0].name) |out_name| {
+                    if (std.mem.eql(u8, out_name, module_path)) {
+                        return op.op_type.getFormula();
+                    }
+                }
+            }
+        }
+
+        // 3. 匹配子路径的最长前缀 (例如 "gpt.layers.0.output" -> 优先继承更长的 "gpt.layers.0" 而非根路径 "gpt")
         var best_prefix_match: ?[]const u8 = null;
         var best_prefix_len: usize = 0;
         var it = self.module_formulas.iterator();
@@ -69,19 +81,6 @@ pub const Graph = struct {
         }
         if (best_prefix_match) |form| {
             return form;
-        }
-
-        // 3. 检查计算图中的算子 (Ops) 是否有输出匹配该模块名称
-        for (self.ops.items) |op| {
-            if (op.outputs.len > 0) {
-                if (op.outputs[0].name) |out_name| {
-                    if (std.mem.eql(u8, out_name, module_path) or
-                        std.mem.startsWith(u8, out_name, module_path))
-                    {
-                        return op.op_type.getFormula();
-                    }
-                }
-            }
         }
 
         // 4. 根据常见模块名模式推导通用公式

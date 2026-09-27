@@ -974,6 +974,66 @@ tr:hover td {
   color: #38bdf8;
 }
 
+.insp-breadcrumb-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.insp-back-btn {
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid #38bdf8;
+  color: #38bdf8;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  transition: all 0.15s ease;
+}
+
+.insp-back-btn:hover {
+  background: #38bdf8;
+  color: #0f172a;
+}
+
+.insp-breadcrumb-item {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 3px;
+  transition: all 0.15s;
+}
+
+.insp-breadcrumb-item:hover {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.1);
+  text-decoration: underline;
+}
+
+.insp-breadcrumb-sep {
+  color: #475569;
+  font-size: 11px;
+}
+
+.insp-breadcrumb-item.current {
+  color: #e2e8f0;
+  font-weight: 600;
+  cursor: default;
+}
+
+.insp-breadcrumb-item.current:hover {
+  background: none;
+  text-decoration: none;
+}
+
 .inspector-subtitle {
   font-size: 12px;
   color: #94a3b8;
@@ -1383,6 +1443,7 @@ footer {
       <div class="inspector-title-box">
         <span class="inspector-icon" id="insp-icon">🔍</span>
         <div>
+          <div class="insp-breadcrumb-bar" id="insp-breadcrumb-bar"></div>
           <div class="inspector-title" id="insp-title">Node Inspector</div>
           <div class="inspector-subtitle" id="insp-subtitle">Detailed Inputs, Parameters & Activations</div>
         </div>
@@ -1626,121 +1687,147 @@ footer {
     {"op_type": "Reshape", "name": "outputs.logits", "module": "outputs", "input_shape": "[32, 256]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 256]", "elements": 8192, "bytes": 32768}
   ],
   "formulas": {
-    "gpt.layers.1.ln_2.act_Reshape_67": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+    "gpt.layers.1.attn.c_proj.act_MatMul_62": "C = A \\cdot B",
 
-    "gpt.layers.0.attn.v_attn.weight": "y = x W^T + b",
+    "gpt.layers.0.mlp.c_fc.act_Gelu_34": "y = 0.5 x \\left(1 + \\text{erf}\\left(\\frac{x}{\\sqrt{2}}\\right)\\right)",
 
-    "gpt.layers.0.mlp.c_fc.act_Gelu_34": "y = x W^T + b",
+    "gpt.layers.1.attn.c_proj.act_Add_63": "C = A + B",
+
+    "gpt.layers.1.ln_2.act_Reshape_67": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
     "gpt.layers.0.attn.q_attn.weight": "y = x W^T + b",
 
-    "gpt.layers.1.attn.c_proj.act_Add_63": "y = x W^T + b",
+    "gpt.layers.0.attn.v_attn.weight": "y = x W^T + b",
 
-    "gpt.layers.0.attn.q_attn.act_MatMul_5": "y = x W^T + b",
+    "gpt.layers.0.attn.causal_mask": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.0.attn.q_attn.act_MatMul_5": "C = A \\cdot B",
 
     "gpt.layers.0.ln_2": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.1.mlp.c_fc.act_Gelu_70": "y = x W^T + b",
+    "MatMul": "C = A \\cdot B",
 
-    "gpt.wpe.act_Embedding_1": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
+    "gpt.layers.1.mlp.c_fc.act_Gelu_70": "y = 0.5 x \\left(1 + \\text{erf}\\left(\\frac{x}{\\sqrt{2}}\\right)\\right)",
 
-    "gpt.layers.0.attn.v_attn.act_Transpose_16": "y = x W^T + b",
+    "gpt.wpe.act_Embedding_1": "y = W_e[\\text{indices}]",
+
+    "gpt.layers.0.attn.v_attn.act_Transpose_16": "y = x^T",
 
     "gpt": "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]",
 
-    "gpt.layers.1.mlp.c_fc.act_Add_69": "y = x W^T + b",
+    "gpt.layers.1.mlp.c_fc.act_Add_69": "C = A + B",
 
-    "gpt.layers.0.attn.q_attn.act_Transpose_14": "y = x W^T + b",
+    "Split": "[y_1, y_2, \\dots, y_k] = \\text{split}(x)",
 
-    "inputs": "y = f(x; \\theta)",
+    "gpt.layers.0.attn.q_attn.act_Transpose_14": "y = x^T",
 
     "gpt.layers.1.attn.q_attn": "y = x W^T + b",
 
-    "gpt.layers.1.attn.q_attn.act_Transpose_50": "y = x W^T + b",
+    "gpt.layers.1.attn.q_attn.act_Transpose_50": "y = x^T",
 
-    "gpt.layers.1.attn.k_attn.act_Transpose_51": "y = x W^T + b",
+    "gpt.layers.1.attn.k_attn.act_Transpose_51": "y = x^T",
 
-    "gpt.layers.0.ln_2.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+    "gpt.layers.1.attn.act_BatchMatMul_58": "C_{b, h} = A_{b, h} \\cdot B_{b, h}",
 
-    "gpt.layers.0.attn.k_attn.act_Transpose_17": "y = x W^T + b",
+    "gpt.layers.0.attn.k_attn.act_Transpose_17": "y = x^T",
 
     "gpt.layers.1.ln_1.act_RmsNorm_39": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.1.attn.act_BatchMatMul_58": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "Concat": "y = [x_1, x_2, \\dots, x_k]",
 
     "gpt.layers.1.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}",
 
-    "gpt.layers.0.attn.act_BatchMatMul_22": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "gpt.layers.0.attn.act_BatchMatMul_22": "C_{b, h} = A_{b, h} \\cdot B_{b, h}",
 
-    "gpt.layers.ln_f.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+    "gpt.lm_head.act_MatMul_77": "C = A \\cdot B",
 
-    "gpt.lm_head.act_MatMul_77": "y = x W^T + b",
+    "inputs": "y = f(x; \\theta)",
+
+    "gpt.layers.0.ln_2.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
     "gpt.layers.1.attn.k_attn": "y = x W^T + b",
 
-    "gpt.layers.0.attn.act_MulScalar_19": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "gpt.layers.0.attn.act_MulScalar_19": "y = c \\cdot x",
+
+    "SubScalar": "y = x - c",
+
+    "gpt.layers.ln_f.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
     "gpt.layers.ln_f.act_RmsNorm_75": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.0.ln_2.act_Reshape_31": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+    "gpt.layers.0.ln_2.act_Reshape_31": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
-    "gpt.layers.1.attn.act_Reshape_60": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "gpt.layers.1.attn.act_Reshape_60": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
-    "gpt.layers.0.attn.act_Reshape_24": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "RmsNorm": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.attn.act_Reshape_24": "y = \\text{reshape}(x, \\text{new\\_shape})",
+
+    "DivScalar": "y = \\frac{x}{c}",
 
     "gpt.layers.1.mlp.c_fc.weight": "y = x W^T + b",
 
-    "gpt.layers.1.mlp.c_proj.act_Reshape_73": "y = x W^T + b",
+    "gpt.layers.1.mlp.c_proj.act_Reshape_73": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
     "gpt.layers.1.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
 
-    "gpt.layers.0.attn.v_attn.act_Reshape_13": "y = x W^T + b",
+    "gpt.layers.0.attn.v_attn.act_Reshape_13": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
-    "gpt.layers.0.mlp.c_proj.act_Reshape_37": "y = x W^T + b",
+    "gpt.layers.0.mlp.c_proj.act_Reshape_37": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
     "gpt.layers.1.attn.q_attn.bias": "y = x W^T + b",
 
     "gpt.layers.1.attn.v_attn": "y = x W^T + b",
 
-    "gpt.layers.0.attn.v_attn.act_Add_10": "y = x W^T + b",
+    "gpt.layers.0.attn.v_attn.act_Add_10": "C = A + B",
 
-    "gpt.layers.0.ln_1.act_Reshape_4": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+    "gpt.layers.0.ln_1.act_Reshape_4": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
-    "gpt.layers.0.attn.k_attn.act_Add_8": "y = x W^T + b",
+    "BatchMatMul": "C_{b, h} = A_{b, h} \\cdot B_{b, h}",
 
-    "gpt.layers.0.mlp.c_proj.weight": "y = x W^T + b",
+    "gpt.layers.0.attn.k_attn.act_Add_8": "C = A + B",
 
     "gpt.layers.1.mlp.c_fc": "y = x W^T + b",
 
-    "gpt.layers.1.attn.k_attn.act_MatMul_43": "y = x W^T + b",
+    "MaxPool2D": "y = \\max_{k \\times k}(x)",
 
-    "gpt.embeddings_sum": "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]",
+    "gpt.layers.1.attn.k_attn.act_MatMul_43": "C = A \\cdot B",
 
-    "gpt.layers.0.attn.k_attn.weight": "y = x W^T + b",
+    "Relu": "y = \\max(0, x)",
 
-    "gpt.layers.0.mlp.c_fc.act_Add_33": "y = x W^T + b",
+    "gpt.layers.0.mlp.c_proj.weight": "y = x W^T + b",
+
+    "gpt.embeddings_sum": "C = A + B",
+
+    "gpt.layers.0.mlp.c_fc.act_Add_33": "C = A + B",
+
+    "Reshape": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
     "gpt.layers.1.ln_2": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.ln_f.act_Reshape_76": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+    "gpt.layers.0.attn.k_attn.weight": "y = x W^T + b",
+
+    "gpt.layers.ln_f.act_Reshape_76": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
     "gpt.layers.0.mlp.c_fc.weight": "y = x W^T + b",
 
-    "gpt.wpe.weight": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
+    "gpt.layers.1.attn.act_Transpose_59": "y = x^T",
 
-    "gpt.layers.1.attn.act_Transpose_59": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "gpt.wpe.weight": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
 
     "gpt.layers.0.attn.q_attn": "y = x W^T + b",
 
-    "gpt.layers.0.attn.act_Add_20": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "gpt.layers.0.attn.act_Add_20": "C = A + B",
 
-    "gpt.layers.1.mlp.c_fc.act_MatMul_68": "y = x W^T + b",
+    "gpt.layers.1.mlp.c_fc.act_MatMul_68": "C = A \\cdot B",
+
+    "AddBias": "y = x + b",
 
     "gpt.layers.1.output": "x_{l+1} = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
 
     "gpt.lm_head.weight": "y = x W^T + b",
 
-    "gpt.layers.1.attn.q_attn.act_Add_42": "y = x W^T + b",
+    "gpt.layers.1.attn.q_attn.act_Add_42": "C = A + B",
 
     "gpt.layers.0.attn.q_attn.bias": "y = x W^T + b",
 
@@ -1756,7 +1843,9 @@ footer {
 
     "gpt.lm_head": "y = x W^T + b",
 
-    "gpt.layers.1.attn.v_attn.act_Reshape_49": "y = x W^T + b",
+    "gpt.layers.1.attn.v_attn.act_Reshape_49": "y = \\text{reshape}(x, \\text{new\\_shape})",
+
+    "Transpose": "y = x^T",
 
     "gpt.layers.1.attn.c_proj.bias": "y = x W^T + b",
 
@@ -1766,69 +1855,87 @@ footer {
 
     "gpt.layers.1.residual_attn": "x_1 = x + \\text{Attention}(\\text{RMSNorm}(x))",
 
-    "gpt.wte.weight": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
+    "SoftmaxCrossEntropy": "\\mathcal{L} = -\\log \\left( \\frac{e^{z_y}}{\\sum_j e^{z_j}} \\right)",
 
-    "gpt.layers.0.attn.act_Softmax_21": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "gpt.layers.0.attn.act_Softmax_21": "P_i = \\frac{e^{z_i - \\max(z)}}{\\sum_j e^{z_j - \\max(z)}}",
 
     "gpt.layers.0.ln_2.act_RmsNorm_30": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
+    "gpt.layers.1.attn.k_attn.act_Reshape_48": "y = \\text{reshape}(x, \\text{new\\_shape})",
+
+    "gpt.wte.weight": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
+
+    "L2Loss": "\\mathcal{L}_{\\text{reg}} = \\frac{1}{2} \\lambda \\sum w^2",
+
     "gpt.layers.0.attn.k_attn.bias": "y = x W^T + b",
 
-    "gpt.layers.1.attn.k_attn.act_Reshape_48": "y = x W^T + b",
+    "gpt.layers.1.mlp.c_proj.act_Add_72": "C = A + B",
 
     "gpt.layers.1.attn.q_attn.weight": "y = x W^T + b",
 
     "gpt.layers.1.mlp.c_fc.bias": "y = x W^T + b",
 
-    "gpt.layers.1.mlp.c_proj.act_Add_72": "y = x W^T + b",
+    "gpt.layers.0.attn.c_proj.act_Add_27": "C = A + B",
 
-    "gpt.layers.0.attn.c_proj.act_Add_27": "y = x W^T + b",
+    "gpt.layers.1.attn.q_attn.act_MatMul_41": "C = A \\cdot B",
 
-    "gpt.layers.1.attn.q_attn.act_MatMul_41": "y = x W^T + b",
+    "Sub": "C = A - B",
 
     "gpt.layers.1.attn.v_attn.weight": "y = x W^T + b",
 
     "gpt.layers.1.attn.c_proj.weight": "y = x W^T + b",
 
-    "gpt.layers.1.attn.act_MulScalar_55": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "Gelu": "y = 0.5 x \\left(1 + \\text{erf}\\left(\\frac{x}{\\sqrt{2}}\\right)\\right)",
 
     "gpt.layers.1.attn.c_proj": "y = x W^T + b",
 
+    "LeakyRelu": "y = \\max(\\alpha x, x)",
+
+    "gpt.layers.1.attn.act_MulScalar_55": "y = c \\cdot x",
+
     "gpt.layers.0.attn.c_proj": "y = x W^T + b",
 
-    "gpt.layers.0.attn.c_proj.act_MatMul_26": "y = x W^T + b",
+    "gpt.layers.0.attn.c_proj.act_MatMul_26": "C = A \\cdot B",
 
     "gpt.layers.0.attn.core": "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V",
 
     "gpt.wpe": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
 
+    "gpt.layers.1.attn.v_attn.act_Transpose_52": "y = x^T",
+
     "gpt.layers.1.ln_1.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.1.attn.v_attn.act_Transpose_52": "y = x W^T + b",
+    "BceLoss": "\\mathcal{L} = -\\frac{1}{N} \\sum [y \\log \\hat{y} + (1-y) \\log(1-\\hat{y})]",
 
     "gpt.layers.1.ln_2.weight": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.lm_head.bias": "y = x W^T + b",
-
     "gpt.layers.0.attn.k_attn": "y = x W^T + b",
 
-    "gpt.layers.0.mlp.c_fc.bias": "y = x W^T + b",
+    "Add": "C = A + B",
 
-    "gpt.layers.1.attn.k_attn.act_Add_44": "y = x W^T + b",
+    "gpt.layers.1.attn.k_attn.act_Add_44": "C = A + B",
+
+    "gpt.layers.0.mlp.c_fc.bias": "y = x W^T + b",
 
     "gpt.layers.0.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
 
     "gpt.wte": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
 
-    "gpt.layers.0.attn.act_Reshape_25": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "AddScalar": "y = x + c",
 
-    "gpt.layers.0.attn.c_proj.act_Reshape_28": "y = x W^T + b",
+    "gpt.lm_head.bias": "y = x W^T + b",
+
+    "gpt.layers.0.attn.act_Reshape_25": "y = \\text{reshape}(x, \\text{new\\_shape})",
+
+    "Softmax": "P_i = \\frac{e^{z_i - \\max(z)}}{\\sum_j e^{z_j - \\max(z)}}",
+
+    "gpt.layers.0.attn.c_proj.act_Reshape_28": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
     "gpt.layers.0.attn.v_attn": "y = x W^T + b",
 
-    "gpt.layers.0.attn.act_Transpose_23": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "gpt.layers.0.attn.act_Transpose_23": "y = x^T",
 
-    "gpt.layers.1.attn.v_attn.act_MatMul_45": "y = x W^T + b",
+    "gpt.layers.1.attn.v_attn.act_MatMul_45": "C = A \\cdot B",
 
     "gpt.layers.0.mlp.c_proj.bias": "y = x W^T + b",
 
@@ -1838,9 +1945,9 @@ footer {
 
     "gpt.layers.ln_f": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.1.attn.act_Softmax_57": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "gpt.layers.1.attn.act_Softmax_57": "P_i = \\frac{e^{z_i - \\max(z)}}{\\sum_j e^{z_j - \\max(z)}}",
 
-    "gpt.layers.0.attn.q_attn.act_Add_6": "y = x W^T + b",
+    "gpt.layers.0.attn.q_attn.act_Add_6": "C = A + B",
 
     "gpt.layers.1.attn.v_attn.bias": "y = x W^T + b",
 
@@ -1848,81 +1955,105 @@ footer {
 
     "gpt.layers": "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)",
 
-    "gpt.layers.1.attn.c_proj.act_Reshape_64": "y = x W^T + b",
+    "RepeatKV": "y = \\text{repeat\\_kv}(x, \\text{groups})",
 
     "gpt.layers.1.ln_1": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
     "gpt.layers.0.ln_1.act_RmsNorm_3": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.0.attn.k_attn.act_Reshape_12": "y = x W^T + b",
+    "gpt.layers.0.attn.k_attn.act_Reshape_12": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
-    "gpt.layers.0.attn.k_attn.act_Transpose_15": "y = x W^T + b",
+    "gpt.layers.0.attn.k_attn.act_Transpose_15": "y = x^T",
+
+    "gpt.layers.1.attn.c_proj.act_Reshape_64": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
     "gpt.layers.0.mlp.c_fc": "y = x W^T + b",
 
-    "gpt.layers.1.attn.k_attn.act_Transpose_53": "y = x W^T + b",
+    "Div": "C = A \\oslash B",
 
-    "gpt.layers.0.attn.act_BatchMatMul_18": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "Tanh": "y = \\tanh(x) = \\frac{e^x - e^{-x}}{e^x + e^{-x}}",
 
-    "gpt.layers.0.mlp.c_proj.act_MatMul_35": "y = x W^T + b",
+    "gpt.layers.1.attn.k_attn.act_Transpose_53": "y = x^T",
+
+    "gpt.layers.0.attn.act_BatchMatMul_18": "C_{b, h} = A_{b, h} \\cdot B_{b, h}",
+
+    "gpt.layers.0.mlp.c_proj.act_MatMul_35": "C = A \\cdot B",
 
     "gpt.layers.0.output": "x_{l+1} = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
 
-    "gpt.layers.1.attn.act_Reshape_61": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "MseLoss": "\\mathcal{L} = \\frac{1}{N} \\sum (y - \\hat{y})^2",
 
-    "gpt.layers.0.attn.q_attn.act_Reshape_11": "y = x W^T + b",
+    "gpt.layers.1.attn.act_Reshape_61": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
-    "gpt.lm_head.act_Add_78": "y = x W^T + b",
+    "gpt.layers.0.attn.q_attn.act_Reshape_11": "y = \\text{reshape}(x, \\text{new\\_shape})",
+
+    "gpt.lm_head.act_Add_78": "C = A + B",
 
     "gpt.wpe.pos_indices": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
 
-    "outputs": "y = \\text{reshape}(x, \\text{new\\_shape})",
+    "outputs": "y = f(x; \\theta)",
 
-    "gpt.layers.1.attn.act_BatchMatMul_54": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "Conv2D": "y = x \\ast W + b",
+
+    "gpt.layers.1.attn.act_BatchMatMul_54": "C_{b, h} = A_{b, h} \\cdot B_{b, h}",
+
+    "gpt.layers.1.attn.q_attn.act_Reshape_47": "y = \\text{reshape}(x, \\text{new\\_shape})",
+
+    "gpt.wte.act_Embedding_0": "y = W_e[\\text{indices}]",
 
     "inputs.token_ids": "y = f(x; \\theta)",
 
-    "gpt.wte.act_Embedding_0": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
-
-    "gpt.layers.1.attn.q_attn.act_Reshape_47": "y = x W^T + b",
+    "Embedding": "y = W_e[\\text{indices}]",
 
     "gpt.layers.0.ln_1": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
     "gpt.layers.0.residual_attn": "x_1 = x + \\text{Attention}(\\text{RMSNorm}(x))",
 
-    "gpt.layers.1.attn.v_attn.act_Add_46": "y = x W^T + b",
+    "Sigmoid": "y = \\frac{1}{1 + e^{-x}}",
+
+    "L1Loss": "\\mathcal{L}_{\\text{reg}} = \\lambda \\sum |w|",
+
+    "gpt.layers.1.attn.v_attn.act_Add_46": "C = A + B",
 
     "gpt.layers.0.attn.c_proj.weight": "y = x W^T + b",
 
     "gpt.layers.1.attn.core": "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V",
 
-    "gpt.layers.0.mlp.c_proj.act_Add_36": "y = x W^T + b",
+    "Silu": "y = x \\cdot \\sigma(x)",
+
+    "gpt.layers.0.mlp.c_proj.act_Add_36": "C = A + B",
+
+    "ConvTranspose2D": "y = x \\ast_{\\text{deconv}} W + b",
+
+    "gpt.layers.1.mlp.c_proj.act_MatMul_71": "C = A \\cdot B",
 
     "gpt.layers.1.attn.k_attn.weight": "y = x W^T + b",
 
-    "gpt.layers.1.mlp.c_proj.act_MatMul_71": "y = x W^T + b",
+    "SigmoidCrossEntropy": "\\mathcal{L} = \\max(x, 0) - x \\cdot y + \\log(1 + e^{-|x|})",
 
     "gpt.layers.0.mlp.c_proj": "y = x W^T + b",
 
     "gpt.layers.1.mlp.c_proj": "y = x W^T + b",
 
-    "gpt.layers.1.ln_1.act_Reshape_40": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+    "BceWithLogitsLoss": "\\mathcal{L} = \\max(x, 0) - x \\cdot y + \\log(1 + e^{-|x|})",
 
-    "gpt.layers.1.attn.act_Add_56": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+    "gpt.layers.1.ln_1.act_Reshape_40": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
-    "gpt.layers.0.attn.v_attn.act_MatMul_9": "y = x W^T + b",
+    "gpt.layers.1.attn.act_Add_56": "C = A + B",
 
-    "gpt.layers.0.mlp.c_fc.act_MatMul_32": "y = x W^T + b",
+    "gpt.layers.0.attn.v_attn.act_MatMul_9": "C = A \\cdot B",
+
+    "gpt.layers.0.mlp.c_fc.act_MatMul_32": "C = A \\cdot B",
 
     "gpt.layers.0": "x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
 
-    "gpt.layers.0.attn.k_attn.act_MatMul_7": "y = x W^T + b",
+    "gpt.layers.0.attn.k_attn.act_MatMul_7": "C = A \\cdot B",
+
+    "MulScalar": "y = c \\cdot x",
 
     "gpt.layers.0.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}",
 
-    "gpt.layers.0.attn.causal_mask": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
-
-    "gpt.layers.1.attn.c_proj.act_MatMul_62": "y = x W^T + b"
+    "Mul": "C = A \\odot B"
   }
 }</script>
 
@@ -2043,7 +2174,14 @@ function getEffectiveFormula(key) {
   // 1. Exact match from JSON metadata (generated by Zig backend)
   if (FORMULAS_DATA[key]) return { formula: FORMULAS_DATA[key], source: 'CODE_SPECIFIED' };
 
-  // 2. Sub-path prefix inheritance: find LONGEST matching parent prefix
+  // 2. Exact match from Ops data: check if this key represents a specific operation output node
+  // (e.g. 'gpt.layers.0.attn.act_Add_20' is an Add op, should get C = A + B rather than the parent module's formula)
+  const matchedOp = OPS_DATA.find(o => o.name === key);
+  if (matchedOp && FORMULAS_DATA[matchedOp.op_type]) {
+    return { formula: FORMULAS_DATA[matchedOp.op_type], source: 'OP_TYPE' };
+  }
+
+  // 3. Sub-path prefix inheritance: find LONGEST matching parent prefix
   // e.g. key is 'gpt.layers.0.output', should match 'gpt.layers.0' rather than 'gpt'
   let bestParent = null;
   let bestParentLen = 0;
@@ -2059,8 +2197,8 @@ function getEffectiveFormula(key) {
     return { formula: FORMULAS_DATA[bestParent], source: 'INHERITED' };
   }
 
-  // 3. Match from Ops data directly
-  const op = OPS_DATA.find(o => o.module === key || o.name === key);
+  // 4. Match from Ops data by module name
+  const op = OPS_DATA.find(o => o.module === key);
   if (op && FORMULAS_DATA[op.op_type]) {
     return { formula: FORMULAS_DATA[op.op_type], source: 'OP_TYPE' };
   }
@@ -2074,6 +2212,7 @@ function getEffectiveFormula(key) {
 
 let CURRENT_INSP_KEY = null;
 let CURRENT_INSP_TAB = 'overview';
+const INSP_HISTORY_STACK = [];
 
 function switchInspectorTab(tab) {
   CURRENT_INSP_TAB = tab;
@@ -2085,17 +2224,59 @@ function switchInspectorTab(tab) {
   });
 }
 
+function inspectorGoBack() {
+  if (INSP_HISTORY_STACK.length > 1) {
+    // Pop current
+    INSP_HISTORY_STACK.pop();
+    // Pop parent to re-open
+    const prev = INSP_HISTORY_STACK.pop();
+    openInspector(prev.key, prev.tab);
+  }
+}
+
 function openInspector(key, initialTab = 'overview') {
+  // Maintain history stack for backwards navigation
+  if (INSP_HISTORY_STACK.length === 0 || INSP_HISTORY_STACK[INSP_HISTORY_STACK.length - 1].key !== key) {
+    INSP_HISTORY_STACK.push({ key, tab: initialTab });
+  }
+
   CURRENT_INSP_KEY = key;
   const modal = document.getElementById('inspector-overlay');
   const titleEl = document.getElementById('insp-title');
   const subEl = document.getElementById('insp-subtitle');
   const iconEl = document.getElementById('insp-icon');
   const bodyEl = document.getElementById('insp-body');
+  const breadcrumbEl = document.getElementById('insp-breadcrumb-bar');
   if (!modal || !bodyEl) return;
 
   const isAttentionCore = key.endsWith('.core');
   const baseKey = isAttentionCore ? key.slice(0, -5) : key;
+
+  // Render Hierarchical Breadcrumb Navigation Bar
+  if (breadcrumbEl) {
+    let bcHtml = '';
+    if (INSP_HISTORY_STACK.length > 1) {
+      bcHtml += '<button class="insp-back-btn" onclick="inspectorGoBack()">← Back</button>';
+    }
+
+    // Build hierarchy segments: e.g. gpt -> layers -> 0 -> attn -> act_Add_20
+    const parts = key.split('.');
+    let accum = '';
+    parts.forEach((p, idx) => {
+      accum = accum ? `${accum}.${p}` : p;
+      const isLast = (idx === parts.length - 1);
+      if (idx > 0) {
+        bcHtml += '<span class="insp-breadcrumb-sep">/</span>';
+      }
+      if (isLast) {
+        bcHtml += `<span class="insp-breadcrumb-item current">${p}</span>`;
+      } else {
+        const segPath = accum;
+        bcHtml += `<span class="insp-breadcrumb-item" onclick="openInspector('${segPath}', 'submodules')">${p}</span>`;
+      }
+    });
+    breadcrumbEl.innerHTML = bcHtml;
+  }
 
   let matchedNodes;
   let matchedOps;
@@ -2346,12 +2527,14 @@ function closeInspector(e) {
   if (e && e.target && e.target.id !== 'inspector-overlay' && !e.target.classList.contains('inspector-close-btn')) return;
   const modal = document.getElementById('inspector-overlay');
   if (modal) modal.classList.remove('open');
+  INSP_HISTORY_STACK.length = 0;
 }
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     const modal = document.getElementById('inspector-overlay');
     if (modal) modal.classList.remove('open');
+    INSP_HISTORY_STACK.length = 0;
   }
 });
 

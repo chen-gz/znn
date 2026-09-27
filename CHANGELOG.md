@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.7] - 2026-09-27
+
+### Added
+- **检查器多层级面包屑与上一层返回导航 (`web/index.html`, `web/js/app.js`, `web/css/style.css`, `src/nn/visualization/template.html`)**:
+  - 在节点检查器 (Inspector) 顶部引入多级面包屑导航栏 (`.insp-breadcrumb-bar`)，实时解析并展示模块的全路径层级（如 `gpt / layers / 0 / attn`）。
+  - 用户可随时点击面包屑中的任意前置层级直接跳回上级子模块结构视图；同时新增 `[← Back]` 按钮，一键沿历史浏览栈平滑回退到上一层。
+
+### Fixed
+- **基础算子节点数学公式精准绑定修复 (`src/autodiff/graph.zig`, `src/nn/visualization.zig`, `web/js/app.js`)**:
+  - 修复注意力层内基础算子节点（如 `gpt.layers.0.attn.act_Add_20`）因前缀匹配错误继承外部 `Attention` 完整注意力公式的问题。
+  - 在后端图推导及 JSON 序列化阶段，优先匹配具体算子类型（如 `Add` 匹配为 $C = A + B$），并在公式字典中注册所有基础算子类型的标准数学公式。
+  - 前端 `getEffectiveFormula` 调整为算子精准匹配优先于模块前缀模糊继承，确保叶子算子节点公式精准呈现。
+
 ## [0.2.6] - 2026-09-27
 
 ### Added

@@ -805,9 +805,40 @@ pub const graph_ir = struct {
             try formulas.put(try arena_alloc.dupe(u8, entry.key_ptr.*), try arena_alloc.dupe(u8, entry.value_ptr.*));
         }
 
-        // 自动遍历所有节点，为尚未显式注册公式的模块和算子从图与内置库中推导并注入公式
+        // 0. 注入所有标准基础算子类型 (OpType) 的标准 LaTeX 公式字典
+        inline for (std.meta.fields(@import("../autodiff/types.zig").OpType)) |field| {
+            const op_enum: @import("../autodiff/types.zig").OpType = @enumFromInt(field.value);
+            const op_name = field.name;
+            const op_form = op_enum.getFormula();
+            try formulas.put(try arena_alloc.dupe(u8, op_name), try arena_alloc.dupe(u8, op_form));
+        }
+
+        // 1. 自动遍历所有算子实例，将其对应的具体算子公式直接绑定到 op.name
+        for (ops_list.items) |op| {
+            if (!formulas.contains(op.name)) {
+                // 如果存在对应的算子类型标准公式，直接使用算子公式
+                if (formulas.get(op.op_type)) |op_form| {
+                    try formulas.put(try arena_alloc.dupe(u8, op.name), try arena_alloc.dupe(u8, op_form));
+                } else {
+                    const inferred = graph.inferModuleFormula(op.name);
+                    try formulas.put(try arena_alloc.dupe(u8, op.name), try arena_alloc.dupe(u8, inferred));
+                }
+            }
+            if (!formulas.contains(op.module)) {
+                const inferred = graph.inferModuleFormula(op.module);
+                try formulas.put(try arena_alloc.dupe(u8, op.module), try arena_alloc.dupe(u8, inferred));
+            }
+        }
+
+        // 2. 自动遍历所有图节点，为尚未显式注册公式的模块和算子从图与内置库中推导并注入公式
         for (nodes.items) |node| {
             if (!formulas.contains(node.name)) {
+                if (std.mem.eql(u8, node.kind, "Activation")) {
+                    if (formulas.get(node.inferred_act)) |act_form| {
+                        try formulas.put(try arena_alloc.dupe(u8, node.name), try arena_alloc.dupe(u8, act_form));
+                        continue;
+                    }
+                }
                 const inferred = graph.inferModuleFormula(node.name);
                 try formulas.put(try arena_alloc.dupe(u8, node.name), try arena_alloc.dupe(u8, inferred));
             }
@@ -816,16 +847,6 @@ pub const graph_ir = struct {
                     const inferred = graph.inferModuleFormula(scope);
                     try formulas.put(try arena_alloc.dupe(u8, scope), try arena_alloc.dupe(u8, inferred));
                 }
-            }
-        }
-        for (ops_list.items) |op| {
-            if (!formulas.contains(op.module)) {
-                const inferred = graph.inferModuleFormula(op.module);
-                try formulas.put(try arena_alloc.dupe(u8, op.module), try arena_alloc.dupe(u8, inferred));
-            }
-            if (!formulas.contains(op.name)) {
-                const inferred = graph.inferModuleFormula(op.name);
-                try formulas.put(try arena_alloc.dupe(u8, op.name), try arena_alloc.dupe(u8, inferred));
             }
         }
 

@@ -14,9 +14,9 @@
   2. [`src/root.zig`](file:///Users/guangzong/Documents/znn/src/root.zig) 中的 `VERSION = "X.Y.Z"` 与 `version = .{ .major = X, .minor = Y, .patch = Z }`
   3. [`CHANGELOG.md`](file:///Users/guangzong/Documents/znn/CHANGELOG.md) 顶部追加对应新版本的详细更新日志 (遵循 [Keep a Changelog](https://keepachangelog.com/) 规范，分类记录 `Added`、`Changed`、`Fixed` 等条目)
 - **版本更新权责划分**：
-  - **大版本号 (`MAJOR`)**：由**用户决策**。未经用户明确要求或确认，AI 不得擅自升级大版本号。
-  - **小版本号与补丁号 (`MINOR` / `PATCH`)**：可由 **AI 直接决定与递增**。当交付完整的大 Feature 或关键功能模块时，AI 自行升级次版本号（例如 `0.1.0 -> 0.2.0`），Bug 修复或小优化升级补丁号（例如 `0.2.0 -> 0.2.1`），并在 `CHANGELOG.md` 中记录对应发布说明。
-- **自动创建 Git Tag 规则 (Git Tagging Rule)**：
-  - 每次版本更新递增版本号时（无论是 `MAJOR`、`MINOR` 还是 `PATCH`），必须在对应版本提交上创建 Git 标签（例如 `git tag vX.Y.Z`）。
-  - 在执行代码推送时，必须同步将创建的标签推送到远端（`git push origin vX.Y.Z`）。
+  - **大版本号 (`MAJOR`) 与小版本号 (`MINOR`)**：由用户决策或重大里程碑发布。未经用户明确要求或确认，日常迭代不频繁递增。
+  - **日常修复与改进**：保持当前版本或记录在 `Unreleased` 中，避免每个小提交都频繁升级版本号与打标签。
+- **推送与 Tag 规则**：
+  - 用户确认或要求 push 后，直接推送代码 commit (`jj git push` 或 `git push origin main`)。
+  - **不要频繁打 Tag 和 push tag**，仅在用户明确指示或完成阶段性正式发布里程碑时才创建并推送 Git Tag。
 
