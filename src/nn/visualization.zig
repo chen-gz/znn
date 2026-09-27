@@ -805,6 +805,22 @@ pub const graph_ir = struct {
             try formulas.put(try arena_alloc.dupe(u8, entry.key_ptr.*), try arena_alloc.dupe(u8, entry.value_ptr.*));
         }
 
+        // 自动遍历所有节点，为尚未显式注册公式的模块和算子从图与内置库中推导并注入公式
+        for (nodes.items) |node| {
+            if (extractModuleScope(node.name)) |scope| {
+                if (!formulas.contains(scope)) {
+                    const inferred = graph.inferModuleFormula(scope);
+                    try formulas.put(try arena_alloc.dupe(u8, scope), try arena_alloc.dupe(u8, inferred));
+                }
+            }
+        }
+        for (ops_list.items) |op| {
+            if (!formulas.contains(op.module)) {
+                const inferred = graph.inferModuleFormula(op.module);
+                try formulas.put(try arena_alloc.dupe(u8, op.module), try arena_alloc.dupe(u8, inferred));
+            }
+        }
+
         // 构建递归模块树
         const root = try ModuleNode.init(arena_alloc, "root", "");
         for (nodes.items) |*node| {

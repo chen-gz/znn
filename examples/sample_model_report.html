@@ -1105,6 +1105,33 @@
     {"op_type": "Add", "name": "activations.block_0_out", "module": "activations", "input_shape": "[2, 8, 64], [2, 8, 64]", "param_shape": "None (Stateless)", "output_shape": "[2, 8, 64]", "elements": 1024, "bytes": 4096}
   ],
   "formulas": {
+    "activations": "C = A + B",
+
+    "gpt.layers.0.mlp.c_proj": "y = x W^T + b",
+
+    "gpt.layers.0.attn.v_attn": "y = x W^T + b",
+
+    "gpt.layers.0.ln_2": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.0.attn.c_proj": "y = x W^T + b",
+
+    "gpt.layers.0.attn.core": "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V",
+
+    "gpt.layers.0.ln_1": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "inputs": "y = f(x; \\theta)",
+
+    "gpt.layers.0.attn.k_attn": "y = x W^T + b",
+
+    "gpt.layers.0.mlp.c_fc": "y = x W^T + b",
+
+    "gpt.layers.0": "x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
+
+    "gpt.layers.0.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}",
+
+    "gpt.layers.0.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.0.attn.q_attn": "y = x W^T + b"
   }
 }
 </script>

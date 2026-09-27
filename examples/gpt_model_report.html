@@ -1228,33 +1228,69 @@
     {"op_type": "Reshape", "name": "outputs.logits", "module": "outputs", "input_shape": "[32, 256]", "param_shape": "None (Stateless)", "output_shape": "[2, 16, 256]", "elements": 8192, "bytes": 32768}
   ],
   "formulas": {
-    "gpt.layers.0.attn.v_attn": "V = x_{2D} W_v^T + b_v \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
+    "gpt.layers.1.mlp.c_fc": "y = x W^T + b",
 
-    "gpt.layers.0.ln_2": "y = \\text{RMSNorm}(x_1; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
+    "gpt.layers.1.attn.c_proj": "y = x W^T + b",
 
-    "gpt.layers.0.attn.c_proj": "y = (\\text{HeadsConcat}) \\cdot W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]",
+    "gpt.layers.0.ln_2": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.lm_head": "\\text{logits} = x_{\\text{norm}} \\cdot W_{head}^T \\quad ([2, 16, 64] \\times [256, 64]^T \\rightarrow [2, 16, 256])",
+    "outputs": "y = \\text{reshape}(x, \\text{new\\_shape})",
 
-    "gpt.layers.ln_f": "y = \\text{RMSNorm}(x_{\\text{last}}; \\gamma \\in \\mathbb{R}^{64}) \\rightarrow [2, 16, 64]",
+    "gpt.layers.0.attn.c_proj": "y = x W^T + b",
 
-    "gpt": "\\text{logits} = \\text{GPT}(\\text{tokens}; \\theta) \\rightarrow [2, 16, 256]",
+    "gpt": "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]",
 
-    "gpt.layers.0.attn.core": "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\rightarrow [2, 4, 16, 16] \\xrightarrow{\\text{MergeHeads}} [2, 16, 64]",
+    "gpt.layers.0.attn.core": "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V",
 
-    "gpt.wpe": "y = \\text{PosEmbedding}(\\text{pos}; W_p \\in \\mathbb{R}^{32 \\times 64}) \\rightarrow [2, 16, 64]",
+    "gpt.wpe": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
 
-    "gpt.layers.0.ln_1": "y = \\text{RMSNorm}(x; \\gamma \\in \\mathbb{R}^{64}, \\epsilon=1e-5) \\rightarrow [2, 16, 64]",
+    "gpt.layers.1.ln_2": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.0.attn.k_attn": "K = x_{2D} W_k^T + b_k \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
+    "gpt.layers.0.ln_1": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
 
-    "gpt.layers.0.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o \\rightarrow [2, 16, 64]",
+    "gpt.layers.1.attn.q_attn": "y = x W^T + b",
 
-    "gpt.wte": "y = \\text{TokenEmbedding}(\\text{ids}; W_e \\in \\mathbb{R}^{256 \\times 64}) \\rightarrow [2, 16, 64]",
+    "gpt.layers.0.attn.k_attn": "y = x W^T + b",
 
-    "gpt.layers.0.attn.q_attn": "Q = x_{2D} W_q^T + b_q \\quad ([32, 64] \\times [64, 64]^T \\rightarrow [2, 4, 16, 16])",
+    "inputs": "y = f(x; \\theta)",
 
-    "gpt.layers.0.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj} \\rightarrow [2, 16, 64]"
+    "gpt.layers.0.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.1.attn.core": "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V",
+
+    "gpt.wte": "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})",
+
+    "gpt.layers.0.attn.q_attn": "y = x W^T + b",
+
+    "gpt.layers.1.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}",
+
+    "gpt.layers.1.attn.k_attn": "y = x W^T + b",
+
+    "gpt.layers.0.attn.v_attn": "y = x W^T + b",
+
+    "gpt.layers.0.mlp.c_proj": "y = x W^T + b",
+
+    "gpt.layers.1.mlp.c_proj": "y = x W^T + b",
+
+    "gpt.layers.1": "x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
+
+    "gpt.layers.ln_f": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.lm_head": "y = x W^T + b",
+
+    "gpt.layers": "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)",
+
+    "gpt.layers.1.attn": "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o",
+
+    "gpt.layers.1.ln_1": "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+
+    "gpt.layers.1.attn.v_attn": "y = x W^T + b",
+
+    "gpt.layers.0.mlp.c_fc": "y = x W^T + b",
+
+    "gpt.layers.0": "x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))",
+
+    "gpt.layers.0.mlp": "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}"
   }
 }
 </script>

@@ -104,9 +104,23 @@ pub const Embedding = struct {
         self.weight.zeroGrad();
     }
 
+    /// 模块标准数学变换公式
+    pub const formula = "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})";
+
+    pub fn registerFormula(self: *const Embedding, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+        }
+    }
+
     /// 查找映射前向传播
     /// 输入 x 为包含 Token ID 的任意维度 Tensor，输出形状为 x.shape + [embedding_dim]
     pub fn forward(self: Embedding, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+            }
+        }
         return try self.weight.embedding(x, allocator, graph);
     }
 };
@@ -221,9 +235,23 @@ pub const MLP = struct {
         self.c_proj.zeroGrad();
     }
 
+    /// 模块标准数学变换公式
+    pub const formula = "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}";
+
+    pub fn registerFormula(self: *const MLP, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+        }
+    }
+
     /// 前向传播逻辑
     /// 支持输入 2D Tensor [B*T, D] 或 3D Tensor [B, T, D]
     pub fn forward(self: MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+            }
+        }
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
@@ -350,8 +378,22 @@ pub const SwiGLU = struct {
         self.w_down.zeroGrad();
     }
 
+    /// 模块标准数学变换公式
+    pub const formula = "y = (\\text{SiLU}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
+
+    pub fn registerFormula(self: *const SwiGLU, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+        }
+    }
+
     /// 前向传播逻辑：支持 2D [B*T, D] 或 3D [B, T, D]
     pub fn forward(self: SwiGLU, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+            }
+        }
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
@@ -776,10 +818,33 @@ pub const CausalSelfAttention = struct {
         self.c_proj.zeroGrad();
     }
 
+    /// 模块标准数学变换公式
+    pub const formula = "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o";
+    pub const core_formula = "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V";
+
+    pub fn registerFormula(self: *const CausalSelfAttention, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+            var buf: [128]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, "{s}.core", .{n})) |core_name| {
+                try graph.setModuleFormula(core_name, core_formula);
+            } else |_| {}
+        }
+    }
+
     /// 前向注意力计算流程
     /// 输入 x 的形状必须为 3D: [B, T, C]
     /// 其中 B 为批次大小 (Batch Size)，T 为时间步长度 (Sequence Length)，C 为通道特征维数 (n_embd)
     pub fn forward(self: CausalSelfAttention, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+                var buf: [128]u8 = undefined;
+                if (std.fmt.bufPrint(&buf, "{s}.core", .{n})) |core_name| {
+                    _ = g.setModuleFormula(core_name, core_formula) catch {};
+                } else |_| {}
+            }
+        }
         const B = x.shape.dims[0];
         const T = x.shape.dims[1];
         const C = x.shape.dims[2];
@@ -1525,8 +1590,26 @@ pub const TransformerBlock = struct {
         self.mlp.zeroGrad();
     }
 
+    /// 模块标准数学变换公式
+    pub const formula = "x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))";
+
+    pub fn registerFormula(self: *const TransformerBlock, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+            try self.ln_1.registerFormula(graph);
+            try self.attn.registerFormula(graph);
+            try self.ln_2.registerFormula(graph);
+            try self.mlp.registerFormula(graph);
+        }
+    }
+
     /// 前向传播流程：x -> Block(x) -> out
     pub fn forward(self: TransformerBlock, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+            }
+        }
         // 1. 第一条支路: RMSNorm -> Attention
         const x_norm1 = try self.ln_1.forward(allocator, graph, x);
         defer if (graph == null) tensor.free(allocator, x_norm1);
@@ -1643,8 +1726,26 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             self.ln_f.zeroGrad();
         }
 
+        /// 模块标准数学变换公式
+        pub const formula = "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)";
+
+        pub fn registerFormula(self: *const Self, graph: *autodiff.Graph) !void {
+            if (self.name) |n| {
+                try graph.setModuleFormula(n, formula);
+                for (&self.h) |*layer| {
+                    try layer.registerFormula(graph);
+                }
+                try self.ln_f.registerFormula(graph);
+            }
+        }
+
         /// 解码器主干网络的前向传播流程
         pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+            if (graph) |g| {
+                if (self.name) |n| {
+                    _ = g.setModuleFormula(n, formula) catch {};
+                }
+            }
             var current_x = x;
             // 依次贯穿每一层 Block
             for (self.h) |layer| {
@@ -1768,10 +1869,28 @@ pub fn GPT(comptime config: GPTConfig) type {
             };
         }
 
+        /// 模块标准数学变换公式
+        pub const formula = "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]";
+
+        pub fn registerFormula(self: *const Self, graph: *autodiff.Graph) !void {
+            if (self.name) |n| {
+                try graph.setModuleFormula(n, formula);
+                try self.token_embedding.registerFormula(graph);
+                try self.position_embedding.registerFormula(graph);
+                try self.decoder.registerFormula(graph);
+                try self.lm_head.registerFormula(graph);
+            }
+        }
+
         /// 前向推理传播流程
         /// 输入 x 为包含 Token ID 的 2D 整数 Tensor，形状为 [B, T]
         /// 输出为未归一化的预测对数 (Logits)，形状为 3D: [B, T, vocab_size]
         pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+            if (graph) |g| {
+                if (self.name) |n| {
+                    _ = g.setModuleFormula(n, formula) catch {};
+                }
+            }
             const B = x.shape.dims[0];
             const T = x.shape.dims[1];
 

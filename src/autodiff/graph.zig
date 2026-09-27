@@ -44,6 +44,70 @@ pub const Graph = struct {
         return self.module_formulas.get(module_path);
     }
 
+    /// 从计算图中自动推导指定模块或节点的数学公式
+    pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u8 {
+        // 1. 如果有显式指定的公式，直接返回
+        if (self.getModuleFormula(module_path)) |form| {
+            return form;
+        }
+
+        // 2. 匹配子路径的前缀 (例如 "gpt.wte.sub" -> 继承 "gpt.wte")
+        var it = self.module_formulas.iterator();
+        while (it.next()) |entry| {
+            if (module_path.len > entry.key_ptr.len and
+                std.mem.startsWith(u8, module_path, entry.key_ptr.*) and
+                module_path[entry.key_ptr.len] == '.')
+            {
+                return entry.value_ptr.*;
+            }
+        }
+
+        // 3. 检查计算图中的算子 (Ops) 是否有输出匹配该模块名称
+        for (self.ops.items) |op| {
+            if (op.outputs.len > 0) {
+                if (op.outputs[0].name) |out_name| {
+                    if (std.mem.eql(u8, out_name, module_path) or
+                        std.mem.startsWith(u8, out_name, module_path))
+                    {
+                        return op.op_type.getFormula();
+                    }
+                }
+            }
+        }
+
+        // 4. 根据常见模块名模式推导通用公式
+        const path = module_path;
+        if (std.mem.endsWith(u8, path, ".core") or std.mem.indexOf(u8, path, "attention_core") != null) {
+            return "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V";
+        }
+        if (std.mem.indexOf(u8, path, "embeddings_sum") != null) {
+            return "x_0 = \\text{wte}(\\text{tokens}) + \\text{wpe}(\\text{positions})";
+        }
+        if (std.mem.indexOf(u8, path, "residual") != null) {
+            return "x_{l+1} = x_l + \\text{Sublayer}(x_l)";
+        }
+        if (std.mem.indexOf(u8, path, "lm_head") != null) {
+            return "\\text{logits} = x \\cdot W_{\\text{head}}^T";
+        }
+        if (std.mem.indexOf(u8, path, "wte") != null) {
+            return "y = \\text{Embedding}(\\text{TokenIDs}; W_e)";
+        }
+        if (std.mem.indexOf(u8, path, "wpe") != null) {
+            return "y = \\text{Embedding}(\\text{PosIDs}; W_p)";
+        }
+        if (std.mem.indexOf(u8, path, "attn") != null) {
+            return "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o";
+        }
+        if (std.mem.indexOf(u8, path, "mlp") != null) {
+            return "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}";
+        }
+        if (std.mem.indexOf(u8, path, "norm") != null or std.mem.indexOf(u8, path, "ln_") != null) {
+            return "y = \\text{RMSNorm}(x; \\gamma, \\epsilon)";
+        }
+
+        return "y = f(x; \\theta)";
+    }
+
     // 设置梯度追踪开关
     pub fn setGradEnabled(self: *Graph, enabled: bool) void {
         self.enable_grad = enabled;

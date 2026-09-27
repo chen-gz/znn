@@ -58,7 +58,21 @@ pub const RMSNorm = struct {
         self.weight.zeroGrad();
     }
 
+    /// 模块标准数学变换公式
+    pub const formula = "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma";
+
+    pub fn registerFormula(self: *const RMSNorm, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+        }
+    }
+
     pub fn forward(self: RMSNorm, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+            }
+        }
         return try x.rmsNorm(self.weight, self.eps, allocator, graph);
     }
 };
@@ -124,7 +138,21 @@ pub const LayerNorm = struct {
         self.bias.zeroGrad();
     }
 
+    /// 模块标准数学变换公式
+    pub const formula = "y = \\frac{x - \\mu}{\\sqrt{\\sigma^2 + \\epsilon}} \\odot \\gamma + \\beta";
+
+    pub fn registerFormula(self: *const LayerNorm, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+        }
+    }
+
     pub fn forward(self: LayerNorm, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+            }
+        }
         const dim = self.weight.shape.dims[0];
         const num_elements = x.data.len;
         const batch_items = num_elements / dim;
@@ -242,7 +270,21 @@ pub const BatchNorm2d = struct {
         self.beta.zeroGrad();
     }
 
+    /// 模块标准数学变换公式
+    pub const formula = "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta";
+
+    pub fn registerFormula(self: *const BatchNorm2d, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+        }
+    }
+
     pub fn forward(self: *BatchNorm2d, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+            }
+        }
         std.debug.assert(x.shape.len == 4); // [N, C, H, W]
         const N = x.shape.dims[0];
         const C = x.shape.dims[1];

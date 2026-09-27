@@ -137,7 +137,22 @@ pub const Linear = struct {
         self.bias.zeroGrad();
     }
 
+    /// 模块标准数学变换公式
+    pub const formula = "y = x W^T + b";
+
+    /// 向计算图注册该模块的数学公式
+    pub fn registerFormula(self: *const Linear, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+        }
+    }
+
     pub fn forward(self: Linear, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+            }
+        }
         const z = try x.matmul(self.weight, allocator, graph);
         if (graph == null) {
             defer tensor.free(allocator, z);
@@ -244,11 +259,23 @@ pub const Conv2D = struct {
         self.bias.zeroGrad();
     }
 
-    pub fn forward(self: Conv2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        if (graph == null) {
-            return try x.conv2d(self.weight, self.bias, allocator, null);
+    /// 模块标准数学变换公式
+    pub const formula = "y = x \\ast W + b";
+
+    pub fn registerFormula(self: *const Conv2D, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
         }
-        return try graph.?.conv2d(x, self.weight, self.bias);
+    }
+
+    pub fn forward(self: Conv2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+            }
+            return try g.conv2d(x, self.weight, self.bias);
+        }
+        return try x.conv2d(self.weight, self.bias, allocator, null);
     }
 };
 
