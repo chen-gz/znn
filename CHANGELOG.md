@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.6] - 2026-09-27
+
+### Added
+- **子模块层级图 DAG 架构流程化渲染 (`web/js/app.js`, `web/css/style.css`, `src/nn/visualization/template.html`)**:
+  - 将节点检查器 (Inspector) 模态窗口内的 **Direct Submodules & Internal Hierarchy** 彻底从朴素网格卡片重构为与主页面一致的 **DAG 架构流程结构图**。
+  - 支持内部拓扑排序、多分支并行执行（如 Attention 内 `q_attn`、`k_attn`、`v_attn` 并行投影与 Dot-Product 聚合）以及残差跳跃链接（Residual Shortcut Highway、⊕ Converge 汇聚节点）。
+  - 子模块流程卡片同样集成形状指示、参数统计，并支持直接点击卡片或按钮 (`📐 Formula`、`📁 Submodules`、`⚙️ Params`) 进行无限级下钻检查。
+
 ## [0.2.5] - 2026-09-27
 
 ### Added
