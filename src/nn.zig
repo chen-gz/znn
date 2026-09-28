@@ -18,12 +18,9 @@ pub const transformer = @import("nn/transformer.zig");
 pub const serialization = @import("nn/serialization.zig");
 pub const visualization = @import("nn/visualization.zig");
 pub const graph_ir = visualization.graph_ir;
-pub const html_report = visualization.html_report;
 pub const generateJson = visualization.generateJson;
 pub const exportJson = visualization.exportJson;
-pub const renderHtmlReport = visualization.renderHtmlReport;
-pub const exportHtmlReport = visualization.exportHtmlReport;
-pub const generateHtmlReport = visualization.generateHtmlReport;
+
 
 // ============================================================================
 // 门面层导出 (Facade Re-exports) - 确保 100% 向上兼容
@@ -1318,35 +1315,16 @@ test "Hierarchical module naming and interactive HTML report export" {
     const json_bytes_read = std.c.fread(&check_json_buf, 1, check_json_buf.len, fj);
     try std.testing.expect(json_bytes_read > 200);
 
-    // 6. 独立 HTML 可视化模块：通过约定的中间 JSON 数据生成自包含的前后端分离 HTML 报告
-    const html_content = try html_report.renderFromJson(json_data, allocator);
-    defer allocator.free(html_content);
-
-    // 校验 HTML 内容中包含关键结构与样式
-    try std.testing.expect(std.mem.indexOf(u8, html_content, "<!DOCTYPE html>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html_content, "znn-model-graph-data") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html_content, "RAW_DATA") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html_content, "renderTree") != null);
-    try std.testing.expect(std.mem.indexOf(u8, html_content, "gpt.layers.0.attn.q_attn.weight") != null);
-
-    // 7. 测试通过独立的 html_report 模块导出 HTML 报告文件
-    const tmp_html_path = "examples/sample_model_report.html";
-    try html_report.exportFromJson(json_data, tmp_html_path, allocator);
-    const html_z = try allocator.dupeZ(u8, tmp_html_path);
-    defer allocator.free(html_z);
-    const fh = std.c.fopen(html_z.ptr, "rb") orelse return error.CannotOpenFile;
-    defer _ = std.c.fclose(fh);
-    var check_html_buf: [1024]u8 = undefined;
-    const html_bytes_read = std.c.fread(&check_html_buf, 1, check_html_buf.len, fh);
-    try std.testing.expect(html_bytes_read > 500);
-
-    // 8. 测试直接通过约定的 ModelHierarchyGraph 结构体渲染 HTML (与 Graph 完全解耦)
+    // 6. 测试直接从 ModelHierarchyGraph 序列化 JSON (与 Graph 实例解耦)
     var model_hierarchy = try graph_ir.build(&graph, allocator);
     defer model_hierarchy.deinit();
-    const html_from_struct = try html_report.renderFromHierarchy(&model_hierarchy, allocator);
-    defer allocator.free(html_from_struct);
-    try std.testing.expect(std.mem.indexOf(u8, html_from_struct, "znn-model-graph-data") != null);
+    const json_from_struct = try graph_ir.serializeJson(&model_hierarchy, allocator);
+    defer allocator.free(json_from_struct);
+    try std.testing.expect(std.mem.indexOf(u8, json_from_struct, "\"module_type\": \"GPT\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json_from_struct, "\"gpt.layers.0.attn.q_attn.weight\"") != null);
 }
+
+
 
 
 
