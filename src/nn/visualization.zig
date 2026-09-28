@@ -1027,18 +1027,75 @@ pub const graph_ir = struct {
             }
         }
 
-        // 将边分类关联到对应模块内部
+        // 将边分类关联到对应模块内部 (依据直接子模块与进出接口精准归属)
         for (edges.items) |e| {
             var it = module_map.iterator();
             while (it.next()) |entry| {
                 const mod_path = entry.key_ptr.*;
                 if (mod_path.len == 0 or std.mem.eql(u8, mod_path, "root")) continue;
                 const m = entry.value_ptr.*;
+
+                // 叶子模块没有子模块，其内部逻辑由 parameters 与 ops 表示，edges 保持为空
+                if (m.children.items.len == 0) continue;
+
                 const from_in = std.mem.startsWith(u8, e.from, mod_path);
                 const to_in = std.mem.startsWith(u8, e.to, mod_path);
+
+                if (!from_in and !to_in) continue;
+
+                // 1. 如果起点和终点都在该模块内部：
                 if (from_in and to_in) {
-                    try m.edges.append(arena_alloc, e);
+                    // 检查是否完全属于某个更深层的子模块（例如 q_attn -> c_proj 属于 attn，不属于 layers.0）
+                    var has_deeper_child = false;
+                    for (m.children.items) |child| {
+                        if (std.mem.startsWith(u8, e.from, child.path) and std.mem.startsWith(u8, e.to, child.path)) {
+                            has_deeper_child = true;
+                            break;
+                        }
+                    }
+                    if (has_deeper_child) continue;
                 }
+
+                // 2. 提取相对于当前模块的子节点或直接子模块名
+                var from_name = e.from;
+                if (from_in and e.from.len > mod_path.len + 1) {
+                    const rel = e.from[mod_path.len + 1 ..];
+                    if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
+                        from_name = rel[0..dot];
+                    } else {
+                        from_name = rel;
+                    }
+                }
+
+                var to_name = e.to;
+                if (to_in and e.to.len > mod_path.len + 1) {
+                    const rel = e.to[mod_path.len + 1 ..];
+                    if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
+                        to_name = rel[0..dot];
+                    } else {
+                        to_name = rel;
+                    }
+                }
+
+                // 如果两端折叠后成为同一个名字（例如内部局部微观流动），跳过
+                if (std.mem.eql(u8, from_name, to_name)) continue;
+
+                // 检查是否已经添加过相同的一对 from -> to
+                var already_has = false;
+                for (m.edges.items) |existing| {
+                    if (std.mem.eql(u8, existing.from, from_name) and std.mem.eql(u8, existing.to, to_name)) {
+                        already_has = true;
+                        break;
+                    }
+                }
+                if (already_has) continue;
+
+                try m.edges.append(arena_alloc, .{
+                    .from = try arena_alloc.dupe(u8, from_name),
+                    .to = try arena_alloc.dupe(u8, to_name),
+                    .shape = try arena_alloc.dupe(u8, e.shape),
+                    .is_skip = e.is_skip,
+                });
             }
         }
 
@@ -1204,76 +1261,7 @@ pub const graph_ir = struct {
         });
         try json_buf.appendSlice(allocator, "},\n  \"root\": ");
         try serializeModuleTree(model_graph.root, &json_buf, allocator);
-
-        // nodes 数组
-        try json_buf.appendSlice(allocator, ",\n  \"nodes\": [");
-        for (model_graph.nodes.items, 0..) |n, i| {
-            if (i > 0) try json_buf.appendSlice(allocator, ",\n");
-            try json_buf.appendSlice(allocator, "    {\"name\": ");
-            try writeEscapedJsonString(&json_buf, allocator, n.name);
-            try json_buf.appendSlice(allocator, ", \"kind\": ");
-            try writeEscapedJsonString(&json_buf, allocator, n.kind);
-            try json_buf.appendSlice(allocator, ", \"shape\": ");
-            try writeEscapedJsonString(&json_buf, allocator, n.shape_str);
-            try json_buf.print(allocator, ", \"elements\": {d}, \"bytes\": {d}, ", .{ n.elements, n.bytes });
-            try json_buf.appendSlice(allocator, "\"status\": ");
-            try writeEscapedJsonString(&json_buf, allocator, n.status);
-            try json_buf.appendSlice(allocator, ", \"act\": ");
-            try writeEscapedJsonString(&json_buf, allocator, n.inferred_act);
-            try json_buf.appendSlice(allocator, ", \"strategy\": ");
-            try writeEscapedJsonString(&json_buf, allocator, n.strategy);
-            try json_buf.appendSlice(allocator, "}");
-        }
-
-        // edges 数组
-        try json_buf.appendSlice(allocator, "\n  ],\n  \"edges\": [");
-        for (model_graph.edges.items, 0..) |e, i| {
-            if (i > 0) try json_buf.appendSlice(allocator, ",\n");
-            try json_buf.appendSlice(allocator, "    {\"from\": ");
-            try writeEscapedJsonString(&json_buf, allocator, e.from);
-            try json_buf.appendSlice(allocator, ", \"to\": ");
-            try writeEscapedJsonString(&json_buf, allocator, e.to);
-            try json_buf.appendSlice(allocator, ", \"shape\": ");
-            try writeEscapedJsonString(&json_buf, allocator, e.shape);
-            try json_buf.print(allocator, ", \"is_skip\": {s}}}", .{ if (e.is_skip) "true" else "false" });
-        }
-
-        // ops 数组
-        try json_buf.appendSlice(allocator, "\n  ],\n  \"ops\": [");
-        for (model_graph.ops.items, 0..) |op, i| {
-            if (i > 0) try json_buf.appendSlice(allocator, ",\n");
-            try json_buf.appendSlice(allocator, "    {\"op_type\": ");
-            try writeEscapedJsonString(&json_buf, allocator, op.op_type);
-            try json_buf.appendSlice(allocator, ", \"name\": ");
-            try writeEscapedJsonString(&json_buf, allocator, op.name);
-            try json_buf.appendSlice(allocator, ", \"module\": ");
-            try writeEscapedJsonString(&json_buf, allocator, op.module);
-            try json_buf.appendSlice(allocator, ", \"input_shape\": ");
-            try writeEscapedJsonString(&json_buf, allocator, op.input_shape);
-            try json_buf.appendSlice(allocator, ", \"param_shape\": ");
-            try writeEscapedJsonString(&json_buf, allocator, op.param_shape);
-            try json_buf.appendSlice(allocator, ", \"output_shape\": ");
-            try writeEscapedJsonString(&json_buf, allocator, op.output_shape);
-            if (op.formula) |f| {
-                try json_buf.appendSlice(allocator, ", \"formula\": ");
-                try writeEscapedJsonString(&json_buf, allocator, f);
-            }
-            try json_buf.print(allocator, ", \"elements\": {d}, \"bytes\": {d}}}", .{ op.elements, op.bytes });
-        }
-
-        // formulas 映射字典
-        try json_buf.appendSlice(allocator, "\n  ],\n  \"formulas\": {");
-        var formula_it = model_graph.formulas.iterator();
-        var f_idx: usize = 0;
-        while (formula_it.next()) |entry| {
-            if (f_idx > 0) try json_buf.appendSlice(allocator, ",\n");
-            try json_buf.appendSlice(allocator, "\n    ");
-            try writeEscapedJsonString(&json_buf, allocator, entry.key_ptr.*);
-            try json_buf.appendSlice(allocator, ": ");
-            try writeEscapedJsonString(&json_buf, allocator, entry.value_ptr.*);
-            f_idx += 1;
-        }
-        try json_buf.appendSlice(allocator, "\n  }\n}");
+        try json_buf.appendSlice(allocator, "\n}");
 
         return json_buf.toOwnedSlice(allocator);
     }

@@ -1301,8 +1301,11 @@ test "Hierarchical module naming and interactive HTML report export" {
     try std.testing.expect(summary_obj.get("total_params").?.integer > 0);
     try std.testing.expect(summary_obj.get("param_nodes").?.integer >= 8);
 
-    const edges_arr = parsed.value.object.get("edges").?.array;
-    try std.testing.expect(edges_arr.items.len >= 10);
+    // 校验顶层保持纯净递归架构：所有 nodes, edges, ops, formulas 均已就近集成进模块树
+    try std.testing.expect(parsed.value.object.get("nodes") == null);
+    try std.testing.expect(parsed.value.object.get("edges") == null);
+    try std.testing.expect(parsed.value.object.get("ops") == null);
+    try std.testing.expect(parsed.value.object.get("formulas") == null);
 
     // 5. 测试将递归 JSON 导出到真实文件系统
     const tmp_json_path = "examples/sample_model_graph.json";

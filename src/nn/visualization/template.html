@@ -1483,13 +1483,41 @@ let currentQuery = '';
 // 1. Data Initialization & File Loading
 // ---------------------------------------------------------------------------
 
+function collectAllFromTree(root) {
+  const nodes = [];
+  const edges = [];
+  const ops = [];
+  const formulas = {};
+
+  function traverse(m) {
+    if (!m) return;
+    if (m.formula && m.path) formulas[m.path] = m.formula;
+    if (m.nodes) nodes.push(...m.nodes);
+    if (m.edges) edges.push(...m.edges);
+    if (m.ops) {
+      ops.push(...m.ops);
+      for (const op of m.ops) {
+        if (op.formula && op.name) formulas[op.name] = op.formula;
+        if (op.formula && op.op_type && !formulas[op.op_type]) formulas[op.op_type] = op.formula;
+      }
+    }
+    if (m.children) {
+      for (const child of m.children) traverse(child);
+    }
+  }
+
+  traverse(root);
+  return { nodes, edges, ops, formulas };
+}
+
 function loadGraphData(graphObj) {
   if (!graphObj) return;
   RAW_GRAPH = graphObj;
-  NODES_DATA = graphObj.nodes || [];
-  EDGES_DATA = graphObj.edges || [];
-  OPS_DATA = graphObj.ops || [];
-  FORMULAS_DATA = graphObj.formulas || {};
+  const treeData = collectAllFromTree(graphObj.root);
+  NODES_DATA = (graphObj.nodes && graphObj.nodes.length > 0) ? graphObj.nodes : treeData.nodes;
+  EDGES_DATA = (graphObj.edges && graphObj.edges.length > 0) ? graphObj.edges : treeData.edges;
+  OPS_DATA = (graphObj.ops && graphObj.ops.length > 0) ? graphObj.ops : treeData.ops;
+  FORMULAS_DATA = Object.assign({}, treeData.formulas, graphObj.formulas || {});
 
   // Update Model Name in Title
   const modelName = graphObj.model_name || 'Neural Network';
@@ -1967,9 +1995,12 @@ function renderSubmoduleFlowHtml(parentKey, submodulesList, matchedNodes, matche
     return '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">No submodules present.</div>';
   }
 
-  // Map of submodule fullPath -> sub object
+  // Map of submodule fullPath / name -> sub object
   const subMap = new Map();
-  submodulesList.forEach(s => subMap.set(s.fullPath, s));
+  submodulesList.forEach(s => {
+    subMap.set(s.fullPath, s);
+    subMap.set(s.name, s);
+  });
 
   // Determine connections among direct submodules
   // Check EDGES_DATA for direct connections or connections via internal operations
@@ -1986,7 +2017,7 @@ function renderSubmoduleFlowHtml(parentKey, submodulesList, matchedNodes, matche
     let toSub = null;
 
     if (subMap.has(e.from)) {
-      fromSub = e.from;
+      fromSub = subMap.get(e.from).fullPath;
     } else if (e.from.startsWith(parentKey + '.')) {
       const rest = e.from.slice(parentKey.length + 1).split('.')[0];
       const candidate = `${parentKey}.${rest}`;
@@ -1994,7 +2025,7 @@ function renderSubmoduleFlowHtml(parentKey, submodulesList, matchedNodes, matche
     }
 
     if (subMap.has(e.to)) {
-      toSub = e.to;
+      toSub = subMap.get(e.to).fullPath;
     } else if (e.to.startsWith(parentKey + '.')) {
       const rest = e.to.slice(parentKey.length + 1).split('.')[0];
       const candidate = `${parentKey}.${rest}`;
