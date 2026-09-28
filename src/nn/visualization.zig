@@ -335,6 +335,12 @@ fn getMajorModulePath(name: []const u8) []const u8 {
     if (std.mem.startsWith(u8, name, "activations.")) return name;
 
     const patterns = [_]struct { pat: []const u8, len: usize }{
+        .{ .pat = ".attn.q_attn.", .len = 12 },
+        .{ .pat = ".attn.k_attn.", .len = 12 },
+        .{ .pat = ".attn.v_attn.", .len = 12 },
+        .{ .pat = ".attn.c_proj.", .len = 12 },
+        .{ .pat = ".mlp.c_fc.", .len = 10 },
+        .{ .pat = ".mlp.c_proj.", .len = 12 },
         .{ .pat = ".attn.", .len = 5 },
         .{ .pat = ".mlp.", .len = 4 },
         .{ .pat = ".ln_1.", .len = 5 },
@@ -358,6 +364,12 @@ fn getMajorModulePath(name: []const u8) []const u8 {
         ".ln_f",
         ".ln_1",
         ".ln_2",
+        ".attn.q_attn",
+        ".attn.k_attn",
+        ".attn.v_attn",
+        ".attn.c_proj",
+        ".mlp.c_fc",
+        ".mlp.c_proj",
         ".attn",
         ".mlp",
     };
@@ -371,6 +383,7 @@ fn getMajorModulePath(name: []const u8) []const u8 {
     if (extractModuleScope(name)) |p| return p;
     return name;
 }
+
 
 fn getLcaBranch(name: []const u8, lca_depth: usize) []const u8 {
     if (std.mem.startsWith(u8, name, "inputs.") or std.mem.startsWith(u8, name, "outputs.") or std.mem.startsWith(u8, name, "activations.")) {
@@ -651,6 +664,7 @@ pub fn collectGraphOps(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayLi
         if (op_scope) |scope| {
             for (op.outputs) |out| {
                 if (!scopes.contains(out)) {
+                    // 如果公共前缀是 .attn 且输出没有明确指定具体名字，标为 .attn (整个注意力模块的内部激活)
                     scopes.put(out, scope) catch {};
                 }
             }
@@ -1035,11 +1049,10 @@ pub const graph_ir = struct {
                 if (mod_path.len == 0 or std.mem.eql(u8, mod_path, "root")) continue;
                 const m = entry.value_ptr.*;
 
-                // 叶子模块没有子模块，其内部逻辑由 parameters 与 ops 表示，edges 保持为空
-                if (m.children.items.len == 0) continue;
-
-                const from_in = std.mem.startsWith(u8, e.from, mod_path);
-                const to_in = std.mem.startsWith(u8, e.to, mod_path);
+                const from_in = std.mem.eql(u8, e.from, mod_path) or
+                    (std.mem.startsWith(u8, e.from, mod_path) and e.from.len > mod_path.len and e.from[mod_path.len] == '.');
+                const to_in = std.mem.eql(u8, e.to, mod_path) or
+                    (std.mem.startsWith(u8, e.to, mod_path) and e.to.len > mod_path.len and e.to[mod_path.len] == '.');
 
                 if (!from_in and !to_in) continue;
 
@@ -1048,13 +1061,24 @@ pub const graph_ir = struct {
                     // 检查是否完全属于某个更深层的子模块（例如 q_attn -> c_proj 属于 attn，不属于 layers.0）
                     var has_deeper_child = false;
                     for (m.children.items) |child| {
-                        if (std.mem.startsWith(u8, e.from, child.path) and std.mem.startsWith(u8, e.to, child.path)) {
+                        const from_child = std.mem.eql(u8, e.from, child.path) or
+                            (std.mem.startsWith(u8, e.from, child.path) and e.from.len > child.path.len and e.from[child.path.len] == '.');
+                        const to_child = std.mem.eql(u8, e.to, child.path) or
+                            (std.mem.startsWith(u8, e.to, child.path) and e.to.len > child.path.len and e.to[child.path.len] == '.');
+                        if (from_child and to_child) {
                             has_deeper_child = true;
                             break;
                         }
                     }
                     if (has_deeper_child) continue;
                 }
+
+                // 2. 如果目标模块有子模块，但当前边的一端指向自身（例如 e.to == mod_path 且由某个内部子模块发出），
+                // 那么这并不是发给父模块的边，而是子模块间的内部连接，应该归入能够承载两者的最小子容器中
+                if (m.children.items.len > 0 and std.mem.eql(u8, e.to, mod_path) and from_in) {
+                    continue;
+                }
+
 
                 // 2. 提取相对于当前模块的子节点或直接子模块名
                 var from_name = e.from;

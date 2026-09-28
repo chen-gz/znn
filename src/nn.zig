@@ -1304,9 +1304,36 @@ test "Hierarchical module naming and interactive HTML report export" {
     try std.testing.expect(parsed.value.object.get("ops") == null);
     try std.testing.expect(parsed.value.object.get("formulas") == null);
 
+    // 校验 Block0 级别的拓扑边 (Edges) 正确性：
+    // 1) 包含前向流 ln_1 -> attn 以及残差边 embeddings_sum -> residual_attn (is_skip = true)
+    // 2) 严禁包含子模块内部 Q/K/V 指向 attn 的泄露边
+    var found_ln1_to_attn = false;
+    var found_skip_to_res = false;
+    var leaked_qkv_to_attn = false;
+    for (layer0_obj.get("edges").?.array.items) |e_val| {
+        const edge = e_val.object;
+        const from_s = edge.get("from").?.string;
+        const to_s = edge.get("to").?.string;
+        const is_skip = edge.get("is_skip").?.bool;
+
+        if (std.mem.eql(u8, from_s, "ln_1") and std.mem.eql(u8, to_s, "attn")) {
+            found_ln1_to_attn = true;
+        }
+        if (std.mem.eql(u8, to_s, "residual_attn") and is_skip) {
+            found_skip_to_res = true;
+        }
+        if ((std.mem.eql(u8, from_s, "q_attn") or std.mem.eql(u8, from_s, "k_attn") or std.mem.eql(u8, from_s, "v_attn")) and std.mem.eql(u8, to_s, "attn")) {
+            leaked_qkv_to_attn = true;
+        }
+    }
+    try std.testing.expect(found_ln1_to_attn);
+    try std.testing.expect(found_skip_to_res);
+    try std.testing.expect(!leaked_qkv_to_attn);
+
     // 5. 测试将递归 JSON 导出到真实文件系统
     const tmp_json_path = "examples/sample_model_graph.json";
     try graph.exportJson(tmp_json_path);
+
     const json_z = try allocator.dupeZ(u8, tmp_json_path);
     defer allocator.free(json_z);
     const fj = std.c.fopen(json_z.ptr, "rb") orelse return error.CannotOpenFile;
