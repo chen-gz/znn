@@ -1305,7 +1305,7 @@ test "Hierarchical module naming and interactive HTML report export" {
     try std.testing.expect(parsed.value.object.get("formulas") == null);
 
     // 校验 Block0 级别的拓扑边 (Edges) 正确性：
-    // 1) 包含前向流 ln_1 -> attn 以及残差边 embeddings_sum -> residual_attn (is_skip = true)
+    // 1) 包含前向流 ln_1 -> attn 以及残差边 inputs.token_embeddings -> residual_attn (is_skip = true)
     // 2) 严禁包含子模块内部 Q/K/V 指向 attn 的泄露边
     var found_ln1_to_attn = false;
     var found_skip_to_res = false;
@@ -1316,10 +1316,10 @@ test "Hierarchical module naming and interactive HTML report export" {
         const to_s = edge.get("to").?.string;
         const is_skip = edge.get("is_skip").?.bool;
 
-        if (std.mem.eql(u8, from_s, "ln_1") and std.mem.eql(u8, to_s, "attn")) {
+        if (std.mem.indexOf(u8, from_s, "ln_1") != null and std.mem.indexOf(u8, to_s, "attn") != null and !is_skip) {
             found_ln1_to_attn = true;
         }
-        if (std.mem.eql(u8, to_s, "residual_attn") and is_skip) {
+        if (std.mem.indexOf(u8, to_s, "residual_attn") != null and is_skip) {
             found_skip_to_res = true;
         }
         if ((std.mem.eql(u8, from_s, "q_attn") or std.mem.eql(u8, from_s, "k_attn") or std.mem.eql(u8, from_s, "v_attn")) and std.mem.eql(u8, to_s, "attn")) {
@@ -1329,6 +1329,38 @@ test "Hierarchical module naming and interactive HTML report export" {
     try std.testing.expect(found_ln1_to_attn);
     try std.testing.expect(found_skip_to_res);
     try std.testing.expect(!leaked_qkv_to_attn);
+
+    // 校验参数矩阵守恒与内存指标递归一致性 (Conservation Check)
+    const ParamCounter = struct {
+        fn countParams(obj: std.json.ObjectMap) usize {
+            var sum: usize = 0;
+            if (obj.get("parameters")) |p_val| {
+                for (p_val.array.items) |p_item| {
+                    if (p_item.object.get("elements")) |el| {
+                        sum += @as(usize, @intCast(el.integer));
+                    }
+                }
+            }
+            if (obj.get("children")) |c_val| {
+                for (c_val.array.items) |c_item| {
+                    sum += countParams(c_item.object);
+                }
+            }
+            return sum;
+        }
+    };
+    const total_recursed_params = ParamCounter.countParams(root_obj);
+    try std.testing.expectEqual(summary_obj.get("total_params").?.integer, @as(i64, @intCast(total_recursed_params)));
+
+    // 校验算子（Ops）拓扑与张量流转维度非空完整性
+    for (q_attn_obj.get("ops").?.array.items) |op_val| {
+        const op_obj = op_val.object;
+        try std.testing.expect(op_obj.get("op_type") != null);
+        try std.testing.expect(op_obj.get("input_shape") != null);
+        try std.testing.expect(op_obj.get("output_shape") != null);
+        try std.testing.expect(op_obj.get("elements").?.integer > 0);
+        try std.testing.expect(op_obj.get("bytes").?.integer > 0);
+    }
 
     // 5. 测试将递归 JSON 导出到真实文件系统
     const tmp_json_path = "examples/sample_model_graph.json";
@@ -1350,6 +1382,83 @@ test "Hierarchical module naming and interactive HTML report export" {
     try std.testing.expect(std.mem.indexOf(u8, json_from_struct, "\"module_type\": \"GPT\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json_from_struct, "\"gpt.layers.0.attn.q_attn.weight\"") != null);
 }
+
+test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivity" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(54321);
+    const random = prng.random();
+
+    // 1. 配置 2 层标准 GPT 模型
+    const config = transformer.GPTConfig{
+        .vocab_size = 128,
+        .block_size = 16,
+        .n_embd = 32,
+        .n_head = 2,
+        .n_layer = 2,
+    };
+
+    var gpt = try transformer.GPT(config).init(allocator, random);
+    defer gpt.deinit(allocator);
+    gpt.setName("gpt");
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    // 2. 构造输入张量并执行前向传播
+    const batch_size: usize = 2;
+    const seq_len: usize = 8;
+    const token_data = try allocator.alloc(f32, batch_size * seq_len);
+    defer allocator.free(token_data);
+    for (token_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
+
+    const input_tokens = try graph.tensorNDWithData(&.{ batch_size, seq_len }, token_data, false);
+    input_tokens.setName("inputs.token_ids");
+
+    const logits = try gpt.forward(allocator, &graph, input_tokens);
+    logits.setName("outputs.logits");
+
+    // 3. 构建 ModelHierarchyGraph 与 JSON
+    const json_data = try graph.formatJson(allocator);
+    defer allocator.free(json_data);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_data, .{});
+    defer parsed.deinit();
+
+    const root_obj = parsed.value.object.get("root").?.object;
+    const gpt_obj = root_obj.get("children").?.array.items[0].object; // "gpt"
+    const layers_obj = gpt_obj.get("children").?.array.items[2].object; // "layers"
+    try std.testing.expectEqualStrings("TransformerDecoder", layers_obj.get("module_type").?.string);
+
+    // 4. 校验跨层连接 (Cross-layer continuity between Layer 0 and Layer 1)
+    // layers 容器内部必须正确记录 0 -> 1 的前向流以及 0 到 1 的残差连接
+    var found_layer0_to_1 = false;
+    for (layers_obj.get("edges").?.array.items) |e_item| {
+        const edge = e_item.object;
+        const from_s = edge.get("from").?.string;
+        const to_s = edge.get("to").?.string;
+        if (std.mem.eql(u8, from_s, "0") and std.mem.eql(u8, to_s, "1")) {
+            found_layer0_to_1 = true;
+        }
+    }
+    try std.testing.expect(found_layer0_to_1);
+
+    // 5. 校验 Layer 1 内部的残差汇聚结构与公式
+    const layer1_obj = layers_obj.get("children").?.array.items[1].object; // "gpt.layers.1"
+    try std.testing.expectEqualStrings("TransformerBlock", layer1_obj.get("module_type").?.string);
+    try std.testing.expect(layer1_obj.get("edges").?.array.items.len > 0);
+
+    var found_layer1_res_skip = false;
+    for (layer1_obj.get("edges").?.array.items) |e_item| {
+        const edge = e_item.object;
+        const to_s = edge.get("to").?.string;
+        const is_skip = edge.get("is_skip").?.bool;
+        if (std.mem.indexOf(u8, to_s, "residual_attn") != null and is_skip) {
+            found_layer1_res_skip = true;
+        }
+    }
+    try std.testing.expect(found_layer1_res_skip);
+}
+
 
 
 
