@@ -286,7 +286,7 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(exe_report);
 
-    const run_report_step = b.step("run-report", "Run the HTML Model Report export example");
+    const run_report_step = b.step("run-report", "Run the Model Graph JSON export example");
     const run_report_cmd = b.addRunArtifact(exe_report);
     run_report_step.dependOn(&run_report_cmd.step);
     run_report_cmd.step.dependOn(b.getInstallStep());

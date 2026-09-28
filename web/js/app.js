@@ -260,6 +260,8 @@ function openInspector(key, initialTab = 'overview') {
     breadcrumbEl.innerHTML = bcHtml;
   }
 
+  const targetMod = findModuleByPath(RAW_GRAPH ? RAW_GRAPH.root : null, key);
+
   let matchedNodes;
   let matchedOps;
   if (isAttentionCore) {
@@ -269,6 +271,11 @@ function openInspector(key, initialTab = 'overview') {
       return !sub.startsWith('q_attn.') && !sub.startsWith('k_attn.') && !sub.startsWith('v_attn.') && !sub.startsWith('c_proj.');
     });
     matchedOps = OPS_DATA.filter(o => o.module === baseKey);
+  } else if (targetMod) {
+    // If exact Module node exists in the recursive tree, collect all its nodes & ops
+    const collected = collectAllFromTree(targetMod);
+    matchedNodes = collected.nodes;
+    matchedOps = collected.ops;
   } else {
     matchedNodes = NODES_DATA.filter(n => n.name === key || n.name.startsWith(key + '.'));
     matchedOps = OPS_DATA.filter(o => o.module === key || o.module.startsWith(key + '.') || o.name.startsWith(key + '.'));
@@ -280,13 +287,18 @@ function openInspector(key, initialTab = 'overview') {
 
   let totalParams = 0;
   let totalBytes = 0;
-  matchedNodes.forEach(n => {
-    if (n.kind === 'Param') totalParams += n.elements;
-    totalBytes += n.bytes;
-  });
+  if (targetMod && (targetMod.total_params !== undefined || targetMod.param_count !== undefined)) {
+    totalParams = targetMod.total_params || 0;
+    totalBytes = targetMod.total_bytes || 0;
+  } else {
+    matchedNodes.forEach(n => {
+      if (n.kind === 'Param') totalParams += n.elements;
+      totalBytes += n.bytes;
+    });
+  }
 
   const paramStr = totalParams > 0 ? `${formatNumber(totalParams)} params (${formatBytes(totalBytes)})` : '0 params (Parameter-free)';
-  if (subEl) subEl.textContent = `${opInfo.type} · ${paramStr}`;
+  if (subEl) subEl.textContent = `${targetMod && targetMod.module_type ? targetMod.module_type : opInfo.type} · ${paramStr}`;
 
   // Update tab param badge
   const tabParamCount = document.getElementById('insp-tab-param-count');
@@ -432,20 +444,34 @@ function openInspector(key, initialTab = 'overview') {
 
   // --- Submodules Structure Drill-down ---
   const subModulesMap = new Map();
-  NODES_DATA.forEach(n => {
-    if (n.name.startsWith(key + '.')) {
-      const remainder = n.name.slice(key.length + 1);
-      const childPart = remainder.split('.')[0];
-      const childFullPath = `${key}.${childPart}`;
-      if (!subModulesMap.has(childFullPath)) {
-        subModulesMap.set(childFullPath, { name: childPart, fullPath: childFullPath, params: 0, bytes: 0, count: 0 });
+  if (targetMod && targetMod.children && targetMod.children.length > 0) {
+    // 1. Direct children from the recursive tree
+    targetMod.children.forEach(c => {
+      subModulesMap.set(c.path, {
+        name: c.name,
+        fullPath: c.path,
+        params: c.total_params || 0,
+        bytes: c.total_bytes || 0,
+        count: c.node_count || 0
+      });
+    });
+  } else {
+    // 2. Fallback to path prefix scanning on NODES_DATA
+    NODES_DATA.forEach(n => {
+      if (n.name.startsWith(key + '.')) {
+        const remainder = n.name.slice(key.length + 1);
+        const childPart = remainder.split('.')[0];
+        const childFullPath = `${key}.${childPart}`;
+        if (!subModulesMap.has(childFullPath)) {
+          subModulesMap.set(childFullPath, { name: childPart, fullPath: childFullPath, params: 0, bytes: 0, count: 0 });
+        }
+        const item = subModulesMap.get(childFullPath);
+        item.count++;
+        item.bytes += n.bytes;
+        if (n.kind === 'Param') item.params += n.elements;
       }
-      const item = subModulesMap.get(childFullPath);
-      item.count++;
-      item.bytes += n.bytes;
-      if (n.kind === 'Param') item.params += n.elements;
-    }
-  });
+    });
+  }
 
   let submodulesHtml = '<div class="insp-section"><div class="insp-section-title"><span>📁 Direct Submodules & Internal Hierarchy</span><span style="font-size: 11px; font-weight: normal; color: #94a3b8;">' + subModulesMap.size + ' Submodules</span></div>';
   if (subModulesMap.size > 0) {
@@ -454,6 +480,7 @@ function openInspector(key, initialTab = 'overview') {
     submodulesHtml += '<div style="font-size: 12px; color: #94a3b8; font-style: italic;">This node is a leaf operation or has no children.</div>';
   }
   submodulesHtml += '</div>';
+
 
   // --- Parameters Dedicated Inspector Tab ---
   const paramNodes = matchedNodes.filter(n => n.kind === 'Param');
@@ -1517,4 +1544,31 @@ window.addEventListener('DOMContentLoaded', () => {
       .catch(() => tryFetch(idx + 1));
   }
   tryFetch(0);
+
+  // Setup drag and drop file loading on body/window
+  window.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const file = e.dataTransfer.files[0];
+      if (file.name.endsWith('.json') || file.type === 'application/json') {
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          try {
+            const parsed = JSON.parse(evt.target.result);
+            loadGraphData(parsed);
+          } catch (err) {
+            alert('Failed to parse dropped JSON: ' + err.message);
+          }
+        };
+        reader.readAsText(file);
+      }
+    }
+  });
 });
+

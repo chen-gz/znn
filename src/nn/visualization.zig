@@ -1290,82 +1290,9 @@ pub const graph_ir = struct {
 };
 
 // ============================================================================
-// 3. 模块二：独立 HTML 可视化报告生成器 (Standalone HTML Report Visualizer)
-//    - 输入: 约定的中间数据结构 (json_str: []const u8 或 *const ModelHierarchyGraph)
-//    - 输出: 自包含的前后端分离 HTML 报告文档 (纯前端 JS 解析渲染)
-//    - 包含 KaTeX LaTeX 数学公式、QKV 并行三列投射、残差跳跃连接分支、TensorBoard 风格卡片
-// ============================================================================
-pub const html_report = struct {
-    pub const template_html = @embedFile("visualization/template.html");
-
-    /// 依据约定的递归 JSON 字符串生成自包含 HTML 报告文档 (使用独立 template.html 模板)
-    pub fn renderFromJson(json_str: []const u8, allocator: std.mem.Allocator) ![]const u8 {
-        const placeholder = "{{ZNN_MODEL_GRAPH_JSON}}";
-        if (std.mem.indexOf(u8, template_html, placeholder)) |idx| {
-            var html_buf: std.ArrayList(u8) = .empty;
-            errdefer html_buf.deinit(allocator);
-
-            try html_buf.appendSlice(allocator, template_html[0..idx]);
-            try html_buf.appendSlice(allocator, json_str);
-            try html_buf.appendSlice(allocator, template_html[idx + placeholder.len ..]);
-
-            return html_buf.toOwnedSlice(allocator);
-        } else {
-            return error.TemplatePlaceholderNotFound;
-        }
-    }
-
-    /// 依据约定的递归 JSON 字符串导出 HTML 报告文件
-    pub fn exportFromJson(json_str: []const u8, file_path: []const u8, allocator: std.mem.Allocator) !void {
-        const html_content = try renderFromJson(json_str, allocator);
-        defer allocator.free(html_content);
-
-        const path_z = try allocator.dupeZ(u8, file_path);
-        defer allocator.free(path_z);
-
-        const file = std.c.fopen(path_z.ptr, "wb") orelse return error.CannotOpenFile;
-        defer _ = std.c.fclose(file);
-
-        const written = std.c.fwrite(html_content.ptr, 1, html_content.len, file);
-        if (written < html_content.len) return error.WriteFailed;
-    }
-
-    /// 依据约定的 ModelHierarchyGraph 结构体渲染自包含 HTML 报告文档
-    pub fn renderFromHierarchy(model_graph: *const ModelHierarchyGraph, allocator: std.mem.Allocator) ![]const u8 {
-        const json_str = try graph_ir.serializeJson(model_graph, allocator);
-        defer allocator.free(json_str);
-        return renderFromJson(json_str, allocator);
-    }
-
-    /// 依据约定的 ModelHierarchyGraph 结构体导出 HTML 报告文件
-    pub fn exportFromHierarchy(model_graph: *const ModelHierarchyGraph, file_path: []const u8, allocator: std.mem.Allocator) !void {
-        const json_str = try graph_ir.serializeJson(model_graph, allocator);
-        defer allocator.free(json_str);
-        try exportFromJson(json_str, file_path, allocator);
-    }
-
-    /// 从 Graph 直接生成自包含 HTML 报告 (组合 generateJson + renderFromJson)
-    pub fn generateHtmlReport(graph: *Graph, allocator: std.mem.Allocator) ![]const u8 {
-        const json_str = try graph_ir.generateJson(graph, allocator);
-        defer allocator.free(json_str);
-        return renderFromJson(json_str, allocator);
-    }
-
-    /// 从 Graph 直接导出 HTML 报告文件 (组合 generateJson + exportFromJson)
-    pub fn exportHtmlReport(graph: *Graph, file_path: []const u8, allocator: std.mem.Allocator) !void {
-        const json_str = try graph_ir.generateJson(graph, allocator);
-        defer allocator.free(json_str);
-        try exportFromJson(json_str, file_path, allocator);
-    }
-};
-
-// ============================================================================
-// 4. 便捷顶层重导出 (Top-Level Re-Exports)
+// 3. 便捷顶层重导出 (Top-Level Re-Exports)
 // ============================================================================
 pub const buildModelHierarchy = graph_ir.build;
 pub const generateJson = graph_ir.generateJson;
 pub const exportJson = graph_ir.exportJson;
 
-pub const renderHtmlReport = html_report.renderFromJson;
-pub const exportHtmlReport = html_report.exportFromJson;
-pub const generateHtmlReport = html_report.generateHtmlReport;

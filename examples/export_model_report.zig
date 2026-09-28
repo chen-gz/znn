@@ -63,16 +63,16 @@ pub fn main() !void {
     std.debug.print("  * Output shape:      [{d}, {d}, {d}]\n", .{ logits.shape.dims[0], logits.shape.dims[1], logits.shape.dims[2] });
     std.debug.print("  * Graph Total Nodes: {d}\n\n", .{graph.tensors.items.len});
 
-    // 4. 导出交互式、树形可折叠的 HTML 架构报告
-    const output_path = "examples/gpt_model_report.html";
-    std.debug.print("[Step 3/4] Exporting Interactive HTML Report...\n", .{});
-    const json_data = try graph.formatJson(allocator);
-    defer allocator.free(json_data);
-    try nn.html_report.exportFromJson(json_data, output_path, allocator);
+    // 4. 导出计算图为独立的 JSON 文件 (提供给 web/ 纯前端页面浏览)
+    const output_path = "examples/sample_model_graph.json";
+    std.debug.print("[Step 3/4] Exporting Model Hierarchy & Graph JSON...\n", .{});
+    try graph.exportJson(output_path);
 
-    std.debug.print("[Step 4/4] Done! Report written to: {s}\n\n", .{output_path});
+    std.debug.print("[Step 4/4] Done! Graph written to: {s}\n\n", .{output_path});
     std.debug.print("-----------------------------------------------------------------\n", .{});
-    std.debug.print("To view the interactive model report in your browser, run:\n", .{});
-    std.debug.print("  open {s}\n", .{output_path});
+    std.debug.print("To view the interactive model architecture & computation graph:\n", .{});
+    std.debug.print("  1. Open web/index.html in your browser: open web/index.html\n", .{});
+    std.debug.print("  2. Load '{s}' using the file picker or drag-and-drop\n", .{output_path});
     std.debug.print("-----------------------------------------------------------------\n\n", .{});
 }
+
