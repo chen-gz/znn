@@ -189,6 +189,7 @@ fn appendNodeData(
             try std.fmt.allocPrint(allocator, "{s}.act_{s}_{d}", .{ scope, op_name, op_idx.* })
         else
             try std.fmt.allocPrint(allocator, "computation_graph.{s}_{d}", .{ op_name, op_idx.* });
+        if (t.name == null) t.name = name;
         op_idx.* += 1;
 
         var strat_buf: [64]u8 = undefined;
@@ -214,6 +215,7 @@ fn appendNodeData(
             try std.fmt.allocPrint(allocator, "{s}.input_{d}", .{ scope, input_idx.* })
         else
             try std.fmt.allocPrint(allocator, "inputs.input_{d}", .{input_idx.*});
+        if (t.name == null) t.name = name;
         input_idx.* += 1;
 
         try nodes.append(allocator, .{
@@ -236,6 +238,7 @@ fn appendNodeData(
         try std.fmt.allocPrint(allocator, "{s}.param_{d}", .{ scope, param_idx.* })
     else
         try std.fmt.allocPrint(allocator, "parameters.param_{d}", .{param_idx.*});
+    if (t.name == null) t.name = name;
     param_idx.* += 1;
 
     if (t.is_custom_initialized) {
@@ -323,12 +326,13 @@ pub const EdgeData = struct {
     is_skip: bool = false,
 };
 
-fn getLogicalModule(name: []const u8) []const u8 {
+fn getMajorModulePath(name: []const u8) []const u8 {
     if (std.mem.endsWith(u8, name, ".residual_attn")) return name;
     if (std.mem.endsWith(u8, name, ".output")) return name;
     if (std.mem.endsWith(u8, name, ".embeddings_sum")) return name;
     if (std.mem.startsWith(u8, name, "inputs.")) return name;
     if (std.mem.startsWith(u8, name, "outputs.")) return name;
+    if (std.mem.startsWith(u8, name, "activations.")) return name;
 
     const patterns = [_]struct { pat: []const u8, len: usize }{
         .{ .pat = ".attn.", .len = 5 },
@@ -366,6 +370,53 @@ fn getLogicalModule(name: []const u8) []const u8 {
 
     if (extractModuleScope(name)) |p| return p;
     return name;
+}
+
+fn getLcaBranch(name: []const u8, lca_depth: usize) []const u8 {
+    if (std.mem.startsWith(u8, name, "inputs.") or std.mem.startsWith(u8, name, "outputs.") or std.mem.startsWith(u8, name, "activations.")) {
+        return name;
+    }
+    if (std.mem.endsWith(u8, name, ".residual_attn") or std.mem.endsWith(u8, name, ".output") or std.mem.endsWith(u8, name, ".embeddings_sum")) {
+        return name;
+    }
+
+    if (lca_depth == 0) {
+        return getMajorModulePath(name);
+    }
+
+    var it = std.mem.splitScalar(u8, name, '.');
+    var idx: usize = 0;
+    while (it.next()) |part| {
+        if (idx == lca_depth) {
+            const token_end = @intFromPtr(part.ptr) + part.len - @intFromPtr(name.ptr);
+            if (std.mem.startsWith(u8, part, "act_") or std.mem.startsWith(u8, part, "Node_") or std.mem.startsWith(u8, part, "tensor")) {
+                if (token_end > part.len + 1) {
+                    return name[0 .. token_end - part.len - 1];
+                }
+                return name;
+            }
+            return name[0..token_end];
+        }
+        idx += 1;
+    }
+    return name;
+}
+
+fn isSkipConnection(from: []const u8, to: []const u8) bool {
+    const is_converge = std.mem.indexOf(u8, to, "residual") != null or
+        std.mem.indexOf(u8, to, "skip") != null or
+        std.mem.endsWith(u8, to, ".output") or
+        std.mem.startsWith(u8, to, "activations.") or
+        std.mem.endsWith(u8, to, "_sum");
+    if (!is_converge) return false;
+
+    if (std.mem.startsWith(u8, from, "inputs.")) return true;
+    if (std.mem.indexOf(u8, from, "residual") != null and !std.mem.eql(u8, from, to)) return true;
+    if (std.mem.endsWith(u8, from, ".embeddings_sum")) return true;
+    if (std.mem.endsWith(u8, to, ".residual_attn") and !std.mem.endsWith(u8, from, ".attn") and !std.mem.endsWith(u8, from, ".c_proj")) return true;
+    if ((std.mem.endsWith(u8, to, ".output") or std.mem.startsWith(u8, to, "activations.")) and !std.mem.endsWith(u8, from, ".mlp") and !std.mem.endsWith(u8, from, ".c_proj")) return true;
+
+    return false;
 }
 
 pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayList(EdgeData) {
@@ -422,54 +473,78 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
         }
     }
 
+    const addEdge = struct {
+        fn add(
+            list: *std.ArrayList(EdgeData),
+            set: *std.StringHashMap(void),
+            arena: std.mem.Allocator,
+            from: []const u8,
+            to: []const u8,
+            shape: []const u8,
+            is_skip: bool,
+        ) !void {
+            if (from.len == 0 or to.len == 0 or std.mem.eql(u8, from, to)) return;
+            var key_buf: [384]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, "{s}->{s}", .{ from, to }) catch return;
+            if (set.contains(key)) return;
+            try set.put(try arena.dupe(u8, key), {});
+            try list.append(arena, .{
+                .from = try arena.dupe(u8, from),
+                .to = try arena.dupe(u8, to),
+                .shape = try arena.dupe(u8, shape),
+                .is_skip = is_skip,
+            });
+        }
+    }.add;
+
     for (graph.ops.items) |op| {
-        for (op.outputs) |out| {
-            const out_name = if (out.name) |n| n else if (scopes.get(out)) |s| s else continue;
-            const to_mod = getLogicalModule(out_name);
+        if (op.outputs.len == 0) continue;
+        const out = op.outputs[0];
+        const out_name = if (out.name) |n| n else (scopes.get(out) orelse "op_out");
 
-            for (op.inputs) |inp| {
-                const inp_name = if (inp.name) |n| n else if (scopes.get(inp)) |s| s else continue;
-                if (inp.creator == null and inp.requires_grad) continue;
-                if (std.mem.endsWith(u8, inp_name, ".causal_mask")) continue;
-                if (std.mem.endsWith(u8, inp_name, ".pos_indices") and std.mem.eql(u8, to_mod, "gpt.wpe")) continue;
+        for (op.inputs) |inp| {
+            // 1. 严格跳过内部权重/偏置参数与常量掩码 (参数已归属在各模块 parameters 属性中，非外部数据流边)
+            if (inp.creator == null and inp.requires_grad) continue;
+            const inp_name = if (inp.name) |n| n else (scopes.get(inp) orelse "inp_tensor");
+            if (std.mem.endsWith(u8, inp_name, ".causal_mask")) continue;
+            if (std.mem.endsWith(u8, inp_name, ".pos_indices")) continue;
 
-                const from_mod = getLogicalModule(inp_name);
-                if (std.mem.eql(u8, from_mod, to_mod)) continue;
-
-                var shape_buf: [64]u8 = undefined;
-                var shape_len: usize = 0;
-                shape_buf[0] = '[';
-                shape_len += 1;
-                for (0..inp.shape.len) |d| {
-                    if (d > 0) {
-                        shape_buf[shape_len] = ',';
-                        shape_buf[shape_len + 1] = ' ';
-                        shape_len += 2;
-                    }
-                    const part = std.fmt.bufPrint(shape_buf[shape_len..], "{d}", .{inp.shape.dims[d]}) catch "";
-                    shape_len += part.len;
+            // 2. 格式化张量形状
+            var shape_buf: [64]u8 = undefined;
+            var shape_len: usize = 0;
+            shape_buf[0] = '[';
+            shape_len += 1;
+            for (0..inp.shape.len) |d| {
+                if (d > 0) {
+                    shape_buf[shape_len] = ',';
+                    shape_buf[shape_len + 1] = ' ';
+                    shape_len += 2;
                 }
-                shape_buf[shape_len] = ']';
-                shape_len += 1;
-                const shape_str = try allocator.dupe(u8, shape_buf[0..shape_len]);
+                const part = std.fmt.bufPrint(shape_buf[shape_len..], "{d}", .{inp.shape.dims[d]}) catch "";
+                shape_len += part.len;
+            }
+            shape_buf[shape_len] = ']';
+            shape_len += 1;
+            const shape_str = shape_buf[0..shape_len];
 
-                const is_skip = (std.mem.endsWith(u8, to_mod, ".residual_attn") and !std.mem.endsWith(u8, from_mod, ".attn")) or
-                                (std.mem.endsWith(u8, to_mod, ".output") and !std.mem.endsWith(u8, from_mod, ".mlp"));
+            // 3. 计算输入和输出激活的最低公共祖先 (LCA) 深度，提取所属模块分支
+            var it_inp = std.mem.splitScalar(u8, inp_name, '.');
+            var it_out = std.mem.splitScalar(u8, out_name, '.');
+            var lca_depth: usize = 0;
+            while (true) {
+                const p1 = it_inp.next();
+                const p2 = it_out.next();
+                if (p1 == null or p2 == null) break;
+                if (!std.mem.eql(u8, p1.?, p2.?)) break;
+                lca_depth += 1;
+            }
 
-                var key_buf: [256]u8 = undefined;
-                const key = std.fmt.bufPrint(&key_buf, "{s}->{s}", .{ from_mod, to_mod }) catch continue;
-                if (edge_set.contains(key)) {
-                    allocator.free(shape_str);
-                    continue;
-                }
-                try edge_set.put(try arena_alloc.dupe(u8, key), {});
+            const from_mod = getLcaBranch(inp_name, lca_depth);
+            const to_mod = getLcaBranch(out_name, lca_depth);
 
-                try edges.append(allocator, .{
-                    .from = try allocator.dupe(u8, from_mod),
-                    .to = try allocator.dupe(u8, to_mod),
-                    .shape = shape_str,
-                    .is_skip = is_skip,
-                });
+            if (!std.mem.eql(u8, from_mod, to_mod)) {
+                const is_skip = isSkipConnection(from_mod, to_mod);
+                try addEdge(&edges, &edge_set, arena_alloc, from_mod, to_mod, shape_str, is_skip);
             }
         }
     }
@@ -515,6 +590,7 @@ pub const OpData = struct {
     output_shape: []const u8,
     elements: usize,
     bytes: usize,
+    formula: ?[]const u8 = null,
 };
 
 pub fn collectGraphOps(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayList(OpData) {
@@ -705,12 +781,17 @@ pub const ModuleNode = struct {
     name: []const u8,
     path: []const u8,
     kind: []const u8 = "module",
+    module_type: []const u8 = "Module",
+    formula: ?[]const u8 = null,
     total_params: usize = 0,
     total_bytes: usize = 0,
     param_count: usize = 0,
     node_count: usize = 0,
     children: std.ArrayList(*ModuleNode),
     nodes: std.ArrayList(NodeData),
+    parameters: std.ArrayList(NodeData),
+    ops: std.ArrayList(OpData),
+    edges: std.ArrayList(EdgeData),
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8, path: []const u8) !*ModuleNode {
         const node = try allocator.create(ModuleNode);
@@ -718,12 +799,17 @@ pub const ModuleNode = struct {
             .name = name,
             .path = path,
             .kind = "module",
+            .module_type = "Module",
+            .formula = null,
             .total_params = 0,
             .total_bytes = 0,
             .param_count = 0,
             .node_count = 0,
             .children = .empty,
             .nodes = .empty,
+            .parameters = .empty,
+            .ops = .empty,
+            .edges = .empty,
         };
         return node;
     }
@@ -789,6 +875,21 @@ pub const graph_ir = struct {
         node.node_count = node_count;
     }
 
+    fn inferModuleType(path: []const u8, name: []const u8) []const u8 {
+        if (std.mem.endsWith(u8, path, ".attn") or std.mem.eql(u8, name, "attn")) return "CausalSelfAttention";
+        if (std.mem.endsWith(u8, path, ".mlp") or std.mem.eql(u8, name, "mlp")) return "MLP";
+        if (std.mem.endsWith(u8, path, ".swiglu") or std.mem.eql(u8, name, "swiglu")) return "SwiGLU";
+        if (std.mem.endsWith(u8, path, ".ln_1") or std.mem.endsWith(u8, path, ".ln_2") or std.mem.endsWith(u8, path, ".ln_f") or std.mem.endsWith(u8, path, ".norm")) return "RMSNorm";
+        if (std.mem.endsWith(u8, path, ".q_attn") or std.mem.endsWith(u8, path, ".k_attn") or std.mem.endsWith(u8, path, ".v_attn") or std.mem.endsWith(u8, path, ".c_proj") or std.mem.endsWith(u8, path, ".c_fc") or std.mem.endsWith(u8, path, ".lm_head") or std.mem.endsWith(u8, path, ".linear")) return "Linear";
+        if (std.mem.endsWith(u8, path, ".wte") or std.mem.endsWith(u8, path, ".wpe") or std.mem.endsWith(u8, path, ".embedding")) return "Embedding";
+        if (std.mem.endsWith(u8, path, ".layers") or std.mem.eql(u8, name, "layers")) return "TransformerDecoder";
+        if (std.mem.eql(u8, path, "gpt") or std.mem.eql(u8, name, "gpt")) return "GPT";
+        if (std.mem.startsWith(u8, path, "gpt.layers.") or std.mem.startsWith(u8, path, "layers.")) {
+            if (std.fmt.parseInt(usize, name, 10)) |_| return "TransformerBlock" else |_| {}
+        }
+        return "Module";
+    }
+
     /// 解析 Graph 并构建约定的中间数据结构 ModelHierarchyGraph
     pub fn build(graph: *Graph, allocator: std.mem.Allocator) !ModelHierarchyGraph {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -814,7 +915,7 @@ pub const graph_ir = struct {
         }
 
         // 1. 自动遍历所有算子实例，将其对应的具体算子公式直接绑定到 op.name
-        for (ops_list.items) |op| {
+        for (ops_list.items) |*op| {
             if (!formulas.contains(op.name)) {
                 // 如果存在对应的算子类型标准公式，直接使用算子公式
                 if (formulas.get(op.op_type)) |op_form| {
@@ -828,6 +929,7 @@ pub const graph_ir = struct {
                 const inferred = graph.inferModuleFormula(op.module);
                 try formulas.put(try arena_alloc.dupe(u8, op.module), try arena_alloc.dupe(u8, inferred));
             }
+            op.formula = formulas.get(op.name) orelse (formulas.get(op.op_type) orelse null);
         }
 
         // 2. 自动遍历所有图节点，为尚未显式注册公式的模块和算子从图与内置库中推导并注入公式
@@ -852,6 +954,13 @@ pub const graph_ir = struct {
 
         // 构建递归模块树
         const root = try ModuleNode.init(arena_alloc, "root", "");
+        root.module_type = "Model";
+        root.formula = graph.getModuleFormula("root") orelse (graph.getModuleFormula("") orelse null);
+
+        var module_map = std.StringHashMap(*ModuleNode).init(arena_alloc);
+        try module_map.put("", root);
+        try module_map.put("root", root);
+
         for (nodes.items) |*node| {
             var it = std.mem.splitScalar(u8, node.name, '.');
             var parts: std.ArrayList([]const u8) = .empty;
@@ -877,11 +986,18 @@ pub const graph_ir = struct {
                         else
                             try std.fmt.allocPrint(arena_alloc, "{s}.{s}", .{ curr.path, part });
                         const new_child = try ModuleNode.init(arena_alloc, try arena_alloc.dupe(u8, part), child_path);
+                        new_child.module_type = inferModuleType(child_path, part);
+                        new_child.formula = formulas.get(child_path) orelse graph.inferModuleFormula(child_path);
+
                         try curr.children.append(arena_alloc, new_child);
+                        try module_map.put(child_path, new_child);
                         curr = new_child;
                     }
                 }
                 try curr.nodes.append(arena_alloc, node.*);
+                if (std.mem.eql(u8, node.kind, "Param")) {
+                    try curr.parameters.append(arena_alloc, node.*);
+                }
             } else {
                 var found_unscoped: ?*ModuleNode = null;
                 for (root.children.items) |child| {
@@ -892,10 +1008,37 @@ pub const graph_ir = struct {
                 }
                 const unscoped = if (found_unscoped) |u| u else blk: {
                     const new_u = try ModuleNode.init(arena_alloc, "(unscoped)", "(unscoped)");
+                    new_u.module_type = "Unscoped";
                     try root.children.append(arena_alloc, new_u);
+                    try module_map.put("(unscoped)", new_u);
                     break :blk new_u;
                 };
                 try unscoped.nodes.append(arena_alloc, node.*);
+                if (std.mem.eql(u8, node.kind, "Param")) {
+                    try unscoped.parameters.append(arena_alloc, node.*);
+                }
+            }
+        }
+
+        // 将算子分类关联到对应模块内部
+        for (ops_list.items) |op| {
+            if (module_map.get(op.module)) |m| {
+                try m.ops.append(arena_alloc, op);
+            }
+        }
+
+        // 将边分类关联到对应模块内部
+        for (edges.items) |e| {
+            var it = module_map.iterator();
+            while (it.next()) |entry| {
+                const mod_path = entry.key_ptr.*;
+                if (mod_path.len == 0 or std.mem.eql(u8, mod_path, "root")) continue;
+                const m = entry.value_ptr.*;
+                const from_in = std.mem.startsWith(u8, e.from, mod_path);
+                const to_in = std.mem.startsWith(u8, e.to, mod_path);
+                if (from_in and to_in) {
+                    try m.edges.append(arena_alloc, e);
+                }
             }
         }
 
@@ -955,8 +1098,18 @@ pub const graph_ir = struct {
         try writeEscapedJsonString(buf, allocator, node.name);
         try buf.appendSlice(allocator, ",\"path\": ");
         try writeEscapedJsonString(buf, allocator, node.path);
-        try buf.appendSlice(allocator, ",\"kind\": \"module\",");
-        try buf.print(allocator, "\"total_params\": {d},", .{node.total_params});
+        try buf.appendSlice(allocator, ",\"kind\": \"module\"");
+        try buf.appendSlice(allocator, ",\"module_type\": ");
+        try writeEscapedJsonString(buf, allocator, node.module_type);
+
+        if (node.formula) |f| {
+            try buf.appendSlice(allocator, ",\"formula\": ");
+            try writeEscapedJsonString(buf, allocator, f);
+        } else {
+            try buf.appendSlice(allocator, ",\"formula\": null");
+        }
+
+        try buf.print(allocator, ",\"total_params\": {d},", .{node.total_params});
         try buf.print(allocator, "\"total_bytes\": {d},", .{node.total_bytes});
         try buf.print(allocator, "\"param_count\": {d},", .{node.param_count});
         try buf.print(allocator, "\"node_count\": {d},", .{node.node_count});
@@ -965,6 +1118,50 @@ pub const graph_ir = struct {
         for (node.children.items, 0..) |child, i| {
             if (i > 0) try buf.appendSlice(allocator, ",");
             try serializeModuleTree(child, buf, allocator);
+        }
+        try buf.appendSlice(allocator, "],\"parameters\": [");
+        for (node.parameters.items, 0..) |p, i| {
+            if (i > 0) try buf.appendSlice(allocator, ",");
+            try buf.appendSlice(allocator, "{\"name\": ");
+            try writeEscapedJsonString(buf, allocator, p.name);
+            try buf.appendSlice(allocator, ",\"shape\": ");
+            try writeEscapedJsonString(buf, allocator, p.shape_str);
+            try buf.print(allocator, ",\"elements\": {d},\"bytes\": {d},", .{ p.elements, p.bytes });
+            try buf.appendSlice(allocator, "\"status\": ");
+            try writeEscapedJsonString(buf, allocator, p.status);
+            try buf.appendSlice(allocator, ",\"strategy\": ");
+            try writeEscapedJsonString(buf, allocator, p.strategy);
+            try buf.appendSlice(allocator, "}");
+        }
+        try buf.appendSlice(allocator, "],\"ops\": [");
+        for (node.ops.items, 0..) |op, i| {
+            if (i > 0) try buf.appendSlice(allocator, ",");
+            try buf.appendSlice(allocator, "{\"op_type\": ");
+            try writeEscapedJsonString(buf, allocator, op.op_type);
+            try buf.appendSlice(allocator, ",\"name\": ");
+            try writeEscapedJsonString(buf, allocator, op.name);
+            try buf.appendSlice(allocator, ",\"input_shape\": ");
+            try writeEscapedJsonString(buf, allocator, op.input_shape);
+            try buf.appendSlice(allocator, ",\"param_shape\": ");
+            try writeEscapedJsonString(buf, allocator, op.param_shape);
+            try buf.appendSlice(allocator, ",\"output_shape\": ");
+            try writeEscapedJsonString(buf, allocator, op.output_shape);
+            if (op.formula) |f| {
+                try buf.appendSlice(allocator, ",\"formula\": ");
+                try writeEscapedJsonString(buf, allocator, f);
+            }
+            try buf.print(allocator, ",\"elements\": {d},\"bytes\": {d}}}", .{ op.elements, op.bytes });
+        }
+        try buf.appendSlice(allocator, "],\"edges\": [");
+        for (node.edges.items, 0..) |e, i| {
+            if (i > 0) try buf.appendSlice(allocator, ",");
+            try buf.appendSlice(allocator, "{\"from\": ");
+            try writeEscapedJsonString(buf, allocator, e.from);
+            try buf.appendSlice(allocator, ",\"to\": ");
+            try writeEscapedJsonString(buf, allocator, e.to);
+            try buf.appendSlice(allocator, ",\"shape\": ");
+            try writeEscapedJsonString(buf, allocator, e.shape);
+            try buf.print(allocator, ",\"is_skip\": {s}}}", .{ if (e.is_skip) "true" else "false" });
         }
         try buf.appendSlice(allocator, "],\"nodes\": [");
         for (node.nodes.items, 0..) |leaf, i| {
@@ -1057,6 +1254,10 @@ pub const graph_ir = struct {
             try writeEscapedJsonString(&json_buf, allocator, op.param_shape);
             try json_buf.appendSlice(allocator, ", \"output_shape\": ");
             try writeEscapedJsonString(&json_buf, allocator, op.output_shape);
+            if (op.formula) |f| {
+                try json_buf.appendSlice(allocator, ", \"formula\": ");
+                try writeEscapedJsonString(&json_buf, allocator, f);
+            }
             try json_buf.print(allocator, ", \"elements\": {d}, \"bytes\": {d}}}", .{ op.elements, op.bytes });
         }
 

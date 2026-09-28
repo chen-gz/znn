@@ -1280,12 +1280,29 @@ test "Hierarchical module naming and interactive HTML report export" {
     try std.testing.expect(root_obj.get("total_params").?.integer > 0);
     try std.testing.expect(root_obj.get("children").?.array.items.len > 0);
 
+    // 校验根与子模块直接内嵌包含 formula, module_type, parameters, ops 与 edges
+    const gpt_child = root_obj.get("children").?.array.items[1].object; // "gpt"
+    try std.testing.expectEqualStrings("GPT", gpt_child.get("module_type").?.string);
+    try std.testing.expect(gpt_child.get("formula") != null);
+
+    const layer0_obj = gpt_child.get("children").?.array.items[0].object.get("children").?.array.items[0].object; // "gpt.layers.0"
+    try std.testing.expectEqualStrings("TransformerBlock", layer0_obj.get("module_type").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, layer0_obj.get("formula").?.string, "TransformerBlock") != null);
+    try std.testing.expect(layer0_obj.get("ops").?.array.items.len > 0);
+    try std.testing.expect(layer0_obj.get("edges").?.array.items.len > 0);
+
+    const q_attn_obj = layer0_obj.get("children").?.array.items[1].object.get("children").?.array.items[0].object; // "q_attn"
+    try std.testing.expectEqualStrings("Linear", q_attn_obj.get("module_type").?.string);
+    try std.testing.expectEqualStrings("y = x W^T + b", q_attn_obj.get("formula").?.string);
+    try std.testing.expectEqual(2, q_attn_obj.get("parameters").?.array.items.len);
+    try std.testing.expect(q_attn_obj.get("ops").?.array.items.len >= 2);
+
     const summary_obj = parsed.value.object.get("summary").?.object;
     try std.testing.expect(summary_obj.get("total_params").?.integer > 0);
     try std.testing.expect(summary_obj.get("param_nodes").?.integer >= 8);
 
     const edges_arr = parsed.value.object.get("edges").?.array;
-    try std.testing.expect(edges_arr.items.len > 0);
+    try std.testing.expect(edges_arr.items.len >= 10);
 
     // 5. 测试将递归 JSON 导出到真实文件系统
     const tmp_json_path = "examples/sample_model_graph.json";
