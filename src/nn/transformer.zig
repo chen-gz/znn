@@ -1591,7 +1591,7 @@ pub const TransformerBlock = struct {
     }
 
     /// 模块标准数学变换公式
-    pub const formula = "x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))";
+    pub const formula = "x_1 = x_l + \\text{Attention}(\\text{RMSNorm}(x_l)), \\quad x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))";
 
     pub fn registerFormula(self: *const TransformerBlock, graph: *autodiff.Graph) !void {
         if (self.name) |n| {
@@ -1617,12 +1617,12 @@ pub const TransformerBlock = struct {
         const x_attn = try self.attn.forward(allocator, graph, x_norm1);
         defer if (graph == null) tensor.free(allocator, x_attn);
 
-        // 2. 第一条残差混合: x1 = x + Attention(RMSNorm(x))
+        // 2. 第一条残差混合: x1 = x_l + Attention(RMSNorm(x_l))
         const x1 = if (graph) |g| try g.add(x, x_attn) else try x.add(x_attn, allocator, null);
         defer if (graph == null) tensor.free(allocator, x1);
         if (graph != null and self.name != null) {
             x1.setNameFormatted("{s}.residual_attn", .{self.name.?});
-            _ = graph.?.setModuleFormula(x1.name.?, "x_1 = x + \\text{Attention}(\\text{RMSNorm}(x))") catch {};
+            _ = graph.?.setModuleFormula(x1.name.?, "x_1 = x_l + \\text{Attention}(\\text{RMSNorm}(x_l))") catch {};
         }
 
         // 3. 第二条支路: RMSNorm -> MLP

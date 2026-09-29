@@ -139,6 +139,9 @@ function getNodeOpType(name) {
 
 function findModuleByPath(root, path) {
   if (!root) return null;
+  if (!path || path === 'root' || path === '(Root / Global Scope)') {
+    if (root.path === '' || root.name === 'root') return root;
+  }
   if (root.path === path) return root;
   if (root.children) {
     for (const child of root.children) {
@@ -150,7 +153,7 @@ function findModuleByPath(root, path) {
 }
 
 function getEffectiveFormula(key) {
-  // 0. Direct match from Module or Op object if available
+  // 0. Direct match from Module or Op object provided directly by backend JSON
   const mod = findModuleByPath(RAW_GRAPH ? RAW_GRAPH.root : null, key);
   if (mod && mod.formula) return { formula: mod.formula, source: 'CODE_SPECIFIED' };
   const matchedOp = OPS_DATA.find(o => o.name === key);
@@ -185,7 +188,7 @@ function getEffectiveFormula(key) {
     return { formula: op.formula || FORMULAS_DATA[op.op_type], source: 'OP_TYPE' };
   }
 
-  return { formula: 'y = f(x; \\theta)', source: 'DEFAULT' };
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,7 +219,15 @@ function inspectorGoBack() {
   }
 }
 
-function openInspector(key, initialTab = 'overview') {
+function openInspector(rawKey, initialTab = 'overview') {
+  // Normalize root key variants and strip any redundant 'root.' prefix
+  let key = rawKey;
+  if (!key || key === 'root' || key === '(Root / Global Scope)' || key === '') {
+    key = 'root';
+  } else if (key.startsWith('root.')) {
+    key = key.slice(5) || 'root';
+  }
+
   // Maintain history stack for backwards navigation
   if (INSP_HISTORY_STACK.length === 0 || INSP_HISTORY_STACK[INSP_HISTORY_STACK.length - 1].key !== key) {
     INSP_HISTORY_STACK.push({ key, tab: initialTab });
@@ -233,30 +244,33 @@ function openInspector(key, initialTab = 'overview') {
 
   const isAttentionCore = key.endsWith('.core');
   const baseKey = isAttentionCore ? key.slice(0, -5) : key;
+  const isRoot = (key === 'root');
 
-  // Render Hierarchical Breadcrumb Navigation Bar
+  // Render Hierarchical Breadcrumb Navigation Bar (Clean root handling without root/root duplicates)
   if (breadcrumbEl) {
     let bcHtml = '';
     if (INSP_HISTORY_STACK.length > 1) {
       bcHtml += '<button class="insp-back-btn" onclick="inspectorGoBack()">← Back</button>';
     }
 
-    // Build hierarchy segments: e.g. gpt -> layers -> 0 -> attn -> act_Add_20
-    const parts = key.split('.');
-    let accum = '';
-    parts.forEach((p, idx) => {
-      accum = accum ? `${accum}.${p}` : p;
-      const isLast = (idx === parts.length - 1);
-      if (idx > 0) {
+    if (isRoot) {
+      bcHtml += '<span class="insp-breadcrumb-item current">root (Model Overview)</span>';
+    } else {
+      bcHtml += '<span class="insp-breadcrumb-item" onclick="openInspector(\'root\', \'submodules\')">root</span>';
+      const parts = key.split('.');
+      let accum = '';
+      parts.forEach((p, idx) => {
+        accum = accum ? `${accum}.${p}` : p;
+        const isLast = (idx === parts.length - 1);
         bcHtml += '<span class="insp-breadcrumb-sep">/</span>';
-      }
-      if (isLast) {
-        bcHtml += `<span class="insp-breadcrumb-item current">${p}</span>`;
-      } else {
-        const segPath = accum;
-        bcHtml += `<span class="insp-breadcrumb-item" onclick="openInspector('${segPath}', 'submodules')">${p}</span>`;
-      }
-    });
+        if (isLast) {
+          bcHtml += `<span class="insp-breadcrumb-item current">${p}</span>`;
+        } else {
+          const segPath = accum;
+          bcHtml += `<span class="insp-breadcrumb-item" onclick="openInspector('${segPath}', 'submodules')">${p}</span>`;
+        }
+      });
+    }
     breadcrumbEl.innerHTML = bcHtml;
   }
 
@@ -282,8 +296,14 @@ function openInspector(key, initialTab = 'overview') {
   }
 
   const opInfo = getNodeOpType(key);
-  if (iconEl) iconEl.textContent = opInfo.icon;
-  if (titleEl) titleEl.textContent = isAttentionCore ? `${baseKey} · Attention Core` : key;
+  if (iconEl) iconEl.textContent = isRoot ? '🌐' : opInfo.icon;
+  if (titleEl) {
+    if (isRoot) {
+      titleEl.textContent = (RAW_GRAPH && RAW_GRAPH.model_name) ? `${RAW_GRAPH.model_name} (Root Model)` : 'Model Root Overview';
+    } else {
+      titleEl.textContent = isAttentionCore ? `${baseKey} · Attention Core` : key;
+    }
+  }
 
   let totalParams = 0;
   let totalBytes = 0;
@@ -305,9 +325,9 @@ function openInspector(key, initialTab = 'overview') {
   if (tabParamCount) tabParamCount.textContent = formatNumber(totalParams);
 
   // Input & Output Shape Resolution from real graph data
-  const isRootModule = (!isAttentionCore && (key === 'gpt' || key === 'model' || !key.includes('.')));
-  const incEdges = isAttentionCore ? [] : EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.'));
-  const outEdges = isAttentionCore ? [] : EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
+  const isRootModule = isRoot || (!isAttentionCore && (key === 'gpt' || key === 'model' || !key.includes('.')));
+  const incEdges = (isAttentionCore || isRoot) ? [] : EDGES_DATA.filter(e => e.to === key || e.to.startsWith(key + '.'));
+  const outEdges = (isAttentionCore || isRoot) ? [] : EDGES_DATA.filter(e => e.from === key || e.from.startsWith(key + '.'));
 
   let modInpShape = 'Unknown';
   let modOutShape = 'Unknown';
@@ -352,24 +372,27 @@ function openInspector(key, initialTab = 'overview') {
     </div>
   `;
 
-  // Mathematical Formula Display
+  // Mathematical Formula Display (Sourced directly from backend JSON)
   const formObj = getEffectiveFormula(key);
-  const isSpecified = formObj.source === 'CODE_SPECIFIED';
-  const badgeLabel = isSpecified ? 'SPECIFIED' : 'GRAPH INFERRED';
-  const badgeCls = isSpecified ? 'insp-formula-badge specified' : 'insp-formula-badge inferred';
-  let formulaHtml = `
-    <div class="insp-formula-box">
-      <div class="insp-formula-header">
-        <span>📐 Mathematical Vector Transformation Formula</span>
-        <span class="${badgeCls}">${badgeLabel}</span>
+  let formulaHtml = '';
+  if (formObj && formObj.formula) {
+    const isSpecified = formObj.source === 'CODE_SPECIFIED';
+    const badgeLabel = isSpecified ? 'SPECIFIED' : 'GRAPH INFERRED';
+    const badgeCls = isSpecified ? 'insp-formula-badge specified' : 'insp-formula-badge inferred';
+    formulaHtml = `
+      <div class="insp-formula-box">
+        <div class="insp-formula-header">
+          <span>📐 Mathematical Vector Transformation Formula</span>
+          <span class="${badgeCls}">${badgeLabel}</span>
+        </div>
+        <div class="insp-formula-display">
+          <span style="font-size:18px;">📐</span>
+          <span id="insp-katex-target" style="flex:1;">${formObj.formula}</span>
+        </div>
+        <div class="insp-formula-desc">Mathematical relationship mapping input representations to output activations.</div>
       </div>
-      <div class="insp-formula-display">
-        <span style="font-size:18px;">📐</span>
-        <span id="insp-katex-target" style="flex:1;">${formObj.formula}</span>
-      </div>
-      <div class="insp-formula-desc">Mathematical relationship mapping input representations to output activations.</div>
-    </div>
-  `;
+    `;
+  }
 
   // Operations Table
   let opsHtml = '';
@@ -521,7 +544,7 @@ function openInspector(key, initialTab = 'overview') {
   // KaTeX Formula Render
   try {
     const target = document.getElementById('insp-katex-target');
-    if (target && window.katex) {
+    if (target && window.katex && formObj && formObj.formula) {
       katex.render(formObj.formula, target, {
         throwOnError: false,
         displayMode: true
@@ -579,6 +602,9 @@ function renderSubmoduleFlowHtml(parentKey, submodulesList, matchedNodes, matche
 
     if (subMap.has(e.from)) {
       fromSub = subMap.get(e.from).fullPath;
+    } else if (parentKey === 'root') {
+      const topPart = e.from.split('.')[0];
+      if (subMap.has(topPart)) fromSub = subMap.get(topPart).fullPath;
     } else if (e.from.startsWith(parentKey + '.')) {
       const rest = e.from.slice(parentKey.length + 1).split('.')[0];
       const candidate = `${parentKey}.${rest}`;
@@ -587,6 +613,9 @@ function renderSubmoduleFlowHtml(parentKey, submodulesList, matchedNodes, matche
 
     if (subMap.has(e.to)) {
       toSub = subMap.get(e.to).fullPath;
+    } else if (parentKey === 'root') {
+      const topPart = e.to.split('.')[0];
+      if (subMap.has(topPart)) toSub = subMap.get(topPart).fullPath;
     } else if (e.to.startsWith(parentKey + '.')) {
       const rest = e.to.slice(parentKey.length + 1).split('.')[0];
       const candidate = `${parentKey}.${rest}`;
@@ -1363,7 +1392,7 @@ function renderBranch(prefix, node) {
           </div>
           <div class="module-meta">
             <span>${metaInfo}</span>
-            ${!isRoot ? `<button class="tb-inspect-btn" onclick="event.preventDefault(); event.stopPropagation(); openInspector('${prefix}')">🔍 Inspect</button>` : ''}
+            ${!isRoot ? `<button class="tb-inspect-btn" onclick="event.preventDefault(); event.stopPropagation(); openInspector('${prefix}')">🔍 Inspect</button>` : `<button class="tb-inspect-btn" onclick="event.preventDefault(); event.stopPropagation(); openInspector('root', 'submodules')">🔍 Inspect</button>`}
           </div>
         </summary>
         <div class="module-content">

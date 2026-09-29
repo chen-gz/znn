@@ -112,6 +112,12 @@ pub const Graph = struct {
         if (std.mem.indexOf(u8, path, "norm") != null or std.mem.indexOf(u8, path, "ln_") != null) {
             return "y = \\text{RMSNorm}(x; \\gamma, \\epsilon)";
         }
+        if (std.mem.indexOf(u8, path, "layers.") != null or std.mem.indexOf(u8, path, "block") != null) {
+            return "x_1 = x_l + \\text{Attention}(\\text{RMSNorm}(x_l)), \\quad x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))";
+        }
+        if (std.mem.endsWith(u8, path, "layers") or std.mem.indexOf(u8, path, "stack") != null) {
+            return "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)";
+        }
 
         return "y = f(x; \\theta)";
     }
