@@ -330,64 +330,95 @@ pub const EdgeData = struct {
     is_skip: bool = false,
 };
 
-/// 从计算图张量直接获取其所属的模块作用域或宏观接口名 (完全基于图拓扑属性，而非字符串猜测)
-fn getTensorModule(t: *Tensor, scopes: *const std.AutoHashMap(*Tensor, []const u8)) []const u8 {
-    // 1. 如果有显式命名的宏观接口节点（如 inputs.*, outputs.*, *.embeddings_sum, *.residual_attn, *.output），优先作为汇聚点
-    if (t.name) |n| {
-        if (std.mem.startsWith(u8, n, "inputs.") or
-            std.mem.startsWith(u8, n, "outputs.") or
-            std.mem.endsWith(u8, n, ".embeddings_sum") or
-            std.mem.endsWith(u8, n, ".residual_attn") or
-            std.mem.endsWith(u8, n, ".output"))
-        {
-            return n;
+/// 检查 target_t 是否为 start_t 的拓扑祖先（即存在前向数据通路 target_t ~> start_t）
+fn isAncestor(start_t: *Tensor, target_t: *Tensor, visited: *std.AutoHashMap(*Tensor, void)) bool {
+    if (start_t == target_t) return true;
+    const op = start_t.creator orelse return false;
+    for (op.inputs) |inp| {
+        // 跳过参数矩阵与偏置，只沿数据流追溯
+        if (inp.creator == null and inp.requires_grad) continue;
+        if (inp == target_t) return true;
+        if (!visited.contains(inp)) {
+            visited.put(inp, {}) catch continue;
+            if (isAncestor(inp, target_t, visited)) return true;
+        }
+    }
+    return false;
+}
+
+/// 判断一个算子是否为跨分支汇聚算子（即非参数数据输入 >= 2，且输入来自不同的模块/分支）
+fn isConvergenceOp(op: *autodiff.Op, scopes: *const std.AutoHashMap(*Tensor, []const u8)) bool {
+    var data_in_count: usize = 0;
+    var first_scope: ?[]const u8 = null;
+    var has_different_scopes = false;
+
+    for (op.inputs) |inp| {
+        // 排除参数与常量
+        if (inp.creator == null and inp.requires_grad) continue;
+        if (inp.name) |n| {
+            if (std.mem.endsWith(u8, n, ".causal_mask") or std.mem.endsWith(u8, n, ".pos_indices")) continue;
+        }
+
+        data_in_count += 1;
+        const s = scopes.get(inp) orelse (if (inp.name) |n| n else "");
+        if (s.len > 0) {
+            if (first_scope == null) {
+                first_scope = s;
+            } else if (!std.mem.eql(u8, first_scope.?, s)) {
+                has_different_scopes = true;
+            }
         }
     }
 
-    // 2. 直接从计算图的模块作用域字典中读取（张量所属的模块路径）
+    return data_in_count >= 2 and has_different_scopes;
+}
+
+/// 从计算图张量直接获取其所属的模块作用域或宏观接口名 (完全基于图拓扑属性，无字符串硬编码启发式)
+fn getTensorModule(
+    t: *Tensor,
+    scopes: *const std.AutoHashMap(*Tensor, []const u8),
+    consumed_set: *const std.AutoHashMap(*Tensor, void),
+) []const u8 {
+    // 1. 图原生源节点 (Graph Inputs): 入度为 0 且非参数张量
+    if (t.creator == null and !t.requires_grad) {
+        if (t.name) |n| return n;
+    }
+
+    // 2. 如果属于显式构造的子模块作用域（如注意力核心 attn.core），优先归属该子模块
+    if (scopes.get(t)) |scope| {
+        if (std.mem.endsWith(u8, scope, ".core")) {
+            return scope;
+        }
+    }
+
+    // 3. 图原生汇聚节点 (Convergence Junctions): 跨分支汇聚算子（多数据输入来自不同分支）产生的显式命名张量
+    if (t.creator) |op| {
+        if (isConvergenceOp(op, scopes)) {
+            if (t.name) |n| {
+                if (std.mem.indexOf(u8, n, ".act_") == null) return n;
+            }
+        }
+    }
+
+    // 4. 图原生终端输出节点 (Graph Sink Outputs): 出度为 0 且显式命名的模型输出张量
+    if (t.creator != null and !consumed_set.contains(t)) {
+        if (t.name) |n| return n;
+    }
+
+    // 5. 属于具体子模块的内部张量/激活值
     if (scopes.get(t)) |scope| {
         return scope;
     }
 
-    // 3. 图原生叶子判断：若为模型参数 (creator == null 且 requires_grad)，其所属模块为父级作用域
+    // 6. 模型权重参数 (creator == null 且 requires_grad)
     if (t.creator == null and t.requires_grad and t.name != null) {
         if (extractModuleScope(t.name.?)) |s| return s;
     }
 
-    // 4. 回退到张量原生名称
+    // 7. 回退到张量原生名称
     if (t.name) |n| return n;
 
     return "unknown";
-}
-
-fn isSkipConnection(from: []const u8, to: []const u8) bool {
-    const is_converge = std.mem.endsWith(u8, to, ".residual_attn") or
-        std.mem.endsWith(u8, to, ".output") or
-        std.mem.endsWith(u8, to, "residual_attn") or
-        std.mem.endsWith(u8, to, "output") or
-        std.mem.indexOf(u8, to, "residual") != null;
-    if (!is_converge) return false;
-
-    // 1. Attention 残差汇聚点 (residual_attn):
-    if (std.mem.endsWith(u8, to, "residual_attn")) {
-        const is_attn_branch = std.mem.endsWith(u8, from, "attn") or
-            std.mem.endsWith(u8, from, "c_proj") or
-            std.mem.indexOf(u8, from, "attn") != null;
-        if (is_attn_branch) return false;
-        return true;
-    }
-
-    // 2. MLP 残差汇聚点 (output):
-    if (std.mem.endsWith(u8, to, "output") or std.mem.startsWith(u8, to, "activations.")) {
-        const is_mlp_branch = std.mem.endsWith(u8, from, "mlp") or
-            std.mem.endsWith(u8, from, "c_proj") or
-            std.mem.indexOf(u8, from, "mlp") != null;
-        if (is_mlp_branch) return false;
-        if (std.mem.indexOf(u8, from, "residual") != null) return true;
-        if (std.mem.startsWith(u8, from, "inputs.")) return true;
-    }
-
-    return false;
 }
 
 pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayList(EdgeData) {
@@ -448,6 +479,15 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
         }
     }
 
+    // 预统计计算图中所有被下游算子消费的张量集合（用于准确判断图终端 Sink 输出节点）
+    var consumed_set = std.AutoHashMap(*Tensor, void).init(arena_alloc);
+    defer consumed_set.deinit();
+    for (graph.ops.items) |op| {
+        for (op.inputs) |inp| {
+            consumed_set.put(inp, {}) catch {};
+        }
+    }
+
     const addEdge = struct {
         fn add(
             list: *std.ArrayList(EdgeData),
@@ -502,11 +542,26 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
             const shape_str = shape_buf[0..shape_len];
 
             // 3. 直接通过张量在计算图中的拓扑属性与模块作用域获取所属模块
-            const from_mod = getTensorModule(inp, &scopes);
-            const to_mod = getTensorModule(out, &scopes);
+            const from_mod = getTensorModule(inp, &scopes, &consumed_set);
+            const to_mod = getTensorModule(out, &scopes, &consumed_set);
 
             if (!std.mem.eql(u8, from_mod, to_mod)) {
-                const is_skip = isSkipConnection(from_mod, to_mod);
+                // 图原生跳跃连接判定：如果汇聚算子的某个输入在拓扑上是另一个输入的祖先，则该输入为跳跃旁路
+                var is_skip = false;
+                if (out.creator) |c_op| {
+                    if (isConvergenceOp(c_op, &scopes)) {
+                        for (c_op.inputs) |other| {
+                            if (other == inp) continue;
+                            if (other.creator == null and other.requires_grad) continue;
+                            var visited = std.AutoHashMap(*Tensor, void).init(arena_alloc);
+                            defer visited.deinit();
+                            if (isAncestor(other, inp, &visited)) {
+                                is_skip = true;
+                                break;
+                            }
+                        }
+                    }
+                }
                 try addEdge(&edges, &edge_set, arena_alloc, from_mod, to_mod, shape_str, is_skip);
             }
         }
@@ -1053,7 +1108,7 @@ pub const graph_ir = struct {
                     .from = try arena_alloc.dupe(u8, from_name),
                     .to = try arena_alloc.dupe(u8, to_name),
                     .shape = try arena_alloc.dupe(u8, e.shape),
-                    .is_skip = isSkipConnection(from_name, to_name),
+                    .is_skip = e.is_skip,
                 });
             }
         }
