@@ -10,6 +10,7 @@
 | :--- | :--- | :--- |
 | **[TODO.md](TODO.md)** | **全面现状诊断与分阶段任务清单** | • 6 个核心技术维度的现状诊断与不成熟之处<br>• Phase 1 (P0) 至 Phase 4 (P3) 细分开发任务<br>• 已交付里程碑与待完成特性的最新跟踪状态 |
 | **[NUMPY_GAP_ANALYSIS.md](NUMPY_GAP_ANALYSIS.md)** | **现代 NumPy 2.x 深度对比与补齐规划** | • 科学计算底座 vs. 深度学习框架的定位差异<br>• 9 大能力维度的全景差距诊断表<br>• 泛型 Dtype、零拷贝切片、多轴归约、线性代数等具体演进方案 |
+| **[VISUALIZATION_GRAPH_EDGE_DESIGN.md](VISUALIZATION_GRAPH_EDGE_DESIGN.md)** | **计算图拓扑边与层次化可视化导出设计** | • 模块内部边越界外泄问题诊断<br>• 局部拓扑边层次封闭律（LCA 跨层收归规则）<br>• 权威全路径与直接子级命名解析标准 |
 
 ---
 
