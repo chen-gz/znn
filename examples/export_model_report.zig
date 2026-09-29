@@ -63,17 +63,11 @@ pub fn main() !void {
     std.debug.print("  * Output shape:      [{d}, {d}, {d}]\n", .{ logits.shape.dims[0], logits.shape.dims[1], logits.shape.dims[2] });
     std.debug.print("  * Graph Total Nodes: {d}\n\n", .{graph.tensors.items.len});
 
-    // 4. 导出计算图为独立的 JSON 文件 (提供给 web/ 纯前端页面浏览)
+    // 4. 导出计算图为独立的 JSON 文件
     const output_path = "examples/sample_model_graph.json";
     std.debug.print("[Step 3/4] Exporting Model Hierarchy & Graph JSON...\n", .{});
     try graph.exportJson(output_path);
-    _ = graph.exportJson("web/public/sample_model_graph.json") catch {};
 
-    std.debug.print("[Step 4/4] Done! Graph written to: {s} and web/public/sample_model_graph.json\n\n", .{output_path});
-    std.debug.print("-----------------------------------------------------------------\n", .{});
-    std.debug.print("To view the interactive model architecture & computation graph:\n", .{});
-    std.debug.print("  1. Open web/index.html in your browser: open web/index.html\n", .{});
-    std.debug.print("  2. Load '{s}' using the file picker or drag-and-drop\n", .{output_path});
-    std.debug.print("-----------------------------------------------------------------\n\n", .{});
+    std.debug.print("[Step 4/4] Done! Graph written to: {s}\n\n", .{output_path});
 }
 
