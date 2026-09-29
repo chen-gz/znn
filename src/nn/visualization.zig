@@ -326,50 +326,34 @@ pub const EdgeData = struct {
     is_skip: bool = false,
 };
 
-fn isLeafToken(token: []const u8) bool {
-    const leaf_params = [_][]const u8{
-        "weight", "bias", "gamma", "beta", "scale", "scaling",
-        "running_mean", "running_var", "pos_indices", "causal_mask",
-    };
-    for (leaf_params) |p| {
-        if (std.mem.eql(u8, token, p)) return true;
-    }
-    if (std.mem.startsWith(u8, token, "act_") or
-        std.mem.startsWith(u8, token, "Node_") or
-        std.mem.startsWith(u8, token, "tensor") or
-        std.mem.startsWith(u8, token, "tmp_"))
-    {
-        return true;
-    }
-    return false;
-}
-
-fn getMajorModulePath(name: []const u8) []const u8 {
-    if (std.mem.startsWith(u8, name, "inputs.") or
-        std.mem.startsWith(u8, name, "outputs.") or
-        std.mem.startsWith(u8, name, "activations."))
-    {
-        return name;
-    }
-    if (std.mem.endsWith(u8, name, ".residual_attn") or
-        std.mem.endsWith(u8, name, ".output") or
-        std.mem.endsWith(u8, name, ".embeddings_sum"))
-    {
-        return name;
-    }
-
-    var curr = name;
-    while (std.mem.lastIndexOfScalar(u8, curr, '.')) |dot_idx| {
-        if (dot_idx == 0) break;
-        const last_part = curr[dot_idx + 1 ..];
-        if (isLeafToken(last_part)) {
-            curr = curr[0..dot_idx];
-        } else {
-            break;
+/// 从计算图张量直接获取其所属的模块作用域或宏观接口名 (完全基于图拓扑属性，而非字符串猜测)
+fn getTensorModule(t: *Tensor, scopes: *const std.AutoHashMap(*Tensor, []const u8)) []const u8 {
+    // 1. 如果有显式命名的宏观接口节点（如 inputs.*, outputs.*, *.embeddings_sum, *.residual_attn, *.output），优先作为汇聚点
+    if (t.name) |n| {
+        if (std.mem.startsWith(u8, n, "inputs.") or
+            std.mem.startsWith(u8, n, "outputs.") or
+            std.mem.endsWith(u8, n, ".embeddings_sum") or
+            std.mem.endsWith(u8, n, ".residual_attn") or
+            std.mem.endsWith(u8, n, ".output"))
+        {
+            return n;
         }
     }
 
-    return curr;
+    // 2. 直接从计算图的模块作用域字典中读取（张量所属的模块路径）
+    if (scopes.get(t)) |scope| {
+        return scope;
+    }
+
+    // 3. 图原生叶子判断：若为模型参数 (creator == null 且 requires_grad)，其所属模块为父级作用域
+    if (t.creator == null and t.requires_grad and t.name != null) {
+        if (extractModuleScope(t.name.?)) |s| return s;
+    }
+
+    // 4. 回退到张量原生名称
+    if (t.name) |n| return n;
+
+    return "unknown";
 }
 
 fn isSkipConnection(from: []const u8, to: []const u8) bool {
@@ -483,14 +467,13 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
     for (graph.ops.items) |op| {
         if (op.outputs.len == 0) continue;
         const out = op.outputs[0];
-        const out_name = if (out.name) |n| n else (scopes.get(out) orelse "op_out");
 
         for (op.inputs) |inp| {
-            // 1. 严格跳过内部权重/偏置参数与常量掩码 (参数已归属在各模块 parameters 属性中，非外部数据流边)
+            // 1. 图原生叶子判断：严格跳过内部权重/偏置参数 (由 creator == null && requires_grad 直接识别，无需字符串猜测)
             if (inp.creator == null and inp.requires_grad) continue;
-            const inp_name = if (inp.name) |n| n else (scopes.get(inp) orelse "inp_tensor");
-            if (std.mem.endsWith(u8, inp_name, ".causal_mask")) continue;
-            if (std.mem.endsWith(u8, inp_name, ".pos_indices")) continue;
+            if (inp.name) |n| {
+                if (std.mem.endsWith(u8, n, ".causal_mask") or std.mem.endsWith(u8, n, ".pos_indices")) continue;
+            }
 
             // 2. 格式化张量形状
             var shape_buf: [64]u8 = undefined;
@@ -510,9 +493,9 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
             shape_len += 1;
             const shape_str = shape_buf[0..shape_len];
 
-            // 3. 提取所属模块/算子路径 (剥除内部叶子参数与临时张量)
-            const from_mod = getMajorModulePath(inp_name);
-            const to_mod = getMajorModulePath(out_name);
+            // 3. 直接通过张量在计算图中的拓扑属性与模块作用域获取所属模块
+            const from_mod = getTensorModule(inp, &scopes);
+            const to_mod = getTensorModule(out, &scopes);
 
             if (!std.mem.eql(u8, from_mod, to_mod)) {
                 const is_skip = isSkipConnection(from_mod, to_mod);
