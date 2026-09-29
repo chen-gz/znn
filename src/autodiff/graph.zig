@@ -19,6 +19,7 @@ pub const Graph = struct {
     ops: std.ArrayList(*Op),             // 追踪计算图中的所有算子指针
     enable_grad: bool,                   // 梯度使能开关（类似 torch.set_grad_enabled），为 false 时不分配梯度缓冲区亦不记录 Op 节点
     module_formulas: std.StringHashMap([]const u8), // 存储模块在代码中声明的显式数学运算公式 (如 "y = x W^T + b")
+    module_types: std.StringHashMap([]const u8),    // 存储模块在代码中声明的显式模块类型 (如 "Linear", "RMSNorm", "GPT")
 
     // 初始化计算图，传入底层通用内存分配器
     pub fn init(backing_allocator: std.mem.Allocator) Graph {
@@ -29,6 +30,7 @@ pub const Graph = struct {
             .ops = .empty,
             .enable_grad = true,
             .module_formulas = std.StringHashMap([]const u8).init(backing_allocator),
+            .module_types = std.StringHashMap([]const u8).init(backing_allocator),
         };
     }
 
@@ -42,6 +44,18 @@ pub const Graph = struct {
     /// 获取指定模块路径绑定的数学公式
     pub fn getModuleFormula(self: *const Graph, module_path: []const u8) ?[]const u8 {
         return self.module_formulas.get(module_path);
+    }
+
+    /// 在代码中为指定模块路径注册显式模块类型 (如 graph.registerModuleType("gpt.layers.0.ln_1", "RMSNorm"))
+    pub fn registerModuleType(self: *Graph, module_path: []const u8, mod_type: []const u8) !void {
+        const mod_copy = try self.arena.allocator().dupe(u8, module_path);
+        const type_copy = try self.arena.allocator().dupe(u8, mod_type);
+        try self.module_types.put(mod_copy, type_copy);
+    }
+
+    /// 获取指定模块路径绑定的模块类型
+    pub fn getModuleType(self: *const Graph, module_path: []const u8) ?[]const u8 {
+        return self.module_types.get(module_path);
     }
 
     /// 从计算图中自动推导指定模块或节点的数学公式
@@ -83,40 +97,22 @@ pub const Graph = struct {
             return form;
         }
 
-        // 4. 根据常见模块名模式推导通用公式
-        const path = module_path;
-        if (std.mem.endsWith(u8, path, ".core") or std.mem.indexOf(u8, path, "attention_core") != null) {
-            return "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V";
-        }
-        if (std.mem.indexOf(u8, path, "embeddings_sum") != null) {
-            return "x_0 = \\text{wte}(\\text{tokens}) + \\text{wpe}(\\text{positions})";
-        }
-        if (std.mem.indexOf(u8, path, "residual") != null) {
-            return "x_{l+1} = x_l + \\text{Sublayer}(x_l)";
-        }
-        if (std.mem.indexOf(u8, path, "lm_head") != null) {
-            return "\\text{logits} = x \\cdot W_{\\text{head}}^T";
-        }
-        if (std.mem.indexOf(u8, path, "wte") != null) {
-            return "y = \\text{Embedding}(\\text{TokenIDs}; W_e)";
-        }
-        if (std.mem.indexOf(u8, path, "wpe") != null) {
-            return "y = \\text{Embedding}(\\text{PosIDs}; W_p)";
-        }
-        if (std.mem.indexOf(u8, path, "attn") != null) {
-            return "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o";
-        }
-        if (std.mem.indexOf(u8, path, "mlp") != null) {
-            return "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}";
-        }
-        if (std.mem.indexOf(u8, path, "norm") != null or std.mem.indexOf(u8, path, "ln_") != null) {
-            return "y = \\text{RMSNorm}(x; \\gamma, \\epsilon)";
-        }
-        if (std.mem.indexOf(u8, path, "layers.") != null or std.mem.indexOf(u8, path, "block") != null) {
-            return "h_l = x_l + \\text{Attention}(\\text{RMSNorm}(x_l)), \\quad x_{l+1} = \\text{TransformerBlock}(x_l) = h_l + \\text{MLP}(\\text{RMSNorm}(h_l))";
-        }
-        if (std.mem.endsWith(u8, path, "layers") or std.mem.indexOf(u8, path, "stack") != null) {
-            return "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)";
+        // 4. 根据模块注册的原生类型推导标准公式 (避免脆弱的字符串模式推测)
+        if (self.getModuleType(module_path)) |m_type| {
+            if (std.mem.eql(u8, m_type, "Linear")) return "y = x W^T + b";
+            if (std.mem.eql(u8, m_type, "Conv2D")) return "y = \\text{Conv2D}(x; W, b)";
+            if (std.mem.eql(u8, m_type, "ConvTranspose2D")) return "y = \\text{ConvTranspose2D}(x; W, b)";
+            if (std.mem.eql(u8, m_type, "RMSNorm")) return "y = \\text{RMSNorm}(x; \\gamma, \\epsilon)";
+            if (std.mem.eql(u8, m_type, "LayerNorm")) return "y = \\text{LayerNorm}(x; \\gamma, \\beta)";
+            if (std.mem.eql(u8, m_type, "BatchNorm2d")) return "y = \\text{BatchNorm2d}(x; \\gamma, \\beta)";
+            if (std.mem.eql(u8, m_type, "Embedding")) return "y = \\text{Embedding}(x; W)";
+            if (std.mem.eql(u8, m_type, "MLP")) return "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}";
+            if (std.mem.eql(u8, m_type, "SwiGLU")) return "y = (\\text{SiLU}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
+            if (std.mem.eql(u8, m_type, "CausalSelfAttention")) return "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o";
+            if (std.mem.eql(u8, m_type, "ScaledDotProductAttention")) return "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V";
+            if (std.mem.eql(u8, m_type, "TransformerBlock")) return "h_l = x_l + \\text{Attention}(\\text{RMSNorm}(x_l)), \\quad x_{l+1} = \\text{TransformerBlock}(x_l) = h_l + \\text{MLP}(\\text{RMSNorm}(h_l))";
+            if (std.mem.eql(u8, m_type, "TransformerDecoder")) return "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)";
+            if (std.mem.eql(u8, m_type, "GPT")) return "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]";
         }
 
         return "y = f(x; \\theta)";
@@ -130,6 +126,7 @@ pub const Graph = struct {
     // 释放整个计算图的内存（包括所有张量与算子节点的前向/反向缓冲区）
     pub fn deinit(self: *Graph) void {
         self.module_formulas.deinit();
+        self.module_types.deinit();
         self.tensors.deinit(self.backing_allocator);
         self.ops.deinit(self.backing_allocator);
         self.arena.deinit();

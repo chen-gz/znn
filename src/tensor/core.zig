@@ -39,6 +39,7 @@ pub const Tensor = struct {
     creator: ?*Op,        // 产生此张量的算子节点（前向图中的父节点，用于追踪计算路径）
     is_view: bool = false, // 是否为零拷贝视图切片（若为 true，deinit 时不释放 data/grad）
     is_custom_initialized: bool = false, // 是否已被层专属自定义初始化 (避免被 Graph 自动初始化重写)
+    is_buffer: bool = false, // 是否为静态缓冲区/非学习常量张量 (如因果掩码 causal_mask, 位置索引 pos_indices)
     name: ?[]const u8 = null, // 可选张量调试名称 (如 "fc1.weight", "conv1.bias")
     name_buf: [64]u8 = undefined,
 

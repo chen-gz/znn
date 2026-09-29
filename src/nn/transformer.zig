@@ -27,6 +27,7 @@ pub const Embedding = struct {
     weight: *Tensor,        // 嵌入层权重矩阵表 (Shape: [vocab_size, embedding_dim])
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "Embedding",
 
     /// 嵌入层初始化选项
     pub const Options = struct {
@@ -119,6 +120,7 @@ pub const Embedding = struct {
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
             }
         }
         return try self.weight.embedding(x, allocator, graph);
@@ -183,6 +185,7 @@ pub const MLP = struct {
     c_proj: Linear,         // 降维投影层 (hidden_dim -> dim)
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "MLP",
 
     /// 初始化 MLP 模块
     /// dim: 输入与输出隐藏维度
@@ -250,6 +253,7 @@ pub const MLP = struct {
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
             }
         }
         const old_shape = x.shape;
@@ -325,6 +329,7 @@ pub const SwiGLU = struct {
     w_down: Linear,         // 降维投影层 (hidden_dim -> dim)
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "SwiGLU",
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize, random: std.Random) !SwiGLU {
         const w_gate = try Linear.init(allocator, dim, hidden_dim, random);
@@ -392,6 +397,7 @@ pub const SwiGLU = struct {
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
             }
         }
         const old_shape = x.shape;
@@ -740,6 +746,7 @@ pub const CausalSelfAttention = struct {
     num_kv_heads: usize,    // Key / Value 头数 (1 = MQA, < n_head = GQA, == n_head = MHA)
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "CausalSelfAttention",
 
     /// 初始化支持分组查询注意力 (GQA / MQA / MHA) 的自注意力层
     /// n_embd: 隐藏嵌入维度，必须能被 n_head 整除
@@ -825,9 +832,11 @@ pub const CausalSelfAttention = struct {
     pub fn registerFormula(self: *const CausalSelfAttention, graph: *autodiff.Graph) !void {
         if (self.name) |n| {
             try graph.setModuleFormula(n, formula);
+            try graph.registerModuleType(n, self.module_type);
             var buf: [128]u8 = undefined;
             if (std.fmt.bufPrint(&buf, "{s}.core", .{n})) |core_name| {
                 try graph.setModuleFormula(core_name, core_formula);
+                try graph.registerModuleType(core_name, "ScaledDotProductAttention");
             } else |_| {}
         }
     }
@@ -839,9 +848,11 @@ pub const CausalSelfAttention = struct {
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
                 var buf: [128]u8 = undefined;
                 if (std.fmt.bufPrint(&buf, "{s}.core", .{n})) |core_name| {
                     _ = g.setModuleFormula(core_name, core_formula) catch {};
+                    _ = g.registerModuleType(core_name, "ScaledDotProductAttention") catch {};
                 } else |_| {}
             }
         }
@@ -998,6 +1009,7 @@ pub const CausalSelfAttention = struct {
         var mask_node = mask;
         if (graph) |g| {
             mask_node = try g.tensorNDWithData(&.{ B, nh, T, T }, mask_data, false);
+            mask_node.is_buffer = true;
             if (self.name) |mod_name| {
                 mask_node.setNameFormatted("{s}.causal_mask", .{mod_name});
             }
@@ -1526,6 +1538,7 @@ pub const TransformerBlock = struct {
     mlp: MLP,               // 前馈多层感知机层
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "TransformerBlock",
 
     /// 初始化 Transformer 块
     /// n_embd: 隐藏特征特征维度
@@ -1596,6 +1609,7 @@ pub const TransformerBlock = struct {
     pub fn registerFormula(self: *const TransformerBlock, graph: *autodiff.Graph) !void {
         if (self.name) |n| {
             try graph.setModuleFormula(n, formula);
+            try graph.registerModuleType(n, self.module_type);
             try self.ln_1.registerFormula(graph);
             try self.attn.registerFormula(graph);
             try self.ln_2.registerFormula(graph);
@@ -1608,6 +1622,7 @@ pub const TransformerBlock = struct {
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
             }
         }
         // 1. 第一条支路: RMSNorm -> Attention
@@ -1656,6 +1671,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
 
         name: ?[]const u8 = null,
         name_buf: [64]u8 = undefined,
+        module_type: []const u8 = "TransformerDecoder",
 
         /// 为整个 Decoder 骨架及其包含的每层 Block 统一设置分层名称
         pub fn setName(self: *Self, name: []const u8) void {
@@ -1734,6 +1750,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
         pub fn registerFormula(self: *const Self, graph: *autodiff.Graph) !void {
             if (self.name) |n| {
                 try graph.setModuleFormula(n, formula);
+                try graph.registerModuleType(n, self.module_type);
                 for (&self.h) |*layer| {
                     try layer.registerFormula(graph);
                 }
@@ -1746,6 +1763,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             if (graph) |g| {
                 if (self.name) |n| {
                     _ = g.setModuleFormula(n, formula) catch {};
+                    _ = g.registerModuleType(n, self.module_type) catch {};
                 }
             }
             var current_x = x;
@@ -1791,6 +1809,7 @@ pub fn GPT(comptime config: GPTConfig) type {
         lm_head: Linear,                            // 最终输出概率的线性分类投影头
         name: ?[]const u8 = null,
         name_buf: [64]u8 = undefined,
+        module_type: []const u8 = "GPT",
 
         const Self = @This();
 
@@ -1877,6 +1896,7 @@ pub fn GPT(comptime config: GPTConfig) type {
         pub fn registerFormula(self: *const Self, graph: *autodiff.Graph) !void {
             if (self.name) |n| {
                 try graph.setModuleFormula(n, formula);
+                try graph.registerModuleType(n, self.module_type);
                 try self.token_embedding.registerFormula(graph);
                 try self.position_embedding.registerFormula(graph);
                 try self.decoder.registerFormula(graph);
@@ -1891,6 +1911,7 @@ pub fn GPT(comptime config: GPTConfig) type {
             if (graph) |g| {
                 if (self.name) |n| {
                     _ = g.setModuleFormula(n, formula) catch {};
+                    _ = g.registerModuleType(n, self.module_type) catch {};
                 }
             }
             const B = x.shape.dims[0];
@@ -1914,6 +1935,7 @@ pub fn GPT(comptime config: GPTConfig) type {
             var pos_node = pos_tensor;
             if (graph) |g| {
                 pos_node = try g.tensorNDWithData(&.{ B, T }, pos_data, false);
+                pos_node.is_buffer = true;
                 if (self.name) |mod_name| {
                     pos_node.setNameFormatted("{s}.wpe.pos_indices", .{mod_name});
                 }

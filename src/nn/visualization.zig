@@ -116,8 +116,10 @@ pub fn collectGraphNodes(graph: *Graph, allocator: std.mem.Allocator) !std.Array
 
         if (op_scope) |scope| {
             var effective_scope = scope;
-            if (std.mem.endsWith(u8, scope, ".attn") or std.mem.eql(u8, scope, "attn")) {
-                effective_scope = std.fmt.allocPrint(arena_alloc, "{s}.core", .{scope}) catch scope;
+            if (graph.getModuleType(scope)) |mtype| {
+                if (std.mem.eql(u8, mtype, "CausalSelfAttention")) {
+                    effective_scope = std.fmt.allocPrint(arena_alloc, "{s}.core", .{scope}) catch scope;
+                }
             }
             for (op.outputs) |out| {
                 if (!scopes.contains(out)) {
@@ -229,8 +231,8 @@ fn appendNodeData(
             .elements = elements,
             .bytes = bytes,
             .status = "INPUT",
-            .inferred_act = "N/A",
-            .strategy = "user input / constant",
+            .inferred_act = try allocator.dupe(u8, "N/A"),
+            .strategy = try allocator.dupe(u8, "user input / constant"),
         });
         return;
     }
@@ -253,8 +255,8 @@ fn appendNodeData(
             .elements = elements,
             .bytes = bytes,
             .status = "CUSTOM_INIT",
-            .inferred_act = "N/A",
-            .strategy = "user-defined customInit",
+            .inferred_act = try allocator.dupe(u8, "N/A"),
+            .strategy = try allocator.dupe(u8, "user-defined customInit"),
         });
         return;
     }
@@ -267,8 +269,8 @@ fn appendNodeData(
             .elements = elements,
             .bytes = bytes,
             .status = "AUTO_GRAPH",
-            .inferred_act = "bias",
-            .strategy = "zeros (0.0)",
+            .inferred_act = try allocator.dupe(u8, "bias"),
+            .strategy = try allocator.dupe(u8, "zeros (0.0)"),
         });
         return;
     }
@@ -310,14 +312,8 @@ pub fn freeGraphNodes(nodes: *std.ArrayList(NodeData), allocator: std.mem.Alloca
     for (nodes.items) |n| {
         allocator.free(n.name);
         allocator.free(n.shape_str);
-        if (std.mem.startsWith(u8, n.strategy, "Xavier") or std.mem.startsWith(u8, n.strategy, "He") or std.mem.startsWith(u8, n.strategy, "LeCun") or std.mem.startsWith(u8, n.strategy, "produced by")) {
-            allocator.free(n.strategy);
-        }
-        if (std.mem.eql(u8, n.kind, "Activation") or std.mem.eql(u8, n.kind, "Param")) {
-            if (!std.mem.eql(u8, n.inferred_act, "N/A") and !std.mem.eql(u8, n.inferred_act, "bias")) {
-                allocator.free(n.inferred_act);
-            }
-        }
+        allocator.free(n.strategy);
+        allocator.free(n.inferred_act);
     }
     nodes.deinit(allocator);
 }
@@ -353,11 +349,9 @@ fn isConvergenceOp(op: *autodiff.Op, scopes: *const std.AutoHashMap(*Tensor, []c
     var has_different_scopes = false;
 
     for (op.inputs) |inp| {
-        // 排除参数与常量
+        // 排除参数与常量/缓冲区
         if (inp.creator == null and inp.requires_grad) continue;
-        if (inp.name) |n| {
-            if (std.mem.endsWith(u8, n, ".causal_mask") or std.mem.endsWith(u8, n, ".pos_indices")) continue;
-        }
+        if (inp.is_buffer) continue;
 
         data_in_count += 1;
         const s = scopes.get(inp) orelse (if (inp.name) |n| n else "");
@@ -375,6 +369,7 @@ fn isConvergenceOp(op: *autodiff.Op, scopes: *const std.AutoHashMap(*Tensor, []c
 
 /// 从计算图张量直接获取其所属的模块作用域或宏观接口名 (完全基于图拓扑属性，无字符串硬编码启发式)
 fn getTensorModule(
+    graph: *const Graph,
     t: *Tensor,
     scopes: *const std.AutoHashMap(*Tensor, []const u8),
     consumed_set: *const std.AutoHashMap(*Tensor, void),
@@ -384,10 +379,12 @@ fn getTensorModule(
         if (t.name) |n| return n;
     }
 
-    // 2. 如果属于显式构造的子模块作用域（如注意力核心 attn.core），优先归属该子模块
+    // 2. 如果属于显式构造的子模块作用域（如注意力核心 ScaledDotProductAttention），优先归属该子模块
     if (scopes.get(t)) |scope| {
-        if (std.mem.endsWith(u8, scope, ".core")) {
-            return scope;
+        if (graph.getModuleType(scope)) |mtype| {
+            if (std.mem.eql(u8, mtype, "ScaledDotProductAttention")) {
+                return scope;
+            }
         }
     }
 
@@ -470,8 +467,10 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
         }
         if (op_scope) |scope| {
             var effective_scope = scope;
-            if (std.mem.endsWith(u8, scope, ".attn") or std.mem.eql(u8, scope, "attn")) {
-                effective_scope = std.fmt.allocPrint(arena_alloc, "{s}.core", .{scope}) catch scope;
+            if (graph.getModuleType(scope)) |mtype| {
+                if (std.mem.eql(u8, mtype, "CausalSelfAttention")) {
+                    effective_scope = std.fmt.allocPrint(arena_alloc, "{s}.core", .{scope}) catch scope;
+                }
             }
             for (op.outputs) |out| {
                 if (!scopes.contains(out)) scopes.put(out, effective_scope) catch {};
@@ -517,11 +516,9 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
         const out = op.outputs[0];
 
         for (op.inputs) |inp| {
-            // 1. 图原生叶子判断：严格跳过内部权重/偏置参数 (由 creator == null && requires_grad 直接识别，无需字符串猜测)
+            // 1. 图原生叶子判断：严格跳过内部权重/偏置参数与静态缓冲张量
             if (inp.creator == null and inp.requires_grad) continue;
-            if (inp.name) |n| {
-                if (std.mem.endsWith(u8, n, ".causal_mask") or std.mem.endsWith(u8, n, ".pos_indices")) continue;
-            }
+            if (inp.is_buffer) continue;
 
             // 2. 格式化张量形状
             var shape_buf: [64]u8 = undefined;
@@ -542,8 +539,8 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
             const shape_str = shape_buf[0..shape_len];
 
             // 3. 直接通过张量在计算图中的拓扑属性与模块作用域获取所属模块
-            const from_mod = getTensorModule(inp, &scopes, &consumed_set);
-            const to_mod = getTensorModule(out, &scopes, &consumed_set);
+            const from_mod = getTensorModule(graph, inp, &scopes, &consumed_set);
+            const to_mod = getTensorModule(graph, out, &scopes, &consumed_set);
 
             if (!std.mem.eql(u8, from_mod, to_mod)) {
                 // 图原生跳跃连接判定：如果汇聚算子的某个输入在拓扑上是另一个输入的祖先，则该输入为跳跃旁路
@@ -878,22 +875,6 @@ pub const graph_ir = struct {
         node.node_count = node_count;
     }
 
-    fn inferModuleType(path: []const u8, name: []const u8) []const u8 {
-        if (std.mem.endsWith(u8, path, ".core") or std.mem.eql(u8, name, "core")) return "ScaledDotProductAttention";
-        if (std.mem.endsWith(u8, path, ".attn") or std.mem.eql(u8, name, "attn")) return "CausalSelfAttention";
-        if (std.mem.endsWith(u8, path, ".mlp") or std.mem.eql(u8, name, "mlp")) return "MLP";
-        if (std.mem.endsWith(u8, path, ".swiglu") or std.mem.eql(u8, name, "swiglu")) return "SwiGLU";
-        if (std.mem.endsWith(u8, path, ".ln_1") or std.mem.endsWith(u8, path, ".ln_2") or std.mem.endsWith(u8, path, ".ln_f") or std.mem.endsWith(u8, path, ".norm")) return "RMSNorm";
-        if (std.mem.endsWith(u8, path, ".q_attn") or std.mem.endsWith(u8, path, ".k_attn") or std.mem.endsWith(u8, path, ".v_attn") or std.mem.endsWith(u8, path, ".c_proj") or std.mem.endsWith(u8, path, ".c_fc") or std.mem.endsWith(u8, path, ".lm_head") or std.mem.endsWith(u8, path, ".linear")) return "Linear";
-        if (std.mem.endsWith(u8, path, ".wte") or std.mem.endsWith(u8, path, ".wpe") or std.mem.endsWith(u8, path, ".embedding")) return "Embedding";
-        if (std.mem.endsWith(u8, path, ".layers") or std.mem.eql(u8, name, "layers")) return "TransformerDecoder";
-        if (std.mem.eql(u8, path, "gpt") or std.mem.eql(u8, name, "gpt")) return "GPT";
-        if (std.mem.startsWith(u8, path, "gpt.layers.") or std.mem.startsWith(u8, path, "layers.")) {
-            if (std.fmt.parseInt(usize, name, 10)) |_| return "TransformerBlock" else |_| {}
-        }
-        return "Module";
-    }
-
     /// 解析 Graph 并构建约定的中间数据结构 ModelHierarchyGraph
     pub fn build(graph: *Graph, allocator: std.mem.Allocator) !ModelHierarchyGraph {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -990,7 +971,7 @@ pub const graph_ir = struct {
                         else
                             try std.fmt.allocPrint(arena_alloc, "{s}.{s}", .{ curr.path, part });
                         const new_child = try ModuleNode.init(arena_alloc, try arena_alloc.dupe(u8, part), child_path);
-                        new_child.module_type = inferModuleType(child_path, part);
+                        new_child.module_type = graph.getModuleType(child_path) orelse "Module";
                         new_child.formula = formulas.get(child_path) orelse graph.inferModuleFormula(child_path);
 
                         try curr.children.append(arena_alloc, new_child);

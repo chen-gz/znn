@@ -13,6 +13,7 @@ pub const RMSNorm = struct {
     eps: f32,               // 均方根分母防止除以 0 的极小常数 (epsilon)
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "RMSNorm",
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !RMSNorm {
         const weight = try createPersistentTensor(allocator, 1, dim, true);
@@ -71,6 +72,7 @@ pub const RMSNorm = struct {
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
             }
         }
         return try x.rmsNorm(self.weight, self.eps, allocator, graph);
@@ -84,6 +86,7 @@ pub const LayerNorm = struct {
     eps: f32,
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "LayerNorm",
 
     pub fn setName(self: *LayerNorm, name: []const u8) void {
         if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
@@ -151,6 +154,7 @@ pub const LayerNorm = struct {
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
             }
         }
         const dim = self.weight.shape.dims[0];
@@ -195,6 +199,7 @@ pub const BatchNorm2d = struct {
     running_var: *Tensor,
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "BatchNorm2d",
 
     pub fn init(allocator: std.mem.Allocator, num_features: usize, eps: f32, momentum: f32) !BatchNorm2d {
         const gamma = try createPersistentTensor(allocator, 1, num_features, true);
@@ -283,6 +288,7 @@ pub const BatchNorm2d = struct {
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
             }
         }
         std.debug.assert(x.shape.len == 4); // [N, C, H, W]
