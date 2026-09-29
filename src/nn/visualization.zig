@@ -875,29 +875,59 @@ pub const graph_ir = struct {
         node.node_count = node_count;
     }
 
-    /// 判断模块类型是否为复合子层 (其内部有独立的微观子层/算子，如注意力 QKV/Core，前馈网络门控/投影等)
-    fn isSublayerModuleType(mtype: []const u8) bool {
-        return std.mem.eql(u8, mtype, "CausalSelfAttention") or
-            std.mem.eql(u8, mtype, "MLP") or
-            std.mem.eql(u8, mtype, "SwiGLU") or
-            std.mem.eql(u8, mtype, "MoELayer") or
-            std.mem.eql(u8, mtype, "MLALayer");
-    }
+    /// 基于模块层次树直接获取顶层组件作用域（不使用任何硬编码模块类型推断函数，完全与层次树对齐）
+    fn getTopLevelScope(root: *const ModuleNode, path: []const u8) []const u8 {
+        if (std.mem.startsWith(u8, path, "inputs.") or std.mem.startsWith(u8, path, "outputs.") or
+            std.mem.eql(u8, path, "inputs") or std.mem.eql(u8, path, "outputs"))
+        {
+            return path;
+        }
 
-    /// 将包含内部微观零件的路径截断/收拢至最外层复合子层作用域 (例如 gpt.layers.0.attn.q_attn -> gpt.layers.0.attn)
-    fn getMacroModuleScope(graph_inst: *const Graph, path: []const u8) []const u8 {
-        var it = std.mem.splitScalar(u8, path, '.');
-        var current_len: usize = 0;
-        while (it.next()) |part| {
-            if (current_len > 0) current_len += 1; // '.'
-            current_len += part.len;
-            const prefix = path[0..current_len];
-            if (graph_inst.getModuleType(prefix)) |mtype| {
-                if (isSublayerModuleType(mtype)) {
-                    return prefix;
+        // 寻找 root 下的实际模型主容器 (排除 inputs/outputs/(unscoped) 等辅助节点)
+        var primary_model: ?*const ModuleNode = null;
+        for (root.children.items) |child| {
+            if (!std.mem.eql(u8, child.name, "inputs") and
+                !std.mem.eql(u8, child.name, "outputs") and
+                !std.mem.eql(u8, child.name, "(unscoped)") and
+                child.children.items.len > 0)
+            {
+                if (primary_model == null) {
+                    primary_model = child;
+                } else {
+                    primary_model = null;
+                    break;
                 }
             }
         }
+
+        const container = primary_model orelse root;
+
+        if (container.path.len == 0 or (std.mem.startsWith(u8, path, container.path) and path.len > container.path.len and path[container.path.len] == '.')) {
+            for (container.children.items) |child| {
+                if (std.mem.eql(u8, path, child.path) or
+                    (std.mem.startsWith(u8, path, child.path) and path.len > child.path.len and path[child.path.len] == '.'))
+                {
+                    return child.path;
+                }
+            }
+            // 属于模型自身的直接激活/算子输出（如 gpt.embeddings_sum）
+            const rel_start = if (container.path.len == 0) 0 else container.path.len + 1;
+            const rel = path[rel_start..];
+            if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
+                return path[0 .. rel_start + dot];
+            }
+            return path;
+        }
+
+        // 通用情况：直接对齐至 root 的第一层子模块
+        for (root.children.items) |child| {
+            if (std.mem.eql(u8, path, child.path) or
+                (std.mem.startsWith(u8, path, child.path) and path.len > child.path.len and path[child.path.len] == '.'))
+            {
+                return child.path;
+            }
+        }
+
         return path;
     }
 
@@ -1165,27 +1195,25 @@ pub const graph_ir = struct {
             }
         }
 
-        // 6. 构造顶层宏观拓扑边 (Macro Edges):
-        // 消除穿透子模块内部器官的微观边 (如 ln_1 -> q_attn, q_attn -> core)，
-        // 将连接端点收拢至复合子层边界 (如 ln_1 -> attn, attn -> residual_attn)，
-        // 仅保留跨模块的宏观流转，内部零件流动保留在各模块自身的 m.edges 中
-        var macro_edges: std.ArrayList(EdgeData) = .empty;
-        var macro_seen = std.StringHashMap(void).init(arena_alloc);
+        // 6. 构造顶层宏观拓扑边 (Top-Level Model Edges):
+        // 直接与模块树顶层架构对齐，不包含任何内部微观子模块细节
+        var top_edges: std.ArrayList(EdgeData) = .empty;
+        var top_seen = std.StringHashMap(void).init(arena_alloc);
 
         for (edges.items) |e| {
-            const macro_from = getMacroModuleScope(graph, e.from);
-            const macro_to = getMacroModuleScope(graph, e.to);
+            const top_from = getTopLevelScope(root, e.from);
+            const top_to = getTopLevelScope(root, e.to);
 
-            if (std.mem.eql(u8, macro_from, macro_to)) continue;
+            if (std.mem.eql(u8, top_from, top_to)) continue;
 
             var key_buf: [384]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buf, "{s}->{s}", .{ macro_from, macro_to }) catch continue;
-            if (macro_seen.contains(key)) continue;
-            try macro_seen.put(try arena_alloc.dupe(u8, key), {});
+            const key = std.fmt.bufPrint(&key_buf, "{s}->{s}", .{ top_from, top_to }) catch continue;
+            if (top_seen.contains(key)) continue;
+            try top_seen.put(try arena_alloc.dupe(u8, key), {});
 
-            try macro_edges.append(arena_alloc, .{
-                .from = try arena_alloc.dupe(u8, macro_from),
-                .to = try arena_alloc.dupe(u8, macro_to),
+            try top_edges.append(arena_alloc, .{
+                .from = try arena_alloc.dupe(u8, top_from),
+                .to = try arena_alloc.dupe(u8, top_to),
                 .shape = try arena_alloc.dupe(u8, e.shape),
                 .is_skip = e.is_skip,
             });
@@ -1196,7 +1224,7 @@ pub const graph_ir = struct {
             .summary = summary,
             .root = root,
             .nodes = nodes,
-            .edges = macro_edges,
+            .edges = top_edges,
             .ops = ops_list,
             .formulas = formulas,
         };
