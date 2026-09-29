@@ -115,9 +115,13 @@ pub fn collectGraphNodes(graph: *Graph, allocator: std.mem.Allocator) !std.Array
         }
 
         if (op_scope) |scope| {
+            var effective_scope = scope;
+            if (std.mem.endsWith(u8, scope, ".attn") or std.mem.eql(u8, scope, "attn")) {
+                effective_scope = std.fmt.allocPrint(arena_alloc, "{s}.core", .{scope}) catch scope;
+            }
             for (op.outputs) |out| {
                 if (!scopes.contains(out)) {
-                    scopes.put(out, scope) catch {};
+                    scopes.put(out, effective_scope) catch {};
                 }
             }
         }
@@ -434,8 +438,12 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
             }
         }
         if (op_scope) |scope| {
+            var effective_scope = scope;
+            if (std.mem.endsWith(u8, scope, ".attn") or std.mem.eql(u8, scope, "attn")) {
+                effective_scope = std.fmt.allocPrint(arena_alloc, "{s}.core", .{scope}) catch scope;
+            }
             for (op.outputs) |out| {
-                if (!scopes.contains(out)) scopes.put(out, scope) catch {};
+                if (!scopes.contains(out)) scopes.put(out, effective_scope) catch {};
             }
         }
     }
@@ -816,6 +824,7 @@ pub const graph_ir = struct {
     }
 
     fn inferModuleType(path: []const u8, name: []const u8) []const u8 {
+        if (std.mem.endsWith(u8, path, ".core") or std.mem.eql(u8, name, "core")) return "ScaledDotProductAttention";
         if (std.mem.endsWith(u8, path, ".attn") or std.mem.eql(u8, name, "attn")) return "CausalSelfAttention";
         if (std.mem.endsWith(u8, path, ".mlp") or std.mem.eql(u8, name, "mlp")) return "MLP";
         if (std.mem.endsWith(u8, path, ".swiglu") or std.mem.eql(u8, name, "swiglu")) return "SwiGLU";
