@@ -189,7 +189,7 @@ fn appendNodeData(
             try std.fmt.allocPrint(allocator, "{s}.act_{s}_{d}", .{ scope, op_name, op_idx.* })
         else
             try std.fmt.allocPrint(allocator, "computation_graph.{s}_{d}", .{ op_name, op_idx.* });
-        if (t.name == null) t.name = name;
+        if (t.name == null) t.name = try graph.arena.allocator().dupe(u8, name);
         op_idx.* += 1;
 
         var strat_buf: [64]u8 = undefined;
@@ -215,7 +215,7 @@ fn appendNodeData(
             try std.fmt.allocPrint(allocator, "{s}.input_{d}", .{ scope, input_idx.* })
         else
             try std.fmt.allocPrint(allocator, "inputs.input_{d}", .{input_idx.*});
-        if (t.name == null) t.name = name;
+        if (t.name == null) t.name = try graph.arena.allocator().dupe(u8, name);
         input_idx.* += 1;
 
         try nodes.append(allocator, .{
@@ -238,7 +238,7 @@ fn appendNodeData(
         try std.fmt.allocPrint(allocator, "{s}.param_{d}", .{ scope, param_idx.* })
     else
         try std.fmt.allocPrint(allocator, "parameters.param_{d}", .{param_idx.*});
-    if (t.name == null) t.name = name;
+    if (t.name == null) t.name = try graph.arena.allocator().dupe(u8, name);
     param_idx.* += 1;
 
     if (t.is_custom_initialized) {
@@ -306,7 +306,7 @@ pub fn freeGraphNodes(nodes: *std.ArrayList(NodeData), allocator: std.mem.Alloca
     for (nodes.items) |n| {
         allocator.free(n.name);
         allocator.free(n.shape_str);
-        if (std.mem.startsWith(u8, n.strategy, "Xavier") or std.mem.startsWith(u8, n.strategy, "He") or std.mem.startsWith(u8, n.strategy, "produced by")) {
+        if (std.mem.startsWith(u8, n.strategy, "Xavier") or std.mem.startsWith(u8, n.strategy, "He") or std.mem.startsWith(u8, n.strategy, "LeCun") or std.mem.startsWith(u8, n.strategy, "produced by")) {
             allocator.free(n.strategy);
         }
         if (std.mem.eql(u8, n.kind, "Activation") or std.mem.eql(u8, n.kind, "Param")) {
@@ -771,22 +771,6 @@ pub fn freeGraphOps(ops_list: *std.ArrayList(OpData), allocator: std.mem.Allocat
         allocator.free(o.output_shape);
     }
     ops_list.deinit(allocator);
-}
-
-fn escapeJsonString(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    for (input) |c| {
-        switch (c) {
-            '\\' => try out.appendSlice(allocator, "\\\\"),
-            '"' => try out.appendSlice(allocator, "\\\""),
-            '\n' => try out.appendSlice(allocator, "\\n"),
-            '\r' => try out.appendSlice(allocator, "\\r"),
-            '\t' => try out.appendSlice(allocator, "\\t"),
-            else => try out.append(allocator, c),
-        }
-    }
-    return out.toOwnedSlice(allocator);
 }
 
 

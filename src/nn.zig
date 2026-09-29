@@ -1285,6 +1285,8 @@ test "Hierarchical module naming and interactive HTML report export" {
     const layer0_obj = gpt_child.get("children").?.array.items[0].object.get("children").?.array.items[0].object; // "gpt.layers.0"
     try std.testing.expectEqualStrings("TransformerBlock", layer0_obj.get("module_type").?.string);
     try std.testing.expect(std.mem.indexOf(u8, layer0_obj.get("formula").?.string, "TransformerBlock") != null);
+    try std.testing.expect(std.mem.indexOf(u8, layer0_obj.get("formula").?.string, "Attention") != null);
+    try std.testing.expect(std.mem.indexOf(u8, layer0_obj.get("formula").?.string, "MLP") != null);
     try std.testing.expect(layer0_obj.get("ops").?.array.items.len > 0);
     try std.testing.expect(layer0_obj.get("edges").?.array.items.len > 0);
 

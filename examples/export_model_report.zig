@@ -67,8 +67,9 @@ pub fn main() !void {
     const output_path = "examples/sample_model_graph.json";
     std.debug.print("[Step 3/4] Exporting Model Hierarchy & Graph JSON...\n", .{});
     try graph.exportJson(output_path);
+    _ = graph.exportJson("web/public/sample_model_graph.json") catch {};
 
-    std.debug.print("[Step 4/4] Done! Graph written to: {s}\n\n", .{output_path});
+    std.debug.print("[Step 4/4] Done! Graph written to: {s} and web/public/sample_model_graph.json\n\n", .{output_path});
     std.debug.print("-----------------------------------------------------------------\n", .{});
     std.debug.print("To view the interactive model architecture & computation graph:\n", .{});
     std.debug.print("  1. Open web/index.html in your browser: open web/index.html\n", .{});
