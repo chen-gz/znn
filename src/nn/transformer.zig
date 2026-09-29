@@ -1935,10 +1935,7 @@ pub fn GPT(comptime config: GPTConfig) type {
             var pos_node = pos_tensor;
             if (graph) |g| {
                 pos_node = try g.tensorNDWithData(&.{ B, T }, pos_data, false);
-                pos_node.is_buffer = true;
-                if (self.name) |mod_name| {
-                    pos_node.setNameFormatted("{s}.wpe.pos_indices", .{mod_name});
-                }
+                pos_node.setName("inputs.pos_indices");
             }
 
             // 3. 获取对应的 Learned 位置嵌入向量: [B, T] -> [B, T, n_embd]

@@ -1038,13 +1038,16 @@ pub const graph_ir = struct {
             }
         }
 
-        // 将边分类关联到对应模块内部 (依据直接子模块与进出接口精准归属)
+        // 将边分类关联到对应模块内部 (严格遵循层次封闭律)
         for (edges.items) |e| {
             var it = module_map.iterator();
             while (it.next()) |entry| {
                 const mod_path = entry.key_ptr.*;
                 if (mod_path.len == 0 or std.mem.eql(u8, mod_path, "root")) continue;
                 const m = entry.value_ptr.*;
+
+                // 仅对拥有直接子模块的复合容器构建局部流动图
+                if (m.children.items.len == 0) continue;
 
                 const from_in = std.mem.eql(u8, e.from, mod_path) or
                     (std.mem.startsWith(u8, e.from, mod_path) and e.from.len > mod_path.len and e.from[mod_path.len] == '.');
@@ -1053,9 +1056,11 @@ pub const graph_ir = struct {
 
                 if (!from_in and !to_in) continue;
 
-                // 1. 如果起点和终点都在该模块内部：
+                var from_name: []const u8 = undefined;
+                var to_name: []const u8 = undefined;
+
                 if (from_in and to_in) {
-                    // 检查是否完全属于某个更深层的子模块（例如 q_attn -> c_proj 属于 attn，不属于 layers.0）
+                    // 1. 两端均在模块内部：检查是否完全属于某个更深层的子模块（例如 q_attn -> core 属于 attn，不属于 layers.0）
                     var has_deeper_child = false;
                     for (m.children.items) |child| {
                         const from_child = std.mem.eql(u8, e.from, child.path) or
@@ -1068,37 +1073,54 @@ pub const graph_ir = struct {
                         }
                     }
                     if (has_deeper_child) continue;
-                }
 
-                // 2. 如果目标模块有子模块，但当前边的一端指向自身（例如 e.to == mod_path 且由某个内部子模块发出），
-                // 那么这并不是发给父模块的边，而是子模块间的内部连接，应该归入能够承载两者的最小子容器中
-                if (m.children.items.len > 0 and std.mem.eql(u8, e.to, mod_path) and from_in) {
-                    continue;
-                }
+                    // 提取相对于当前模块的直接子节点名
+                    from_name = e.from;
+                    if (e.from.len > mod_path.len + 1) {
+                        const rel = e.from[mod_path.len + 1 ..];
+                        if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
+                            from_name = rel[0..dot];
+                        } else {
+                            from_name = rel;
+                        }
+                    }
 
-
-                // 2. 提取相对于当前模块的子节点或直接子模块名
-                var from_name = e.from;
-                if (from_in and e.from.len > mod_path.len + 1) {
-                    const rel = e.from[mod_path.len + 1 ..];
-                    if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
-                        from_name = rel[0..dot];
-                    } else {
-                        from_name = rel;
+                    to_name = e.to;
+                    if (e.to.len > mod_path.len + 1) {
+                        const rel = e.to[mod_path.len + 1 ..];
+                        if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
+                            to_name = rel[0..dot];
+                        } else {
+                            to_name = rel;
+                        }
+                    }
+                } else if (!from_in and to_in) {
+                    // 2. 外部数据流入当前模块：规范起点为接口名 "inputs"
+                    from_name = "inputs";
+                    to_name = e.to;
+                    if (e.to.len > mod_path.len + 1) {
+                        const rel = e.to[mod_path.len + 1 ..];
+                        if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
+                            to_name = rel[0..dot];
+                        } else {
+                            to_name = rel;
+                        }
+                    }
+                } else if (from_in and !to_in) {
+                    // 3. 当前模块内部数据流出到外部：规范终点为接口名 "output"
+                    to_name = "output";
+                    from_name = e.from;
+                    if (e.from.len > mod_path.len + 1) {
+                        const rel = e.from[mod_path.len + 1 ..];
+                        if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
+                            from_name = rel[0..dot];
+                        } else {
+                            from_name = rel;
+                        }
                     }
                 }
 
-                var to_name = e.to;
-                if (to_in and e.to.len > mod_path.len + 1) {
-                    const rel = e.to[mod_path.len + 1 ..];
-                    if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
-                        to_name = rel[0..dot];
-                    } else {
-                        to_name = rel;
-                    }
-                }
-
-                // 如果两端折叠后成为同一个名字（例如内部局部微观流动），跳过
+                // 如果两端折叠后成为同一个名字（例如自身内部微观环路或 output->output），跳过
                 if (std.mem.eql(u8, from_name, to_name)) continue;
 
                 // 检查是否已经添加过相同的一对 from -> to
