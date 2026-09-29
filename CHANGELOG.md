@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Added
+- **显式模块作用域 (`src/autodiff/graph.zig`, `src/autodiff/op.zig`, `src/tensor/core.zig`)**:
+  - `Graph` 新增作用域栈与 `pushScope` / `popScope` / `currentScope`，以及 `Graph.enterModule` / `Graph.enterChildScope` 守卫 API；`Op.scope` 与 `Tensor.scope` 在创建时记录当前模块完整路径。
+  - 所有内置模块 (`Linear`, `Conv2D`, `ConvTranspose2D`, `RMSNorm`, `LayerNorm`, `BatchNorm2d`, `Embedding`, `MLP`, `SwiGLU`, `CausalSelfAttention`, `TransformerBlock`, `TransformerDecoder`, `GPT`) 在 `forward` 入口进入自身作用域并自动注册模块类型。
+  - `CausalSelfAttention` 将 $QK^T$、缩放、掩码、softmax 与加权求和封装在 `core` 子作用域 (`ScaledDotProductAttention`)。
+- **作用域局部图导出 (`src/nn/visualization.zig`)**: 每个组合模块导出自身的 `ports` / `flow_nodes` / `edges` 局部图；Reshape / Transpose / RepeatKV 折叠进边的 `transforms`；残差边通过局部图可达性判定；无参数多算子叶子 (如 `core`) 导出算子级局部图。
+- 新增作用域归属测试与黄金边集测试 (`src/nn.zig`)。
+
+### Changed
+- **可视化 JSON 升级为 schema 2.0 (不兼容 1.0)**: 移除顶层 `edges`，新增 `default_scope`；端口以 `@in<k>` / `@out<k>` 命名并携带 `ref`；`summary` 新增 `buffer_nodes`；图输入归属 `root.nodes`，不再生成 `inputs` / `outputs` 伪模块。
+- `TransformerBlock` 第二个残差加法节点由 `output` 更名为 `residual_mlp`；MLP 激活输出命名为 `gelu`。
+- `GPT` 的位置索引张量改为 `{gpt}.pos_indices` 静态缓冲区 (`is_buffer = true`)，不再作为模型输入出现。
+
+### Fixed
+- 修复算子依据输入推断归属导致的模块错配、`.core` 伪节点合成、端口名与真实节点冲突、残差判定依赖边顺序、根作用域边与顶层 `edges` 层级错位等问题 (详见 chen-gz.github.io `doc/visualization-model-edge-design.md`)。
+
 ## [0.2.7] - 2026-09-27
 
 ### Added

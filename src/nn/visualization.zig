@@ -6,18 +6,28 @@ const init_mod = @import("init.zig");
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
 const Graph = autodiff.Graph;
+const Op = autodiff.Op;
+
+/// 导出 JSON 的 schema 版本
+pub const SCHEMA_VERSION = "2.0";
 
 /// 单个计算图节点的详细可视化元数据
 pub const NodeData = struct {
     name: []const u8,
-    kind: []const u8, // "Param", "Input", "Activation"
+    kind: []const u8, // "Param", "Input", "Buffer", "Activation"
+    module: []const u8, // 节点所属模块的完整路径 ("" 表示根)
     shape_str: []const u8,
     elements: usize,
     bytes: usize,
-    status: []const u8, // "AUTO_GRAPH", "CUSTOM_INIT", "INPUT", "OP_OUTPUT"
+    status: []const u8, // "AUTO_GRAPH", "CUSTOM_INIT", "INPUT", "BUFFER", "OP_OUTPUT"
     inferred_act: []const u8,
     strategy: []const u8,
 };
+
+// ============================================================================
+// 1. 模块作用域解析 (Module Scope Resolution)
+//    归属完全由 Graph 作用域栈在算子/张量创建时记录的 scope 决定，不从输入推断。
+// ============================================================================
 
 /// 从节点名称中提取父模块路径 (以 '.' 分隔)
 fn extractModuleScope(name: []const u8) ?[]const u8 {
@@ -27,176 +37,174 @@ fn extractModuleScope(name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// 计算两个模块路径在点号边界处的最长公共前缀
-fn getCommonModulePrefix(a: []const u8, b: []const u8) []const u8 {
-    if (std.mem.eql(u8, a, b)) return a;
-    const min_len = @min(a.len, b.len);
-    var matched_len: usize = 0;
-    while (matched_len < min_len and a[matched_len] == b[matched_len]) : (matched_len += 1) {}
-
-    if (matched_len == min_len) {
-        if (a.len > min_len and a[min_len] == '.') return b;
-        if (b.len > min_len and b[min_len] == '.') return a;
-    }
-
-    var i = matched_len;
-    while (i > 0) : (i -= 1) {
-        if (a[i - 1] == '.') {
-            return a[0 .. i - 1];
-        }
-    }
-    return "";
+/// 判断 path 是否位于 scope 之内 (包含 scope 自身)；空 scope 表示根作用域，包含一切路径
+fn isWithinScope(path: []const u8, scope: []const u8) bool {
+    if (scope.len == 0) return true;
+    if (std.mem.eql(u8, path, scope)) return true;
+    return path.len > scope.len and std.mem.startsWith(u8, path, scope) and path[scope.len] == '.';
 }
 
-/// 收集计算图中所有节点的详细元数据
+/// 两个作用域路径在点号边界上的最近公共祖先
+fn commonScope(a: []const u8, b: []const u8) []const u8 {
+    if (isWithinScope(a, b)) return b;
+    if (isWithinScope(b, a)) return a;
+    var last_dot: ?usize = null;
+    var i: usize = 0;
+    while (i < a.len and i < b.len and a[i] == b[i]) : (i += 1) {
+        if (a[i] == '.') last_dot = i;
+    }
+    return if (last_dot) |d| a[0..d] else "";
+}
+
+/// scope 相对于 parent 的直接子模块名 (要求 scope 严格位于 parent 之内)
+fn childSegment(scope: []const u8, parent: []const u8) []const u8 {
+    const rel = if (parent.len == 0) scope else scope[parent.len + 1 ..];
+    if (std.mem.indexOfScalar(u8, rel, '.')) |d| return rel[0..d];
+    return rel;
+}
+
+fn joinScope(allocator: std.mem.Allocator, parent: []const u8, seg: []const u8) ![]const u8 {
+    if (parent.len == 0) return allocator.dupe(u8, seg);
+    return std.fmt.allocPrint(allocator, "{s}.{s}", .{ parent, seg });
+}
+
+fn isParam(t: *const Tensor) bool {
+    return t.creator == null and t.requires_grad;
+}
+
+/// 算子所属模块：以创建时记录的作用域为准；若算子的参数属于该作用域更深层的子模块
+/// (子模块 forward 未接入作用域栈)，则以参数所属模块为准。
+pub fn opScope(op: *const Op) []const u8 {
+    var s = op.scope;
+    for (op.inputs) |inp| {
+        if (!isParam(inp)) continue;
+        const n = inp.name orelse continue;
+        const ps = extractModuleScope(n) orelse continue;
+        if (ps.len > s.len and isWithinScope(ps, s)) s = ps;
+    }
+    return s;
+}
+
+/// 张量所属模块：算子输出取其算子作用域；参数取其名称前缀；输入与常量取创建时的作用域
+pub fn tensorScope(t: *const Tensor) []const u8 {
+    if (t.creator) |op| return opScope(op);
+    if (t.requires_grad) {
+        if (t.name) |n| {
+            if (extractModuleScope(n)) |s| return s;
+        }
+    }
+    return t.scope;
+}
+
+/// 透明算子：只改变张量布局、不做数值计算，在局部图中折叠进边而不作为节点
+fn isTransparentOp(op: *const Op) bool {
+    return switch (op.op_type) {
+        .Reshape, .Transpose, .RepeatKV => true,
+        else => false,
+    };
+}
+
+fn firstDataInput(op: *const Op) ?*Tensor {
+    for (op.inputs) |inp| {
+        if (!isParam(inp)) return inp;
+    }
+    return null;
+}
+
+fn formatShapeAlloc(allocator: std.mem.Allocator, s: Shape) ![]const u8 {
+    var buf: [64]u8 = undefined;
+    var len: usize = 0;
+    buf[0] = '[';
+    len += 1;
+    for (0..s.len) |d| {
+        if (d > 0) {
+            buf[len] = ',';
+            buf[len + 1] = ' ';
+            len += 2;
+        }
+        const part = std.fmt.bufPrint(buf[len..], "{d}", .{s.dims[d]}) catch "";
+        len += part.len;
+    }
+    buf[len] = ']';
+    len += 1;
+    return try allocator.dupe(u8, buf[0..len]);
+}
+
+fn shapeEql(a: Shape, b: Shape) bool {
+    if (a.len != b.len) return false;
+    for (0..a.len) |i| {
+        if (a.dims[i] != b.dims[i]) return false;
+    }
+    return true;
+}
+
+// ============================================================================
+// 2. 节点、算子元数据采集 (Node & Op Metadata)
+// ============================================================================
+
+/// 收集计算图中所有节点的详细元数据 (未命名张量按所属作用域自动命名)
 pub fn collectGraphNodes(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayList(NodeData) {
     var nodes: std.ArrayList(NodeData) = .empty;
-    errdefer nodes.deinit(allocator);
+    errdefer freeGraphNodes(&nodes, allocator);
 
     const arena_alloc = graph.arena.allocator();
     var visited = std.AutoHashMap(*Tensor, void).init(arena_alloc);
     defer visited.deinit();
 
-    var scopes = std.AutoHashMap(*Tensor, []const u8).init(arena_alloc);
-    defer scopes.deinit();
-
-    // 1. 预扫描：注册所有显式命名且包含点号分层的张量作用域
-    for (graph.tensors.items) |t| {
-        if (t.name) |n| {
-            if (extractModuleScope(n)) |s| {
-                scopes.put(t, s) catch {};
-            }
-        }
-    }
-    for (graph.ops.items) |op| {
-        for (op.inputs) |t| {
-            if (t.name) |n| {
-                if (extractModuleScope(n)) |s| {
-                    scopes.put(t, s) catch {};
-                }
-            }
-        }
-        for (op.outputs) |t| {
-            if (t.name) |n| {
-                if (extractModuleScope(n)) |s| {
-                    scopes.put(t, s) catch {};
-                }
-            }
-        }
-    }
-
-    // 2. 拓扑扫描：自动将算子输入参数的模块前缀推导并级联传播至各中间激活节点
-    for (graph.ops.items) |op| {
-        var op_scope: ?[]const u8 = null;
-        // 优先从输入中的底层参数（叶子节点，如 weight, bias）继承最具体的子模块层级所属
-        for (op.inputs) |inp| {
-            if (inp.creator == null and inp.name != null) {
-                if (extractModuleScope(inp.name.?)) |p_scope| {
-                    if (op_scope == null or p_scope.len > op_scope.?.len) {
-                        op_scope = p_scope;
-                    }
-                }
-            }
-        }
-        // 若无直接参数输入，则寻找所有已有作用域输入的公共最长模块前缀
-        if (op_scope == null) {
-            for (op.inputs) |inp| {
-                if (scopes.get(inp)) |inp_scope| {
-                    if (op_scope == null) {
-                        op_scope = inp_scope;
-                    } else {
-                        const common = getCommonModulePrefix(op_scope.?, inp_scope);
-                        if (common.len > 0) {
-                            op_scope = common;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (op_scope) |scope| {
-            var effective_scope = scope;
-            if (graph.getModuleType(scope)) |mtype| {
-                if (std.mem.eql(u8, mtype, "CausalSelfAttention")) {
-                    effective_scope = std.fmt.allocPrint(arena_alloc, "{s}.core", .{scope}) catch scope;
-                }
-            }
-            for (op.outputs) |out| {
-                if (!scopes.contains(out)) {
-                    scopes.put(out, effective_scope) catch {};
-                }
-            }
-        }
-    }
-
-    var param_idx: usize = 0;
-    var input_idx: usize = 0;
-    var op_idx: usize = 0;
+    var counters = NodeCounters{};
 
     for (graph.ops.items) |op| {
         for (op.inputs) |t| {
             if (visited.contains(t)) continue;
-            visited.put(t, {}) catch continue;
-            try appendNodeData(graph, t, &param_idx, &input_idx, &op_idx, &scopes, &nodes, allocator);
+            try visited.put(t, {});
+            try appendNodeData(graph, t, &counters, &nodes, allocator);
         }
         for (op.outputs) |t| {
             if (visited.contains(t)) continue;
-            visited.put(t, {}) catch continue;
-            try appendNodeData(graph, t, &param_idx, &input_idx, &op_idx, &scopes, &nodes, allocator);
+            try visited.put(t, {});
+            try appendNodeData(graph, t, &counters, &nodes, allocator);
         }
     }
 
     for (graph.tensors.items) |t| {
         if (visited.contains(t)) continue;
-        visited.put(t, {}) catch continue;
-        try appendNodeData(graph, t, &param_idx, &input_idx, &op_idx, &scopes, &nodes, allocator);
+        try visited.put(t, {});
+        try appendNodeData(graph, t, &counters, &nodes, allocator);
     }
 
     return nodes;
 }
 
+const NodeCounters = struct {
+    param: usize = 0,
+    input: usize = 0,
+    op: usize = 0,
+};
+
 fn appendNodeData(
     graph: *Graph,
     t: *Tensor,
-    param_idx: *usize,
-    input_idx: *usize,
-    op_idx: *usize,
-    scopes: *const std.AutoHashMap(*Tensor, []const u8),
+    counters: *NodeCounters,
     nodes: *std.ArrayList(NodeData),
     allocator: std.mem.Allocator,
 ) !void {
-    // 1. 形状格式化
-    var shape_buf: [64]u8 = undefined;
-    var shape_len: usize = 0;
-    shape_buf[0] = '[';
-    shape_len += 1;
-    for (0..t.shape.len) |d| {
-        if (d > 0) {
-            shape_buf[shape_len] = ',';
-            shape_buf[shape_len + 1] = ' ';
-            shape_len += 2;
-        }
-        const part = std.fmt.bufPrint(shape_buf[shape_len..], "{d}", .{t.shape.dims[d]}) catch "";
-        shape_len += part.len;
-    }
-    shape_buf[shape_len] = ']';
-    shape_len += 1;
-    const shape_str = try allocator.dupe(u8, shape_buf[0..shape_len]);
-
+    const shape_str = try formatShapeAlloc(allocator, t.shape);
     const elements = t.data.len;
     const bytes = elements * @sizeOf(f32);
+    const scope = tensorScope(t);
+    const module = try allocator.dupe(u8, scope);
 
-    // 2. 判断节点分类
+    // 1. 算子输出激活值
     if (t.creator) |creator_op| {
         const op_name = @tagName(creator_op.op_type);
         const name = if (t.name) |n|
             try allocator.dupe(u8, n)
-        else if (scopes.get(t)) |scope|
-            try std.fmt.allocPrint(allocator, "{s}.act_{s}_{d}", .{ scope, op_name, op_idx.* })
+        else if (scope.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}.act_{s}_{d}", .{ scope, op_name, counters.op })
         else
-            try std.fmt.allocPrint(allocator, "computation_graph.{s}_{d}", .{ op_name, op_idx.* });
+            try std.fmt.allocPrint(allocator, "graph.act_{s}_{d}", .{ op_name, counters.op });
         if (t.name == null) t.name = try graph.arena.allocator().dupe(u8, name);
-        op_idx.* += 1;
+        counters.op += 1;
 
         var strat_buf: [64]u8 = undefined;
         const strat = try allocator.dupe(u8, std.fmt.bufPrint(&strat_buf, "produced by {s}", .{op_name}) catch "op output");
@@ -204,6 +212,7 @@ fn appendNodeData(
         try nodes.append(allocator, .{
             .name = name,
             .kind = "Activation",
+            .module = module,
             .shape_str = shape_str,
             .elements = elements,
             .bytes = bytes,
@@ -214,43 +223,47 @@ fn appendNodeData(
         return;
     }
 
+    // 2. 图输入与常量缓冲区
     if (!t.requires_grad) {
+        const prefix = if (t.is_buffer) "buffer" else "input";
         const name = if (t.name) |n|
             try allocator.dupe(u8, n)
-        else if (scopes.get(t)) |scope|
-            try std.fmt.allocPrint(allocator, "{s}.input_{d}", .{ scope, input_idx.* })
+        else if (scope.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}.{s}_{d}", .{ scope, prefix, counters.input })
         else
-            try std.fmt.allocPrint(allocator, "inputs.input_{d}", .{input_idx.*});
+            try std.fmt.allocPrint(allocator, "inputs.{s}_{d}", .{ prefix, counters.input });
         if (t.name == null) t.name = try graph.arena.allocator().dupe(u8, name);
-        input_idx.* += 1;
+        counters.input += 1;
 
         try nodes.append(allocator, .{
             .name = name,
-            .kind = "Input",
+            .kind = if (t.is_buffer) "Buffer" else "Input",
+            .module = module,
             .shape_str = shape_str,
             .elements = elements,
             .bytes = bytes,
-            .status = "INPUT",
+            .status = if (t.is_buffer) "BUFFER" else "INPUT",
             .inferred_act = try allocator.dupe(u8, "N/A"),
-            .strategy = try allocator.dupe(u8, "user input / constant"),
+            .strategy = try allocator.dupe(u8, if (t.is_buffer) "constant buffer" else "user input"),
         });
         return;
     }
 
-    // 模型可学习参数
+    // 3. 模型可学习参数
     const name = if (t.name) |n|
         try allocator.dupe(u8, n)
-    else if (scopes.get(t)) |scope|
-        try std.fmt.allocPrint(allocator, "{s}.param_{d}", .{ scope, param_idx.* })
+    else if (scope.len > 0)
+        try std.fmt.allocPrint(allocator, "{s}.param_{d}", .{ scope, counters.param })
     else
-        try std.fmt.allocPrint(allocator, "parameters.param_{d}", .{param_idx.*});
+        try std.fmt.allocPrint(allocator, "parameters.param_{d}", .{counters.param});
     if (t.name == null) t.name = try graph.arena.allocator().dupe(u8, name);
-    param_idx.* += 1;
+    counters.param += 1;
 
     if (t.is_custom_initialized) {
         try nodes.append(allocator, .{
             .name = name,
             .kind = "Param",
+            .module = module,
             .shape_str = shape_str,
             .elements = elements,
             .bytes = bytes,
@@ -265,6 +278,7 @@ fn appendNodeData(
         try nodes.append(allocator, .{
             .name = name,
             .kind = "Param",
+            .module = module,
             .shape_str = shape_str,
             .elements = elements,
             .bytes = bytes,
@@ -298,6 +312,7 @@ fn appendNodeData(
     try nodes.append(allocator, .{
         .name = name,
         .kind = "Param",
+        .module = module,
         .shape_str = shape_str,
         .elements = elements,
         .bytes = bytes,
@@ -311,288 +326,12 @@ fn appendNodeData(
 pub fn freeGraphNodes(nodes: *std.ArrayList(NodeData), allocator: std.mem.Allocator) void {
     for (nodes.items) |n| {
         allocator.free(n.name);
+        allocator.free(n.module);
         allocator.free(n.shape_str);
         allocator.free(n.strategy);
         allocator.free(n.inferred_act);
     }
     nodes.deinit(allocator);
-}
-
-/// 计算图中逻辑模块之间的数据流转边
-pub const EdgeData = struct {
-    from: []const u8,
-    to: []const u8,
-    shape: []const u8,
-    is_skip: bool = false,
-};
-
-/// 检查 target_t 是否为 start_t 的拓扑祖先（即存在前向数据通路 target_t ~> start_t）
-fn isAncestor(start_t: *Tensor, target_t: *Tensor, visited: *std.AutoHashMap(*Tensor, void)) bool {
-    if (start_t == target_t) return true;
-    const op = start_t.creator orelse return false;
-    for (op.inputs) |inp| {
-        // 跳过参数矩阵与偏置，只沿数据流追溯
-        if (inp.creator == null and inp.requires_grad) continue;
-        if (inp == target_t) return true;
-        if (!visited.contains(inp)) {
-            visited.put(inp, {}) catch continue;
-            if (isAncestor(inp, target_t, visited)) return true;
-        }
-    }
-    return false;
-}
-
-/// 判断一个算子是否为跨分支汇聚算子（即非参数数据输入 >= 2，且输入来自不同的模块/分支）
-fn isConvergenceOp(op: *autodiff.Op, scopes: *const std.AutoHashMap(*Tensor, []const u8)) bool {
-    var data_in_count: usize = 0;
-    var first_scope: ?[]const u8 = null;
-    var has_different_scopes = false;
-
-    for (op.inputs) |inp| {
-        // 排除参数与常量/缓冲区
-        if (inp.creator == null and inp.requires_grad) continue;
-        if (inp.is_buffer) continue;
-
-        data_in_count += 1;
-        const s = scopes.get(inp) orelse (if (inp.name) |n| n else "");
-        if (s.len > 0) {
-            if (first_scope == null) {
-                first_scope = s;
-            } else if (!std.mem.eql(u8, first_scope.?, s)) {
-                has_different_scopes = true;
-            }
-        }
-    }
-
-    return data_in_count >= 2 and has_different_scopes;
-}
-
-/// 从计算图张量直接获取其所属的模块作用域或宏观接口名 (完全基于图拓扑属性，无字符串硬编码启发式)
-fn getTensorModule(
-    graph: *const Graph,
-    t: *Tensor,
-    scopes: *const std.AutoHashMap(*Tensor, []const u8),
-    consumed_set: *const std.AutoHashMap(*Tensor, void),
-) []const u8 {
-    // 1. 图原生源节点 (Graph Inputs): 入度为 0 且非参数张量
-    if (t.creator == null and !t.requires_grad) {
-        if (t.name) |n| return n;
-    }
-
-    // 2. 如果属于显式构造的子模块作用域（如注意力核心 ScaledDotProductAttention），优先归属该子模块
-    if (scopes.get(t)) |scope| {
-        if (graph.getModuleType(scope)) |mtype| {
-            if (std.mem.eql(u8, mtype, "ScaledDotProductAttention")) {
-                return scope;
-            }
-        }
-    }
-
-    // 3. 图原生汇聚节点 (Convergence Junctions): 跨分支汇聚算子（多数据输入来自不同分支）产生的显式命名张量
-    if (t.creator) |op| {
-        if (isConvergenceOp(op, scopes)) {
-            if (t.name) |n| {
-                if (std.mem.indexOf(u8, n, ".act_") == null) return n;
-            }
-        }
-    }
-
-    // 4. 图原生终端输出节点 (Graph Sink Outputs): 出度为 0 且显式命名的模型输出张量
-    if (t.creator != null and !consumed_set.contains(t)) {
-        if (t.name) |n| return n;
-    }
-
-    // 5. 属于具体子模块的内部张量/激活值
-    if (scopes.get(t)) |scope| {
-        return scope;
-    }
-
-    // 6. 模型权重参数 (creator == null 且 requires_grad)
-    if (t.creator == null and t.requires_grad and t.name != null) {
-        if (extractModuleScope(t.name.?)) |s| return s;
-    }
-
-    // 7. 回退到张量原生名称
-    if (t.name) |n| return n;
-
-    return "unknown";
-}
-
-pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayList(EdgeData) {
-    var edges: std.ArrayList(EdgeData) = .empty;
-    errdefer freeGraphEdges(&edges, allocator);
-
-    const arena_alloc = graph.arena.allocator();
-    var edge_set = std.StringHashMap(void).init(arena_alloc);
-    defer edge_set.deinit();
-
-    var scopes = std.AutoHashMap(*Tensor, []const u8).init(arena_alloc);
-    defer scopes.deinit();
-
-    for (graph.tensors.items) |t| {
-        if (t.name) |n| {
-            if (extractModuleScope(n)) |s| scopes.put(t, s) catch {};
-        }
-    }
-    for (graph.ops.items) |op| {
-        for (op.inputs) |t| {
-            if (t.name) |n| {
-                if (extractModuleScope(n)) |s| scopes.put(t, s) catch {};
-            }
-        }
-        for (op.outputs) |t| {
-            if (t.name) |n| {
-                if (extractModuleScope(n)) |s| scopes.put(t, s) catch {};
-            }
-        }
-    }
-    for (graph.ops.items) |op| {
-        var op_scope: ?[]const u8 = null;
-        for (op.inputs) |inp| {
-            if (inp.creator == null and inp.name != null) {
-                if (extractModuleScope(inp.name.?)) |p_scope| {
-                    if (op_scope == null or p_scope.len > op_scope.?.len) op_scope = p_scope;
-                }
-            }
-        }
-        if (op_scope == null) {
-            for (op.inputs) |inp| {
-                if (scopes.get(inp)) |inp_scope| {
-                    if (op_scope == null) op_scope = inp_scope else {
-                        const common = getCommonModulePrefix(op_scope.?, inp_scope);
-                        if (common.len > 0) op_scope = common;
-                    }
-                }
-            }
-        }
-        if (op_scope) |scope| {
-            var effective_scope = scope;
-            if (graph.getModuleType(scope)) |mtype| {
-                if (std.mem.eql(u8, mtype, "CausalSelfAttention")) {
-                    effective_scope = std.fmt.allocPrint(arena_alloc, "{s}.core", .{scope}) catch scope;
-                }
-            }
-            for (op.outputs) |out| {
-                if (!scopes.contains(out)) scopes.put(out, effective_scope) catch {};
-            }
-        }
-    }
-
-    // 预统计计算图中所有被下游算子消费的张量集合（用于准确判断图终端 Sink 输出节点）
-    var consumed_set = std.AutoHashMap(*Tensor, void).init(arena_alloc);
-    defer consumed_set.deinit();
-    for (graph.ops.items) |op| {
-        for (op.inputs) |inp| {
-            consumed_set.put(inp, {}) catch {};
-        }
-    }
-
-    const addEdge = struct {
-        fn add(
-            list: *std.ArrayList(EdgeData),
-            set: *std.StringHashMap(void),
-            arena: std.mem.Allocator,
-            from: []const u8,
-            to: []const u8,
-            shape: []const u8,
-            is_skip: bool,
-        ) !void {
-            if (from.len == 0 or to.len == 0 or std.mem.eql(u8, from, to)) return;
-            var key_buf: [384]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buf, "{s}->{s}", .{ from, to }) catch return;
-            if (set.contains(key)) return;
-            try set.put(try arena.dupe(u8, key), {});
-            try list.append(arena, .{
-                .from = try arena.dupe(u8, from),
-                .to = try arena.dupe(u8, to),
-                .shape = try arena.dupe(u8, shape),
-                .is_skip = is_skip,
-            });
-        }
-    }.add;
-
-    for (graph.ops.items) |op| {
-        if (op.outputs.len == 0) continue;
-        const out = op.outputs[0];
-
-        for (op.inputs) |inp| {
-            // 1. 图原生叶子判断：严格跳过内部权重/偏置参数与静态缓冲张量
-            if (inp.creator == null and inp.requires_grad) continue;
-            if (inp.is_buffer) continue;
-
-            // 2. 格式化张量形状
-            var shape_buf: [64]u8 = undefined;
-            var shape_len: usize = 0;
-            shape_buf[0] = '[';
-            shape_len += 1;
-            for (0..inp.shape.len) |d| {
-                if (d > 0) {
-                    shape_buf[shape_len] = ',';
-                    shape_buf[shape_len + 1] = ' ';
-                    shape_len += 2;
-                }
-                const part = std.fmt.bufPrint(shape_buf[shape_len..], "{d}", .{inp.shape.dims[d]}) catch "";
-                shape_len += part.len;
-            }
-            shape_buf[shape_len] = ']';
-            shape_len += 1;
-            const shape_str = shape_buf[0..shape_len];
-
-            // 3. 直接通过张量在计算图中的拓扑属性与模块作用域获取所属模块
-            const from_mod = getTensorModule(graph, inp, &scopes, &consumed_set);
-            const to_mod = getTensorModule(graph, out, &scopes, &consumed_set);
-
-            if (!std.mem.eql(u8, from_mod, to_mod)) {
-                // 图原生跳跃连接判定：如果汇聚算子的某个输入在拓扑上是另一个输入的祖先，则该输入为跳跃旁路
-                var is_skip = false;
-                if (out.creator) |c_op| {
-                    if (isConvergenceOp(c_op, &scopes)) {
-                        for (c_op.inputs) |other| {
-                            if (other == inp) continue;
-                            if (other.creator == null and other.requires_grad) continue;
-                            var visited = std.AutoHashMap(*Tensor, void).init(arena_alloc);
-                            defer visited.deinit();
-                            if (isAncestor(other, inp, &visited)) {
-                                is_skip = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                try addEdge(&edges, &edge_set, arena_alloc, from_mod, to_mod, shape_str, is_skip);
-            }
-        }
-    }
-
-    return edges;
-}
-
-pub fn freeGraphEdges(edges: *std.ArrayList(EdgeData), allocator: std.mem.Allocator) void {
-    for (edges.items) |e| {
-        allocator.free(e.from);
-        allocator.free(e.to);
-        allocator.free(e.shape);
-    }
-    edges.deinit(allocator);
-}
-
-fn formatShapeAlloc(allocator: std.mem.Allocator, s: Shape) ![]const u8 {
-    var buf: [64]u8 = undefined;
-    var len: usize = 0;
-    buf[0] = '[';
-    len += 1;
-    for (0..s.len) |d| {
-        if (d > 0) {
-            buf[len] = ',';
-            buf[len + 1] = ' ';
-            len += 2;
-        }
-        const part = std.fmt.bufPrint(buf[len..], "{d}", .{s.dims[d]}) catch "";
-        len += part.len;
-    }
-    buf[len] = ']';
-    len += 1;
-    return try allocator.dupe(u8, buf[0..len]);
 }
 
 /// 计算图中单个算子/节点的维度流转与参数信息
@@ -612,82 +351,19 @@ pub fn collectGraphOps(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayLi
     var ops_list: std.ArrayList(OpData) = .empty;
     errdefer freeGraphOps(&ops_list, allocator);
 
-    const arena_alloc = graph.arena.allocator();
-    var scopes = std.AutoHashMap(*Tensor, []const u8).init(arena_alloc);
-    defer scopes.deinit();
-
-    for (graph.tensors.items) |t| {
-        if (t.name) |n| {
-            if (extractModuleScope(n)) |s| {
-                scopes.put(t, s) catch {};
-            }
-        }
-    }
-    for (graph.ops.items) |op| {
-        for (op.inputs) |t| {
-            if (t.name) |n| {
-                if (extractModuleScope(n)) |s| {
-                    scopes.put(t, s) catch {};
-                }
-            }
-        }
-        for (op.outputs) |t| {
-            if (t.name) |n| {
-                if (extractModuleScope(n)) |s| {
-                    scopes.put(t, s) catch {};
-                }
-            }
-        }
-    }
-
-    for (graph.ops.items) |op| {
-        var op_scope: ?[]const u8 = null;
-        for (op.inputs) |inp| {
-            if (inp.creator == null and inp.name != null) {
-                if (extractModuleScope(inp.name.?)) |p_scope| {
-                    if (op_scope == null or p_scope.len > op_scope.?.len) {
-                        op_scope = p_scope;
-                    }
-                }
-            }
-        }
-        if (op_scope == null) {
-            for (op.inputs) |inp| {
-                if (scopes.get(inp)) |inp_scope| {
-                    if (op_scope == null) {
-                        op_scope = inp_scope;
-                    } else {
-                        const common = getCommonModulePrefix(op_scope.?, inp_scope);
-                        if (common.len > 0) op_scope = common;
-                    }
-                }
-            }
-        }
-        if (op_scope) |scope| {
-            for (op.outputs) |out| {
-                if (!scopes.contains(out)) {
-                    // 如果公共前缀是 .attn 且输出没有明确指定具体名字，标为 .attn (整个注意力模块的内部激活)
-                    scopes.put(out, scope) catch {};
-                }
-            }
-        }
-    }
-
     var op_counter: usize = 0;
     for (graph.ops.items) |op| {
         if (op.outputs.len == 0) continue;
         const out = op.outputs[0];
         const op_tag = @tagName(op.op_type);
-
-        const mod_scope = if (out.name) |n|
-            (extractModuleScope(n) orelse (scopes.get(out) orelse "graph"))
-        else
-            (scopes.get(out) orelse "graph");
+        const mod_scope = opScope(op);
 
         const op_name = if (out.name) |n|
             try allocator.dupe(u8, n)
+        else if (mod_scope.len > 0)
+            try std.fmt.allocPrint(allocator, "{s}.act_{s}_{d}", .{ mod_scope, op_tag, op_counter })
         else
-            try std.fmt.allocPrint(allocator, "{s}.act_{s}_{d}", .{ mod_scope, op_tag, op_counter });
+            try std.fmt.allocPrint(allocator, "graph.act_{s}_{d}", .{ op_tag, op_counter });
         op_counter += 1;
 
         const out_shape = try formatShapeAlloc(allocator, out.shape);
@@ -696,7 +372,6 @@ pub fn collectGraphOps(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayLi
 
         var inp_shape_buf: [256]u8 = undefined;
         var inp_shape_len: usize = 0;
-
         var param_shape_buf: [256]u8 = undefined;
         var param_shape_len: usize = 0;
 
@@ -718,7 +393,7 @@ pub fn collectGraphOps(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayLi
             s_len += 1;
             const single_shape = s_buf[0..s_len];
 
-            if (inp.creator == null and inp.requires_grad) {
+            if (isParam(inp)) {
                 const p_name = if (inp.name) |pn| (if (std.mem.lastIndexOf(u8, pn, ".")) |dot| pn[dot + 1 ..] else pn) else "param";
                 if (param_shape_len > 0) {
                     param_shape_buf[param_shape_len] = ',';
@@ -775,6 +450,30 @@ pub fn freeGraphOps(ops_list: *std.ArrayList(OpData), allocator: std.mem.Allocat
     ops_list.deinit(allocator);
 }
 
+// ============================================================================
+// 3. 模块局部图 (Scoped Local Graph)
+// ============================================================================
+
+/// 模块局部图中的节点
+pub const FlowNode = struct {
+    id: []const u8, // 局部 id；端口使用保留前缀 "@in" / "@out"
+    kind: []const u8, // "port_in", "port_out", "module", "op", "buffer"
+    ref: []const u8, // 全局引用：子模块路径、张量名，或端口在外部可见的另一端
+    op_type: ?[]const u8 = null,
+    module_type: ?[]const u8 = null,
+    shape: []const u8 = "",
+};
+
+/// 模块局部图中的一条数据流边
+pub const EdgeData = struct {
+    from: []const u8,
+    to: []const u8,
+    shape: []const u8, // 生产端张量形状
+    dst_shape: ?[]const u8 = null, // 经过透明算子后到达消费端的形状 (与 shape 相同时为 null)
+    transforms: []const []const u8 = &.{}, // 折叠进该边的透明算子 (按执行顺序)
+    is_skip: bool = false,
+    kind: []const u8 = "data", // "data" 或 "buffer"
+};
 
 /// 递归模型层级模块组节点 (Recursive Module Node)
 pub const ModuleNode = struct {
@@ -791,6 +490,7 @@ pub const ModuleNode = struct {
     nodes: std.ArrayList(NodeData),
     parameters: std.ArrayList(NodeData),
     ops: std.ArrayList(OpData),
+    flow_nodes: std.ArrayList(FlowNode),
     edges: std.ArrayList(EdgeData),
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8, path: []const u8) !*ModuleNode {
@@ -798,22 +498,338 @@ pub const ModuleNode = struct {
         node.* = .{
             .name = name,
             .path = path,
-            .kind = "module",
-            .module_type = "Module",
-            .formula = null,
-            .total_params = 0,
-            .total_bytes = 0,
-            .param_count = 0,
-            .node_count = 0,
             .children = .empty,
             .nodes = .empty,
             .parameters = .empty,
             .ops = .empty,
+            .flow_nodes = .empty,
             .edges = .empty,
         };
         return node;
     }
+
+    /// 根模块、复合模块与无参数的多算子叶子模块 (如注意力核心) 导出局部图；
+    /// 带参数的叶子层 (Linear、RMSNorm、Embedding 等) 视为原子节点。
+    fn wantsLocalGraph(self: *const ModuleNode) bool {
+        if (self.path.len == 0) return true;
+        if (self.children.items.len > 0) return true;
+        return self.parameters.items.len == 0 and self.ops.items.len > 0;
+    }
 };
+
+const Vertex = union(enum) {
+    external,
+    transparent,
+    child: []const u8,
+    own_op: *Op,
+    buffer: *Tensor,
+    graph_input: *Tensor,
+};
+
+const ConsumerMap = std.AutoHashMap(*Tensor, std.ArrayList(*Op));
+
+const LocalGraphBuilder = struct {
+    arena: std.mem.Allocator,
+    graph: *Graph,
+    module: *ModuleNode,
+    module_map: *const std.StringHashMap(*ModuleNode),
+    consumers: *const ConsumerMap,
+    node_ids: std.StringHashMap([]const u8),
+    used_ids: std.StringHashMap(void),
+    edge_keys: std.StringHashMap(void),
+    n_in: usize = 0,
+    n_out: usize = 0,
+
+    fn init(
+        arena: std.mem.Allocator,
+        graph: *Graph,
+        module: *ModuleNode,
+        module_map: *const std.StringHashMap(*ModuleNode),
+        consumers: *const ConsumerMap,
+    ) LocalGraphBuilder {
+        return .{
+            .arena = arena,
+            .graph = graph,
+            .module = module,
+            .module_map = module_map,
+            .consumers = consumers,
+            .node_ids = std.StringHashMap([]const u8).init(arena),
+            .used_ids = std.StringHashMap(void).init(arena),
+            .edge_keys = std.StringHashMap(void).init(arena),
+        };
+    }
+
+    fn classifyOp(self: *const LocalGraphBuilder, op: *Op) Vertex {
+        const path = self.module.path;
+        const s = opScope(op);
+        if (std.mem.eql(u8, s, path)) {
+            return if (isTransparentOp(op)) .transparent else .{ .own_op = op };
+        }
+        if (isWithinScope(s, path)) return .{ .child = childSegment(s, path) };
+        return .external;
+    }
+
+    fn classifyLeaf(self: *const LocalGraphBuilder, t: *Tensor) Vertex {
+        const path = self.module.path;
+        const s = t.scope;
+        if (std.mem.eql(u8, s, path)) {
+            if (!t.is_buffer and path.len == 0) return .{ .graph_input = t };
+            return .{ .buffer = t };
+        }
+        if (isWithinScope(s, path)) return .{ .child = childSegment(s, path) };
+        return .external;
+    }
+
+    fn producerVertex(self: *const LocalGraphBuilder, t: *Tensor) Vertex {
+        if (t.creator) |op| return self.classifyOp(op);
+        return self.classifyLeaf(t);
+    }
+
+    const Walk = struct {
+        origin: *Tensor,
+        transforms: []const []const u8,
+    };
+
+    /// 沿当前作用域内的透明算子向上回溯，得到真正的生产端张量与折叠的变换序列
+    fn walkBack(self: *LocalGraphBuilder, t: *Tensor) !Walk {
+        var cur = t;
+        var rev: std.ArrayList([]const u8) = .empty;
+        while (cur.creator) |op| {
+            if (!isTransparentOp(op)) break;
+            if (!std.mem.eql(u8, opScope(op), self.module.path)) break;
+            const src = firstDataInput(op) orelse break;
+            const desc = try std.fmt.allocPrint(self.arena, "{s} {s} -> {s}", .{
+                @tagName(op.op_type),
+                try formatShapeAlloc(self.arena, src.shape),
+                try formatShapeAlloc(self.arena, cur.shape),
+            });
+            try rev.append(self.arena, desc);
+            cur = src;
+        }
+        std.mem.reverse([]const u8, rev.items);
+        return .{ .origin = cur, .transforms = rev.items };
+    }
+
+    /// 算子在作用域 scope 的局部图中对应的全局引用 (子模块路径或算子输出张量名)
+    fn opRefIn(self: *LocalGraphBuilder, op: *Op, scope: []const u8) ![]const u8 {
+        const s = opScope(op);
+        if (std.mem.eql(u8, s, scope)) return op.outputs[0].name orelse "op";
+        return joinScope(self.arena, scope, childSegment(s, scope));
+    }
+
+    /// 输入端口的外部来源：越过透明算子找到真正的生产者，并在最近公共祖先作用域中解析
+    fn producerRef(self: *LocalGraphBuilder, t0: *Tensor) ![]const u8 {
+        var cur = t0;
+        while (cur.creator) |op| {
+            if (!isTransparentOp(op)) break;
+            cur = firstDataInput(op) orelse break;
+        }
+        const op = cur.creator orelse return cur.name orelse "input";
+        return self.opRefIn(op, commonScope(opScope(op), self.module.path));
+    }
+
+    /// 输出端口的外部去向：越过透明算子找到真正的消费者，并在最近公共祖先作用域中解析
+    fn consumerRef(self: *LocalGraphBuilder, c: *Op) ![]const u8 {
+        var cur = c;
+        while (isTransparentOp(cur)) {
+            const out = cur.outputs[0];
+            const list = self.consumers.get(out) orelse return out.name orelse "output";
+            if (list.items.len == 0) return out.name orelse "output";
+            cur = list.items[0];
+        }
+        return self.opRefIn(cur, commonScope(opScope(cur), self.module.path));
+    }
+
+    /// 局部 id：去掉当前模块路径前缀后的剩余名；仍含点号时取最后一段
+    fn localId(self: *const LocalGraphBuilder, name: []const u8) []const u8 {
+        const path = self.module.path;
+        var rel = name;
+        if (path.len > 0 and name.len > path.len + 1 and std.mem.startsWith(u8, name, path) and name[path.len] == '.') {
+            rel = name[path.len + 1 ..];
+        }
+        if (std.mem.lastIndexOfScalar(u8, rel, '.')) |d| rel = rel[d + 1 ..];
+        return rel;
+    }
+
+    fn uniqueId(self: *LocalGraphBuilder, preferred: []const u8) ![]const u8 {
+        var candidate = preferred;
+        var n: usize = 2;
+        while (self.used_ids.contains(candidate)) : (n += 1) {
+            candidate = try std.fmt.allocPrint(self.arena, "{s}_{d}", .{ preferred, n });
+        }
+        try self.used_ids.put(candidate, {});
+        return candidate;
+    }
+
+    fn addNode(self: *LocalGraphBuilder, key: []const u8, preferred_id: []const u8, node: FlowNode) ![]const u8 {
+        if (self.node_ids.get(key)) |id| return id;
+        const id = try self.uniqueId(preferred_id);
+        var n = node;
+        n.id = id;
+        try self.module.flow_nodes.append(self.arena, n);
+        try self.node_ids.put(key, id);
+        return id;
+    }
+
+    fn vertexId(self: *LocalGraphBuilder, v: Vertex) ![]const u8 {
+        switch (v) {
+            .child => |seg| {
+                const key = try std.fmt.allocPrint(self.arena, "module:{s}", .{seg});
+                const ref = try joinScope(self.arena, self.module.path, seg);
+                const mtype = if (self.module_map.get(ref)) |m| m.module_type else "Module";
+                return self.addNode(key, seg, .{ .id = "", .kind = "module", .ref = ref, .module_type = mtype });
+            },
+            .own_op => |op| {
+                const out = op.outputs[0];
+                const name = out.name orelse "op";
+                const key = try std.fmt.allocPrint(self.arena, "op:{x}", .{@intFromPtr(op)});
+                return self.addNode(key, self.localId(name), .{
+                    .id = "",
+                    .kind = "op",
+                    .ref = name,
+                    .op_type = @tagName(op.op_type),
+                    .shape = try formatShapeAlloc(self.arena, out.shape),
+                });
+            },
+            .buffer => |t| {
+                const name = t.name orelse "buffer";
+                const key = try std.fmt.allocPrint(self.arena, "buffer:{x}", .{@intFromPtr(t)});
+                return self.addNode(key, self.localId(name), .{
+                    .id = "",
+                    .kind = "buffer",
+                    .ref = name,
+                    .shape = try formatShapeAlloc(self.arena, t.shape),
+                });
+            },
+            .graph_input => |t| return self.portIn(t, t.name orelse "input"),
+            .external, .transparent => unreachable,
+        }
+    }
+
+    fn portIn(self: *LocalGraphBuilder, t: *Tensor, ref: []const u8) ![]const u8 {
+        const key = try std.fmt.allocPrint(self.arena, "in:{x}", .{@intFromPtr(t)});
+        if (self.node_ids.get(key)) |id| return id;
+        const preferred = try std.fmt.allocPrint(self.arena, "@in{d}", .{self.n_in});
+        self.n_in += 1;
+        return self.addNode(key, preferred, .{
+            .id = "",
+            .kind = "port_in",
+            .ref = ref,
+            .shape = try formatShapeAlloc(self.arena, t.shape),
+        });
+    }
+
+    fn portOut(self: *LocalGraphBuilder, t: *Tensor, ref: []const u8) ![]const u8 {
+        const key = try std.fmt.allocPrint(self.arena, "out:{x}", .{@intFromPtr(t)});
+        if (self.node_ids.get(key)) |id| return id;
+        const preferred = try std.fmt.allocPrint(self.arena, "@out{d}", .{self.n_out});
+        self.n_out += 1;
+        return self.addNode(key, preferred, .{
+            .id = "",
+            .kind = "port_out",
+            .ref = ref,
+            .shape = try formatShapeAlloc(self.arena, t.shape),
+        });
+    }
+
+    fn addEdge(self: *LocalGraphBuilder, from: []const u8, to: []const u8, origin: *Tensor, arrival: *Tensor, transforms: []const []const u8) !void {
+        if (std.mem.eql(u8, from, to)) return;
+        const key = try std.fmt.allocPrint(self.arena, "{s}->{s}", .{ from, to });
+        if (self.edge_keys.contains(key)) return;
+        try self.edge_keys.put(key, {});
+        try self.module.edges.append(self.arena, .{
+            .from = from,
+            .to = to,
+            .shape = try formatShapeAlloc(self.arena, origin.shape),
+            .dst_shape = if (shapeEql(origin.shape, arrival.shape)) null else try formatShapeAlloc(self.arena, arrival.shape),
+            .transforms = transforms,
+            .kind = if (origin.creator == null and origin.is_buffer) "buffer" else "data",
+        });
+    }
+
+    fn build(self: *LocalGraphBuilder) !void {
+        // 1. 每条 (张量 -> 非透明消费者) 数据依赖在当前作用域中的投影
+        for (self.graph.ops.items) |c| {
+            const cv = self.classifyOp(c);
+            if (cv == .transparent) continue;
+            for (c.inputs) |t| {
+                if (isParam(t)) continue;
+                const walk = try self.walkBack(t);
+                const origin = walk.origin;
+                if (isParam(origin)) continue;
+                const pv = self.producerVertex(origin);
+                if (pv == .transparent) continue;
+                if (pv == .external and cv == .external) continue;
+
+                const from_id = if (pv == .external)
+                    try self.portIn(origin, try self.producerRef(origin))
+                else
+                    try self.vertexId(pv);
+                const to_id = if (cv == .external)
+                    try self.portOut(t, try self.consumerRef(c))
+                else
+                    try self.vertexId(cv);
+                try self.addEdge(from_id, to_id, origin, t, walk.transforms);
+            }
+        }
+
+        // 2. 图终端输出 (没有任何消费者的算子输出)
+        for (self.graph.ops.items) |p| {
+            for (p.outputs) |t| {
+                if (self.consumers.contains(t)) continue;
+                const walk = try self.walkBack(t);
+                const pv = self.producerVertex(walk.origin);
+                if (pv == .external or pv == .transparent) continue;
+                const from_id = try self.vertexId(pv);
+                const to_id = try self.portOut(t, t.name orelse "output");
+                try self.addEdge(from_id, to_id, walk.origin, t, walk.transforms);
+            }
+        }
+
+        // 3. 在局部图内重新计算残差跳跃标记
+        self.markSkips();
+    }
+
+    fn findNode(self: *const LocalGraphBuilder, id: []const u8) ?FlowNode {
+        for (self.module.flow_nodes.items) |n| {
+            if (std.mem.eql(u8, n.id, id)) return n;
+        }
+        return null;
+    }
+
+    fn reaches(self: *const LocalGraphBuilder, from: []const u8, target: []const u8, depth: usize) bool {
+        if (depth > self.module.edges.items.len) return false;
+        for (self.module.edges.items) |e| {
+            if (!std.mem.eql(u8, e.from, from)) continue;
+            if (std.mem.eql(u8, e.to, target)) return true;
+            if (self.reaches(e.to, target, depth + 1)) return true;
+        }
+        return false;
+    }
+
+    /// 边 (u -> t) 为 skip，当且仅当 t 是加法汇聚节点，且 t 另有入边 (w -> t) 使得 u 在局部图内可达 w
+    fn markSkips(self: *LocalGraphBuilder) void {
+        const edges = self.module.edges.items;
+        for (edges, 0..) |*e, i| {
+            const target = self.findNode(e.to) orelse continue;
+            if (!std.mem.eql(u8, target.kind, "op")) continue;
+            const op_type = target.op_type orelse continue;
+            if (!std.mem.eql(u8, op_type, "Add")) continue;
+            for (edges, 0..) |other, j| {
+                if (i == j or !std.mem.eql(u8, other.to, e.to)) continue;
+                if (std.mem.eql(u8, other.from, e.from)) continue;
+                if (self.reaches(e.from, other.from, 0)) {
+                    e.is_skip = true;
+                    break;
+                }
+            }
+        }
+    }
+};
+
+// ============================================================================
+// 4. 模型层级中间结构 (Model Hierarchy IR)
+// ============================================================================
 
 /// 模型全局摘要统计指标 (KPI Summary)
 pub const Summary = struct {
@@ -821,19 +837,20 @@ pub const Summary = struct {
     total_bytes: usize = 0,
     param_nodes: usize = 0,
     input_nodes: usize = 0,
+    buffer_nodes: usize = 0,
     activation_nodes: usize = 0,
     custom_init_count: usize = 0,
     auto_graph_count: usize = 0,
     total_nodes: usize = 0,
 };
 
-/// 包含完整递归树、DAG有向图连通关系与全局指标的模型结构中间数据
+/// 包含完整递归模块树 (每个模块自带局部图) 与全局指标的模型结构中间数据
 pub const ModelHierarchyGraph = struct {
     arena: std.heap.ArenaAllocator,
     summary: Summary,
     root: *ModuleNode,
+    default_scope: []const u8,
     nodes: std.ArrayList(NodeData),
-    edges: std.ArrayList(EdgeData),
     ops: std.ArrayList(OpData),
     formulas: std.StringHashMap([]const u8),
 
@@ -843,7 +860,7 @@ pub const ModelHierarchyGraph = struct {
 };
 
 // ============================================================================
-// 2. 模块一：模型计算图与模块层级提取器 (Graph / Model Hierarchy Extractor)
+// 5. 模型计算图与模块层级提取器 (Graph / Model Hierarchy Extractor)
 //    - 输入: *autodiff.Graph
 //    - 输出: 约定的中间数据结构 ModelHierarchyGraph 或 递归 JSON 字符串
 // ============================================================================
@@ -875,60 +892,43 @@ pub const graph_ir = struct {
         node.node_count = node_count;
     }
 
-    /// 基于模块层次树直接获取顶层组件作用域（不使用任何硬编码模块类型推断函数，完全与层次树对齐）
-    fn getTopLevelScope(root: *const ModuleNode, path: []const u8) []const u8 {
-        if (std.mem.startsWith(u8, path, "inputs.") or std.mem.startsWith(u8, path, "outputs.") or
-            std.mem.eql(u8, path, "inputs") or std.mem.eql(u8, path, "outputs"))
-        {
-            return path;
+    const TreeContext = struct {
+        arena: std.mem.Allocator,
+        graph: *Graph,
+        formulas: *const std.StringHashMap([]const u8),
+        module_map: *std.StringHashMap(*ModuleNode),
+    };
+
+    /// 获取 (必要时逐级创建) 指定路径的模块节点
+    fn ensureModule(ctx: *const TreeContext, path: []const u8) !*ModuleNode {
+        if (ctx.module_map.get(path)) |m| return m;
+        const parent_path = extractModuleScope(path) orelse "";
+        const parent = try ensureModule(ctx, parent_path);
+
+        const path_copy = try ctx.arena.dupe(u8, path);
+        const name = if (std.mem.lastIndexOfScalar(u8, path_copy, '.')) |d| path_copy[d + 1 ..] else path_copy;
+        const m = try ModuleNode.init(ctx.arena, name, path_copy);
+        m.module_type = ctx.graph.getModuleType(path) orelse "Module";
+        m.formula = ctx.formulas.get(path) orelse ctx.graph.inferModuleFormula(path);
+        try parent.children.append(ctx.arena, m);
+        try ctx.module_map.put(path_copy, m);
+        return m;
+    }
+
+    fn buildLocalGraphs(
+        arena: std.mem.Allocator,
+        graph: *Graph,
+        node: *ModuleNode,
+        module_map: *const std.StringHashMap(*ModuleNode),
+        consumers: *const ConsumerMap,
+    ) !void {
+        if (node.wantsLocalGraph()) {
+            var builder = LocalGraphBuilder.init(arena, graph, node, module_map, consumers);
+            try builder.build();
         }
-
-        // 寻找 root 下的实际模型主容器 (排除 inputs/outputs/(unscoped) 等辅助节点)
-        var primary_model: ?*const ModuleNode = null;
-        for (root.children.items) |child| {
-            if (!std.mem.eql(u8, child.name, "inputs") and
-                !std.mem.eql(u8, child.name, "outputs") and
-                !std.mem.eql(u8, child.name, "(unscoped)") and
-                child.children.items.len > 0)
-            {
-                if (primary_model == null) {
-                    primary_model = child;
-                } else {
-                    primary_model = null;
-                    break;
-                }
-            }
+        for (node.children.items) |child| {
+            try buildLocalGraphs(arena, graph, child, module_map, consumers);
         }
-
-        const container = primary_model orelse root;
-
-        if (container.path.len == 0 or (std.mem.startsWith(u8, path, container.path) and path.len > container.path.len and path[container.path.len] == '.')) {
-            for (container.children.items) |child| {
-                if (std.mem.eql(u8, path, child.path) or
-                    (std.mem.startsWith(u8, path, child.path) and path.len > child.path.len and path[child.path.len] == '.'))
-                {
-                    return child.path;
-                }
-            }
-            // 属于模型自身的直接激活/算子输出（如 gpt.embeddings_sum）
-            const rel_start = if (container.path.len == 0) 0 else container.path.len + 1;
-            const rel = path[rel_start..];
-            if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
-                return path[0 .. rel_start + dot];
-            }
-            return path;
-        }
-
-        // 通用情况：直接对齐至 root 的第一层子模块
-        for (root.children.items) |child| {
-            if (std.mem.eql(u8, path, child.path) or
-                (std.mem.startsWith(u8, path, child.path) and path.len > child.path.len and path[child.path.len] == '.'))
-            {
-                return child.path;
-            }
-        }
-
-        return path;
     }
 
     /// 解析 Graph 并构建约定的中间数据结构 ModelHierarchyGraph
@@ -938,7 +938,6 @@ pub const graph_ir = struct {
         const arena_alloc = arena.allocator();
 
         const nodes = try collectGraphNodes(graph, arena_alloc);
-        const edges = try collectGraphEdges(graph, arena_alloc);
         const ops_list = try collectGraphOps(graph, arena_alloc);
 
         var formulas = std.StringHashMap([]const u8).init(arena_alloc);
@@ -948,17 +947,14 @@ pub const graph_ir = struct {
         }
 
         // 0. 注入所有标准基础算子类型 (OpType) 的标准 LaTeX 公式字典
-        inline for (std.meta.fields(@import("../autodiff/types.zig").OpType)) |field| {
-            const op_enum: @import("../autodiff/types.zig").OpType = @enumFromInt(field.value);
-            const op_name = field.name;
-            const op_form = op_enum.getFormula();
-            try formulas.put(try arena_alloc.dupe(u8, op_name), try arena_alloc.dupe(u8, op_form));
+        inline for (std.meta.fields(autodiff.OpType)) |field| {
+            const op_enum: autodiff.OpType = @enumFromInt(field.value);
+            try formulas.put(try arena_alloc.dupe(u8, field.name), try arena_alloc.dupe(u8, op_enum.getFormula()));
         }
 
-        // 1. 自动遍历所有算子实例，将其对应的具体算子公式直接绑定到 op.name
+        // 1. 为每个算子实例绑定其算子类型的标准公式
         for (ops_list.items) |*op| {
             if (!formulas.contains(op.name)) {
-                // 如果存在对应的算子类型标准公式，直接使用算子公式
                 if (formulas.get(op.op_type)) |op_form| {
                     try formulas.put(try arena_alloc.dupe(u8, op.name), try arena_alloc.dupe(u8, op_form));
                 } else {
@@ -966,14 +962,14 @@ pub const graph_ir = struct {
                     try formulas.put(try arena_alloc.dupe(u8, op.name), try arena_alloc.dupe(u8, inferred));
                 }
             }
-            if (!formulas.contains(op.module)) {
+            if (op.module.len > 0 and !formulas.contains(op.module)) {
                 const inferred = graph.inferModuleFormula(op.module);
                 try formulas.put(try arena_alloc.dupe(u8, op.module), try arena_alloc.dupe(u8, inferred));
             }
             op.formula = formulas.get(op.name) orelse (formulas.get(op.op_type) orelse null);
         }
 
-        // 2. 自动遍历所有图节点，为尚未显式注册公式的模块和算子从图与内置库中推导并注入公式
+        // 2. 为尚未显式注册公式的节点与其所属模块注入推导公式
         for (nodes.items) |node| {
             if (!formulas.contains(node.name)) {
                 if (std.mem.eql(u8, node.kind, "Activation")) {
@@ -985,192 +981,48 @@ pub const graph_ir = struct {
                 const inferred = graph.inferModuleFormula(node.name);
                 try formulas.put(try arena_alloc.dupe(u8, node.name), try arena_alloc.dupe(u8, inferred));
             }
-            if (extractModuleScope(node.name)) |scope| {
-                if (!formulas.contains(scope)) {
-                    const inferred = graph.inferModuleFormula(scope);
-                    try formulas.put(try arena_alloc.dupe(u8, scope), try arena_alloc.dupe(u8, inferred));
-                }
+            if (node.module.len > 0 and !formulas.contains(node.module)) {
+                const inferred = graph.inferModuleFormula(node.module);
+                try formulas.put(try arena_alloc.dupe(u8, node.module), try arena_alloc.dupe(u8, inferred));
             }
         }
 
-        // 构建递归模块树
+        // 3. 按作用域构建递归模块树：节点与算子放入其所属模块
         const root = try ModuleNode.init(arena_alloc, "root", "");
         root.module_type = "Model";
         root.formula = graph.getModuleFormula("root") orelse (graph.getModuleFormula("") orelse null);
 
         var module_map = std.StringHashMap(*ModuleNode).init(arena_alloc);
         try module_map.put("", root);
-        try module_map.put("root", root);
+        const ctx = TreeContext{
+            .arena = arena_alloc,
+            .graph = graph,
+            .formulas = &formulas,
+            .module_map = &module_map,
+        };
 
-        for (nodes.items) |*node| {
-            var it = std.mem.splitScalar(u8, node.name, '.');
-            var parts: std.ArrayList([]const u8) = .empty;
-            while (it.next()) |part| {
-                try parts.append(arena_alloc, part);
-            }
-
-            if (parts.items.len > 1) {
-                var curr = root;
-                for (parts.items[0 .. parts.items.len - 1]) |part| {
-                    var found: ?*ModuleNode = null;
-                    for (curr.children.items) |child| {
-                        if (std.mem.eql(u8, child.name, part)) {
-                            found = child;
-                            break;
-                        }
-                    }
-                    if (found) |child| {
-                        curr = child;
-                    } else {
-                        const child_path = if (curr.path.len == 0)
-                            try arena_alloc.dupe(u8, part)
-                        else
-                            try std.fmt.allocPrint(arena_alloc, "{s}.{s}", .{ curr.path, part });
-                        const new_child = try ModuleNode.init(arena_alloc, try arena_alloc.dupe(u8, part), child_path);
-                        new_child.module_type = graph.getModuleType(child_path) orelse "Module";
-                        new_child.formula = formulas.get(child_path) orelse graph.inferModuleFormula(child_path);
-
-                        try curr.children.append(arena_alloc, new_child);
-                        try module_map.put(child_path, new_child);
-                        curr = new_child;
-                    }
-                }
-                try curr.nodes.append(arena_alloc, node.*);
-                if (std.mem.eql(u8, node.kind, "Param")) {
-                    try curr.parameters.append(arena_alloc, node.*);
-                }
-            } else {
-                var found_unscoped: ?*ModuleNode = null;
-                for (root.children.items) |child| {
-                    if (std.mem.eql(u8, child.name, "(unscoped)")) {
-                        found_unscoped = child;
-                        break;
-                    }
-                }
-                const unscoped = if (found_unscoped) |u| u else blk: {
-                    const new_u = try ModuleNode.init(arena_alloc, "(unscoped)", "(unscoped)");
-                    new_u.module_type = "Unscoped";
-                    try root.children.append(arena_alloc, new_u);
-                    try module_map.put("(unscoped)", new_u);
-                    break :blk new_u;
-                };
-                try unscoped.nodes.append(arena_alloc, node.*);
-                if (std.mem.eql(u8, node.kind, "Param")) {
-                    try unscoped.parameters.append(arena_alloc, node.*);
-                }
+        for (nodes.items) |node| {
+            const m = try ensureModule(&ctx, node.module);
+            try m.nodes.append(arena_alloc, node);
+            if (std.mem.eql(u8, node.kind, "Param")) {
+                try m.parameters.append(arena_alloc, node);
             }
         }
-
-        // 将算子分类关联到对应模块内部
         for (ops_list.items) |op| {
-            if (module_map.get(op.module)) |m| {
-                try m.ops.append(arena_alloc, op);
-            }
+            const m = try ensureModule(&ctx, op.module);
+            try m.ops.append(arena_alloc, op);
         }
 
-        // 将边分类关联到对应模块内部 (严格遵循层次封闭律)
-        for (edges.items) |e| {
-            var it = module_map.iterator();
-            while (it.next()) |entry| {
-                const mod_path = entry.key_ptr.*;
-                if (mod_path.len == 0 or std.mem.eql(u8, mod_path, "root")) continue;
-                const m = entry.value_ptr.*;
-
-                // 仅对拥有直接子模块的复合容器构建局部流动图
-                if (m.children.items.len == 0) continue;
-
-                const from_in = std.mem.eql(u8, e.from, mod_path) or
-                    (std.mem.startsWith(u8, e.from, mod_path) and e.from.len > mod_path.len and e.from[mod_path.len] == '.');
-                const to_in = std.mem.eql(u8, e.to, mod_path) or
-                    (std.mem.startsWith(u8, e.to, mod_path) and e.to.len > mod_path.len and e.to[mod_path.len] == '.');
-
-                if (!from_in and !to_in) continue;
-
-                var from_name: []const u8 = undefined;
-                var to_name: []const u8 = undefined;
-
-                if (from_in and to_in) {
-                    // 1. 两端均在模块内部：检查是否完全属于某个更深层的子模块（例如 q_attn -> core 属于 attn，不属于 layers.0）
-                    var has_deeper_child = false;
-                    for (m.children.items) |child| {
-                        const from_child = std.mem.eql(u8, e.from, child.path) or
-                            (std.mem.startsWith(u8, e.from, child.path) and e.from.len > child.path.len and e.from[child.path.len] == '.');
-                        const to_child = std.mem.eql(u8, e.to, child.path) or
-                            (std.mem.startsWith(u8, e.to, child.path) and e.to.len > child.path.len and e.to[child.path.len] == '.');
-                        if (from_child and to_child) {
-                            has_deeper_child = true;
-                            break;
-                        }
-                    }
-                    if (has_deeper_child) continue;
-
-                    // 提取相对于当前模块的直接子节点名
-                    from_name = e.from;
-                    if (e.from.len > mod_path.len + 1) {
-                        const rel = e.from[mod_path.len + 1 ..];
-                        if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
-                            from_name = rel[0..dot];
-                        } else {
-                            from_name = rel;
-                        }
-                    }
-
-                    to_name = e.to;
-                    if (e.to.len > mod_path.len + 1) {
-                        const rel = e.to[mod_path.len + 1 ..];
-                        if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
-                            to_name = rel[0..dot];
-                        } else {
-                            to_name = rel;
-                        }
-                    }
-                } else if (!from_in and to_in) {
-                    // 2. 外部数据流入当前模块：规范起点为接口名 "inputs"
-                    from_name = "inputs";
-                    to_name = e.to;
-                    if (e.to.len > mod_path.len + 1) {
-                        const rel = e.to[mod_path.len + 1 ..];
-                        if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
-                            to_name = rel[0..dot];
-                        } else {
-                            to_name = rel;
-                        }
-                    }
-                } else if (from_in and !to_in) {
-                    // 3. 当前模块内部数据流出到外部：规范终点为接口名 "output"
-                    to_name = "output";
-                    from_name = e.from;
-                    if (e.from.len > mod_path.len + 1) {
-                        const rel = e.from[mod_path.len + 1 ..];
-                        if (std.mem.indexOfScalar(u8, rel, '.')) |dot| {
-                            from_name = rel[0..dot];
-                        } else {
-                            from_name = rel;
-                        }
-                    }
-                }
-
-                // 如果两端折叠后成为同一个名字（例如自身内部微观环路或 output->output），跳过
-                if (std.mem.eql(u8, from_name, to_name)) continue;
-
-                // 检查是否已经添加过相同的一对 from -> to
-                var already_has = false;
-                for (m.edges.items) |existing| {
-                    if (std.mem.eql(u8, existing.from, from_name) and std.mem.eql(u8, existing.to, to_name)) {
-                        already_has = true;
-                        break;
-                    }
-                }
-                if (already_has) continue;
-
-                try m.edges.append(arena_alloc, .{
-                    .from = try arena_alloc.dupe(u8, from_name),
-                    .to = try arena_alloc.dupe(u8, to_name),
-                    .shape = try arena_alloc.dupe(u8, e.shape),
-                    .is_skip = e.is_skip,
-                });
+        // 4. 为每个模块构建局部图
+        var consumers = ConsumerMap.init(arena_alloc);
+        for (graph.ops.items) |op| {
+            for (op.inputs) |inp| {
+                const gop = try consumers.getOrPut(inp);
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
+                try gop.value_ptr.append(arena_alloc, op);
             }
         }
+        try buildLocalGraphs(arena_alloc, graph, root, &module_map, &consumers);
 
         aggregateMetrics(root);
 
@@ -1179,7 +1031,6 @@ pub const graph_ir = struct {
             .total_bytes = root.total_bytes,
             .total_nodes = nodes.items.len,
         };
-
         for (nodes.items) |n| {
             if (std.mem.eql(u8, n.kind, "Param")) {
                 summary.param_nodes += 1;
@@ -1190,41 +1041,22 @@ pub const graph_ir = struct {
                 }
             } else if (std.mem.eql(u8, n.kind, "Input")) {
                 summary.input_nodes += 1;
+            } else if (std.mem.eql(u8, n.kind, "Buffer")) {
+                summary.buffer_nodes += 1;
             } else {
                 summary.activation_nodes += 1;
             }
         }
 
-        // 6. 构造顶层宏观拓扑边 (Top-Level Model Edges):
-        // 直接与模块树顶层架构对齐，不包含任何内部微观子模块细节
-        var top_edges: std.ArrayList(EdgeData) = .empty;
-        var top_seen = std.StringHashMap(void).init(arena_alloc);
-
-        for (edges.items) |e| {
-            const top_from = getTopLevelScope(root, e.from);
-            const top_to = getTopLevelScope(root, e.to);
-
-            if (std.mem.eql(u8, top_from, top_to)) continue;
-
-            var key_buf: [384]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buf, "{s}->{s}", .{ top_from, top_to }) catch continue;
-            if (top_seen.contains(key)) continue;
-            try top_seen.put(try arena_alloc.dupe(u8, key), {});
-
-            try top_edges.append(arena_alloc, .{
-                .from = try arena_alloc.dupe(u8, top_from),
-                .to = try arena_alloc.dupe(u8, top_to),
-                .shape = try arena_alloc.dupe(u8, e.shape),
-                .is_skip = e.is_skip,
-            });
-        }
+        // 5. 默认展示作用域：根只包裹一个模型容器时展示该容器，否则展示根
+        const default_scope: []const u8 = if (root.children.items.len == 1) root.children.items[0].path else "";
 
         return .{
             .arena = arena,
             .summary = summary,
             .root = root,
+            .default_scope = default_scope,
             .nodes = nodes,
-            .edges = top_edges,
             .ops = ops_list,
             .formulas = formulas,
         };
@@ -1244,6 +1076,22 @@ pub const graph_ir = struct {
             }
         }
         try buf.append(allocator, '"');
+    }
+
+    fn serializePorts(node: *const ModuleNode, buf: *std.ArrayList(u8), allocator: std.mem.Allocator, kind: []const u8) !void {
+        var first = true;
+        for (node.flow_nodes.items) |n| {
+            if (!std.mem.eql(u8, n.kind, kind)) continue;
+            if (!first) try buf.appendSlice(allocator, ",");
+            first = false;
+            try buf.appendSlice(allocator, "{\"id\": ");
+            try writeEscapedJsonString(buf, allocator, n.id);
+            try buf.appendSlice(allocator, ",\"ref\": ");
+            try writeEscapedJsonString(buf, allocator, n.ref);
+            try buf.appendSlice(allocator, ",\"shape\": ");
+            try writeEscapedJsonString(buf, allocator, n.shape);
+            try buf.appendSlice(allocator, "}");
+        }
     }
 
     fn serializeModuleTree(node: *const ModuleNode, buf: *std.ArrayList(u8), allocator: std.mem.Allocator) !void {
@@ -1294,6 +1142,8 @@ pub const graph_ir = struct {
             try writeEscapedJsonString(buf, allocator, op.op_type);
             try buf.appendSlice(allocator, ",\"name\": ");
             try writeEscapedJsonString(buf, allocator, op.name);
+            try buf.appendSlice(allocator, ",\"module\": ");
+            try writeEscapedJsonString(buf, allocator, op.module);
             try buf.appendSlice(allocator, ",\"input_shape\": ");
             try writeEscapedJsonString(buf, allocator, op.input_shape);
             try buf.appendSlice(allocator, ",\"param_shape\": ");
@@ -1306,6 +1156,31 @@ pub const graph_ir = struct {
             }
             try buf.print(allocator, ",\"elements\": {d},\"bytes\": {d}}}", .{ op.elements, op.bytes });
         }
+        try buf.appendSlice(allocator, "],\"ports\": {\"inputs\": [");
+        try serializePorts(node, buf, allocator, "port_in");
+        try buf.appendSlice(allocator, "],\"outputs\": [");
+        try serializePorts(node, buf, allocator, "port_out");
+        try buf.appendSlice(allocator, "]},\"flow_nodes\": [");
+        for (node.flow_nodes.items, 0..) |n, i| {
+            if (i > 0) try buf.appendSlice(allocator, ",");
+            try buf.appendSlice(allocator, "{\"id\": ");
+            try writeEscapedJsonString(buf, allocator, n.id);
+            try buf.appendSlice(allocator, ",\"kind\": ");
+            try writeEscapedJsonString(buf, allocator, n.kind);
+            try buf.appendSlice(allocator, ",\"ref\": ");
+            try writeEscapedJsonString(buf, allocator, n.ref);
+            if (n.op_type) |t| {
+                try buf.appendSlice(allocator, ",\"op_type\": ");
+                try writeEscapedJsonString(buf, allocator, t);
+            }
+            if (n.module_type) |t| {
+                try buf.appendSlice(allocator, ",\"module_type\": ");
+                try writeEscapedJsonString(buf, allocator, t);
+            }
+            try buf.appendSlice(allocator, ",\"shape\": ");
+            try writeEscapedJsonString(buf, allocator, n.shape);
+            try buf.appendSlice(allocator, "}");
+        }
         try buf.appendSlice(allocator, "],\"edges\": [");
         for (node.edges.items, 0..) |e, i| {
             if (i > 0) try buf.appendSlice(allocator, ",");
@@ -1315,7 +1190,22 @@ pub const graph_ir = struct {
             try writeEscapedJsonString(buf, allocator, e.to);
             try buf.appendSlice(allocator, ",\"shape\": ");
             try writeEscapedJsonString(buf, allocator, e.shape);
-            try buf.print(allocator, ",\"is_skip\": {s}}}", .{ if (e.is_skip) "true" else "false" });
+            if (e.dst_shape) |ds| {
+                try buf.appendSlice(allocator, ",\"dst_shape\": ");
+                try writeEscapedJsonString(buf, allocator, ds);
+            }
+            if (e.transforms.len > 0) {
+                try buf.appendSlice(allocator, ",\"transforms\": [");
+                for (e.transforms, 0..) |tr, ti| {
+                    if (ti > 0) try buf.appendSlice(allocator, ",");
+                    try writeEscapedJsonString(buf, allocator, tr);
+                }
+                try buf.appendSlice(allocator, "]");
+            }
+            try buf.print(allocator, ",\"is_skip\": {s}", .{if (e.is_skip) "true" else "false"});
+            try buf.appendSlice(allocator, ",\"kind\": ");
+            try writeEscapedJsonString(buf, allocator, e.kind);
+            try buf.appendSlice(allocator, "}");
         }
         try buf.appendSlice(allocator, "],\"nodes\": [");
         for (node.nodes.items, 0..) |leaf, i| {
@@ -1324,6 +1214,8 @@ pub const graph_ir = struct {
             try writeEscapedJsonString(buf, allocator, leaf.name);
             try buf.appendSlice(allocator, ",\"kind\": ");
             try writeEscapedJsonString(buf, allocator, leaf.kind);
+            try buf.appendSlice(allocator, ",\"module\": ");
+            try writeEscapedJsonString(buf, allocator, leaf.module);
             try buf.appendSlice(allocator, ",\"shape\": ");
             try writeEscapedJsonString(buf, allocator, leaf.shape_str);
             try buf.print(allocator, ",\"elements\": {d},\"bytes\": {d},", .{ leaf.elements, leaf.bytes });
@@ -1343,36 +1235,24 @@ pub const graph_ir = struct {
         var json_buf: std.ArrayList(u8) = .empty;
         errdefer json_buf.deinit(allocator);
 
-        try json_buf.appendSlice(allocator, "{\n  \"version\": \"1.0\",\n  \"summary\": {");
+        try json_buf.appendSlice(allocator, "{\n  \"version\": \"" ++ SCHEMA_VERSION ++ "\",\n  \"summary\": {");
         try json_buf.print(allocator,
-            \\ "total_params": {d}, "total_bytes": {d}, "param_nodes": {d}, "input_nodes": {d}, "activation_nodes": {d}, "custom_init_count": {d}, "auto_graph_count": {d}, "total_nodes": {d}
+            \\ "total_params": {d}, "total_bytes": {d}, "param_nodes": {d}, "input_nodes": {d}, "buffer_nodes": {d}, "activation_nodes": {d}, "custom_init_count": {d}, "auto_graph_count": {d}, "total_nodes": {d}
         , .{
             model_graph.summary.total_params,
             model_graph.summary.total_bytes,
             model_graph.summary.param_nodes,
             model_graph.summary.input_nodes,
+            model_graph.summary.buffer_nodes,
             model_graph.summary.activation_nodes,
             model_graph.summary.custom_init_count,
             model_graph.summary.auto_graph_count,
             model_graph.summary.total_nodes,
         });
-        try json_buf.appendSlice(allocator, "},\n  \"root\": ");
+        try json_buf.appendSlice(allocator, "},\n  \"default_scope\": ");
+        try writeEscapedJsonString(&json_buf, allocator, model_graph.default_scope);
+        try json_buf.appendSlice(allocator, ",\n  \"root\": ");
         try serializeModuleTree(model_graph.root, &json_buf, allocator);
-
-        try json_buf.appendSlice(allocator, ",\n  \"edges\": [");
-        for (model_graph.edges.items, 0..) |e, i| {
-            if (i > 0) try json_buf.appendSlice(allocator, ",\n    ");
-            if (i == 0) try json_buf.appendSlice(allocator, "\n    ");
-            try json_buf.appendSlice(allocator, "{\"from\": ");
-            try writeEscapedJsonString(&json_buf, allocator, e.from);
-            try json_buf.appendSlice(allocator, ", \"to\": ");
-            try writeEscapedJsonString(&json_buf, allocator, e.to);
-            try json_buf.appendSlice(allocator, ", \"shape\": ");
-            try writeEscapedJsonString(&json_buf, allocator, e.shape);
-            try json_buf.print(allocator, ", \"is_skip\": {s}}}", .{if (e.is_skip) "true" else "false"});
-        }
-        try json_buf.appendSlice(allocator, "\n  ]");
-
         try json_buf.appendSlice(allocator, "\n}");
 
         return json_buf.toOwnedSlice(allocator);
@@ -1402,9 +1282,8 @@ pub const graph_ir = struct {
 };
 
 // ============================================================================
-// 3. 便捷顶层重导出 (Top-Level Re-Exports)
+// 6. 便捷顶层重导出 (Top-Level Re-Exports)
 // ============================================================================
 pub const buildModelHierarchy = graph_ir.build;
 pub const generateJson = graph_ir.generateJson;
 pub const exportJson = graph_ir.exportJson;
-

@@ -149,6 +149,8 @@ pub const Linear = struct {
     }
 
     pub fn forward(self: Linear, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
@@ -272,6 +274,8 @@ pub const Conv2D = struct {
     }
 
     pub fn forward(self: Conv2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
@@ -420,6 +424,8 @@ pub const ConvTranspose2D = struct {
     }
 
     pub fn forward(self: ConvTranspose2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.registerModuleType(n, self.module_type) catch {};

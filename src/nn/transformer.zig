@@ -117,6 +117,8 @@ pub const Embedding = struct {
     /// 查找映射前向传播
     /// 输入 x 为包含 Token ID 的任意维度 Tensor，输出形状为 x.shape + [embedding_dim]
     pub fn forward(self: Embedding, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
@@ -250,6 +252,8 @@ pub const MLP = struct {
     /// 前向传播逻辑
     /// 支持输入 2D Tensor [B*T, D] 或 3D Tensor [B, T, D]
     pub fn forward(self: MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
@@ -285,6 +289,9 @@ pub const MLP = struct {
         // 3. GELU 激活函数引入非线性
         const a1 = if (graph) |g| try g.gelu(h1) else try h1.gelu(allocator, null);
         defer if (graph == null) tensor.free(allocator, a1);
+        if (graph != null) {
+            if (self.name) |mod_name| a1.setNameFormatted("{s}.gelu", .{mod_name});
+        }
 
         // 4. 降维投射回原始特征维度: [B*T, hidden_dim] -> [B*T, D]
         const h2 = try self.c_proj.forward(allocator, graph, a1);
@@ -394,6 +401,8 @@ pub const SwiGLU = struct {
 
     /// 前向传播逻辑：支持 2D [B*T, D] 或 3D [B, T, D]
     pub fn forward(self: SwiGLU, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
@@ -845,6 +854,8 @@ pub const CausalSelfAttention = struct {
     /// 输入 x 的形状必须为 3D: [B, T, C]
     /// 其中 B 为批次大小 (Batch Size)，T 为时间步长度 (Sequence Length)，C 为通道特征维数 (n_embd)
     pub fn forward(self: CausalSelfAttention, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
@@ -958,6 +969,12 @@ pub const CausalSelfAttention = struct {
         defer if (free_k_rep) tensor.free(allocator, k);
         defer if (free_v_rep) tensor.free(allocator, v);
 
+        // 注意力核心 (ScaledDotProductAttention) 子作用域: K^T -> QK^T -> 缩放 -> 掩码 -> softmax -> ·V
+        // head 切分与合并属于 CausalSelfAttention 本身，不计入核心子作用域
+        const core_scope = try autodiff.Graph.enterChildScope(graph, "core", "ScaledDotProductAttention");
+        var core_scope_open = true;
+        defer if (core_scope_open) core_scope.exit();
+
         // 5. 转置 Key 用于计算点积注意力: [B, nh, T, hs] -> [B, nh, hs, T]
         var k_t = k;
         if (graph) |g| {
@@ -1043,6 +1060,9 @@ pub const CausalSelfAttention = struct {
             y_4d = try att_sm.batchMatMul(v, allocator, null);
         }
         defer if (graph == null) tensor.free(allocator, y_4d);
+
+        core_scope.exit();
+        core_scope_open = false;
 
         // 12. 将多头的输出转置回去，重新展平拼接成单头向量表示
         // 转置: [B, nh, T, hs] -> [B, T, nh, hs]
@@ -1619,6 +1639,8 @@ pub const TransformerBlock = struct {
 
     /// 前向传播流程：x -> Block(x) -> out
     pub fn forward(self: TransformerBlock, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
@@ -1651,7 +1673,7 @@ pub const TransformerBlock = struct {
         if (graph) |g| {
             const out = try g.add(x1, x_mlp);
             if (self.name) |mod_name| {
-                out.setNameFormatted("{s}.output", .{mod_name});
+                out.setNameFormatted("{s}.residual_mlp", .{mod_name});
                 _ = g.setModuleFormula(out.name.?, "x_{l+1} = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))") catch {};
             }
             return out;
@@ -1760,6 +1782,8 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
 
         /// 解码器主干网络的前向传播流程
         pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+            const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+            defer module_scope.exit();
             if (graph) |g| {
                 if (self.name) |n| {
                     _ = g.setModuleFormula(n, formula) catch {};
@@ -1908,6 +1932,8 @@ pub fn GPT(comptime config: GPTConfig) type {
         /// 输入 x 为包含 Token ID 的 2D 整数 Tensor，形状为 [B, T]
         /// 输出为未归一化的预测对数 (Logits)，形状为 3D: [B, T, vocab_size]
         pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+            const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+            defer module_scope.exit();
             if (graph) |g| {
                 if (self.name) |n| {
                     _ = g.setModuleFormula(n, formula) catch {};
@@ -1935,7 +1961,11 @@ pub fn GPT(comptime config: GPTConfig) type {
             var pos_node = pos_tensor;
             if (graph) |g| {
                 pos_node = try g.tensorNDWithData(&.{ B, T }, pos_data, false);
-                pos_node.setName("inputs.pos_indices");
+                // 位置索引由输入形状在模型内部生成，属于 GPT 自身的常量缓冲区，而非模型输入
+                pos_node.is_buffer = true;
+                if (self.name) |mod_name| {
+                    pos_node.setNameFormatted("{s}.pos_indices", .{mod_name});
+                }
             }
 
             // 3. 获取对应的 Learned 位置嵌入向量: [B, T] -> [B, T, n_embd]

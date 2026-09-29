@@ -1279,7 +1279,9 @@ test "Hierarchical module naming and interactive HTML report export" {
     try std.testing.expect(root_obj.get("children").?.array.items.len > 0);
 
     // 校验根与子模块直接内嵌包含 formula, module_type, parameters, ops 与 edges
-    const gpt_child = root_obj.get("children").?.array.items[1].object; // "gpt"
+    // 图输入归属于 root.nodes，不再生成 "inputs" 伪模块，因此 gpt 是唯一的根子模块
+    try std.testing.expectEqual(@as(usize, 1), root_obj.get("children").?.array.items.len);
+    const gpt_child = root_obj.get("children").?.array.items[0].object; // "gpt"
     try std.testing.expectEqualStrings("GPT", gpt_child.get("module_type").?.string);
     try std.testing.expect(gpt_child.get("formula") != null);
 
@@ -1301,12 +1303,14 @@ test "Hierarchical module naming and interactive HTML report export" {
     try std.testing.expect(summary_obj.get("total_params").?.integer > 0);
     try std.testing.expect(summary_obj.get("param_nodes").?.integer >= 8);
 
-    // 校验顶层包含全局拓扑边与统计指标：所有 nodes, ops, formulas 均已就近集成进模块树
+    // 校验 schema 2.0 顶层结构：nodes, ops, formulas, edges 均已就近集成进模块树，
+    // 顶层仅保留 default_scope 指示前端初始展开的作用域
+    try std.testing.expectEqualStrings("2.0", parsed.value.object.get("version").?.string);
     try std.testing.expect(parsed.value.object.get("nodes") == null);
-    try std.testing.expect(parsed.value.object.get("edges") != null);
-    try std.testing.expect(parsed.value.object.get("edges").?.array.items.len > 0);
+    try std.testing.expect(parsed.value.object.get("edges") == null);
     try std.testing.expect(parsed.value.object.get("ops") == null);
     try std.testing.expect(parsed.value.object.get("formulas") == null);
+    try std.testing.expectEqualStrings("gpt", parsed.value.object.get("default_scope").?.string);
 
     // 校验 Block0 级别的拓扑边 (Edges) 正确性：
     // 1) 包含前向流 ln_1 -> attn 以及残差边 inputs.token_embeddings -> residual_attn (is_skip = true)
@@ -1463,6 +1467,256 @@ test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivit
         }
     }
     try std.testing.expect(found_layer1_res_skip);
+}
+
+/// 可视化测试辅助：按完整路径查找模块节点，并以 "from->to[ skip| buffer]" 形式比较局部边集合
+const VisTestUtil = struct {
+    fn findModule(node: std.json.ObjectMap, path: []const u8) ?std.json.ObjectMap {
+        if (std.mem.eql(u8, node.get("path").?.string, path)) return node;
+        if (node.get("children")) |children| {
+            for (children.array.items) |child| {
+                if (findModule(child.object, path)) |m| return m;
+            }
+        }
+        return null;
+    }
+
+    fn expectEdgeSet(allocator: std.mem.Allocator, root: std.json.ObjectMap, path: []const u8, expected: []const []const u8) !void {
+        const module = findModule(root, path) orelse return error.ModuleNotFound;
+        var actual: std.ArrayList([]u8) = .empty;
+        defer {
+            for (actual.items) |s| allocator.free(s);
+            actual.deinit(allocator);
+        }
+        for (module.get("edges").?.array.items) |e_val| {
+            const edge = e_val.object;
+            const tag: []const u8 = if (edge.get("is_skip").?.bool)
+                " skip"
+            else if (std.mem.eql(u8, edge.get("kind").?.string, "buffer"))
+                " buffer"
+            else
+                "";
+            try actual.append(allocator, try std.fmt.allocPrint(allocator, "{s}->{s}{s}", .{
+                edge.get("from").?.string, edge.get("to").?.string, tag,
+            }));
+        }
+        errdefer {
+            std.debug.print("edge set mismatch in scope '{s}', actual edges:\n", .{path});
+            for (actual.items) |s| std.debug.print("  {s}\n", .{s});
+        }
+        try std.testing.expectEqual(expected.len, actual.items.len);
+        for (expected) |want| {
+            var found = false;
+            for (actual.items) |have| {
+                if (std.mem.eql(u8, want, have)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                std.debug.print("missing edge: {s}\n", .{want});
+                return error.MissingEdge;
+            }
+        }
+    }
+
+    fn findEdge(root: std.json.ObjectMap, path: []const u8, from: []const u8, to: []const u8) !std.json.ObjectMap {
+        const module = findModule(root, path) orelse return error.ModuleNotFound;
+        for (module.get("edges").?.array.items) |e_val| {
+            const edge = e_val.object;
+            if (std.mem.eql(u8, edge.get("from").?.string, from) and std.mem.eql(u8, edge.get("to").?.string, to)) return edge;
+        }
+        return error.EdgeNotFound;
+    }
+
+    fn expectPortRef(root: std.json.ObjectMap, path: []const u8, direction: []const u8, index: usize, ref: []const u8) !void {
+        const module = findModule(root, path) orelse return error.ModuleNotFound;
+        const ports = module.get("ports").?.object.get(direction).?.array.items;
+        try std.testing.expect(index < ports.len);
+        try std.testing.expectEqualStrings(ref, ports[index].object.get("ref").?.string);
+    }
+};
+
+test "Explicit module scopes attribute ops and tensors to the executing module" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(24680);
+    const random = prng.random();
+
+    const config = transformer.GPTConfig{ .vocab_size = 128, .block_size = 16, .n_embd = 32, .n_head = 2, .n_layer = 2 };
+    var gpt = try transformer.GPT(config).init(allocator, random);
+    defer gpt.deinit(allocator);
+    gpt.setName("gpt");
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    var token_data: [2 * 8]f32 = undefined;
+    for (&token_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
+    const input_tokens = try graph.tensorNDWithData(&.{ 2, 8 }, &token_data, false);
+    input_tokens.setName("inputs.token_ids");
+    _ = try gpt.forward(allocator, &graph, input_tokens);
+
+    // forward 结束后作用域栈必须完全弹出
+    try std.testing.expectEqualStrings("", graph.currentScope());
+
+    // 图输入在任何模块之外创建，归属根作用域
+    try std.testing.expectEqualStrings("", input_tokens.scope);
+
+    var gelu_scope: ?[]const u8 = null;
+    var core_transpose_found = false;
+    var attn_reshape_found = false;
+    for (graph.ops.items) |o| {
+        switch (o.op_type) {
+            .Gelu => if (gelu_scope == null) {
+                gelu_scope = o.scope;
+            },
+            .Transpose => if (std.mem.eql(u8, o.scope, "gpt.layers.0.attn.core")) {
+                core_transpose_found = true;
+            },
+            .Reshape => if (std.mem.eql(u8, o.scope, "gpt.layers.0.attn")) {
+                attn_reshape_found = true;
+            },
+            else => {},
+        }
+        // 叶子模块 ln_1 只执行 RMSNorm 计算，不应拥有任何 Reshape
+        if (o.op_type == .Reshape) try std.testing.expect(!std.mem.eql(u8, o.scope, "gpt.layers.0.ln_1"));
+    }
+    try std.testing.expectEqualStrings("gpt.layers.0.mlp", gelu_scope.?);
+    try std.testing.expect(core_transpose_found);
+    try std.testing.expect(attn_reshape_found);
+
+    // 输出 logits 的最终 Reshape 由 GPT 自身执行，归属 "gpt"
+    const last_op = graph.ops.items[graph.ops.items.len - 1];
+    try std.testing.expectEqual(autodiff.OpType.Reshape, last_op.op_type);
+    try std.testing.expectEqualStrings("gpt", last_op.scope);
+
+    // pos_indices 是 GPT 内部创建的静态缓冲区
+    var pos_found = false;
+    for (graph.tensors.items) |t| {
+        if (t.name) |n| if (std.mem.eql(u8, n, "gpt.pos_indices")) {
+            pos_found = true;
+            try std.testing.expect(t.is_buffer);
+            try std.testing.expectEqualStrings("gpt", t.scope);
+        };
+    }
+    try std.testing.expect(pos_found);
+
+    // 模块类型由 enterModule 自动注册
+    try std.testing.expectEqualStrings("CausalSelfAttention", graph.module_types.get("gpt.layers.0.attn").?);
+    try std.testing.expectEqualStrings("ScaledDotProductAttention", graph.module_types.get("gpt.layers.0.attn.core").?);
+}
+
+test "Scoped local graph export matches golden edge sets (schema 2.0)" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(97531);
+    const random = prng.random();
+
+    const config = transformer.GPTConfig{ .vocab_size = 128, .block_size = 16, .n_embd = 32, .n_head = 2, .n_layer = 2 };
+    var gpt = try transformer.GPT(config).init(allocator, random);
+    defer gpt.deinit(allocator);
+    gpt.setName("gpt");
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    var token_data: [2 * 8]f32 = undefined;
+    for (&token_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
+    const input_tokens = try graph.tensorNDWithData(&.{ 2, 8 }, &token_data, false);
+    input_tokens.setName("inputs.token_ids");
+    const logits = try gpt.forward(allocator, &graph, input_tokens);
+    logits.setName("outputs.logits");
+
+    const json_data = try graph.formatJson(allocator);
+    defer allocator.free(json_data);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_data, .{});
+    defer parsed.deinit();
+
+    const top = parsed.value.object;
+    try std.testing.expectEqualStrings("2.0", top.get("version").?.string);
+    try std.testing.expectEqualStrings("gpt", top.get("default_scope").?.string);
+    try std.testing.expect(top.get("edges") == null);
+    const summary = top.get("summary").?.object;
+    try std.testing.expectEqual(@as(i64, 1), summary.get("input_nodes").?.integer);
+    // pos_indices + 每层一个 causal_mask
+    try std.testing.expectEqual(@as(i64, 3), summary.get("buffer_nodes").?.integer);
+
+    const root = top.get("root").?.object;
+
+    // 根作用域：图输入/输出端口与 gpt 相连
+    try VisTestUtil.expectEdgeSet(allocator, root, "", &.{ "@in0->gpt", "gpt->@out0" });
+    try VisTestUtil.expectPortRef(root, "", "inputs", 0, "inputs.token_ids");
+    try VisTestUtil.expectPortRef(root, "", "outputs", 0, "outputs.logits");
+
+    // gpt：pos_indices 为缓冲区边，而非模型输入；Reshape 折叠进边的 transforms
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt", &.{
+        "@in0->wte",
+        "pos_indices->wpe buffer",
+        "wte->embeddings_sum",
+        "wpe->embeddings_sum",
+        "embeddings_sum->layers",
+        "layers->lm_head",
+        "lm_head->@out0",
+    });
+    const to_head = try VisTestUtil.findEdge(root, "gpt", "layers", "lm_head");
+    try std.testing.expectEqualStrings("[2, 8, 32]", to_head.get("shape").?.string);
+    try std.testing.expectEqualStrings("[16, 32]", to_head.get("dst_shape").?.string);
+    try std.testing.expectEqual(@as(usize, 1), to_head.get("transforms").?.array.items.len);
+
+    // gpt.layers：层间串联，无虚假残差
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.layers", &.{ "@in0->0", "0->1", "1->ln_f", "ln_f->@out0" });
+
+    // 每个 Block：两条残差边都在 Block 自身作用域内，且端口引用在最近公共作用域中解析
+    const block_edges = [_][]const u8{
+        "@in0->ln_1",
+        "ln_1->attn",
+        "@in0->residual_attn skip",
+        "attn->residual_attn",
+        "residual_attn->ln_2",
+        "ln_2->mlp",
+        "residual_attn->residual_mlp skip",
+        "mlp->residual_mlp",
+        "residual_mlp->@out0",
+    };
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.layers.0", &block_edges);
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.layers.1", &block_edges);
+    try VisTestUtil.expectPortRef(root, "gpt.layers.0", "inputs", 0, "gpt.embeddings_sum");
+    try VisTestUtil.expectPortRef(root, "gpt.layers.0", "outputs", 0, "gpt.layers.1");
+    try VisTestUtil.expectPortRef(root, "gpt.layers.1", "outputs", 0, "gpt.layers.ln_f");
+
+    // 注意力：共享输入扇出到 q/k/v，核心计算封装在 core 子作用域
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.layers.0.attn", &.{
+        "@in0->q_attn",
+        "@in0->k_attn",
+        "@in0->v_attn",
+        "q_attn->core",
+        "k_attn->core",
+        "v_attn->core",
+        "core->c_proj",
+        "c_proj->@out0",
+    });
+
+    // core：无参数多算子叶子导出算子级局部图，causal_mask 以缓冲区边接入
+    const core_mod = VisTestUtil.findModule(root, "gpt.layers.0.attn.core").?;
+    try std.testing.expectEqualStrings("ScaledDotProductAttention", core_mod.get("module_type").?.string);
+    try std.testing.expectEqual(@as(usize, 3), core_mod.get("ports").?.object.get("inputs").?.array.items.len);
+    var mask_edges: usize = 0;
+    for (core_mod.get("edges").?.array.items) |e_val| {
+        const edge = e_val.object;
+        if (std.mem.eql(u8, edge.get("from").?.string, "causal_mask")) {
+            try std.testing.expectEqualStrings("buffer", edge.get("kind").?.string);
+            mask_edges += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), mask_edges);
+
+    // MLP：激活函数作为命名算子节点出现
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.layers.0.mlp", &.{ "@in0->c_fc", "c_fc->gelu", "gelu->c_proj", "c_proj->@out0" });
+
+    // 带参数的叶子模块 (Linear / RMSNorm) 不导出算子级局部图
+    for ([_][]const u8{ "gpt.layers.0.attn.q_attn", "gpt.layers.0.ln_1" }) |leaf_path| {
+        const leaf = VisTestUtil.findModule(root, leaf_path).?;
+        if (leaf.get("edges")) |e| try std.testing.expectEqual(@as(usize, 0), e.array.items.len);
+    }
 }
 
 
