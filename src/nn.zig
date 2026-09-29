@@ -1245,6 +1245,7 @@ test "Hierarchical module naming and interactive HTML report export" {
     var block = try transformer.TransformerBlock.init(allocator, 64, 4, random);
     defer block.deinit(allocator);
     block.setName("gpt.layers.0");
+    try graph.registerModuleType("gpt", "GPT");
 
     // 验证子层参数名称是否按层次正确拼接
     try std.testing.expectEqualStrings("gpt.wte.weight", emb.weight.name.?);

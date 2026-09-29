@@ -53,6 +53,7 @@ pub const Linear = struct {
     bias: *Tensor,
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "Linear",
 
     /// 构造线性层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize, random_opt: anytype) !Linear {
@@ -151,6 +152,7 @@ pub const Linear = struct {
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
             }
         }
         const z = try x.matmul(self.weight, allocator, graph);
@@ -167,6 +169,7 @@ pub const Conv2D = struct {
     bias: *Tensor,
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "Conv2D",
 
     /// 构造卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random_opt: anytype) !Conv2D {
@@ -272,6 +275,7 @@ pub const Conv2D = struct {
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
             }
             return try g.conv2d(x, self.weight, self.bias);
         }
@@ -289,6 +293,7 @@ pub const ConvTranspose2D = struct {
     bias: ?*Tensor,
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "ConvTranspose2D",
 
     /// 构造反卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(
@@ -416,6 +421,9 @@ pub const ConvTranspose2D = struct {
 
     pub fn forward(self: ConvTranspose2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
         if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.registerModuleType(n, self.module_type) catch {};
+            }
             return try g.convTranspose2D(x, self.weight, self.bias, self.stride, self.padding);
         }
         return try x.convTranspose2d(self.weight, self.bias, self.stride, self.padding, allocator, null);
