@@ -875,6 +875,32 @@ pub const graph_ir = struct {
         node.node_count = node_count;
     }
 
+    /// 判断模块类型是否为复合子层 (其内部有独立的微观子层/算子，如注意力 QKV/Core，前馈网络门控/投影等)
+    fn isSublayerModuleType(mtype: []const u8) bool {
+        return std.mem.eql(u8, mtype, "CausalSelfAttention") or
+            std.mem.eql(u8, mtype, "MLP") or
+            std.mem.eql(u8, mtype, "SwiGLU") or
+            std.mem.eql(u8, mtype, "MoELayer") or
+            std.mem.eql(u8, mtype, "MLALayer");
+    }
+
+    /// 将包含内部微观零件的路径截断/收拢至最外层复合子层作用域 (例如 gpt.layers.0.attn.q_attn -> gpt.layers.0.attn)
+    fn getMacroModuleScope(graph_inst: *const Graph, path: []const u8) []const u8 {
+        var it = std.mem.splitScalar(u8, path, '.');
+        var current_len: usize = 0;
+        while (it.next()) |part| {
+            if (current_len > 0) current_len += 1; // '.'
+            current_len += part.len;
+            const prefix = path[0..current_len];
+            if (graph_inst.getModuleType(prefix)) |mtype| {
+                if (isSublayerModuleType(mtype)) {
+                    return prefix;
+                }
+            }
+        }
+        return path;
+    }
+
     /// 解析 Graph 并构建约定的中间数据结构 ModelHierarchyGraph
     pub fn build(graph: *Graph, allocator: std.mem.Allocator) !ModelHierarchyGraph {
         var arena = std.heap.ArenaAllocator.init(allocator);
@@ -1117,12 +1143,38 @@ pub const graph_ir = struct {
             }
         }
 
+        // 6. 构造顶层宏观拓扑边 (Macro Edges):
+        // 消除穿透子模块内部器官的微观边 (如 ln_1 -> q_attn, q_attn -> core)，
+        // 将连接端点收拢至复合子层边界 (如 ln_1 -> attn, attn -> residual_attn)，
+        // 仅保留跨模块的宏观流转，内部零件流动保留在各模块自身的 m.edges 中
+        var macro_edges: std.ArrayList(EdgeData) = .empty;
+        var macro_seen = std.StringHashMap(void).init(arena_alloc);
+
+        for (edges.items) |e| {
+            const macro_from = getMacroModuleScope(graph, e.from);
+            const macro_to = getMacroModuleScope(graph, e.to);
+
+            if (std.mem.eql(u8, macro_from, macro_to)) continue;
+
+            var key_buf: [384]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, "{s}->{s}", .{ macro_from, macro_to }) catch continue;
+            if (macro_seen.contains(key)) continue;
+            try macro_seen.put(try arena_alloc.dupe(u8, key), {});
+
+            try macro_edges.append(arena_alloc, .{
+                .from = try arena_alloc.dupe(u8, macro_from),
+                .to = try arena_alloc.dupe(u8, macro_to),
+                .shape = try arena_alloc.dupe(u8, e.shape),
+                .is_skip = e.is_skip,
+            });
+        }
+
         return .{
             .arena = arena,
             .summary = summary,
             .root = root,
             .nodes = nodes,
-            .edges = edges,
+            .edges = macro_edges,
             .ops = ops_list,
             .formulas = formulas,
         };
