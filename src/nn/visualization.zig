@@ -372,36 +372,6 @@ fn getMajorModulePath(name: []const u8) []const u8 {
     return curr;
 }
 
-fn getLcaBranch(name: []const u8, lca_depth: usize) []const u8 {
-    if (std.mem.startsWith(u8, name, "inputs.") or std.mem.startsWith(u8, name, "outputs.") or std.mem.startsWith(u8, name, "activations.")) {
-        return name;
-    }
-    if (std.mem.endsWith(u8, name, ".residual_attn") or std.mem.endsWith(u8, name, ".output") or std.mem.endsWith(u8, name, ".embeddings_sum")) {
-        return name;
-    }
-
-    if (lca_depth == 0) {
-        return getMajorModulePath(name);
-    }
-
-    var it = std.mem.splitScalar(u8, name, '.');
-    var idx: usize = 0;
-    while (it.next()) |part| {
-        if (idx == lca_depth) {
-            const token_end = @intFromPtr(part.ptr) + part.len - @intFromPtr(name.ptr);
-            if (isLeafToken(part)) {
-                if (token_end > part.len + 1) {
-                    return name[0 .. token_end - part.len - 1];
-                }
-                return name;
-            }
-            return name[0..token_end];
-        }
-        idx += 1;
-    }
-    return name;
-}
-
 fn isSkipConnection(from: []const u8, to: []const u8) bool {
     const is_converge = std.mem.endsWith(u8, to, ".residual_attn") or
         std.mem.endsWith(u8, to, ".output") or
@@ -540,20 +510,9 @@ pub fn collectGraphEdges(graph: *Graph, allocator: std.mem.Allocator) !std.Array
             shape_len += 1;
             const shape_str = shape_buf[0..shape_len];
 
-            // 3. 计算输入和输出激活的最低公共祖先 (LCA) 深度，提取所属模块分支
-            var it_inp = std.mem.splitScalar(u8, inp_name, '.');
-            var it_out = std.mem.splitScalar(u8, out_name, '.');
-            var lca_depth: usize = 0;
-            while (true) {
-                const p1 = it_inp.next();
-                const p2 = it_out.next();
-                if (p1 == null or p2 == null) break;
-                if (!std.mem.eql(u8, p1.?, p2.?)) break;
-                lca_depth += 1;
-            }
-
-            const from_mod = getLcaBranch(inp_name, lca_depth);
-            const to_mod = getLcaBranch(out_name, lca_depth);
+            // 3. 提取所属模块/算子路径 (剥除内部叶子参数与临时张量)
+            const from_mod = getMajorModulePath(inp_name);
+            const to_mod = getMajorModulePath(out_name);
 
             if (!std.mem.eql(u8, from_mod, to_mod)) {
                 const is_skip = isSkipConnection(from_mod, to_mod);

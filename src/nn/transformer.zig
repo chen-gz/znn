@@ -1591,7 +1591,7 @@ pub const TransformerBlock = struct {
     }
 
     /// 模块标准数学变换公式
-    pub const formula = "x_1 = x_l + \\text{Attention}(\\text{RMSNorm}(x_l)), \\quad x_{l+1} = \\text{TransformerBlock}(x_l) = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))";
+    pub const formula = "h_l = x_l + \\text{Attention}(\\text{RMSNorm}(x_l)), \\quad x_{l+1} = \\text{TransformerBlock}(x_l) = h_l + \\text{MLP}(\\text{RMSNorm}(h_l))";
 
     pub fn registerFormula(self: *const TransformerBlock, graph: *autodiff.Graph) !void {
         if (self.name) |n| {
