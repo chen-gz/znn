@@ -20,6 +20,7 @@ pub const Graph = struct {
     enable_grad: bool,                   // 梯度使能开关（类似 torch.set_grad_enabled），为 false 时不分配梯度缓冲区亦不记录 Op 节点
     module_formulas: std.StringHashMap([]const u8), // 存储模块在代码中声明的显式数学运算公式 (如 "y = x W^T + b")
     module_types: std.StringHashMap([]const u8),    // 存储模块在代码中声明的显式模块类型 (如 "Linear", "RMSNorm", "GPT")
+    scope_stack: std.ArrayList([]const u8),         // 当前正在执行 forward 的模块作用域栈 (栈顶为最内层模块的完整路径)
 
     // 初始化计算图，传入底层通用内存分配器
     pub fn init(backing_allocator: std.mem.Allocator) Graph {
@@ -31,7 +32,62 @@ pub const Graph = struct {
             .enable_grad = true,
             .module_formulas = std.StringHashMap([]const u8).init(backing_allocator),
             .module_types = std.StringHashMap([]const u8).init(backing_allocator),
+            .scope_stack = .empty,
         };
+    }
+
+    /// 模块作用域守卫：由 `enterModule` / `enterChildScope` 返回，`exit()` 时弹出对应作用域
+    pub const ScopeGuard = struct {
+        graph: ?*Graph = null,
+
+        pub fn exit(self: ScopeGuard) void {
+            if (self.graph) |g| g.popScope();
+        }
+    };
+
+    /// 压入一个模块作用域 (完整路径)，之后创建的算子与张量都归属该模块
+    pub fn pushScope(self: *Graph, path: []const u8, module_type: ?[]const u8) !void {
+        const path_copy = try self.arena.allocator().dupe(u8, path);
+        try self.scope_stack.append(self.backing_allocator, path_copy);
+        if (module_type) |t| try self.registerModuleType(path_copy, t);
+    }
+
+    /// 弹出最内层模块作用域
+    pub fn popScope(self: *Graph) void {
+        _ = self.scope_stack.pop();
+    }
+
+    /// 当前最内层模块作用域的完整路径 ("" 表示根作用域)
+    pub fn currentScope(self: *const Graph) []const u8 {
+        if (self.scope_stack.items.len == 0) return "";
+        return self.scope_stack.items[self.scope_stack.items.len - 1];
+    }
+
+    /// 在模块 forward 入口处进入该模块的作用域。
+    /// 未构建计算图 (graph == null) 或模块未命名时返回空守卫。
+    /// 用法: `const scope = try Graph.enterModule(graph, self.name, self.module_type); defer scope.exit();`
+    pub fn enterModule(graph: ?*Graph, name: ?[]const u8, module_type: []const u8) !ScopeGuard {
+        const g = graph orelse return .{};
+        const n = name orelse return .{};
+        try g.pushScope(n, module_type);
+        return .{ .graph = g };
+    }
+
+    /// 在当前模块内部开启一个命名子作用域 (如注意力模块内部的 "core")。
+    /// 当前处于根作用域 (所属模块未命名) 时返回空守卫。
+    pub fn enterChildScope(graph: ?*Graph, local_name: []const u8, module_type: []const u8) !ScopeGuard {
+        const g = graph orelse return .{};
+        const parent = g.currentScope();
+        if (parent.len == 0) return .{};
+        const path = try std.fmt.allocPrint(g.arena.allocator(), "{s}.{s}", .{ parent, local_name });
+        try g.pushScope(path, module_type);
+        return .{ .graph = g };
+    }
+
+    /// 记录一个新创建的算子，并标记其所属的当前模块作用域
+    fn recordOp(self: *Graph, o: *Op) !void {
+        o.scope = self.currentScope();
+        try self.ops.append(self.backing_allocator, o);
     }
 
     /// 在代码中为指定模块路径设置数学公式 (如 graph.setModuleFormula("gpt.layers.0.attn", "A = softmax(QK^T / sqrt(d_k)) V"))
@@ -127,6 +183,7 @@ pub const Graph = struct {
     pub fn deinit(self: *Graph) void {
         self.module_formulas.deinit();
         self.module_types.deinit();
+        self.scope_stack.deinit(self.backing_allocator);
         self.tensors.deinit(self.backing_allocator);
         self.ops.deinit(self.backing_allocator);
         self.arena.deinit();
@@ -198,6 +255,7 @@ pub const Graph = struct {
             .strides = strides,
             .requires_grad = effective_req_grad,
             .creator = null,
+            .scope = self.currentScope(),
         };
         @memset(t.data, 0.0);
         if (effective_req_grad) {
@@ -255,7 +313,7 @@ pub const Graph = struct {
                 .context = .{ .Reshape = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -294,7 +352,7 @@ pub const Graph = struct {
                 },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -340,7 +398,7 @@ pub const Graph = struct {
                 },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -381,7 +439,7 @@ pub const Graph = struct {
             for (outputs) |out| {
                 out.creator = o;
             }
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return outputs;
@@ -433,7 +491,7 @@ pub const Graph = struct {
                 },
             };
             Y.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return Y;
@@ -468,7 +526,7 @@ pub const Graph = struct {
                 .context = .{ .MatMul = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -507,7 +565,7 @@ pub const Graph = struct {
                 .context = .{ .Relu = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -540,7 +598,7 @@ pub const Graph = struct {
                 .context = .{ .Gelu = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -573,7 +631,7 @@ pub const Graph = struct {
                 .context = .{ .Sigmoid = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -606,7 +664,7 @@ pub const Graph = struct {
                 .context = .{ .Tanh = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -639,7 +697,7 @@ pub const Graph = struct {
                 .context = .{ .LeakyRelu = .{ .alpha = alpha } },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -673,7 +731,7 @@ pub const Graph = struct {
                 .context = .{ .Silu = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -744,7 +802,7 @@ pub const Graph = struct {
                 },
             };
             loss.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         } else {
             for (0..B) |i| {
                 const logits_row = logits.data[i * N .. (i + 1) * N];
@@ -798,7 +856,7 @@ pub const Graph = struct {
                 .context = .{ .MseLoss = {} },
             };
             loss.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return loss;
@@ -838,7 +896,7 @@ pub const Graph = struct {
                 .context = .{ .BceWithLogitsLoss = {} },
             };
             loss.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return loss;
@@ -882,7 +940,7 @@ pub const Graph = struct {
                 .context = .{ .BceLoss = .{ .eps = eps } },
             };
             loss.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return loss;
@@ -926,7 +984,7 @@ pub const Graph = struct {
                 .context = .{ .L2Loss = .{ .lambda = lambda } },
             };
             loss.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return loss;
@@ -966,7 +1024,7 @@ pub const Graph = struct {
                 .context = .{ .L1Loss = .{ .lambda = lambda } },
             };
             loss.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return loss;
@@ -1024,7 +1082,7 @@ pub const Graph = struct {
                 .context = .{ .MulScalar = .{ .val = val } },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1058,7 +1116,7 @@ pub const Graph = struct {
                 .context = .{ .AddScalar = .{ .val = val } },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1092,7 +1150,7 @@ pub const Graph = struct {
                 .context = .{ .SubScalar = .{ .val = val } },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1126,7 +1184,7 @@ pub const Graph = struct {
                 .context = .{ .DivScalar = .{ .val = val } },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1161,7 +1219,7 @@ pub const Graph = struct {
                 .context = .{ .Add = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1196,7 +1254,7 @@ pub const Graph = struct {
                 .context = .{ .Sub = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1231,7 +1289,7 @@ pub const Graph = struct {
                 .context = .{ .Mul = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1266,7 +1324,7 @@ pub const Graph = struct {
                 .context = .{ .Div = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1304,7 +1362,7 @@ pub const Graph = struct {
                 .context = .{ .Conv2D = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1349,7 +1407,7 @@ pub const Graph = struct {
                 .context = .{ .ConvTranspose2D = .{ .stride = stride, .padding = padding } },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1382,7 +1440,7 @@ pub const Graph = struct {
                 .context = .{ .MaxPool2D = .{ .pool_size = pool_size, .stride = stride } },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1415,7 +1473,7 @@ pub const Graph = struct {
                 .context = .{ .Softmax = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1449,7 +1507,7 @@ pub const Graph = struct {
                 .context = .{ .RmsNorm = .{ .eps = eps } },
             };
             Y.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return Y;
@@ -1483,7 +1541,7 @@ pub const Graph = struct {
                 .context = .{ .BatchMatMul = {} },
             };
             C.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return C;
@@ -1517,7 +1575,7 @@ pub const Graph = struct {
                 .context = .{ .Embedding = {} },
             };
             Y.creator = o;
-            try self.ops.append(self.backing_allocator, o);
+            try self.recordOp(o);
         }
 
         return Y;

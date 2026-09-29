@@ -69,6 +69,8 @@ pub const RMSNorm = struct {
     }
 
     pub fn forward(self: RMSNorm, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
@@ -151,6 +153,8 @@ pub const LayerNorm = struct {
     }
 
     pub fn forward(self: LayerNorm, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};
@@ -285,6 +289,8 @@ pub const BatchNorm2d = struct {
     }
 
     pub fn forward(self: *BatchNorm2d, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
         if (graph) |g| {
             if (self.name) |n| {
                 _ = g.setModuleFormula(n, formula) catch {};

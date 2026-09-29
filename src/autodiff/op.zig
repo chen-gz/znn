@@ -18,6 +18,7 @@ pub const Op = struct {
     inputs: []*Tensor,      // 输入张量数组
     outputs: []*Tensor,     // 输出张量数组
     context: OpContext,     // 算子特有的运行时上下文数据
+    scope: []const u8 = "", // 创建该算子时所处的模块作用域完整路径（由 Graph 作用域栈记录，"" 表示图的根作用域）
 
     // 重新执行该算子的前向计算，根据最新输入更新输出张量的数据
     pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
