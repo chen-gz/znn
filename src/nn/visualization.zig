@@ -326,64 +326,51 @@ pub const EdgeData = struct {
     is_skip: bool = false,
 };
 
-fn getMajorModulePath(name: []const u8) []const u8 {
-    if (std.mem.endsWith(u8, name, ".residual_attn")) return name;
-    if (std.mem.endsWith(u8, name, ".output")) return name;
-    if (std.mem.endsWith(u8, name, ".embeddings_sum")) return name;
-    if (std.mem.startsWith(u8, name, "inputs.")) return name;
-    if (std.mem.startsWith(u8, name, "outputs.")) return name;
-    if (std.mem.startsWith(u8, name, "activations.")) return name;
-
-    const patterns = [_]struct { pat: []const u8, len: usize }{
-        .{ .pat = ".attn.q_attn.", .len = 12 },
-        .{ .pat = ".attn.k_attn.", .len = 12 },
-        .{ .pat = ".attn.v_attn.", .len = 12 },
-        .{ .pat = ".attn.c_proj.", .len = 12 },
-        .{ .pat = ".mlp.c_fc.", .len = 10 },
-        .{ .pat = ".mlp.c_proj.", .len = 12 },
-        .{ .pat = ".attn.", .len = 5 },
-        .{ .pat = ".mlp.", .len = 4 },
-        .{ .pat = ".ln_1.", .len = 5 },
-        .{ .pat = ".ln_2.", .len = 5 },
-        .{ .pat = ".ln_f.", .len = 5 },
-        .{ .pat = ".wte.", .len = 4 },
-        .{ .pat = ".wpe.", .len = 4 },
-        .{ .pat = ".lm_head.", .len = 8 },
+fn isLeafToken(token: []const u8) bool {
+    const leaf_params = [_][]const u8{
+        "weight", "bias", "gamma", "beta", "scale", "scaling",
+        "running_mean", "running_var", "pos_indices", "causal_mask",
     };
-
-    for (patterns) |p| {
-        if (std.mem.indexOf(u8, name, p.pat)) |idx| {
-            return name[0 .. idx + p.len];
-        }
+    for (leaf_params) |p| {
+        if (std.mem.eql(u8, token, p)) return true;
     }
-
-    const suffixes = [_][]const u8{
-        ".wte",
-        ".wpe",
-        ".lm_head",
-        ".ln_f",
-        ".ln_1",
-        ".ln_2",
-        ".attn.q_attn",
-        ".attn.k_attn",
-        ".attn.v_attn",
-        ".attn.c_proj",
-        ".mlp.c_fc",
-        ".mlp.c_proj",
-        ".attn",
-        ".mlp",
-    };
-
-    for (suffixes) |suf| {
-        if (std.mem.endsWith(u8, name, suf)) {
-            return name;
-        }
+    if (std.mem.startsWith(u8, token, "act_") or
+        std.mem.startsWith(u8, token, "Node_") or
+        std.mem.startsWith(u8, token, "tensor") or
+        std.mem.startsWith(u8, token, "tmp_"))
+    {
+        return true;
     }
-
-    if (extractModuleScope(name)) |p| return p;
-    return name;
+    return false;
 }
 
+fn getMajorModulePath(name: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, name, "inputs.") or
+        std.mem.startsWith(u8, name, "outputs.") or
+        std.mem.startsWith(u8, name, "activations."))
+    {
+        return name;
+    }
+    if (std.mem.endsWith(u8, name, ".residual_attn") or
+        std.mem.endsWith(u8, name, ".output") or
+        std.mem.endsWith(u8, name, ".embeddings_sum"))
+    {
+        return name;
+    }
+
+    var curr = name;
+    while (std.mem.lastIndexOfScalar(u8, curr, '.')) |dot_idx| {
+        if (dot_idx == 0) break;
+        const last_part = curr[dot_idx + 1 ..];
+        if (isLeafToken(last_part)) {
+            curr = curr[0..dot_idx];
+        } else {
+            break;
+        }
+    }
+
+    return curr;
+}
 
 fn getLcaBranch(name: []const u8, lca_depth: usize) []const u8 {
     if (std.mem.startsWith(u8, name, "inputs.") or std.mem.startsWith(u8, name, "outputs.") or std.mem.startsWith(u8, name, "activations.")) {
@@ -402,7 +389,7 @@ fn getLcaBranch(name: []const u8, lca_depth: usize) []const u8 {
     while (it.next()) |part| {
         if (idx == lca_depth) {
             const token_end = @intFromPtr(part.ptr) + part.len - @intFromPtr(name.ptr);
-            if (std.mem.startsWith(u8, part, "act_") or std.mem.startsWith(u8, part, "Node_") or std.mem.startsWith(u8, part, "tensor")) {
+            if (isLeafToken(part)) {
                 if (token_end > part.len + 1) {
                     return name[0 .. token_end - part.len - 1];
                 }
@@ -416,18 +403,31 @@ fn getLcaBranch(name: []const u8, lca_depth: usize) []const u8 {
 }
 
 fn isSkipConnection(from: []const u8, to: []const u8) bool {
-    const is_converge = std.mem.indexOf(u8, to, "residual") != null or
-        std.mem.indexOf(u8, to, "skip") != null or
+    const is_converge = std.mem.endsWith(u8, to, ".residual_attn") or
         std.mem.endsWith(u8, to, ".output") or
-        std.mem.startsWith(u8, to, "activations.") or
-        std.mem.endsWith(u8, to, "_sum");
+        std.mem.endsWith(u8, to, "residual_attn") or
+        std.mem.endsWith(u8, to, "output") or
+        std.mem.indexOf(u8, to, "residual") != null;
     if (!is_converge) return false;
 
-    if (std.mem.startsWith(u8, from, "inputs.")) return true;
-    if (std.mem.indexOf(u8, from, "residual") != null and !std.mem.eql(u8, from, to)) return true;
-    if (std.mem.endsWith(u8, from, ".embeddings_sum")) return true;
-    if (std.mem.endsWith(u8, to, ".residual_attn") and !std.mem.endsWith(u8, from, ".attn") and !std.mem.endsWith(u8, from, ".c_proj")) return true;
-    if ((std.mem.endsWith(u8, to, ".output") or std.mem.startsWith(u8, to, "activations.")) and !std.mem.endsWith(u8, from, ".mlp") and !std.mem.endsWith(u8, from, ".c_proj")) return true;
+    // 1. Attention 残差汇聚点 (residual_attn):
+    if (std.mem.endsWith(u8, to, "residual_attn")) {
+        const is_attn_branch = std.mem.endsWith(u8, from, "attn") or
+            std.mem.endsWith(u8, from, "c_proj") or
+            std.mem.indexOf(u8, from, "attn") != null;
+        if (is_attn_branch) return false;
+        return true;
+    }
+
+    // 2. MLP 残差汇聚点 (output):
+    if (std.mem.endsWith(u8, to, "output") or std.mem.startsWith(u8, to, "activations.")) {
+        const is_mlp_branch = std.mem.endsWith(u8, from, "mlp") or
+            std.mem.endsWith(u8, from, "c_proj") or
+            std.mem.indexOf(u8, from, "mlp") != null;
+        if (is_mlp_branch) return false;
+        if (std.mem.indexOf(u8, from, "residual") != null) return true;
+        if (std.mem.startsWith(u8, from, "inputs.")) return true;
+    }
 
     return false;
 }
@@ -1102,7 +1102,7 @@ pub const graph_ir = struct {
                     .from = try arena_alloc.dupe(u8, from_name),
                     .to = try arena_alloc.dupe(u8, to_name),
                     .shape = try arena_alloc.dupe(u8, e.shape),
-                    .is_skip = e.is_skip,
+                    .is_skip = isSkipConnection(from_name, to_name),
                 });
             }
         }
@@ -1269,6 +1269,21 @@ pub const graph_ir = struct {
         });
         try json_buf.appendSlice(allocator, "},\n  \"root\": ");
         try serializeModuleTree(model_graph.root, &json_buf, allocator);
+
+        try json_buf.appendSlice(allocator, ",\n  \"edges\": [");
+        for (model_graph.edges.items, 0..) |e, i| {
+            if (i > 0) try json_buf.appendSlice(allocator, ",\n    ");
+            if (i == 0) try json_buf.appendSlice(allocator, "\n    ");
+            try json_buf.appendSlice(allocator, "{\"from\": ");
+            try writeEscapedJsonString(&json_buf, allocator, e.from);
+            try json_buf.appendSlice(allocator, ", \"to\": ");
+            try writeEscapedJsonString(&json_buf, allocator, e.to);
+            try json_buf.appendSlice(allocator, ", \"shape\": ");
+            try writeEscapedJsonString(&json_buf, allocator, e.shape);
+            try json_buf.print(allocator, ", \"is_skip\": {s}}}", .{if (e.is_skip) "true" else "false"});
+        }
+        try json_buf.appendSlice(allocator, "\n  ]");
+
         try json_buf.appendSlice(allocator, "\n}");
 
         return json_buf.toOwnedSlice(allocator);

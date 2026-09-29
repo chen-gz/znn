@@ -1300,9 +1300,10 @@ test "Hierarchical module naming and interactive HTML report export" {
     try std.testing.expect(summary_obj.get("total_params").?.integer > 0);
     try std.testing.expect(summary_obj.get("param_nodes").?.integer >= 8);
 
-    // 校验顶层保持纯净递归架构：所有 nodes, edges, ops, formulas 均已就近集成进模块树
+    // 校验顶层包含全局拓扑边与统计指标：所有 nodes, ops, formulas 均已就近集成进模块树
     try std.testing.expect(parsed.value.object.get("nodes") == null);
-    try std.testing.expect(parsed.value.object.get("edges") == null);
+    try std.testing.expect(parsed.value.object.get("edges") != null);
+    try std.testing.expect(parsed.value.object.get("edges").?.array.items.len > 0);
     try std.testing.expect(parsed.value.object.get("ops") == null);
     try std.testing.expect(parsed.value.object.get("formulas") == null);
 
@@ -1364,12 +1365,14 @@ test "Hierarchical module naming and interactive HTML report export" {
         try std.testing.expect(op_obj.get("bytes").?.integer > 0);
     }
 
-    // 5. 测试将递归 JSON 导出到真实文件系统
-    const tmp_json_path = "examples/sample_model_graph.json";
+    // 5. 测试将递归 JSON 导出到临时测试文件
+    const tmp_json_path = "tmp_test_model_graph.json";
     try graph.exportJson(tmp_json_path);
 
     const json_z = try allocator.dupeZ(u8, tmp_json_path);
     defer allocator.free(json_z);
+    const c_api = struct { extern "c" fn remove(filename: [*:0]const u8) c_int; };
+    defer _ = c_api.remove(json_z.ptr);
     const fj = std.c.fopen(json_z.ptr, "rb") orelse return error.CannotOpenFile;
     defer _ = std.c.fclose(fj);
     var check_json_buf: [1024]u8 = undefined;
