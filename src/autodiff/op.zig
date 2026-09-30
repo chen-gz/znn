@@ -672,6 +672,42 @@ pub const Op = struct {
                     o.* = val * m;
                 }
             },
+            .RoPE => {
+                const X = self.inputs[0];
+                const Y = self.outputs[0];
+                const start_pos = self.context.RoPE.start_pos;
+                const rotary_offset = self.context.RoPE.rotary_offset;
+                const D = X.shape.dims[X.shape.len - 1];
+                const T = if (X.shape.len >= 2) X.shape.dims[X.shape.len - 2] else 1;
+                const outer = X.data.len / (T * D);
+                const rot_dim = D - rotary_offset;
+                const half = rot_dim / 2;
+                const rot_dim_f = @as(f32, @floatFromInt(rot_dim));
+
+                for (0..outer) |o| {
+                    for (0..T) |t| {
+                        const row_in = X.data[(o * T + t) * D .. (o * T + t + 1) * D];
+                        const row_out = Y.data[(o * T + t) * D .. (o * T + t + 1) * D];
+                        if (rotary_offset > 0) {
+                            @memcpy(row_out[0..rotary_offset], row_in[0..rotary_offset]);
+                        }
+                        const pos_f = @as(f32, @floatFromInt(start_pos + t));
+                        for (0..half) |i| {
+                            const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
+                            const theta = pos_f * freq;
+                            const cos_t = @cos(theta);
+                            const sin_t = @sin(theta);
+                            const x0 = row_in[rotary_offset + 2 * i];
+                            const x1 = row_in[rotary_offset + 2 * i + 1];
+                            row_out[rotary_offset + 2 * i] = x0 * cos_t - x1 * sin_t;
+                            row_out[rotary_offset + 2 * i + 1] = x0 * sin_t + x1 * cos_t;
+                        }
+                        if (2 * half < rot_dim) {
+                            row_out[D - 1] = row_in[D - 1];
+                        }
+                    }
+                }
+            },
             .BatchMatMul => {
                 const A = self.inputs[0];
                 const B = self.inputs[1];
@@ -1825,6 +1861,44 @@ pub const Op = struct {
                 if (X.requires_grad) {
                     for (X.grad, Y.grad, mask_scale) |*dx, dy, m| {
                         dx.* += dy * m;
+                    }
+                }
+            },
+            .RoPE => {
+                const X = self.inputs[0];
+                const Y = self.outputs[0];
+                if (X.requires_grad) {
+                    const start_pos = self.context.RoPE.start_pos;
+                    const rotary_offset = self.context.RoPE.rotary_offset;
+                    const D = X.shape.dims[X.shape.len - 1];
+                    const T = if (X.shape.len >= 2) X.shape.dims[X.shape.len - 2] else 1;
+                    const outer = X.data.len / (T * D);
+                    const rot_dim = D - rotary_offset;
+                    const half = rot_dim / 2;
+                    const rot_dim_f = @as(f32, @floatFromInt(rot_dim));
+
+                    for (0..outer) |o| {
+                        for (0..T) |t| {
+                            const dx_row = X.grad[(o * T + t) * D .. (o * T + t + 1) * D];
+                            const dy_row = Y.grad[(o * T + t) * D .. (o * T + t + 1) * D];
+                            for (0..rotary_offset) |j| {
+                                dx_row[j] += dy_row[j];
+                            }
+                            const pos_f = @as(f32, @floatFromInt(start_pos + t));
+                            for (0..half) |i| {
+                                const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
+                                const theta = pos_f * freq;
+                                const cos_t = @cos(theta);
+                                const sin_t = @sin(theta);
+                                const dy0 = dy_row[rotary_offset + 2 * i];
+                                const dy1 = dy_row[rotary_offset + 2 * i + 1];
+                                dx_row[rotary_offset + 2 * i] += dy0 * cos_t + dy1 * sin_t;
+                                dx_row[rotary_offset + 2 * i + 1] += -dy0 * sin_t + dy1 * cos_t;
+                            }
+                            if (2 * half < rot_dim) {
+                                dx_row[D - 1] += dy_row[D - 1];
+                            }
+                        }
                     }
                 }
             },

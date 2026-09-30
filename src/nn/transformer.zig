@@ -1349,48 +1349,143 @@ pub const MLALayer = struct {
     pub fn forward(self: MLALayer, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
+        const B = if (is_3d) old_shape.dims[0] else 1;
+        const T = if (is_3d) old_shape.dims[1] else old_shape.dims[0];
+        const C = if (is_3d) old_shape.dims[2] else old_shape.dims[1];
+        const nh = self.n_head;
+        const hd = self.head_dim;
+        const dr = self.d_r;
+        const q_head_dim = hd + dr;
+
         var x_2d = x;
         if (is_3d) {
-            const B = old_shape.dims[0];
-            const T = old_shape.dims[1];
-            const D = old_shape.dims[2];
             if (graph) |g| {
-                x_2d = try g.reshape(x, &.{ B * T, D });
+                x_2d = try g.reshape(x, &.{ B * T, C });
             } else {
-                x_2d = try x.reshape(&.{ B * T, D }, allocator, null);
+                x_2d = try x.reshape(&.{ B * T, C }, allocator, null);
             }
         }
         defer if (is_3d and graph == null) tensor.free(allocator, x_2d);
 
-        // 1. 投影 Q, 潜在 c_kv, 解耦 RoPE Key
+        // 1. 投影 Q, 潜在 c_kv, 解耦 RoPE Key k_r
         const q_all = try self.q_proj.forward(allocator, graph, x_2d); // [B*T, nh * (hd + dr)]
         defer if (graph == null) tensor.free(allocator, q_all);
 
         const c_kv = try self.w_dkv.forward(allocator, graph, x_2d); // [B*T, d_c]
         defer if (graph == null) tensor.free(allocator, c_kv);
 
+        const k_r_2d = try self.w_kr.forward(allocator, graph, x_2d); // [B*T, d_r]
+        defer if (graph == null) tensor.free(allocator, k_r_2d);
+
         // 2. 上投影还原内容键 Kc 与内容值 Vc
-        const k_c = try self.w_uk.forward(allocator, graph, c_kv); // [B*T, nh * hd]
+        const k_c_2d = try self.w_uk.forward(allocator, graph, c_kv); // [B*T, nh * hd]
+        defer if (graph == null) tensor.free(allocator, k_c_2d);
+
+        const v_c_2d = try self.w_uv.forward(allocator, graph, c_kv); // [B*T, nh * hd]
+        defer if (graph == null) tensor.free(allocator, v_c_2d);
+
+        // 3. 重塑并转置为 4D 多头结构，对 Query 的 RoPE 子空间与共享 k_r 施加旋转位置编码
+        const q_4d = if (graph) |g| try g.reshape(q_all, &.{ B, T, nh, q_head_dim }) else try q_all.reshape(&.{ B, T, nh, q_head_dim }, allocator, null);
+        defer if (graph == null) tensor.free(allocator, q_4d);
+        const q_trans = if (graph) |g| try g.transposeND(q_4d, 1, 2) else try q_4d.transpose(1, 2, allocator, null);
+        defer if (graph == null) tensor.free(allocator, q_trans);
+        const q_rot = if (graph) |g| try g.ropeOffset(q_trans, 0, hd) else try q_trans.ropeOffset(0, hd, allocator, null);
+        defer if (graph == null) tensor.free(allocator, q_rot);
+
+        const k_c_4d = if (graph) |g| try g.reshape(k_c_2d, &.{ B, T, nh, hd }) else try k_c_2d.reshape(&.{ B, T, nh, hd }, allocator, null);
+        defer if (graph == null) tensor.free(allocator, k_c_4d);
+        const k_c = if (graph) |g| try g.transposeND(k_c_4d, 1, 2) else try k_c_4d.transpose(1, 2, allocator, null);
         defer if (graph == null) tensor.free(allocator, k_c);
 
-        const v_c = try self.w_uv.forward(allocator, graph, c_kv); // [B*T, nh * hd]
-        defer if (graph == null) tensor.free(allocator, v_c);
+        const k_r_4d = if (graph) |g| try g.reshape(k_r_2d, &.{ B, 1, T, dr }) else try k_r_2d.reshape(&.{ B, 1, T, dr }, allocator, null);
+        defer if (graph == null) tensor.free(allocator, k_r_4d);
+        const k_r_rot = if (graph) |g| try g.rope(k_r_4d, 0) else try k_r_4d.rope(0, allocator, null);
+        defer if (graph == null) tensor.free(allocator, k_r_rot);
 
-        // 3. 经过输出投影输出特征
-        const combined_val = if (graph) |g| try g.add(k_c, v_c) else try k_c.add(v_c, allocator, null);
-        defer if (graph == null) tensor.free(allocator, combined_val);
+        var k_r_heads = k_r_rot;
+        var free_k_r_heads = false;
+        if (nh > 1) {
+            if (graph) |g| {
+                k_r_heads = try g.repeatKV(k_r_rot, nh);
+            } else {
+                const rep = try tensor.zeros(allocator, &.{ B, nh, T, dr });
+                const head_elems = T * dr;
+                for (0..B) |b| {
+                    const src = k_r_rot.data[b * head_elems .. (b + 1) * head_elems];
+                    for (0..nh) |h| {
+                        const dst = rep.data[(b * nh + h) * head_elems .. (b * nh + h + 1) * head_elems];
+                        @memcpy(dst, src);
+                    }
+                }
+                k_r_heads = rep;
+                free_k_r_heads = true;
+            }
+        }
+        defer if (free_k_r_heads) tensor.free(allocator, k_r_heads);
 
-        const out_2d = try self.o_proj.forward(allocator, graph, combined_val);
+        const k_full = if (graph) |g| try g.concat(&.{ k_c, k_r_heads }, 3) else try tensor.concat(allocator, &.{ k_c, k_r_heads }, 3, null);
+        defer if (graph == null) tensor.free(allocator, k_full);
+
+        const v_4d = if (graph) |g| try g.reshape(v_c_2d, &.{ B, T, nh, hd }) else try v_c_2d.reshape(&.{ B, T, nh, hd }, allocator, null);
+        defer if (graph == null) tensor.free(allocator, v_4d);
+        const v = if (graph) |g| try g.transposeND(v_4d, 1, 2) else try v_4d.transpose(1, 2, allocator, null);
+        defer if (graph == null) tensor.free(allocator, v);
+
+        // 4. 缩放点积因果注意力: Softmax((Q * K^T) / sqrt(hd + dr) + M) * V
+        const k_t = if (graph) |g| try g.transposeND(k_full, 2, 3) else try k_full.transpose(2, 3, allocator, null);
+        defer if (graph == null) tensor.free(allocator, k_t);
+
+        const att = if (graph) |g| try g.batchMatMul(q_rot, k_t) else try q_rot.batchMatMul(k_t, allocator, null);
+        defer if (graph == null) tensor.free(allocator, att);
+
+        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(q_head_dim)));
+        const att_scaled = if (graph) |g| try g.mulScalar(att, scale) else try att.mulScalar(scale, allocator, null);
+        defer if (graph == null) tensor.free(allocator, att_scaled);
+
+        const mask_data = try allocator.alloc(f32, T * T);
+        defer allocator.free(mask_data);
+        @memset(mask_data, 0.0);
+        for (0..T) |i| {
+            for (0..T) |j| {
+                if (j > i) {
+                    mask_data[i * T + j] = -1e9;
+                }
+            }
+        }
+        const mask = try tensor.array(allocator, &.{ 1, 1, T, T }, mask_data);
+        defer tensor.free(allocator, mask);
+
+        var att_masked = att_scaled;
+        if (graph) |g| {
+            const mask_node = try g.tensorNDWithData(&.{ 1, 1, T, T }, mask_data, false);
+            mask_node.is_buffer = true;
+            att_masked = try g.add(att_scaled, mask_node);
+        } else {
+            att_masked = try att_scaled.add(mask, allocator, null);
+        }
+        defer if (graph == null) tensor.free(allocator, att_masked);
+
+        const att_sm = if (graph) |g| try g.softmax(att_masked) else try att_masked.softmax(allocator, null);
+        defer if (graph == null) tensor.free(allocator, att_sm);
+
+        const y_4d = if (graph) |g| try g.batchMatMul(att_sm, v) else try att_sm.batchMatMul(v, allocator, null);
+        defer if (graph == null) tensor.free(allocator, y_4d);
+
+        // 5. 合并多头并经输出投影 o_proj 输出特征
+        const y_trans = if (graph) |g| try g.transposeND(y_4d, 1, 2) else try y_4d.transpose(1, 2, allocator, null);
+        defer if (graph == null) tensor.free(allocator, y_trans);
+
+        const y_2d = if (graph) |g| try g.reshape(y_trans, &.{ B * T, nh * hd }) else try y_trans.reshape(&.{ B * T, nh * hd }, allocator, null);
+        defer if (graph == null) tensor.free(allocator, y_2d);
+
+        const out_2d = try self.o_proj.forward(allocator, graph, y_2d);
 
         if (is_3d) {
-            const B = old_shape.dims[0];
-            const T = old_shape.dims[1];
-            const D = old_shape.dims[2];
             if (graph) |g| {
-                return try g.reshape(out_2d, &.{ B, T, D });
+                return try g.reshape(out_2d, &.{ B, T, C });
             } else {
                 defer tensor.free(allocator, out_2d);
-                return try out_2d.reshape(&.{ B, T, D }, allocator, null);
+                return try out_2d.reshape(&.{ B, T, C }, allocator, null);
             }
         }
 

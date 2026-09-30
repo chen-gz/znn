@@ -1723,6 +1723,44 @@ pub const Graph = struct {
         return Y;
     }
 
+    pub fn rope(self: *Graph, X: *Tensor, start_pos: usize) !*Tensor {
+        return self.ropeOffset(X, start_pos, 0);
+    }
+
+    pub fn ropeOffset(self: *Graph, X: *Tensor, start_pos: usize, rotary_offset: usize) !*Tensor {
+        const allocator = self.arena.allocator();
+        const Y = try X.ropeOffset(start_pos, rotary_offset, allocator, null);
+        Y.scope = self.currentScope();
+
+        const req_grad = self.enable_grad and X.requires_grad;
+        Y.requires_grad = req_grad;
+        if (req_grad) {
+            Y.grad = try allocator.alloc(f32, Y.data.len);
+            @memset(Y.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, Y);
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 1);
+            inputs[0] = X;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = Y;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .RoPE,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = rotary_offset } },
+            };
+            Y.creator = o;
+            try self.recordOp(o);
+        }
+
+        return Y;
+    }
+
     pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.batchMatMul(B, allocator, null);

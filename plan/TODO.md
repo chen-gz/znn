@@ -92,8 +92,8 @@
   - [x] 在 [`OpType`](../src/autodiff/types.zig) 中新增 `LayerNorm`、`BatchNorm2d`、`Dropout`、`AvgPool2D`，并在 [`Graph`](../src/autodiff/graph.zig) 与 [`Op`](../src/autodiff/op.zig) 中实现其前向/反向传播与数学公式推导。
   - [x] 修复 [`LayerNorm.forward`](../src/nn/normalization.zig)、[`BatchNorm2d.forward`](../src/nn/normalization.zig)、[`Dropout.forward`](../src/nn/normalization.zig) 与 [`AvgPool2D.forward`](../src/nn/normalization.zig) 在 `graph != null` 时未挂载 `Op` 导致梯度静默截断的问题。
 
-- [ ] **1.5.2 完善 `MLALayer.forward` 训练前向与反向求导路径 (`transformer.zig`)**
-  - [ ] 修复 [`MLALayer.forward`](../src/nn/transformer.zig) 未使用 `q_all`、`w_kr` 及因果注意力（直接 `k_c + v_c`）的占位实现，补全基于计算图的完整潜在多头注意力（Content + RoPE + Scaled Dot-Product Attention）前向与反向传播。
+- [x] **1.5.2 完善 `MLALayer.forward` 训练前向与反向求导路径 (`transformer.zig`)**
+  - [x] 修复 [`MLALayer.forward`](../src/nn/transformer.zig) 未使用 `q_all`、`w_kr` 及因果注意力（直接 `k_c + v_c`）的占位实现，补全基于计算图的完整潜在多头注意力（Content + RoPE + Scaled Dot-Product Attention）前向与反向传播。
 
 - [ ] **1.5.3 大词表交叉熵与 LLM 后训练 Loss 计算图集成 (`autodiff/`, `transformer.zig`)**
   - [ ] 扩展 [`Graph.softmaxCrossEntropy`](../src/autodiff/graph.zig) 支持 `usize` / `u32` 标签（突破 `[]const u8` 最多 256 类的限制）。

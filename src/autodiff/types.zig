@@ -38,6 +38,7 @@ pub const OpType = enum {
     LayerNorm, // LayerNorm 层归一化
     BatchNorm2d, // 二维批量归一化
     Dropout, // 随机丢弃正则化
+    RoPE, // 旋转位置编码 (Rotary Position Embedding)
     Embedding, // 嵌入查找 (Embedding Lookup)
 
     // --- 损失函数与正则化 (Loss Functions & Regularization) ---
@@ -83,6 +84,7 @@ pub const OpType = enum {
             .LayerNorm => "y = \\frac{x - \\mu}{\\sqrt{\\sigma^2 + \\epsilon}} \\odot \\gamma + \\beta",
             .BatchNorm2d => "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta",
             .Dropout => "y = \\frac{m \\odot x}{1 - p}",
+            .RoPE => "y_t = R_{\\Theta, t} x_t",
             .Embedding => "y = W_e[\\text{indices}]",
             .MseLoss => "\\mathcal{L} = \\frac{1}{N} \\sum (y - \\hat{y})^2",
             .BceLoss => "\\mathcal{L} = -\\frac{1}{N} \\sum [y \\log \\hat{y} + (1-y) \\log(1-\\hat{y})]",
@@ -173,6 +175,10 @@ pub const OpContext = union(enum) {
     },
     Dropout: struct {
         mask_scale: []f32,
+    },
+    RoPE: struct {
+        start_pos: usize,
+        rotary_offset: usize,
     },
     Embedding: void,
 
