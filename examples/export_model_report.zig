@@ -67,7 +67,25 @@ pub fn main() !void {
     const output_path = "examples/sample_model_graph.json";
     std.debug.print("[Step 3/4] Exporting Model Hierarchy & Graph JSON...\n", .{});
     try graph.exportJson(output_path);
+    std.debug.print("  * Graph written to: {s}\n\n", .{output_path});
 
-    std.debug.print("[Step 4/4] Done! Graph written to: {s}\n\n", .{output_path});
+    // 5. 导出单个 Linear 层的最小参考 JSON (可视化器 JSON 格式指南中的模板)
+    std.debug.print("[Step 4/4] Exporting minimal single-Linear reference JSON...\n", .{});
+    var linear = try nn.Linear.init(allocator, 8, 4, random);
+    defer linear.deinit(allocator);
+    linear.setName("linear");
+
+    var min_graph = autodiff.Graph.init(allocator);
+    defer min_graph.deinit();
+    var x_data: [2 * 8]f32 = undefined;
+    for (&x_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i)) * 0.1;
+    const x = try min_graph.tensorNDWithData(&.{ 2, 8 }, &x_data, false);
+    x.setName("inputs.x");
+    const y = try linear.forward(allocator, &min_graph, x);
+    y.setName("outputs.y");
+
+    const minimal_path = "examples/minimal_model_graph.json";
+    try min_graph.exportJson(minimal_path);
+    std.debug.print("  * Graph written to: {s}\n\n", .{minimal_path});
 }
 

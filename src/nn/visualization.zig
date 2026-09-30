@@ -11,6 +11,9 @@ const Op = autodiff.Op;
 /// 导出 JSON 的 schema 版本
 pub const SCHEMA_VERSION = "2.0";
 
+/// 导出 JSON 的 JSON Schema (draft 2020-12)，逐字段描述 serializeJson 的输出
+pub const SCHEMA_JSON = @embedFile("model_graph.schema.json");
+
 /// 单个计算图节点的详细可视化元数据
 pub const NodeData = struct {
     name: []const u8,

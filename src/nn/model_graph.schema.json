@@ -1,0 +1,433 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://chen-gz.github.io/tools/visualizer/model_graph.schema.json",
+  "title": "ModelHierarchyGraph",
+  "description": "ZNN model graph export (schema 2.0): global summary metrics plus a recursive module tree in which every module carries its parameters, operations, tensors and its own scoped local data-flow graph.",
+  "type": "object",
+  "required": ["version", "summary", "default_scope", "root"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "description": "Schema version, always \"2.0\".",
+      "const": "2.0"
+    },
+    "summary": {
+      "description": "Global model statistics shown in the KPI cards.",
+      "$ref": "#/$defs/Summary"
+    },
+    "default_scope": {
+      "description": "Module path whose local graph is shown first (e.g. \"gpt\"); \"\" selects the root module.",
+      "type": "string"
+    },
+    "root": {
+      "description": "Root module (path \"\"). Graph inputs live in root.nodes and appear as root input ports.",
+      "$ref": "#/$defs/ModuleNode"
+    }
+  },
+  "$defs": {
+    "Summary": {
+      "title": "Summary",
+      "description": "Global model statistics aggregated over every tensor in the graph.",
+      "type": "object",
+      "required": [
+        "total_params",
+        "total_bytes",
+        "param_nodes",
+        "input_nodes",
+        "buffer_nodes",
+        "activation_nodes",
+        "custom_init_count",
+        "auto_graph_count",
+        "total_nodes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "total_params": {
+          "description": "Learnable scalars (sum of elements over all Param tensors).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_bytes": {
+          "description": "Storage of all tensors (params, inputs, buffers, activations) in bytes, f32.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "param_nodes": {
+          "description": "Number of Param tensors.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "input_nodes": {
+          "description": "Number of Input tensors (user-provided graph inputs).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "buffer_nodes": {
+          "description": "Number of Buffer tensors (constant, non-trainable module state such as position indices).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "activation_nodes": {
+          "description": "Number of Activation tensors (operation outputs).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "custom_init_count": {
+          "description": "Params initialized by module code (status CUSTOM_INIT).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "auto_graph_count": {
+          "description": "Params whose initializer was chosen from the consuming activation (status AUTO_GRAPH).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_nodes": {
+          "description": "Number of tensors in the graph (param + input + buffer + activation).",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "ModuleNode": {
+      "title": "ModuleNode",
+      "description": "One module of the hierarchy. The root, composite modules and parameter-free multi-op leaves (e.g. attention core) export a local graph; parameterized leaves (Linear, RMSNorm, Embedding) are atomic and export empty ports, flow_nodes and edges.",
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "kind",
+        "module_type",
+        "formula",
+        "total_params",
+        "total_bytes",
+        "param_count",
+        "node_count",
+        "children",
+        "parameters",
+        "ops",
+        "ports",
+        "flow_nodes",
+        "edges",
+        "nodes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Last path segment (\"root\" for the root module).",
+          "type": "string"
+        },
+        "path": {
+          "description": "Dot-separated full module path, e.g. \"gpt.layers.0.attn\"; \"\" for the root.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Node discriminator, always \"module\".",
+          "const": "module"
+        },
+        "module_type": {
+          "description": "Module class name, e.g. \"GPT\", \"TransformerBlock\", \"Linear\"; \"Model\" for the root.",
+          "type": "string"
+        },
+        "formula": {
+          "description": "LaTeX formula of the module rendered with KaTeX in display mode, or null.",
+          "type": ["string", "null"]
+        },
+        "total_params": {
+          "description": "Learnable scalars in this module and all descendants.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_bytes": {
+          "description": "Bytes of the tensors listed in nodes of this module and all descendants.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "param_count": {
+          "description": "Number of Param tensors owned directly by this module (descendants excluded).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "node_count": {
+          "description": "Number of tensors in nodes of this module and all descendants.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "children": {
+          "description": "Direct submodules; [] for leaves.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/ModuleNode" }
+        },
+        "parameters": {
+          "description": "Learnable tensors owned directly by this module (also listed in nodes).",
+          "type": "array",
+          "items": { "$ref": "#/$defs/ParamEntry" }
+        },
+        "ops": {
+          "description": "Autodiff operations executed in this module's own scope (descendants excluded), in execution order.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/OpEntry" }
+        },
+        "ports": {
+          "description": "Boundary tensors of the local graph, mirroring the port_in / port_out entries of flow_nodes.",
+          "$ref": "#/$defs/Ports"
+        },
+        "flow_nodes": {
+          "description": "Vertices of the local graph.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/FlowNode" }
+        },
+        "edges": {
+          "description": "Directed data-flow edges of the local graph between flow_nodes ids.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/Edge" }
+        },
+        "nodes": {
+          "description": "Every tensor owned directly by this module: params, inputs, buffers and activations.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/TensorNode" }
+        }
+      }
+    },
+    "ParamEntry": {
+      "title": "ParamEntry",
+      "description": "A learnable tensor of a module.",
+      "type": "object",
+      "required": ["name", "shape", "elements", "bytes", "status", "strategy"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Full tensor name, e.g. \"gpt.wte.weight\".",
+          "type": "string"
+        },
+        "shape": {
+          "description": "Shape string, e.g. \"[256, 64]\".",
+          "type": "string"
+        },
+        "elements": {
+          "description": "Number of scalars.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "description": "Storage size in bytes (4 bytes per element).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "status": {
+          "description": "CUSTOM_INIT: initialized by module code. AUTO_GRAPH: initializer chosen from the consuming activation.",
+          "enum": ["CUSTOM_INIT", "AUTO_GRAPH"]
+        },
+        "strategy": {
+          "description": "Initializer, e.g. \"user-defined customInit\", \"He Normal (gain=1.414)\", \"zeros (0.0)\".",
+          "type": "string"
+        }
+      }
+    },
+    "OpEntry": {
+      "title": "OpEntry",
+      "description": "An autodiff operation and the shapes flowing through it.",
+      "type": "object",
+      "required": ["op_type", "name", "module", "input_shape", "param_shape", "output_shape", "elements", "bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "op_type": {
+          "description": "Operation tag, e.g. \"MatMul\", \"Add\", \"Softmax\", \"RmsNorm\", \"Reshape\".",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name of the output tensor, e.g. \"gpt.layers.0.residual_attn\".",
+          "type": "string"
+        },
+        "module": {
+          "description": "Path of the module scope the operation ran in.",
+          "type": "string"
+        },
+        "input_shape": {
+          "description": "Comma-separated shapes of the non-parameter inputs, or \"None\".",
+          "type": "string"
+        },
+        "param_shape": {
+          "description": "Parameter inputs as \"name: [shape]\" pairs, or \"None (Stateless)\".",
+          "type": "string"
+        },
+        "output_shape": {
+          "description": "Shape of the output tensor.",
+          "type": "string"
+        },
+        "formula": {
+          "description": "Optional LaTeX formula of the operation.",
+          "type": "string"
+        },
+        "elements": {
+          "description": "Number of scalars in the output tensor.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "description": "Output storage size in bytes.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Ports": {
+      "title": "Ports",
+      "description": "Input and output ports of a module's local graph.",
+      "type": "object",
+      "required": ["inputs", "outputs"],
+      "additionalProperties": false,
+      "properties": {
+        "inputs": {
+          "description": "Input ports @in0, @in1, ...",
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortEntry" }
+        },
+        "outputs": {
+          "description": "Output ports @out0, @out1, ...",
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortEntry" }
+        }
+      }
+    },
+    "PortEntry": {
+      "title": "PortEntry",
+      "description": "A tensor crossing the module boundary.",
+      "type": "object",
+      "required": ["id", "ref", "shape"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Reserved local id \"@in<k>\" or \"@out<k>\"; never collides with child names.",
+          "type": "string"
+        },
+        "ref": {
+          "description": "External endpoint (module path or tensor name) resolved in the nearest common ancestor scope: the producer for inputs, the consumer or output tensor for outputs.",
+          "type": "string"
+        },
+        "shape": {
+          "description": "Shape of the boundary tensor.",
+          "type": "string"
+        }
+      }
+    },
+    "FlowNode": {
+      "title": "FlowNode",
+      "description": "A vertex of a module's local graph.",
+      "type": "object",
+      "required": ["id", "kind", "ref", "shape"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Local id unique within the module: child name, op or buffer name segment, or port id.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "port_in / port_out: boundary port. module: direct child module. op: non-transparent operation run in this scope. buffer: constant buffer tensor.",
+          "enum": ["port_in", "port_out", "module", "op", "buffer"]
+        },
+        "ref": {
+          "description": "Global reference: child module path, tensor name, or the external endpoint of a port.",
+          "type": "string"
+        },
+        "op_type": {
+          "description": "Operation tag; present only when kind is op.",
+          "type": "string"
+        },
+        "module_type": {
+          "description": "Child module class name; present only when kind is module.",
+          "type": "string"
+        },
+        "shape": {
+          "description": "Tensor shape for ports, ops and buffers; \"\" for modules.",
+          "type": "string"
+        }
+      }
+    },
+    "Edge": {
+      "title": "Edge",
+      "description": "A directed data-flow edge between two local ids of the same module.",
+      "type": "object",
+      "required": ["from", "to", "shape", "is_skip", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "description": "Local id of the producer.",
+          "type": "string"
+        },
+        "to": {
+          "description": "Local id of the consumer.",
+          "type": "string"
+        },
+        "shape": {
+          "description": "Shape leaving the producer.",
+          "type": "string"
+        },
+        "dst_shape": {
+          "description": "Shape arriving at the consumer after the folded transforms; omitted when equal to shape.",
+          "type": "string"
+        },
+        "transforms": {
+          "description": "Transparent ops (Reshape, Transpose, RepeatKV) folded into the edge in execution order, e.g. \"Reshape [2, 16, 64] -> [32, 64]\"; omitted when empty.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "is_skip": {
+          "description": "True for the residual input of an Add whose other input is reachable from the same producer.",
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "data: activation flow. buffer: edge leaving a constant buffer.",
+          "enum": ["data", "buffer"]
+        }
+      }
+    },
+    "TensorNode": {
+      "title": "TensorNode",
+      "description": "A tensor owned by a module.",
+      "type": "object",
+      "required": ["name", "kind", "module", "shape", "elements", "bytes", "status", "act", "strategy"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Full tensor name, e.g. \"inputs.token_ids\" or \"gpt.layers.0.residual_attn\".",
+          "type": "string"
+        },
+        "kind": {
+          "description": "Tensor category.",
+          "enum": ["Param", "Input", "Buffer", "Activation"]
+        },
+        "module": {
+          "description": "Path of the owning module (\"\" for the root).",
+          "type": "string"
+        },
+        "shape": {
+          "description": "Shape string.",
+          "type": "string"
+        },
+        "elements": {
+          "description": "Number of scalars.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytes": {
+          "description": "Storage size in bytes.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "status": {
+          "description": "CUSTOM_INIT / AUTO_GRAPH for params, INPUT for inputs, BUFFER for buffers, OP_OUTPUT for activations.",
+          "enum": ["CUSTOM_INIT", "AUTO_GRAPH", "INPUT", "BUFFER", "OP_OUTPUT"]
+        },
+        "act": {
+          "description": "Producing op tag for activations, detected consuming activation for AUTO_GRAPH weights (\"bias\" for biases), otherwise \"N/A\".",
+          "type": "string"
+        },
+        "strategy": {
+          "description": "Origin, e.g. \"user input\", \"constant buffer\", \"produced by MatMul\", or the initializer for params.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

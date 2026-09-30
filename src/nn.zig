@@ -1719,10 +1719,181 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     }
 }
 
+/// 可视化测试辅助：按 model_graph.schema.json 所用的 JSON Schema 关键字子集校验 JSON
+/// ($ref, type, const, enum, minimum, required, properties, additionalProperties, items)
+const SchemaCheck = struct {
+    defs: std.json.ObjectMap,
+    /// 首个违规所在的字段名 (未违规时为空)
+    field: []const u8 = "",
 
+    fn init(schema: std.json.Value) SchemaCheck {
+        return .{ .defs = schema.object.get("$defs").?.object };
+    }
 
+    fn resolve(self: SchemaCheck, schema: std.json.ObjectMap) std.json.ObjectMap {
+        if (schema.get("$ref")) |r| {
+            const prefix = "#/$defs/";
+            std.debug.assert(std.mem.startsWith(u8, r.string, prefix));
+            return self.defs.get(r.string[prefix.len..]).?.object;
+        }
+        return schema;
+    }
 
+    fn typeMatches(name: []const u8, v: std.json.Value) bool {
+        const eql = std.mem.eql;
+        return switch (v) {
+            .null => eql(u8, name, "null"),
+            .bool => eql(u8, name, "boolean"),
+            .integer => eql(u8, name, "integer") or eql(u8, name, "number"),
+            .float, .number_string => eql(u8, name, "number"),
+            .string => eql(u8, name, "string"),
+            .array => eql(u8, name, "array"),
+            .object => eql(u8, name, "object"),
+        };
+    }
 
+    fn check(self: *SchemaCheck, schema_in: std.json.ObjectMap, v: std.json.Value) !void {
+        const schema = self.resolve(schema_in);
+        if (schema.get("type")) |t| {
+            const ok = switch (t) {
+                .string => |name| typeMatches(name, v),
+                .array => |names| blk: {
+                    for (names.items) |name| {
+                        if (typeMatches(name.string, v)) break :blk true;
+                    }
+                    break :blk false;
+                },
+                else => return error.InvalidSchema,
+            };
+            if (!ok) return error.SchemaTypeMismatch;
+        }
+        if (schema.get("const")) |c| {
+            if (v != .string or !std.mem.eql(u8, c.string, v.string)) return error.SchemaConstMismatch;
+        }
+        if (schema.get("enum")) |e| {
+            if (v != .string) return error.SchemaEnumMismatch;
+            for (e.array.items) |allowed| {
+                if (std.mem.eql(u8, allowed.string, v.string)) break;
+            } else return error.SchemaEnumMismatch;
+        }
+        if (schema.get("minimum")) |m| {
+            if (v == .integer and v.integer < m.integer) return error.SchemaBelowMinimum;
+        }
+        switch (v) {
+            .object => |obj| {
+                if (schema.get("required")) |req| {
+                    for (req.array.items) |key| {
+                        if (obj.get(key.string) == null) {
+                            self.field = key.string;
+                            return error.SchemaMissingField;
+                        }
+                    }
+                }
+                const closed = if (schema.get("additionalProperties")) |ap| ap == .bool and !ap.bool else false;
+                const props = schema.get("properties");
+                var it = obj.iterator();
+                while (it.next()) |entry| {
+                    const key = entry.key_ptr.*;
+                    if (props) |p| {
+                        if (p.object.get(key)) |sub| {
+                            self.check(sub.object, entry.value_ptr.*) catch |err| {
+                                if (self.field.len == 0) self.field = key;
+                                return err;
+                            };
+                            continue;
+                        }
+                    }
+                    if (closed) {
+                        self.field = key;
+                        return error.SchemaUnknownField;
+                    }
+                }
+            },
+            .array => |arr| {
+                if (schema.get("items")) |items| {
+                    for (arr.items) |item| try self.check(items.object, item);
+                }
+            },
+            else => {},
+        }
+    }
 
+    fn run(allocator: std.mem.Allocator, json_text: []const u8, report: bool) !void {
+        var schema = try std.json.parseFromSlice(std.json.Value, allocator, visualization.SCHEMA_JSON, .{});
+        defer schema.deinit();
+        var doc = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+        defer doc.deinit();
+        var checker = SchemaCheck.init(schema.value);
+        checker.check(schema.value.object, doc.value) catch |err| {
+            if (report) std.debug.print("schema violation {s} at field \"{s}\"\n", .{ @errorName(err), checker.field });
+            return err;
+        };
+    }
 
+    /// 校验并返回首个违规错误 (不输出诊断)
+    fn validate(allocator: std.mem.Allocator, json_text: []const u8) !void {
+        return run(allocator, json_text, false);
+    }
 
+    /// 校验导出结果；违规时输出出错字段名
+    fn expectConforms(allocator: std.mem.Allocator, json_text: []const u8) !void {
+        return run(allocator, json_text, true);
+    }
+};
+
+test "Model graph JSON export conforms to the published JSON Schema" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(24680);
+    const random = prng.random();
+
+    // 1. 多层 GPT：覆盖端口、缓冲区边、折叠变换与残差边
+    {
+        const config = transformer.GPTConfig{ .vocab_size = 64, .block_size = 8, .n_embd = 16, .n_head = 2, .n_layer = 2 };
+        var gpt = try transformer.GPT(config).init(allocator, random);
+        defer gpt.deinit(allocator);
+        gpt.setName("gpt");
+
+        var graph = autodiff.Graph.init(allocator);
+        defer graph.deinit();
+        var token_data: [2 * 4]f32 = undefined;
+        for (&token_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
+        const input_tokens = try graph.tensorNDWithData(&.{ 2, 4 }, &token_data, false);
+        input_tokens.setName("inputs.token_ids");
+        const logits = try gpt.forward(allocator, &graph, input_tokens);
+        logits.setName("outputs.logits");
+
+        const json_data = try graph.formatJson(allocator);
+        defer allocator.free(json_data);
+        try SchemaCheck.expectConforms(allocator, json_data);
+    }
+
+    // 2. 单个 Linear：最小模型
+    {
+        var linear = try core.Linear.init(allocator, 8, 4, random);
+        defer linear.deinit(allocator);
+        linear.setName("linear");
+
+        var graph = autodiff.Graph.init(allocator);
+        defer graph.deinit();
+        var x_data: [2 * 8]f32 = undefined;
+        for (&x_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i)) * 0.1;
+        const x = try graph.tensorNDWithData(&.{ 2, 8 }, &x_data, false);
+        x.setName("inputs.x");
+        const y = try linear.forward(allocator, &graph, x);
+        y.setName("outputs.y");
+
+        const json_data = try graph.formatJson(allocator);
+        defer allocator.free(json_data);
+        try SchemaCheck.expectConforms(allocator, json_data);
+    }
+
+    // 3. 校验器自身：未声明字段与错误版本均被拒绝
+    try std.testing.expectError(error.SchemaConstMismatch, SchemaCheck.validate(allocator,
+        \\{"version": "1.0", "summary": {}, "default_scope": "", "root": {}}
+    ));
+    try std.testing.expectError(error.SchemaUnknownField, SchemaCheck.validate(allocator,
+        \\{"version": "2.0", "extra": 1, "summary": {"total_params": 0, "total_bytes": 0, "param_nodes": 0, "input_nodes": 0, "buffer_nodes": 0, "activation_nodes": 0, "custom_init_count": 0, "auto_graph_count": 0, "total_nodes": 0},
+        \\ "default_scope": "", "root": {"name": "root", "path": "", "kind": "module", "module_type": "Model", "formula": null, "total_params": 0, "total_bytes": 0, "param_count": 0, "node_count": 0,
+        \\ "children": [], "parameters": [], "ops": [], "ports": {"inputs": [], "outputs": []}, "flow_nodes": [], "edges": [], "nodes": []}}
+    ));
+}
