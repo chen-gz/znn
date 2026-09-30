@@ -233,8 +233,27 @@ pub const Op = struct {
                 loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
             },
             .Reshape => {
-                // A.data and C.data point to the same memory buffer (aliased).
-                // Do not use @memcpy as it panics on overlapping identical memory.
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                if (!C.is_view) {
+                    var coord = [_]usize{0} ** 8;
+                    const len = A.shape.len;
+                    for (0..C.data.len) |dest_i| {
+                        var src_idx: usize = 0;
+                        for (0..len) |d| {
+                            src_idx += coord[d] * A.strides.dims[d];
+                        }
+                        C.data[dest_i] = A.data[src_idx];
+
+                        var d = len;
+                        while (d > 0) {
+                            d -= 1;
+                            coord[d] += 1;
+                            if (coord[d] < A.shape.dims[d]) break;
+                            coord[d] = 0;
+                        }
+                    }
+                }
             },
             .Transpose => {
                 const A = self.inputs[0];
@@ -1151,16 +1170,36 @@ pub const Op = struct {
             // ====================================================================
             // 5. 形状变换反向传播 (Reshape Backward)
             // ====================================================================
-            // 前向公式: C = reshape(A)，仅改变形状元数据，不修改物理排列
+            // 前向公式: C = reshape(A)
             // 数学推导:
-            //   Reshape 没有数学上的参数变换，因此其梯度传递就是将输出梯度 dC
-            //   以一维平铺形式直接拷回/累加到输入 A 的梯度 dA 缓冲区中。
+            //   Reshape 没有数学上的参数变换，若 A 为连续布局则直接逐元素累加，
+            //   若 A 为非连续跨步视图则按 A.strides 累加回对应的物理偏移位置。
             .Reshape => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
                 if (A.requires_grad) {
-                    for (C.grad, 0..) |g, i| {
-                        A.grad[i] += g;
+                    if (A.isContiguous() and A.grad.len >= C.grad.len) {
+                        for (C.grad, 0..) |g, i| {
+                            A.grad[i] += g;
+                        }
+                    } else {
+                        var coord = [_]usize{0} ** 8;
+                        const len = A.shape.len;
+                        for (C.grad) |g| {
+                            var src_idx: usize = 0;
+                            for (0..len) |d| {
+                                src_idx += coord[d] * A.strides.dims[d];
+                            }
+                            A.grad[src_idx] += g;
+
+                            var d = len;
+                            while (d > 0) {
+                                d -= 1;
+                                coord[d] += 1;
+                                if (coord[d] < A.shape.dims[d]) break;
+                                coord[d] = 0;
+                            }
+                        }
                     }
                 }
             },
@@ -1351,14 +1390,17 @@ pub const Op = struct {
                 const B = self.inputs[1];
                 const C = self.outputs[0];
 
-                if (A.shape.eq(B.shape)) {
+                if (A.shape.eq(B.shape) and A.isContiguous() and B.isContiguous() and
+                    (!A.requires_grad or A.grad.len >= C.grad.len) and
+                    (!B.requires_grad or B.grad.len >= C.grad.len))
+                {
                     if (A.requires_grad) {
-                        for (A.grad, C.grad) |*a_g, c_g| {
+                        for (A.grad[0..C.grad.len], C.grad) |*a_g, c_g| {
                             a_g.* += c_g;
                         }
                     }
                     if (B.requires_grad) {
-                        for (B.grad, C.grad) |*b_g, c_g| {
+                        for (B.grad[0..C.grad.len], C.grad) |*b_g, c_g| {
                             b_g.* += c_g;
                         }
                     }
@@ -1400,14 +1442,17 @@ pub const Op = struct {
                 const B = self.inputs[1];
                 const C = self.outputs[0];
 
-                if (A.shape.eq(B.shape)) {
+                if (A.shape.eq(B.shape) and A.isContiguous() and B.isContiguous() and
+                    (!A.requires_grad or A.grad.len >= C.grad.len) and
+                    (!B.requires_grad or B.grad.len >= C.grad.len))
+                {
                     if (A.requires_grad) {
-                        for (A.grad, C.grad) |*a_g, c_g| {
+                        for (A.grad[0..C.grad.len], C.grad) |*a_g, c_g| {
                             a_g.* += c_g;
                         }
                     }
                     if (B.requires_grad) {
-                        for (B.grad, C.grad) |*b_g, c_g| {
+                        for (B.grad[0..C.grad.len], C.grad) |*b_g, c_g| {
                             b_g.* -= c_g;
                         }
                     }
@@ -1449,14 +1494,18 @@ pub const Op = struct {
                 const B = self.inputs[1];
                 const C = self.outputs[0];
 
-                if (A.shape.eq(B.shape)) {
+                if (A.shape.eq(B.shape) and A.isContiguous() and B.isContiguous() and
+                    A.data.len >= C.grad.len and B.data.len >= C.grad.len and
+                    (!A.requires_grad or A.grad.len >= C.grad.len) and
+                    (!B.requires_grad or B.grad.len >= C.grad.len))
+                {
                     if (A.requires_grad) {
-                        for (A.grad, C.grad, B.data) |*a_g, c_g, b_val| {
+                        for (A.grad[0..C.grad.len], C.grad, B.data[0..C.grad.len]) |*a_g, c_g, b_val| {
                             a_g.* += c_g * b_val;
                         }
                     }
                     if (B.requires_grad) {
-                        for (B.grad, C.grad, A.data) |*b_g, c_g, a_val| {
+                        for (B.grad[0..C.grad.len], C.grad, A.data[0..C.grad.len]) |*b_g, c_g, a_val| {
                             b_g.* += c_g * a_val;
                         }
                     }
@@ -1498,14 +1547,18 @@ pub const Op = struct {
                 const B = self.inputs[1];
                 const C = self.outputs[0];
 
-                if (A.shape.eq(B.shape)) {
+                if (A.shape.eq(B.shape) and A.isContiguous() and B.isContiguous() and
+                    A.data.len >= C.grad.len and B.data.len >= C.grad.len and
+                    (!A.requires_grad or A.grad.len >= C.grad.len) and
+                    (!B.requires_grad or B.grad.len >= C.grad.len))
+                {
                     if (A.requires_grad) {
-                        for (A.grad, C.grad, B.data) |*a_g, c_g, b_val| {
+                        for (A.grad[0..C.grad.len], C.grad, B.data[0..C.grad.len]) |*a_g, c_g, b_val| {
                             a_g.* += c_g / b_val;
                         }
                     }
                     if (B.requires_grad) {
-                        for (B.grad, C.grad, A.data, B.data) |*b_g, c_g, a_val, b_val| {
+                        for (B.grad[0..C.grad.len], C.grad, A.data[0..C.grad.len], B.data[0..C.grad.len]) |*b_g, c_g, a_val, b_val| {
                             b_g.* -= c_g * a_val / (b_val * b_val);
                         }
                     }

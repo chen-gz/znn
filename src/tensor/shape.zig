@@ -39,6 +39,16 @@ pub const Shape = struct {
         }
         return true;
     }
+
+    /// 计算张量逻辑元素总数
+    pub fn numel(self: Shape) usize {
+        if (self.len == 0) return 0;
+        var total: usize = 1;
+        for (0..self.len) |i| {
+            total *= self.dims[i];
+        }
+        return total;
+    }
 };
 
 /// 计算行优先（Row-Major）布局下的连续跨度（Contiguous Strides）
@@ -65,6 +75,22 @@ pub fn computeContiguousStrides(shape: Shape) Shape {
         i -= 1;
     }
     return strides;
+}
+
+/// 校验给定的 (shape, strides) 是否满足行优先紧密连续布局
+/// 注：若某维度大小为 1，其跨度步长不影响物理偏移，视为连续。
+pub fn isContiguousStrides(shape: Shape, strides: Shape) bool {
+    if (shape.len != strides.len) return false;
+    if (shape.len == 0) return true;
+    var s: usize = 1;
+    var i: usize = shape.len - 1;
+    while (true) {
+        if (shape.dims[i] != 1 and strides.dims[i] != s) return false;
+        s *= shape.dims[i];
+        if (i == 0) break;
+        i -= 1;
+    }
+    return true;
 }
 
 /// 交换指定维度的形状（通常在转置算子中配合 strides 交换实现快速视图变换）
@@ -150,15 +176,19 @@ pub fn broadcastBinaryOpRaw(
     B_strides: Shape,
     comptime op: fn (f32, f32) f32,
 ) void {
-    // 快速路径：若形状完全相同且连续，直接单层循环 SIMD 扁平迭代
-    if (A_shape.eq(B_shape)) {
-        for (C_data, A_data, B_data) |*c_val, a_val, b_val| {
+    // 快速路径：若形状完全相同且均为连续行优先跨度，直接单层循环扁平迭代
+    if (A_shape.eq(B_shape) and A_shape.eq(C_shape) and
+        isContiguousStrides(A_shape, A_strides) and
+        isContiguousStrides(B_shape, B_strides) and
+        A_data.len >= C_data.len and B_data.len >= C_data.len)
+    {
+        for (C_data, A_data[0..C_data.len], B_data[0..C_data.len]) |*c_val, a_val, b_val| {
             c_val.* = op(a_val, b_val);
         }
         return;
     }
 
-    // 广播路径：基于步长为 0 的虚拟映射执行多维坐标遍历
+    // 广播或非连续跨步路径：基于虚拟跨度执行多维坐标遍历
     const a_strides = computeBroadcastStrides(A_shape, A_strides, C_shape);
     const b_strides = computeBroadcastStrides(B_shape, B_strides, C_shape);
     const len = C_shape.len;
@@ -185,4 +215,5 @@ pub fn broadcastBinaryOpRaw(
         }
     }
 }
+
 

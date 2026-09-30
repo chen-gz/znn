@@ -272,27 +272,41 @@ pub const Graph = struct {
         const shape = try Shape.fromSlice(new_shape_slice);
         const strides = computeContiguousStrides(shape);
 
-        var old_total: usize = 1;
-        for (0..A.shape.len) |i| {
-            old_total *= A.shape.dims[i];
-        }
-        var new_total: usize = 1;
-        for (new_shape_slice) |dim| {
-            new_total *= dim;
-        }
+        const old_total = A.shape.numel();
+        const new_total = shape.numel();
         if (old_total != new_total) return error.ShapeMismatch;
 
-
         const req_grad = self.enable_grad and A.requires_grad;
+        const can_alias = A.isContiguous() and A.data.len >= new_total;
 
         C.* = Tensor{
-            .data = A.data, // 共享前向数据
+            .data = if (can_alias) A.data[0..new_total] else try allocator.alloc(f32, new_total),
             .grad = if (req_grad) try allocator.alloc(f32, new_total) else &.{},
             .shape = shape,
             .strides = strides,
             .requires_grad = req_grad,
             .creator = null,
+            .is_view = can_alias,
         };
+        if (!can_alias) {
+            var coord = [_]usize{0} ** 8;
+            const len = A.shape.len;
+            for (0..new_total) |dest_i| {
+                var src_idx: usize = 0;
+                for (0..len) |d| {
+                    src_idx += coord[d] * A.strides.dims[d];
+                }
+                C.data[dest_i] = A.data[src_idx];
+
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < A.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
+            }
+        }
         if (req_grad) {
             @memset(C.grad, 0.0);
         }

@@ -5,6 +5,7 @@ const c = @import("../cblas.zig");
 const shape_mod = @import("shape.zig");
 pub const Shape = shape_mod.Shape;
 pub const computeContiguousStrides = shape_mod.computeContiguousStrides;
+pub const isContiguousStrides = shape_mod.isContiguousStrides;
 pub const transposeShape = shape_mod.transposeShape;
 pub const broadcastShapes = shape_mod.broadcastShapes;
 pub const computeBroadcastStrides = shape_mod.computeBroadcastStrides;
@@ -549,14 +550,8 @@ pub const Tensor = struct {
         }
         const shape = try Shape.fromSlice(new_shape_slice);
         const strides = computeContiguousStrides(shape);
-        var old_total: usize = 1;
-        for (0..self.shape.len) |i| {
-            old_total *= self.shape.dims[i];
-        }
-        var new_total: usize = 1;
-        for (new_shape_slice) |dim| {
-            new_total *= dim;
-        }
+        const old_total = self.shape.numel();
+        const new_total = shape.numel();
         if (old_total != new_total) return error.ShapeMismatch;
 
         const C = try allocator.create(Tensor);
@@ -568,12 +563,50 @@ pub const Tensor = struct {
             .requires_grad = false,
             .creator = null,
         };
-        @memcpy(C.data, self.data);
+        if (self.isContiguous() and self.data.len >= new_total) {
+            @memcpy(C.data, self.data[0..new_total]);
+        } else {
+            var coord = [_]usize{0} ** 8;
+            const len = self.shape.len;
+            for (0..new_total) |dest_i| {
+                var src_idx: usize = 0;
+                for (0..len) |d| {
+                    src_idx += coord[d] * self.strides.dims[d];
+                }
+                C.data[dest_i] = self.data[src_idx];
+
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < self.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
+            }
+        }
         return C;
     }
 
     pub fn split(self: *Tensor, num_splits: usize, dim: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror![]*Tensor {
         return tensorSplit(allocator, self, num_splits, dim, graph);
+    }
+
+    /// 零拷贝维度转置视图（仅交换 shape 与 strides，共享底层 data 与 grad 缓冲区）
+    pub fn transposeView(self: *Tensor, dim0: usize, dim1: usize, allocator: std.mem.Allocator) !*Tensor {
+        if (dim0 >= self.shape.len or dim1 >= self.shape.len) {
+            return error.DimensionOutOfBounds;
+        }
+        const view = try allocator.create(Tensor);
+        view.* = Tensor{
+            .data = self.data,
+            .grad = self.grad,
+            .shape = transposeShape(self.shape, dim0, dim1),
+            .strides = transposeShape(self.strides, dim0, dim1),
+            .requires_grad = self.requires_grad,
+            .creator = null,
+            .is_view = true,
+        };
+        return view;
     }
 
     pub fn transpose(self: *Tensor, dim0: usize, dim1: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
@@ -1304,8 +1337,11 @@ pub const Tensor = struct {
     }
 
     pub fn isContiguous(self: Tensor) bool {
-        const contig = computeContiguousStrides(self.shape);
-        return self.strides.eq(contig);
+        return isContiguousStrides(self.shape, self.strides);
+    }
+
+    pub fn numel(self: Tensor) usize {
+        return self.shape.numel();
     }
 
     /// 通用多维张量沿指定轴或全局求和归约 (Sum Reduction)
@@ -1399,8 +1435,28 @@ pub const Tensor = struct {
         } else {
             // 全局归约 (Global reduction over all elements)
             var total: f32 = 0.0;
-            for (self.data) |v| {
-                total += v;
+            const elem_count = self.shape.numel();
+            if (self.isContiguous() and self.data.len >= elem_count) {
+                for (self.data[0..elem_count]) |v| {
+                    total += v;
+                }
+            } else {
+                var coord = [_]usize{0} ** 8;
+                const len = self.shape.len;
+                for (0..elem_count) |_| {
+                    var src_idx: usize = 0;
+                    for (0..len) |d| {
+                        src_idx += coord[d] * self.strides.dims[d];
+                    }
+                    total += self.data[src_idx];
+                    var d = len;
+                    while (d > 0) {
+                        d -= 1;
+                        coord[d] += 1;
+                        if (coord[d] < self.shape.dims[d]) break;
+                        coord[d] = 0;
+                    }
+                }
             }
 
             if (keepdims) {
@@ -1420,7 +1476,7 @@ pub const Tensor = struct {
     /// 通用多维张量沿指定轴或全局均值归约 (Mean Reduction)
     pub fn mean(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
         const C = try self.sum(axis, keepdims, allocator);
-        const count = if (axis) |ax| @as(f32, @floatFromInt(self.shape.dims[ax])) else @as(f32, @floatFromInt(self.data.len));
+        const count = if (axis) |ax| @as(f32, @floatFromInt(self.shape.dims[ax])) else @as(f32, @floatFromInt(self.shape.numel()));
         for (C.data) |*val| {
             val.* /= count;
         }
@@ -1438,7 +1494,7 @@ pub const Tensor = struct {
         defer free(allocator, sq);
 
         const sum_sq = try sq.sum(axis, keepdims, allocator);
-        const count = if (axis) |ax| self.shape.dims[ax] else self.data.len;
+        const count = if (axis) |ax| self.shape.dims[ax] else self.shape.numel();
         if (count <= ddof) {
             free(allocator, sum_sq);
             return error.InvalidDDOF;
@@ -1466,8 +1522,10 @@ pub const Tensor = struct {
         const target_shape = try broadcastShapes(cond.shape, s_xy);
         const C = try zeros(allocator, target_shape.dims[0..target_shape.len]);
 
-        if (cond.shape.eq(x.shape) and x.shape.eq(y.shape) and cond.isContiguous() and x.isContiguous() and y.isContiguous()) {
-            for (C.data, cond.data, x.data, y.data) |*out_v, c_v, x_v, y_v| {
+        if (cond.shape.eq(x.shape) and x.shape.eq(y.shape) and cond.isContiguous() and x.isContiguous() and y.isContiguous() and
+            cond.data.len >= C.data.len and x.data.len >= C.data.len and y.data.len >= C.data.len)
+        {
+            for (C.data, cond.data[0..C.data.len], x.data[0..C.data.len], y.data[0..C.data.len]) |*out_v, c_v, x_v, y_v| {
                 out_v.* = if (c_v != 0.0) x_v else y_v;
             }
             return C;
@@ -1506,10 +1564,31 @@ pub const Tensor = struct {
     /// 根据 mask 将满足条件 (mask != 0) 的元素赋值为指定标量值（返回新分配副本）
     pub fn maskedFill(self: *Tensor, mask: *Tensor, value: f32, allocator: std.mem.Allocator) !*Tensor {
         if (!self.shape.eq(mask.shape)) return error.ShapeMismatch;
-        const C = try self.clone(allocator);
-        for (C.data, mask.data) |*out_v, m_v| {
-            if (m_v != 0.0) {
-                out_v.* = value;
+        const C = try self.contiguous(allocator);
+        if (mask.isContiguous() and mask.data.len >= C.data.len) {
+            for (C.data, mask.data[0..C.data.len]) |*out_v, m_v| {
+                if (m_v != 0.0) {
+                    out_v.* = value;
+                }
+            }
+        } else {
+            var coord = [_]usize{0} ** 8;
+            const len = mask.shape.len;
+            for (C.data) |*out_v| {
+                var m_idx: usize = 0;
+                for (0..len) |d| {
+                    m_idx += coord[d] * mask.strides.dims[d];
+                }
+                if (mask.data[m_idx] != 0.0) {
+                    out_v.* = value;
+                }
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < mask.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
             }
         }
         return C;
@@ -1533,7 +1612,7 @@ pub const Tensor = struct {
             if (ax >= self.shape.len) return error.DimensionOutOfBounds;
             if (self.shape.dims[ax] != 1) return error.CannotSqueezeDimension;
             if (self.shape.len == 1) {
-                return self.clone(allocator);
+                return self.contiguous(allocator);
             }
             var new_dims = [_]usize{0} ** 8;
             var dest_d: usize = 0;
@@ -1651,8 +1730,8 @@ pub const Tensor = struct {
     pub fn clip(self: *Tensor, min_val: f32, max_val: f32, allocator: std.mem.Allocator) !*Tensor {
         if (min_val > max_val) return error.InvalidRange;
         const out = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        if (self.isContiguous()) {
-            for (self.data, out.data) |x, *y| {
+        if (self.isContiguous() and self.data.len >= out.data.len) {
+            for (self.data[0..out.data.len], out.data) |x, *y| {
                 y.* = std.math.clamp(x, min_val, max_val);
             }
         } else {
@@ -1793,8 +1872,9 @@ pub const Tensor = struct {
         var count: usize = 0;
         var coord = [_]usize{0} ** 8;
         const len = self.shape.len;
+        const elem_count = self.shape.numel();
 
-        for (0..self.data.len) |_| {
+        for (0..elem_count) |_| {
             var src_idx: usize = 0;
             for (0..len) |d| {
                 src_idx += coord[d] * self.strides.dims[d];
@@ -1816,7 +1896,7 @@ pub const Tensor = struct {
 
         @memset(&coord, 0);
         var row: usize = 0;
-        for (0..self.data.len) |_| {
+        for (0..elem_count) |_| {
             var src_idx: usize = 0;
             for (0..len) |d| {
                 src_idx += coord[d] * self.strides.dims[d];
@@ -1843,8 +1923,8 @@ pub const Tensor = struct {
         const out = try GenericTensor(DestT).init(allocator, self.shape.dims[0..self.shape.len], null);
         errdefer out.deinit(allocator);
 
-        if (self.isContiguous()) {
-            for (self.data, 0..) |val, i| {
+        if (self.isContiguous() and self.data.len >= out.data.len) {
+            for (self.data[0..out.data.len], 0..) |val, i| {
                 out.data[i] = convertScalar(DestT, f32, val);
             }
         } else {

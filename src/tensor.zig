@@ -8,6 +8,7 @@ pub const ops = @import("tensor/ops.zig");
 // --- Re-export shape and stride utilities ---
 pub const Shape = shape.Shape;
 pub const computeContiguousStrides = shape.computeContiguousStrides;
+pub const isContiguousStrides = shape.isContiguousStrides;
 pub const transposeShape = shape.transposeShape;
 pub const broadcastShapes = shape.broadcastShapes;
 pub const computeBroadcastStrides = shape.computeBroadcastStrides;
