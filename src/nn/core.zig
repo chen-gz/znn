@@ -448,13 +448,34 @@ pub fn deinitModel(model: anytype, allocator: std.mem.Allocator) void {
         const field_info = @typeInfo(FieldType);
         if (FieldType == *Tensor) {
             freePersistentTensor(allocator, @field(model, field.name));
+        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
+            if (@field(model, field.name)) |t| {
+                freePersistentTensor(allocator, t);
+            }
         } else if (FieldType == []f32) {
             allocator.free(@field(model, field.name));
+        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
+            const ElemT = field_info.pointer.child;
+            if (ElemT == *Tensor) {
+                for (@field(model, field.name)) |t| {
+                    freePersistentTensor(allocator, t);
+                }
+                allocator.free(@field(model, field.name));
+            } else if (@typeInfo(ElemT) == .@"struct") {
+                for (@field(model, field.name)) |*item| {
+                    deinitModel(item, allocator);
+                }
+                allocator.free(@field(model, field.name));
+            }
         } else if (field_info == .@"struct") {
             deinitModel(&@field(model, field.name), allocator);
         } else if (field_info == .@"array") {
-            const elem_info = @typeInfo(field_info.@"array".child);
-            if (elem_info == .@"struct") {
+            const ElemT = field_info.@"array".child;
+            if (ElemT == *Tensor) {
+                for (@field(model, field.name)) |t| {
+                    freePersistentTensor(allocator, t);
+                }
+            } else if (@typeInfo(ElemT) == .@"struct") {
                 for (&@field(model, field.name)) |*item| {
                     deinitModel(item, allocator);
                 }
@@ -471,11 +492,30 @@ pub fn zeroGradModel(model: anytype) void {
         const field_info = @typeInfo(FieldType);
         if (FieldType == *Tensor) {
             @field(model, field.name).zeroGrad();
+        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
+            if (@field(model, field.name)) |t| {
+                t.zeroGrad();
+            }
+        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
+            const ElemT = field_info.pointer.child;
+            if (ElemT == *Tensor) {
+                for (@field(model, field.name)) |t| {
+                    t.zeroGrad();
+                }
+            } else if (@typeInfo(ElemT) == .@"struct") {
+                for (@field(model, field.name)) |*item| {
+                    zeroGradModel(item);
+                }
+            }
         } else if (field_info == .@"struct") {
             zeroGradModel(&@field(model, field.name));
         } else if (field_info == .@"array") {
-            const elem_info = @typeInfo(field_info.@"array".child);
-            if (elem_info == .@"struct") {
+            const ElemT = field_info.@"array".child;
+            if (ElemT == *Tensor) {
+                for (@field(model, field.name)) |t| {
+                    t.zeroGrad();
+                }
+            } else if (@typeInfo(ElemT) == .@"struct") {
                 for (&@field(model, field.name)) |*item| {
                     zeroGradModel(item);
                 }
@@ -494,6 +534,9 @@ pub fn collectParameters(model: anytype, allocator: std.mem.Allocator) ![]*Tenso
 fn collectParametersInternal(model: anytype, list: *std.ArrayList(*Tensor), allocator: std.mem.Allocator) !void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);
+    if (@hasField(T, "lora_a") and @hasField(T, "lora_b") and @hasField(T, "weight")) {
+        model.weight.requires_grad = false;
+    }
     inline for (info.@"struct".fields) |field| {
         const FieldType = field.type;
         if (@sizeOf(FieldType) == 0) continue;
@@ -509,11 +552,30 @@ fn collectParametersInternal(model: anytype, list: *std.ArrayList(*Tensor), allo
                     try list.append(allocator, tensor_ptr);
                 }
             }
+        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
+            const ElemT = field_info.pointer.child;
+            if (ElemT == *Tensor) {
+                for (@field(model, field.name)) |tensor_ptr| {
+                    if (tensor_ptr.requires_grad) {
+                        try list.append(allocator, tensor_ptr);
+                    }
+                }
+            } else if (@typeInfo(ElemT) == .@"struct") {
+                for (@field(model, field.name)) |*item| {
+                    try collectParametersInternal(item, list, allocator);
+                }
+            }
         } else if (field_info == .@"struct") {
             try collectParametersInternal(&@field(model, field.name), list, allocator);
         } else if (field_info == .@"array") {
-            const elem_info = @typeInfo(field_info.@"array".child);
-            if (elem_info == .@"struct") {
+            const ElemT = field_info.@"array".child;
+            if (ElemT == *Tensor) {
+                for (@field(model, field.name)) |tensor_ptr| {
+                    if (tensor_ptr.requires_grad) {
+                        try list.append(allocator, tensor_ptr);
+                    }
+                }
+            } else if (@typeInfo(ElemT) == .@"struct") {
                 for (&@field(model, field.name)) |*item| {
                     try collectParametersInternal(item, list, allocator);
                 }

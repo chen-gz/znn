@@ -103,8 +103,8 @@
   - [x] 修复 [`broadcastBinaryOpRaw`](../src/tensor/shape.zig) 及 [`Op.backward`](../src/autodiff/op.zig) 中仅凭 `A_shape.eq(B_shape)` 就跳过步长与 `offset` 检查直接遍历底层切片的越界/读错数据问题。
   - [x] 修复 [`Graph.reshape`](../src/autodiff/graph.zig) 对非连续张量直接共享 `data` 切片且未维护 `is_view` 的隐患。
 
-- [ ] **1.5.5 Comptime 模型反射支持动态切片 `[]T` 与可选参数 `?*Tensor` (`nn/core.zig`)**
-  - [ ] 在 [`collectParametersInternal`](../src/nn/core.zig)、[`deinitModel`](../src/nn/core.zig) 与 [`zeroGradModel`](../src/nn/core.zig) 中支持结构体切片字段（如 `MoELayer` 的 `[]MLP`、`StackedLSTM` 的 `[]LSTMCell`）及 `?*Tensor` 字段（如 `ConvTranspose2D.bias`、`LoRALinear.bias`），并正确冻结 `LoRALinear` 基础权重梯度。
+- [x] **1.5.5 Comptime 模型反射支持动态切片 `[]T` 与可选参数 `?*Tensor` (`nn/core.zig`)**
+  - [x] 在 [`collectParametersInternal`](../src/nn/core.zig)、[`deinitModel`](../src/nn/core.zig) 与 [`zeroGradModel`](../src/nn/core.zig) 中支持结构体切片字段（如 `MoELayer` 的 `[]MLP`、`StackedLSTM` 的 `[]LSTMCell`）及 `?*Tensor` 字段（如 `ConvTranspose2D.bias`、`LoRALinear.bias`），并正确冻结 `LoRALinear` 基础权重梯度。
 
 - [ ] **1.5.6 Safetensors 序列化覆盖度与无序加载兼容性 (`nn/serialization.zig`)**
   - [ ] 在 [`writeModelTensors`](../src/nn/serialization.zig)、[`writeModelData`](../src/nn/serialization.zig) 与 [`loadModelTensors`](../src/nn/serialization.zig) 中支持 `?*Tensor` 与子模块切片 `[]T`。

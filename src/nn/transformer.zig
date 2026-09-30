@@ -2153,10 +2153,33 @@ pub const LoRALinear = struct {
         lora_alpha: f32,
         random: std.Random,
     ) !LoRALinear {
+        return initWithBias(allocator, in_features, out_features, r, lora_alpha, false, random);
+    }
+
+    pub fn initWithBias(
+        allocator: std.mem.Allocator,
+        in_features: usize,
+        out_features: usize,
+        r: usize,
+        lora_alpha: f32,
+        use_bias: bool,
+        random: std.Random,
+    ) !LoRALinear {
         // 冻结的基础权重
         const weight = try createPersistentTensor(allocator, in_features, out_features, false);
         errdefer freePersistentTensor(allocator, weight);
         initializeWeights(random, weight.data, in_features);
+        weight.is_custom_initialized = true;
+
+        var bias: ?*Tensor = null;
+        if (use_bias) {
+            const b = try createPersistentTensor(allocator, 1, out_features, true);
+            errdefer freePersistentTensor(allocator, b);
+            @memset(b.data, 0.0);
+            b.is_custom_initialized = true;
+            bias = b;
+        }
+        errdefer if (bias) |b| freePersistentTensor(allocator, b);
 
         // 可微调低秩旁路 A：高斯初始化
         const lora_a = try createPersistentTensor(allocator, in_features, r, true);
@@ -2172,7 +2195,7 @@ pub const LoRALinear = struct {
 
         return LoRALinear{
             .weight = weight,
-            .bias = null,
+            .bias = bias,
             .lora_a = lora_a,
             .lora_b = lora_b,
             .in_features = in_features,
@@ -2190,6 +2213,7 @@ pub const LoRALinear = struct {
     }
 
     pub fn zeroGrad(self: LoRALinear) void {
+        self.weight.zeroGrad();
         self.lora_a.zeroGrad();
         self.lora_b.zeroGrad();
         if (self.bias) |b| b.zeroGrad();
