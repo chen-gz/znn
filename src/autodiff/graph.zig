@@ -1446,6 +1446,40 @@ pub const Graph = struct {
         return C;
     }
 
+    pub fn avgpool2d(self: *Graph, A: *Tensor, kernel_size: usize, stride: usize) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.avgpool2d(kernel_size, stride, allocator, null);
+        C.scope = self.currentScope();
+
+        const req_grad = self.enable_grad and A.requires_grad;
+        C.requires_grad = req_grad;
+        if (req_grad) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, C);
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 1);
+            inputs[0] = A;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = C;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .AvgPool2D,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .AvgPool2D = .{ .kernel_size = kernel_size, .stride = stride } },
+            };
+            C.creator = o;
+            try self.recordOp(o);
+        }
+
+        return C;
+    }
+
     pub fn softmax(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.softmax(allocator, null);
@@ -1505,6 +1539,182 @@ pub const Graph = struct {
                 .inputs = inputs,
                 .outputs = outputs,
                 .context = .{ .RmsNorm = .{ .eps = eps } },
+            };
+            Y.creator = o;
+            try self.recordOp(o);
+        }
+
+        return Y;
+    }
+
+    pub fn layerNorm(self: *Graph, X: *Tensor, G: *Tensor, B: *Tensor, eps: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const Y = try X.layerNorm(G, B, eps, allocator, null);
+        Y.scope = self.currentScope();
+
+        const req_grad = self.enable_grad and (X.requires_grad or G.requires_grad or B.requires_grad);
+        Y.requires_grad = req_grad;
+        if (req_grad) {
+            Y.grad = try allocator.alloc(f32, Y.data.len);
+            @memset(Y.grad, 0.0);
+        }
+
+        try self.tensors.append(self.backing_allocator, Y);
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 3);
+            inputs[0] = X;
+            inputs[1] = G;
+            inputs[2] = B;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = Y;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .LayerNorm,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .LayerNorm = .{ .eps = eps } },
+            };
+            Y.creator = o;
+            try self.recordOp(o);
+        }
+
+        return Y;
+    }
+
+    pub fn batchNorm2d(
+        self: *Graph,
+        X: *Tensor,
+        G: *Tensor,
+        B: *Tensor,
+        running_mean: *Tensor,
+        running_var: *Tensor,
+        eps: f32,
+        momentum: f32,
+        training: bool,
+    ) !*Tensor {
+        if (X.shape.len != 4) return error.IncompatibleDimensions;
+        const N = X.shape.dims[0];
+        const C = X.shape.dims[1];
+        const H = X.shape.dims[2];
+        const W = X.shape.dims[3];
+        if (G.data.len != C or B.data.len != C or running_mean.data.len != C or running_var.data.len != C) {
+            return error.ShapeMismatch;
+        }
+
+        const allocator = self.arena.allocator();
+        const req_grad = self.enable_grad and (X.requires_grad or G.requires_grad or B.requires_grad);
+        const Y = try self.tensorND(&.{ N, C, H, W }, req_grad);
+
+        const save_mean = try allocator.alloc(f32, C);
+        const save_inv_std = try allocator.alloc(f32, C);
+
+        const spatial_size = H * W;
+        const total_samples_f = @as(f32, @floatFromInt(N * spatial_size));
+
+        for (0..C) |c| {
+            var mean_val: f32 = 0.0;
+            var var_val: f32 = 0.0;
+
+            if (training) {
+                var sum_val: f32 = 0.0;
+                for (0..N) |n| {
+                    const c_slice = X.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
+                    for (c_slice) |val| sum_val += val;
+                }
+                mean_val = sum_val / total_samples_f;
+
+                var var_sum: f32 = 0.0;
+                for (0..N) |n| {
+                    const c_slice = X.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
+                    for (c_slice) |val| {
+                        const diff = val - mean_val;
+                        var_sum += diff * diff;
+                    }
+                }
+                var_val = var_sum / total_samples_f;
+
+                running_mean.data[c] = (1.0 - momentum) * running_mean.data[c] + momentum * mean_val;
+                running_var.data[c] = (1.0 - momentum) * running_var.data[c] + momentum * var_val;
+            } else {
+                mean_val = running_mean.data[c];
+                var_val = running_var.data[c];
+            }
+
+            const inv_std = 1.0 / @sqrt(var_val + eps);
+            save_mean[c] = mean_val;
+            save_inv_std[c] = inv_std;
+
+            const g_val = G.data[c];
+            const b_val = B.data[c];
+
+            for (0..N) |n| {
+                const in_slice = X.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
+                const out_slice = Y.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
+                for (in_slice, out_slice) |val, *o| {
+                    o.* = (val - mean_val) * inv_std * g_val + b_val;
+                }
+            }
+        }
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 3);
+            inputs[0] = X;
+            inputs[1] = G;
+            inputs[2] = B;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = Y;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .BatchNorm2d,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .BatchNorm2d = .{
+                    .eps = eps,
+                    .training = training,
+                    .save_mean = save_mean,
+                    .save_inv_std = save_inv_std,
+                } },
+            };
+            Y.creator = o;
+            try self.recordOp(o);
+        }
+
+        return Y;
+    }
+
+    pub fn dropout(self: *Graph, X: *Tensor, p: f32, random: std.Random) !*Tensor {
+        const allocator = self.arena.allocator();
+        const req_grad = self.enable_grad and X.requires_grad;
+        const Y = try self.tensorND(X.shape.dims[0..X.shape.len], req_grad);
+
+        const mask_scale = try allocator.alloc(f32, X.data.len);
+        const scale = 1.0 / (1.0 - p);
+
+        for (X.data, Y.data, mask_scale) |val, *o, *m| {
+            if (random.float(f32) < p) {
+                m.* = 0.0;
+                o.* = 0.0;
+            } else {
+                m.* = scale;
+                o.* = val * scale;
+            }
+        }
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 1);
+            inputs[0] = X;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = Y;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .Dropout,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{ .Dropout = .{ .mask_scale = mask_scale } },
             };
             Y.creator = o;
             try self.recordOp(o);
@@ -1686,9 +1896,19 @@ pub const Graph = struct {
         // 如果已经被层的 customInit 初始化过，则坚决跳过，绝不覆盖！
         if (!t.requires_grad or t.is_custom_initialized or t.creator != null) return;
 
-        // 1. 如果是 1D 偏置向量 (Shape 类似 [out_features] 或 [1, out_features] 且为加法偏置)
+        // 1. 如果是 1D 参数向量 (归一化缩放因子 gamma 初始化为 1.0，偏置向量初始化为 0.0)
         if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
-            // 默认置零偏置
+            for (self.ops.items) |op| {
+                switch (op.op_type) {
+                    .RmsNorm, .LayerNorm, .BatchNorm2d => {
+                        if (op.inputs.len >= 2 and op.inputs[1] == t) {
+                            @memset(t.data, 1.0);
+                            return;
+                        }
+                    },
+                    else => {},
+                }
+            }
             @memset(t.data, 0.0);
             return;
         }

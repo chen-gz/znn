@@ -923,6 +923,56 @@ pub const Tensor = struct {
         return out;
     }
 
+    pub fn avgpool2d(self: *Tensor, kernel_size: usize, stride: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.avgpool2d(self, kernel_size, stride);
+        }
+        if (self.shape.len != 4) return error.IncompatibleDimensions;
+        if (stride == 0 or kernel_size == 0) return error.InvalidStride;
+        const N = self.shape.dims[0];
+        const C = self.shape.dims[1];
+        const H = self.shape.dims[2];
+        const W = self.shape.dims[3];
+        if (kernel_size > H or kernel_size > W) return error.KernelBiggerThanInput;
+
+        const out_h = (H - kernel_size) / stride + 1;
+        const out_w = (W - kernel_size) / stride + 1;
+        const out = try zeros(allocator, &.{ N, C, out_h, out_w });
+        const pool_area = @as(f32, @floatFromInt(kernel_size * kernel_size));
+
+        const s_n = self.strides.dims[0];
+        const s_c = self.strides.dims[1];
+        const s_h = self.strides.dims[2];
+        const s_w = self.strides.dims[3];
+
+        const o_n = out.strides.dims[0];
+        const o_c = out.strides.dims[1];
+        const o_h = out.strides.dims[2];
+        const o_w = out.strides.dims[3];
+
+        for (0..N) |n| {
+            for (0..C) |c_| {
+                for (0..out_h) |oh| {
+                    for (0..out_w) |ow| {
+                        const ih_start = oh * stride;
+                        const iw_start = ow * stride;
+                        var sum_val: f32 = 0.0;
+
+                        for (0..kernel_size) |kh| {
+                            for (0..kernel_size) |kw| {
+                                const ih = ih_start + kh;
+                                const iw = iw_start + kw;
+                                sum_val += self.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
+                            }
+                        }
+                        out.data[n * o_n + c_ * o_c + oh * o_h + ow * o_w] = sum_val / pool_area;
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
     pub fn softmax(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.softmax(self);
@@ -974,6 +1024,38 @@ pub const Tensor = struct {
 
             for (row_in, row_out, G.data) |x_val, *y_val, g_val| {
                 y_val.* = x_val / rms * g_val;
+            }
+        }
+        return Y;
+    }
+
+    pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.layerNorm(self, G, B, eps);
+        }
+        const D = self.shape.dims[self.shape.len - 1];
+        if (G.data.len != D or B.data.len != D) return error.ShapeMismatch;
+        const M = self.data.len / D;
+        const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        const d_f = @as(f32, @floatFromInt(D));
+
+        for (0..M) |i| {
+            const row_in = self.data[i * D .. (i + 1) * D];
+            const row_out = Y.data[i * D .. (i + 1) * D];
+
+            var sum_x: f32 = 0.0;
+            for (row_in) |val| sum_x += val;
+            const mean_val = sum_x / d_f;
+
+            var var_sum: f32 = 0.0;
+            for (row_in) |val| {
+                const diff = val - mean_val;
+                var_sum += diff * diff;
+            }
+            const inv_std = 1.0 / @sqrt(var_sum / d_f + eps);
+
+            for (0..D) |j| {
+                row_out[j] = (row_in[j] - mean_val) * inv_std * G.data[j] + B.data[j];
             }
         }
         return Y;
