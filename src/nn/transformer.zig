@@ -2257,8 +2257,7 @@ pub fn maskedCrossEntropyLoss(
 ) !f32 {
     const N = logits.shape.dims[0];
     const V = logits.shape.dims[1];
-    std.debug.assert(targets.len == N);
-    std.debug.assert(mask.len == N);
+    if (targets.len != N or mask.len != N) return error.ShapeMismatch;
     _ = allocator;
 
     var total_loss: f32 = 0.0;
@@ -2266,6 +2265,7 @@ pub fn maskedCrossEntropyLoss(
 
     for (0..N) |i| {
         if (mask[i] <= 0.0) continue;
+        if (targets[i] >= V) return error.IndexOutOfBounds;
 
         const row = logits.data[i * V .. (i + 1) * V];
         var max_v = row[0];
@@ -2286,12 +2286,43 @@ pub fn maskedCrossEntropyLoss(
     }
 
     if (total_weight > 0.0) {
+        if (logits.requires_grad and logits.grad.len == N * V) {
+            for (0..N) |i| {
+                const w = mask[i];
+                if (w <= 0.0) continue;
+                const scale = w / total_weight;
+                const row = logits.data[i * V .. (i + 1) * V];
+                const grad_row = logits.grad[i * V .. (i + 1) * V];
+                var max_v = row[0];
+                for (row) |v| if (v > max_v) {
+                    max_v = v;
+                };
+                var sum_exp: f32 = 0.0;
+                for (row) |v| sum_exp += @exp(v - max_v);
+                const label: usize = targets[i];
+                for (0..V) |j| {
+                    const p = @exp(row[j] - max_v) / sum_exp;
+                    grad_row[j] += scale * (p - (if (j == label) @as(f32, 1.0) else 0.0));
+                }
+            }
+        }
         return total_loss / total_weight;
     }
     return 0.0;
 }
 
+/// 监督微调 (SFT) 掩码交叉熵损失 (Autograd 计算图节点版本)
+pub fn maskedCrossEntropyLossGraph(
+    graph: *autodiff.Graph,
+    logits: *Tensor,
+    targets: anytype,
+    mask: []const f32,
+) !*Tensor {
+    return graph.maskedCrossEntropyLoss(logits, targets, mask);
+}
+
 pub const sftCrossEntropyLoss = maskedCrossEntropyLoss;
+pub const sftCrossEntropyLossGraph = maskedCrossEntropyLossGraph;
 
 /// 直接偏好优化 (DPO) 损失函数：
 /// L_DPO = - E [ log( sigmoid( beta * ( (log pi(y_w) - log ref(y_w)) - (log pi(y_l) - log ref(y_l)) ) ) ) ]
@@ -2324,6 +2355,18 @@ pub fn dpoLoss(
         total_loss += loss_i;
     }
     return total_loss / @as(f32, @floatFromInt(N));
+}
+
+/// 直接偏好优化 (DPO) 损失函数 (Autograd 计算图节点版本)
+pub fn dpoLossGraph(
+    graph: *autodiff.Graph,
+    pi_chosen_logps: *Tensor,
+    pi_rejected_logps: *Tensor,
+    ref_chosen_logps: []const f32,
+    ref_rejected_logps: []const f32,
+    beta: f32,
+) !*Tensor {
+    return graph.dpoLoss(pi_chosen_logps, pi_rejected_logps, ref_chosen_logps, ref_rejected_logps, beta);
 }
 
 /// 组相对策略优化 (GRPO, Group Relative Policy Optimization) 优势计算
@@ -2468,6 +2511,19 @@ pub fn grpoLoss(
     }
 
     return -(total_obj * inv_n);
+}
+
+/// GRPO 损失函数 (Autograd 计算图节点版本)
+pub fn grpoLossGraph(
+    graph: *autodiff.Graph,
+    old_logps: *Tensor,
+    new_logps: *Tensor,
+    advantages: []const f32,
+    ref_logps: ?[]const f32,
+    beta: f32,
+    clip_eps: f32,
+) !*Tensor {
+    return graph.grpoLoss(old_logps, new_logps, advantages, ref_logps, beta, clip_eps);
 }
 
 // ============================================================================
