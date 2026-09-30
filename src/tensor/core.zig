@@ -1061,6 +1061,49 @@ pub const Tensor = struct {
         return Y;
     }
 
+    pub fn rope(self: *Tensor, start_pos: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        return self.ropeOffset(start_pos, 0, allocator, graph);
+    }
+
+    pub fn ropeOffset(self: *Tensor, start_pos: usize, rotary_offset: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.ropeOffset(self, start_pos, rotary_offset);
+        }
+        const D = self.shape.dims[self.shape.len - 1];
+        if (rotary_offset > D) return error.DimensionOutOfBounds;
+        const T = if (self.shape.len >= 2) self.shape.dims[self.shape.len - 2] else 1;
+        const outer = self.data.len / (T * D);
+        const rot_dim = D - rotary_offset;
+        const half = rot_dim / 2;
+        const rot_dim_f = @as(f32, @floatFromInt(rot_dim));
+
+        const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+        for (0..outer) |o| {
+            for (0..T) |t| {
+                const row_in = self.data[(o * T + t) * D .. (o * T + t + 1) * D];
+                const row_out = Y.data[(o * T + t) * D .. (o * T + t + 1) * D];
+                if (rotary_offset > 0) {
+                    @memcpy(row_out[0..rotary_offset], row_in[0..rotary_offset]);
+                }
+                const pos_f = @as(f32, @floatFromInt(start_pos + t));
+                for (0..half) |i| {
+                    const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
+                    const theta = pos_f * freq;
+                    const cos_t = @cos(theta);
+                    const sin_t = @sin(theta);
+                    const x0 = row_in[rotary_offset + 2 * i];
+                    const x1 = row_in[rotary_offset + 2 * i + 1];
+                    row_out[rotary_offset + 2 * i] = x0 * cos_t - x1 * sin_t;
+                    row_out[rotary_offset + 2 * i + 1] = x0 * sin_t + x1 * cos_t;
+                }
+                if (2 * half < rot_dim) {
+                    row_out[D - 1] = row_in[D - 1];
+                }
+            }
+        }
+        return Y;
+    }
+
     pub fn batchMatMul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.batchMatMul(self, other);
