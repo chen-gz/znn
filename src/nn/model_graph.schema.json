@@ -91,7 +91,7 @@
     },
     "ModuleNode": {
       "title": "ModuleNode",
-      "description": "One module of the hierarchy. The root, composite modules and parameter-free multi-op leaves (e.g. attention core) export a local graph; parameterized leaves (Linear, RMSNorm, Embedding) are atomic and export empty ports, flow_nodes and edges.",
+      "description": "One module of the hierarchy. The root, modules with children and parameter-free modules that run operations in their own scope (e.g. attention core) export a local graph; parameterized leaves (Linear, RMSNorm, Embedding) are atomic and export empty ports, flow_nodes and edges.",
       "type": "object",
       "required": [
         "name",
@@ -298,11 +298,11 @@
       "additionalProperties": false,
       "properties": {
         "id": {
-          "description": "Reserved local id \"@in<k>\" or \"@out<k>\"; never collides with child names.",
+          "description": "Reserved local id \"@in<k>\" or \"@out<k>\", numbered in discovery order; the @ prefix never collides with other local ids.",
           "type": "string"
         },
         "ref": {
-          "description": "External endpoint (module path or tensor name) resolved in the nearest common ancestor scope: the producer for inputs, the consumer or output tensor for outputs.",
+          "description": "External endpoint as seen in the nearest common ancestor scope of this module and that endpoint (module path or tensor name): the producer for inputs, the first consumer for outputs, or the tensor name for a final graph output.",
           "type": "string"
         },
         "shape": {
@@ -319,7 +319,7 @@
       "additionalProperties": false,
       "properties": {
         "id": {
-          "description": "Local id unique within the module: child name, op or buffer name segment, or port id.",
+          "description": "Local id, unique within the module: the child module name, the last name segment of an op output or buffer tensor (auto name act_<OpType>_<idx> when unnamed; suffix _2, _3 on collision), or a port id @in<k> / @out<k>.",
           "type": "string"
         },
         "kind": {
@@ -373,7 +373,7 @@
           "items": { "type": "string" }
         },
         "is_skip": {
-          "description": "True for the residual input of an Add whose other input is reachable from the same producer.",
+          "description": "True when the consumer is an Add op and the producer reaches the source of another input edge of that Add within this local graph (the residual shortcut).",
           "type": "boolean"
         },
         "kind": {
