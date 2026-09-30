@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Graph` 新增作用域栈与 `pushScope` / `popScope` / `currentScope`，以及 `Graph.enterModule` / `Graph.enterChildScope` 守卫 API；`Op.scope` 与 `Tensor.scope` 在创建时记录当前模块完整路径。
   - 所有内置模块 (`Linear`, `Conv2D`, `ConvTranspose2D`, `RMSNorm`, `LayerNorm`, `BatchNorm2d`, `Embedding`, `MLP`, `SwiGLU`, `CausalSelfAttention`, `TransformerBlock`, `TransformerDecoder`, `GPT`) 在 `forward` 入口进入自身作用域并自动注册模块类型。
   - `CausalSelfAttention` 将 $QK^T$、缩放、掩码、softmax 与加权求和封装在 `core` 子作用域 (`ScaledDotProductAttention`)。
-- **作用域局部图导出 (`src/nn/visualization.zig`)**: 每个组合模块导出自身的 `ports` / `flow_nodes` / `edges` 局部图；Reshape / Transpose / RepeatKV 折叠进边的 `transforms`；残差边通过局部图可达性判定；无参数多算子叶子 (如 `core`) 导出算子级局部图。
+- **作用域局部图导出 (`src/nn/visualization.zig`)**: 每个组合模块导出自身的 `ports` / `flow_nodes` / `edges` 局部图；Reshape / Transpose / RepeatKV 折叠进边的 `transforms`；残差边通过局部图可达性判定；无参数但执行算子的叶子 (如 `core`) 导出算子级局部图。
 - 新增作用域归属测试与黄金边集测试 (`src/nn.zig`)。
 - **可视化 JSON Schema (`src/nn/model_graph.schema.json`)**: 以 JSON Schema (draft 2020-12) 逐字段描述 schema 2.0 导出格式 (所有对象 `additionalProperties: false`，字段均带 `description`)，通过 `visualization.SCHEMA_JSON` 嵌入；新增一致性测试，用 GPT 与单个 `Linear` 的导出结果校验 schema，并验证未声明字段与错误版本会被拒绝。
 - `examples/export_model_report.zig` 额外导出单个 `Linear` 层的最小参考 JSON `examples/minimal_model_graph.json` (可视化器 JSON 格式指南中的模板)。
@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **节点分类强类型枚举 (`src/nn/visualization.zig`, `src/nn.zig`)**: 将 `NodeData.kind` 从弱类型字符串切片 (`[]const u8`) 重构为强类型枚举 `NodeKind` (`.Param`, `.Input`, `.Buffer`, `.Activation`)，消除 `std.mem.eql` 字符串比较并利用 `switch` 提供编译期完备性检查；序列化与反序列化通过 `asString()` 与 `fromString()` 保持 JSON Schema 2.0 规格完全一致。
 - **其余取值字段同样改为枚举 (`src/nn/visualization.zig`, `src/nn.zig`)**: `NodeData.status` → `NodeStatus` (`CUSTOM_INIT` / `AUTO_GRAPH` / `INPUT` / `BUFFER` / `OP_OUTPUT`)，`FlowNode.kind` → `FlowNodeKind` (`port_in` / `port_out` / `module` / `op` / `buffer`)，`EdgeData.kind` → `EdgeKind` (`data` / `buffer`)；`summary` 的初始化计数改为穷举 `switch`；删除恒为 `"module"` 的 `ModuleNode.kind` 字段 (序列化仍固定输出 `"kind": "module"`)。新增测试断言这些枚举的标签与 `model_graph.schema.json` 中对应的 `enum` 列表逐一一致；导出的 JSON 逐字节不变。
 - **可视化 JSON 升级为 schema 2.0 (不兼容 1.0)**: 移除顶层 `edges`，新增 `default_scope`；端口以 `@in<k>` / `@out<k>` 命名并携带 `ref`；`summary` 新增 `buffer_nodes`；图输入归属 `root.nodes`，不再生成 `inputs` / `outputs` 伪模块。
+- **Schema 字段说明补全 (`src/nn/model_graph.schema.json`)**: `FlowNode.id` 写明本地 id 的来源、自动命名与重名后缀规则，`Edge.is_skip` 写明残差判定条件，`PortEntry.id` / `ref` 与 `ModuleNode` 写明端口编号、外部端点解析与局部图导出范围；`plan/VISUALIZATION_GRAPH_EDGE_DESIGN.md` 改为当前规范的摘要与指引。
 - `TransformerBlock` 第二个残差加法节点由 `output` 更名为 `residual_mlp`；MLP 激活输出命名为 `gelu`。
 - `GPT` 的位置索引张量改为 `{gpt}.pos_indices` 静态缓冲区 (`is_buffer = true`)，不再作为模型输入出现。
 - `TransformerBlock.formula` 改用 `aligned` 环境分两行排版 (注意力残差与 MLP 残差各占一行)，不再以 `\quad` 拼接在同一行。
