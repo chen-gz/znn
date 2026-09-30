@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **节点分类强类型枚举 (`src/nn/visualization.zig`, `src/nn.zig`)**: 将 `NodeData.kind` 从弱类型字符串切片 (`[]const u8`) 重构为强类型枚举 `NodeKind` (`.Param`, `.Input`, `.Buffer`, `.Activation`)，消除 `std.mem.eql` 字符串比较并利用 `switch` 提供编译期完备性检查；序列化与反序列化通过 `asString()` 与 `fromString()` 保持 JSON Schema 2.0 规格完全一致。
+- **其余取值字段同样改为枚举 (`src/nn/visualization.zig`, `src/nn.zig`)**: `NodeData.status` → `NodeStatus` (`CUSTOM_INIT` / `AUTO_GRAPH` / `INPUT` / `BUFFER` / `OP_OUTPUT`)，`FlowNode.kind` → `FlowNodeKind` (`port_in` / `port_out` / `module` / `op` / `buffer`)，`EdgeData.kind` → `EdgeKind` (`data` / `buffer`)；`summary` 的初始化计数改为穷举 `switch`；删除恒为 `"module"` 的 `ModuleNode.kind` 字段 (序列化仍固定输出 `"kind": "module"`)。新增测试断言这些枚举的标签与 `model_graph.schema.json` 中对应的 `enum` 列表逐一一致；导出的 JSON 逐字节不变。
 - **可视化 JSON 升级为 schema 2.0 (不兼容 1.0)**: 移除顶层 `edges`，新增 `default_scope`；端口以 `@in<k>` / `@out<k>` 命名并携带 `ref`；`summary` 新增 `buffer_nodes`；图输入归属 `root.nodes`，不再生成 `inputs` / `outputs` 伪模块。
 - `TransformerBlock` 第二个残差加法节点由 `output` 更名为 `residual_mlp`；MLP 激活输出命名为 `gelu`。
 - `GPT` 的位置索引张量改为 `{gpt}.pos_indices` 静态缓冲区 (`is_buffer = true`)，不再作为模型输入出现。

@@ -35,9 +35,28 @@ pub const NodeKind = enum {
     }
 };
 
+/// 张量来源 / 初始化状态枚举 (Tensor Node Status)
+pub const NodeStatus = enum {
+    /// 参数：由模块代码显式初始化 (customInit)
+    CUSTOM_INIT,
+    /// 参数：依据消费端激活函数自动选择初始化策略
+    AUTO_GRAPH,
+    /// 图输入
+    INPUT,
+    /// 常量缓冲区
+    BUFFER,
+    /// 算子输出 (激活)
+    OP_OUTPUT,
+
+    pub fn asString(self: NodeStatus) []const u8 {
+        return @tagName(self);
+    }
+};
+
 /// 单个计算图节点的详细可视化元数据
 pub const NodeData = struct {
     pub const Kind = NodeKind;
+    pub const Status = NodeStatus;
 
     name: []const u8,
     kind: NodeKind,
@@ -45,7 +64,7 @@ pub const NodeData = struct {
     shape_str: []const u8,
     elements: usize,
     bytes: usize,
-    status: []const u8, // "AUTO_GRAPH", "CUSTOM_INIT", "INPUT", "BUFFER", "OP_OUTPUT"
+    status: NodeStatus,
     inferred_act: []const u8,
     strategy: []const u8,
 };
@@ -242,7 +261,7 @@ fn appendNodeData(
             .shape_str = shape_str,
             .elements = elements,
             .bytes = bytes,
-            .status = "OP_OUTPUT",
+            .status = .OP_OUTPUT,
             .inferred_act = try allocator.dupe(u8, op_name),
             .strategy = strat,
         });
@@ -268,7 +287,7 @@ fn appendNodeData(
             .shape_str = shape_str,
             .elements = elements,
             .bytes = bytes,
-            .status = if (t.is_buffer) "BUFFER" else "INPUT",
+            .status = if (t.is_buffer) .BUFFER else .INPUT,
             .inferred_act = try allocator.dupe(u8, "N/A"),
             .strategy = try allocator.dupe(u8, if (t.is_buffer) "constant buffer" else "user input"),
         });
@@ -293,7 +312,7 @@ fn appendNodeData(
             .shape_str = shape_str,
             .elements = elements,
             .bytes = bytes,
-            .status = "CUSTOM_INIT",
+            .status = .CUSTOM_INIT,
             .inferred_act = try allocator.dupe(u8, "N/A"),
             .strategy = try allocator.dupe(u8, "user-defined customInit"),
         });
@@ -308,7 +327,7 @@ fn appendNodeData(
             .shape_str = shape_str,
             .elements = elements,
             .bytes = bytes,
-            .status = "AUTO_GRAPH",
+            .status = .AUTO_GRAPH,
             .inferred_act = try allocator.dupe(u8, "bias"),
             .strategy = try allocator.dupe(u8, "zeros (0.0)"),
         });
@@ -342,7 +361,7 @@ fn appendNodeData(
         .shape_str = shape_str,
         .elements = elements,
         .bytes = bytes,
-        .status = "AUTO_GRAPH",
+        .status = .AUTO_GRAPH,
         .inferred_act = try allocator.dupe(u8, act_name),
         .strategy = strat,
     });
@@ -480,10 +499,40 @@ pub fn freeGraphOps(ops_list: *std.ArrayList(OpData), allocator: std.mem.Allocat
 // 3. 模块局部图 (Scoped Local Graph)
 // ============================================================================
 
+/// 局部图节点类型枚举 (Flow Node Kind)
+pub const FlowNodeKind = enum {
+    /// 进入模块的边界张量
+    port_in,
+    /// 离开模块的边界张量
+    port_out,
+    /// 直接子模块
+    module,
+    /// 在本作用域内直接执行的非透明算子
+    op,
+    /// 在本作用域内创建的常量缓冲区
+    buffer,
+
+    pub fn asString(self: FlowNodeKind) []const u8 {
+        return @tagName(self);
+    }
+};
+
+/// 局部图边类型枚举 (Edge Kind)
+pub const EdgeKind = enum {
+    /// 激活数据流
+    data,
+    /// 从常量缓冲区出发的边
+    buffer,
+
+    pub fn asString(self: EdgeKind) []const u8 {
+        return @tagName(self);
+    }
+};
+
 /// 模块局部图中的节点
 pub const FlowNode = struct {
     id: []const u8, // 局部 id；端口使用保留前缀 "@in" / "@out"
-    kind: []const u8, // "port_in", "port_out", "module", "op", "buffer"
+    kind: FlowNodeKind,
     ref: []const u8, // 全局引用：子模块路径、张量名，或端口在外部可见的另一端
     op_type: ?[]const u8 = null,
     module_type: ?[]const u8 = null,
@@ -498,14 +547,13 @@ pub const EdgeData = struct {
     dst_shape: ?[]const u8 = null, // 经过透明算子后到达消费端的形状 (与 shape 相同时为 null)
     transforms: []const []const u8 = &.{}, // 折叠进该边的透明算子 (按执行顺序)
     is_skip: bool = false,
-    kind: []const u8 = "data", // "data" 或 "buffer"
+    kind: EdgeKind = .data,
 };
 
-/// 递归模型层级模块组节点 (Recursive Module Node)
+/// 递归模型层级模块组节点 (Recursive Module Node)；序列化时 "kind" 固定为 "module"
 pub const ModuleNode = struct {
     name: []const u8,
     path: []const u8,
-    kind: []const u8 = "module",
     module_type: []const u8 = "Module",
     formula: ?[]const u8 = null,
     total_params: usize = 0,
@@ -703,7 +751,7 @@ const LocalGraphBuilder = struct {
                 const key = try std.fmt.allocPrint(self.arena, "module:{s}", .{seg});
                 const ref = try joinScope(self.arena, self.module.path, seg);
                 const mtype = if (self.module_map.get(ref)) |m| m.module_type else "Module";
-                return self.addNode(key, seg, .{ .id = "", .kind = "module", .ref = ref, .module_type = mtype });
+                return self.addNode(key, seg, .{ .id = "", .kind = .module, .ref = ref, .module_type = mtype });
             },
             .own_op => |op| {
                 const out = op.outputs[0];
@@ -711,7 +759,7 @@ const LocalGraphBuilder = struct {
                 const key = try std.fmt.allocPrint(self.arena, "op:{x}", .{@intFromPtr(op)});
                 return self.addNode(key, self.localId(name), .{
                     .id = "",
-                    .kind = "op",
+                    .kind = .op,
                     .ref = name,
                     .op_type = @tagName(op.op_type),
                     .shape = try formatShapeAlloc(self.arena, out.shape),
@@ -722,7 +770,7 @@ const LocalGraphBuilder = struct {
                 const key = try std.fmt.allocPrint(self.arena, "buffer:{x}", .{@intFromPtr(t)});
                 return self.addNode(key, self.localId(name), .{
                     .id = "",
-                    .kind = "buffer",
+                    .kind = .buffer,
                     .ref = name,
                     .shape = try formatShapeAlloc(self.arena, t.shape),
                 });
@@ -739,7 +787,7 @@ const LocalGraphBuilder = struct {
         self.n_in += 1;
         return self.addNode(key, preferred, .{
             .id = "",
-            .kind = "port_in",
+            .kind = .port_in,
             .ref = ref,
             .shape = try formatShapeAlloc(self.arena, t.shape),
         });
@@ -752,7 +800,7 @@ const LocalGraphBuilder = struct {
         self.n_out += 1;
         return self.addNode(key, preferred, .{
             .id = "",
-            .kind = "port_out",
+            .kind = .port_out,
             .ref = ref,
             .shape = try formatShapeAlloc(self.arena, t.shape),
         });
@@ -769,7 +817,7 @@ const LocalGraphBuilder = struct {
             .shape = try formatShapeAlloc(self.arena, origin.shape),
             .dst_shape = if (shapeEql(origin.shape, arrival.shape)) null else try formatShapeAlloc(self.arena, arrival.shape),
             .transforms = transforms,
-            .kind = if (origin.creator == null and origin.is_buffer) "buffer" else "data",
+            .kind = if (origin.creator == null and origin.is_buffer) .buffer else .data,
         });
     }
 
@@ -838,7 +886,7 @@ const LocalGraphBuilder = struct {
         const edges = self.module.edges.items;
         for (edges, 0..) |*e, i| {
             const target = self.findNode(e.to) orelse continue;
-            if (!std.mem.eql(u8, target.kind, "op")) continue;
+            if (target.kind != .op) continue;
             const op_type = target.op_type orelse continue;
             if (!std.mem.eql(u8, op_type, "Add")) continue;
             for (edges, 0..) |other, j| {
@@ -1061,10 +1109,10 @@ pub const graph_ir = struct {
             switch (n.kind) {
                 .Param => {
                     summary.param_nodes += 1;
-                    if (std.mem.eql(u8, n.status, "CUSTOM_INIT")) {
-                        summary.custom_init_count += 1;
-                    } else if (std.mem.eql(u8, n.status, "AUTO_GRAPH")) {
-                        summary.auto_graph_count += 1;
+                    switch (n.status) {
+                        .CUSTOM_INIT => summary.custom_init_count += 1,
+                        .AUTO_GRAPH => summary.auto_graph_count += 1,
+                        .INPUT, .BUFFER, .OP_OUTPUT => {},
                     }
                 },
                 .Input => summary.input_nodes += 1,
@@ -1103,10 +1151,10 @@ pub const graph_ir = struct {
         try buf.append(allocator, '"');
     }
 
-    fn serializePorts(node: *const ModuleNode, buf: *std.ArrayList(u8), allocator: std.mem.Allocator, kind: []const u8) !void {
+    fn serializePorts(node: *const ModuleNode, buf: *std.ArrayList(u8), allocator: std.mem.Allocator, kind: FlowNodeKind) !void {
         var first = true;
         for (node.flow_nodes.items) |n| {
-            if (!std.mem.eql(u8, n.kind, kind)) continue;
+            if (n.kind != kind) continue;
             if (!first) try buf.appendSlice(allocator, ",");
             first = false;
             try buf.appendSlice(allocator, "{\"id\": ");
@@ -1155,7 +1203,7 @@ pub const graph_ir = struct {
             try writeEscapedJsonString(buf, allocator, p.shape_str);
             try buf.print(allocator, ",\"elements\": {d},\"bytes\": {d},", .{ p.elements, p.bytes });
             try buf.appendSlice(allocator, "\"status\": ");
-            try writeEscapedJsonString(buf, allocator, p.status);
+            try writeEscapedJsonString(buf, allocator, p.status.asString());
             try buf.appendSlice(allocator, ",\"strategy\": ");
             try writeEscapedJsonString(buf, allocator, p.strategy);
             try buf.appendSlice(allocator, "}");
@@ -1182,16 +1230,16 @@ pub const graph_ir = struct {
             try buf.print(allocator, ",\"elements\": {d},\"bytes\": {d}}}", .{ op.elements, op.bytes });
         }
         try buf.appendSlice(allocator, "],\"ports\": {\"inputs\": [");
-        try serializePorts(node, buf, allocator, "port_in");
+        try serializePorts(node, buf, allocator, .port_in);
         try buf.appendSlice(allocator, "],\"outputs\": [");
-        try serializePorts(node, buf, allocator, "port_out");
+        try serializePorts(node, buf, allocator, .port_out);
         try buf.appendSlice(allocator, "]},\"flow_nodes\": [");
         for (node.flow_nodes.items, 0..) |n, i| {
             if (i > 0) try buf.appendSlice(allocator, ",");
             try buf.appendSlice(allocator, "{\"id\": ");
             try writeEscapedJsonString(buf, allocator, n.id);
             try buf.appendSlice(allocator, ",\"kind\": ");
-            try writeEscapedJsonString(buf, allocator, n.kind);
+            try writeEscapedJsonString(buf, allocator, n.kind.asString());
             try buf.appendSlice(allocator, ",\"ref\": ");
             try writeEscapedJsonString(buf, allocator, n.ref);
             if (n.op_type) |t| {
@@ -1229,7 +1277,7 @@ pub const graph_ir = struct {
             }
             try buf.print(allocator, ",\"is_skip\": {s}", .{if (e.is_skip) "true" else "false"});
             try buf.appendSlice(allocator, ",\"kind\": ");
-            try writeEscapedJsonString(buf, allocator, e.kind);
+            try writeEscapedJsonString(buf, allocator, e.kind.asString());
             try buf.appendSlice(allocator, "}");
         }
         try buf.appendSlice(allocator, "],\"nodes\": [");
@@ -1245,7 +1293,7 @@ pub const graph_ir = struct {
             try writeEscapedJsonString(buf, allocator, leaf.shape_str);
             try buf.print(allocator, ",\"elements\": {d},\"bytes\": {d},", .{ leaf.elements, leaf.bytes });
             try buf.appendSlice(allocator, "\"status\": ");
-            try writeEscapedJsonString(buf, allocator, leaf.status);
+            try writeEscapedJsonString(buf, allocator, leaf.status.asString());
             try buf.appendSlice(allocator, ",\"act\": ");
             try writeEscapedJsonString(buf, allocator, leaf.inferred_act);
             try buf.appendSlice(allocator, ",\"strategy\": ");

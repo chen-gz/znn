@@ -21,6 +21,9 @@ pub const graph_ir = visualization.graph_ir;
 pub const generateJson = visualization.generateJson;
 pub const exportJson = visualization.exportJson;
 pub const NodeKind = visualization.NodeKind;
+pub const NodeStatus = visualization.NodeStatus;
+pub const FlowNodeKind = visualization.FlowNodeKind;
+pub const EdgeKind = visualization.EdgeKind;
 pub const NodeData = visualization.NodeData;
 
 
@@ -1919,3 +1922,37 @@ test "NodeKind enum conversions and NodeData typing" {
     try std.testing.expect(NodeKind.fromString("Unknown") == null);
 }
 
+test "Visualization enums match the enum lists of the published JSON Schema" {
+    const allocator = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, visualization.SCHEMA_JSON, .{});
+    defer parsed.deinit();
+    const defs = parsed.value.object.get("$defs").?.object;
+
+    const Check = struct {
+        fn prop(d: std.json.ObjectMap, def: []const u8, field: []const u8) std.json.ObjectMap {
+            return d.get(def).?.object.get("properties").?.object.get(field).?.object;
+        }
+
+        /// schema 的 enum 列表与 Zig 枚举的标签逐一对应 (顺序一致)
+        fn same(comptime E: type, values: []const std.json.Value) !void {
+            const fields = @typeInfo(E).@"enum".fields;
+            try std.testing.expectEqual(fields.len, values.len);
+            inline for (fields, 0..) |f, i| {
+                try std.testing.expectEqualStrings(f.name, values[i].string);
+            }
+        }
+    };
+
+    try Check.same(NodeKind, Check.prop(defs, "TensorNode", "kind").get("enum").?.array.items);
+    try Check.same(NodeStatus, Check.prop(defs, "TensorNode", "status").get("enum").?.array.items);
+    try Check.same(FlowNodeKind, Check.prop(defs, "FlowNode", "kind").get("enum").?.array.items);
+    try Check.same(EdgeKind, Check.prop(defs, "Edge", "kind").get("enum").?.array.items);
+
+    // 参数只可能是 CUSTOM_INIT / AUTO_GRAPH
+    const param_status = Check.prop(defs, "ParamEntry", "status").get("enum").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), param_status.len);
+    try std.testing.expectEqualStrings(NodeStatus.CUSTOM_INIT.asString(), param_status[0].string);
+    try std.testing.expectEqualStrings(NodeStatus.AUTO_GRAPH.asString(), param_status[1].string);
+
+    try std.testing.expectEqualStrings("module", Check.prop(defs, "ModuleNode", "kind").get("const").?.string);
+}
