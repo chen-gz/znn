@@ -2117,3 +2117,74 @@ test "Comptime reflection supports slice modules, optional bias, and frozen LoRA
     try std.testing.expectEqual(@as(usize, 3), lora_params.len);
 }
 
+test "Safetensors serialization supports slice modules, optional bias, and out-of-order offsets" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(101);
+    const random = prng.random();
+
+    // 1. Round-trip saveModel / loadModel with MoELayer ([]MLP) and ConvTranspose2D (?*Tensor)
+    const CompositeModel = struct {
+        moe: MoELayer,
+        deconv: ConvTranspose2D,
+        lora: LoRALinear,
+    };
+
+    var m1 = CompositeModel{
+        .moe = try MoELayer.init(allocator, 4, 8, 2, 1, 1, random),
+        .deconv = try ConvTranspose2D.init(allocator, 2, 2, 2, 1, 0, true, random),
+        .lora = try LoRALinear.initWithBias(allocator, 4, 3, 2, 2.0, true, random),
+    };
+    defer deinitModel(&m1, allocator);
+    m1.deconv.bias.?.data[0] = 7.25;
+    m1.lora.bias.?.data[1] = -3.5;
+    m1.moe.routed_experts[1].c_fc.weight.data[0] = 42.0;
+
+    const path = "test_composite_model.safetensors";
+    try saveModel(&m1, std.testing.io, path, allocator);
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+
+    var m2 = CompositeModel{
+        .moe = try MoELayer.init(allocator, 4, 8, 2, 1, 1, random),
+        .deconv = try ConvTranspose2D.init(allocator, 2, 2, 2, 1, 0, true, random),
+        .lora = try LoRALinear.initWithBias(allocator, 4, 3, 2, 2.0, true, random),
+    };
+    defer deinitModel(&m2, allocator);
+    m2.deconv.bias.?.data[0] = 0.0;
+    m2.lora.bias.?.data[1] = 0.0;
+    m2.moe.routed_experts[1].c_fc.weight.data[0] = 0.0;
+
+    try loadModel(&m2, std.testing.io, path, allocator);
+    try std.testing.expectApproxEqAbs(@as(f32, 7.25), m2.deconv.bias.?.data[0], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, -3.5), m2.lora.bias.?.data[1], 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 42.0), m2.moe.routed_experts[1].c_fc.weight.data[0], 1e-6);
+
+    // 2. Out-of-order physical offsets (bias stored before weight in file) + __metadata__
+    var lin = try Linear.init(allocator, 2, 2, random);
+    defer lin.deinit(allocator);
+
+    const header_json =
+        \\{"__metadata":{"format":"pt"},"bias":{"dtype":"F32","shape":[1,2],"data_offsets":[0,8]},"weight":{"dtype":"F32","shape":[2,2],"data_offsets":[8,24]}}
+    ;
+    const ooo_path = "test_ooo_linear.safetensors";
+    {
+        var file = try std.Io.Dir.cwd().createFile(std.testing.io, ooo_path, .{});
+        defer file.close(std.testing.io);
+        var buf: [1024]u8 = undefined;
+        var fw = file.writer(std.testing.io, &buf);
+        const w = &fw.interface;
+        const hlen: u64 = header_json.len;
+        try w.writeAll(std.mem.asBytes(&hlen));
+        try w.writeAll(header_json);
+        // Physical payload: bias (2 floats = 8 bytes) FIRST, then weight (4 floats = 16 bytes)
+        const payload_floats = [_]f32{ 10.0, 20.0, 1.0, 2.0, 3.0, 4.0 };
+        try w.writeAll(std.mem.sliceAsBytes(&payload_floats));
+        try w.flush();
+    }
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, ooo_path) catch {};
+
+    try loadModel(&lin, std.testing.io, ooo_path, allocator);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 10.0, 20.0 }, lin.bias.data);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, lin.weight.data);
+}
+
+

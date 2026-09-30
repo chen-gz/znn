@@ -106,9 +106,9 @@
 - [x] **1.5.5 Comptime 模型反射支持动态切片 `[]T` 与可选参数 `?*Tensor` (`nn/core.zig`)**
   - [x] 在 [`collectParametersInternal`](../src/nn/core.zig)、[`deinitModel`](../src/nn/core.zig) 与 [`zeroGradModel`](../src/nn/core.zig) 中支持结构体切片字段（如 `MoELayer` 的 `[]MLP`、`StackedLSTM` 的 `[]LSTMCell`）及 `?*Tensor` 字段（如 `ConvTranspose2D.bias`、`LoRALinear.bias`），并正确冻结 `LoRALinear` 基础权重梯度。
 
-- [ ] **1.5.6 Safetensors 序列化覆盖度与无序加载兼容性 (`nn/serialization.zig`)**
-  - [ ] 在 [`writeModelTensors`](../src/nn/serialization.zig)、[`writeModelData`](../src/nn/serialization.zig) 与 [`loadModelTensors`](../src/nn/serialization.zig) 中支持 `?*Tensor` 与子模块切片 `[]T`。
-  - [ ] 移除 [`loadTensorData`](../src/nn/serialization.zig) 中对文件张量物理存储顺序必须与 Zig 字段顺序一致（`start_offset >= current_offset.*`）的强假设，改为按偏移量随机访问读取，兼容外部导出的 Safetensors 文件。
+- [x] **1.5.6 Safetensors 序列化覆盖度与无序加载兼容性 (`nn/serialization.zig`)**
+  - [x] 在 [`writeModelTensors`](../src/nn/serialization.zig)、[`writeModelData`](../src/nn/serialization.zig) 与 [`loadModelTensors`](../src/nn/serialization.zig) 中支持 `?*Tensor` 与子模块切片 `[]T`。
+  - [x] 移除 [`loadTensorData`](../src/nn/serialization.zig) 中对文件张量物理存储顺序必须与 Zig 字段顺序一致（`start_offset >= current_offset.*`）的强假设，改为按偏移量随机访问读取，兼容外部导出的 Safetensors 文件。
 
 - [ ] **1.5.7 消除 `Tensor`、`Graph` 与 `Op.forward` 的算子前向三重重复 (`tensor/core.zig`, `autodiff/graph.zig`, `autodiff/op.zig`)**
   - [ ] 复用统一的前向计算实现，消除 [`Op.forward`](../src/autodiff/op.zig) 与 [`Graph`](../src/autodiff/graph.zig) 中重复手写的数百行前向算子代码。
