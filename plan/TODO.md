@@ -99,9 +99,9 @@
   - [x] 扩展 [`Graph.softmaxCrossEntropy`](../src/autodiff/graph.zig) 支持 `usize` / `u32` 标签（突破 `[]const u8` 最多 256 类的限制）。
   - [x] 将 [`maskedCrossEntropyLoss`](../src/nn/transformer.zig)、[`dpoLoss`](../src/nn/transformer.zig) 与 [`grpoLoss`](../src/nn/transformer.zig) 接入动态计算图 `Graph`，支持端到端 `graph.backward(loss)`。
 
-- [ ] **1.5.4 非连续张量视图（Strided Views）在广播、反向传播与 `reshape` 中的内存安全 (`shape.zig`, `core.zig`, `autodiff/`)**
-  - [ ] 修复 [`broadcastBinaryOpRaw`](../src/tensor/shape.zig) 及 [`Op.backward`](../src/autodiff/op.zig) 中仅凭 `A_shape.eq(B_shape)` 就跳过步长与 `offset` 检查直接遍历底层切片的越界/读错数据问题。
-  - [ ] 修复 [`Graph.reshape`](../src/autodiff/graph.zig) 对非连续张量直接共享 `data` 切片且未维护 `is_view` 的隐患。
+- [x] **1.5.4 非连续张量视图（Strided Views）在广播、反向传播与 `reshape` 中的内存安全 (`shape.zig`, `core.zig`, `autodiff/`)**
+  - [x] 修复 [`broadcastBinaryOpRaw`](../src/tensor/shape.zig) 及 [`Op.backward`](../src/autodiff/op.zig) 中仅凭 `A_shape.eq(B_shape)` 就跳过步长与 `offset` 检查直接遍历底层切片的越界/读错数据问题。
+  - [x] 修复 [`Graph.reshape`](../src/autodiff/graph.zig) 对非连续张量直接共享 `data` 切片且未维护 `is_view` 的隐患。
 
 - [ ] **1.5.5 Comptime 模型反射支持动态切片 `[]T` 与可选参数 `?*Tensor` (`nn/core.zig`)**
   - [ ] 在 [`collectParametersInternal`](../src/nn/core.zig)、[`deinitModel`](../src/nn/core.zig) 与 [`zeroGradModel`](../src/nn/core.zig) 中支持结构体切片字段（如 `MoELayer` 的 `[]MLP`、`StackedLSTM` 的 `[]LSTMCell`）及 `?*Tensor` 字段（如 `ConvTranspose2D.bias`、`LoRALinear.bias`），并正确冻结 `LoRALinear` 基础权重梯度。

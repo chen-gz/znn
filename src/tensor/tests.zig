@@ -1,5 +1,6 @@
 const std = @import("std");
 const tensor = @import("../tensor.zig");
+const autodiff = @import("../autodiff.zig");
 const Shape = tensor.Shape;
 const broadcastShapes = tensor.broadcastShapes;
 const DType = tensor.DType;
@@ -882,6 +883,72 @@ test "NumPy Tier 1 element-wise ufuncs: sqrt, exp, log, abs" {
     defer free(allocator, t_log);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), t_log.data[0], 1e-5);
 }
+
+test "Strided non-contiguous views in binary ops, reshape, and autograd backward" {
+    const allocator = std.testing.allocator;
+
+    // 1. Eager binary op on equal-shape non-contiguous transposeView & slice
+    {
+        const mat = try array(allocator, &.{ 2, 2 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0 });
+        defer free(allocator, mat);
+
+        // mat^T view has shape [2, 2], strides [1, 2], logical [[1, 3], [2, 4]]
+        const mat_t = try mat.transposeView(0, 1, allocator);
+        defer free(allocator, mat_t);
+        try std.testing.expect(!mat_t.isContiguous());
+
+        // sum_mat = mat + mat_t => [[2, 5], [5, 8]]
+        const sum_mat = try mat.add(mat_t, allocator, null);
+        defer free(allocator, sum_mat);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.0), sum_mat.get(&.{ 0, 0 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 5.0), sum_mat.get(&.{ 0, 1 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 5.0), sum_mat.get(&.{ 1, 0 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 8.0), sum_mat.get(&.{ 1, 1 }), 1e-5);
+
+        // Reshape on non-contiguous mat_t to [4] => [1, 3, 2, 4]
+        const flat_t = try mat_t.reshape(&.{4}, allocator, null);
+        defer free(allocator, flat_t);
+        try std.testing.expectEqualSlices(f32, &[_]f32{ 1.0, 3.0, 2.0, 4.0 }, flat_t.data);
+    }
+
+    // 2. Graph reshape and binary ops backward on non-contiguous views
+    {
+        var graph = autodiff.Graph.init(allocator);
+        defer graph.deinit();
+
+        const A = try graph.array(&.{ 2, 2 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, true);
+        const A_t = try A.transposeView(0, 1, graph.arena.allocator());
+
+        const B = try graph.array(&.{ 2, 2 }, &[_]f32{ 10.0, 20.0, 30.0, 40.0 }, true);
+        // C = A_t * B => [[1*10, 3*20], [2*30, 4*40]] = [[10, 60], [60, 160]]
+        const C = try graph.mul(A_t, B);
+        try std.testing.expectApproxEqAbs(@as(f32, 10.0), C.get(&.{ 0, 0 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 60.0), C.get(&.{ 0, 1 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 60.0), C.get(&.{ 1, 0 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 160.0), C.get(&.{ 1, 1 }), 1e-5);
+
+        // Also test Graph.reshape on non-contiguous A_t
+        const R = try graph.reshape(A_t, &.{4});
+        try std.testing.expect(!R.is_view);
+        try std.testing.expectEqualSlices(f32, &[_]f32{ 1.0, 3.0, 2.0, 4.0 }, R.data);
+
+        // Contiguous reshape sets is_view = true
+        const C_flat = try graph.reshape(C, &.{4});
+        try std.testing.expect(C_flat.is_view);
+
+        const total = try graph.add(C_flat, R);
+        @memset(total.grad, 1.0);
+        try graph.backward(total);
+
+        // d(total)/dA[0,1] (value 2.0): appears at A_t[1,0] (mul by B[1,0]=30) + R[2] (1.0) => 31.0
+        // d(total)/dA[1,0] (value 3.0): appears at A_t[0,1] (mul by B[0,1]=20) + R[1] (1.0) => 21.0
+        try std.testing.expectApproxEqAbs(@as(f32, 11.0), A.getGrad(&.{ 0, 0 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 31.0), A.getGrad(&.{ 0, 1 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 21.0), A.getGrad(&.{ 1, 0 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 41.0), A.getGrad(&.{ 1, 1 }), 1e-5);
+    }
+}
+
 
 
 

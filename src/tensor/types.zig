@@ -2,6 +2,7 @@ const std = @import("std");
 const shape_mod = @import("shape.zig");
 pub const Shape = shape_mod.Shape;
 pub const computeContiguousStrides = shape_mod.computeContiguousStrides;
+pub const isContiguousStrides = shape_mod.isContiguousStrides;
 
 // ============================================================================
 // 2. 数据类型系统与泛型张量 (DType System & Generic Tensor)
@@ -157,8 +158,7 @@ pub fn GenericTensor(comptime T: type) type {
         }
 
         pub fn isContiguous(self: Self) bool {
-            const c_strides = computeContiguousStrides(self.shape);
-            return self.strides.eq(c_strides);
+            return isContiguousStrides(self.shape, self.strides);
         }
 
         pub fn getFlatIndexChecked(self: Self, indices: []const usize) !usize {
@@ -199,8 +199,8 @@ pub fn GenericTensor(comptime T: type) type {
         pub fn clone(self: Self, allocator: std.mem.Allocator) !*Self {
             const out = try Self.init(allocator, self.shape.dims[0..self.shape.len], null);
             errdefer out.deinit(allocator);
-            if (self.isContiguous()) {
-                @memcpy(out.data, self.data);
+            if (self.isContiguous() and self.data.len >= out.data.len) {
+                @memcpy(out.data, self.data[0..out.data.len]);
             } else {
                 var coord = [_]usize{0} ** 8;
                 const len = self.shape.len;
@@ -265,8 +265,8 @@ pub fn GenericTensor(comptime T: type) type {
             const out = try GenericTensor(DestT).init(allocator, self.shape.dims[0..self.shape.len], null);
             errdefer out.deinit(allocator);
 
-            if (self.isContiguous()) {
-                for (self.data, 0..) |val, i| {
+            if (self.isContiguous() and self.data.len >= out.data.len) {
+                for (self.data[0..out.data.len], 0..) |val, i| {
                     out.data[i] = convertScalar(DestT, T, val);
                 }
             } else {
