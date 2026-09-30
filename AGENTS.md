@@ -20,3 +20,11 @@
   - **日常小步改动只推 main 分支**：日常迭代、小步优化与 Bug 修复只推送代码 commit 到 `main` 分支（无需 Tag，直接使用 `jj git push` 或 `git push origin main`）。
   - **让 Tag 成为里程碑**：不要频繁打 Tag 或频繁递增版本号。只有在积累了一批功能、完成阶段性重要成果或由用户明确指示时，才作为里程碑创建并推送新的 Git Tag。
 
+## 3. Refactoring & No Backward Compatibility (重构优先，不保留向后兼容)
+- **Refactor Freely (允许并鼓励重构)**: When a change exposes a flawed design, refactor the affected code, APIs, data formats and documents directly instead of layering patches on top. Restructuring modules, renaming public APIs and fields, and rewriting components are all allowed.
+- **No Backward Compatibility (不需要考虑向后兼容)**: Do NOT keep compatibility layers for superseded designs, including:
+  - fallback branches for old data or export schema versions (e.g. the visualization JSON schema `1.0`),
+  - deprecated aliases, re-exports, wrapper functions, or duplicated old/new code paths,
+  - heuristics kept only to support a replaced mechanism (e.g. name-based scope inference after explicit module scopes landed).
+- **Delete What Is Superseded (删除被取代的内容)**: Remove replaced code, tests and plan documents in the same change, and update the affected tests to the new behavior instead of keeping the old assertions. Leave no commented-out code behind.
+- **Upgrade Producer and Consumer Together (生产端与消费端同步升级)**: When a shared format changes (e.g. `graph_ir` / `exportJson` output consumed by the chen-gz.github.io `/visualizer` page), update the exporter, all consumers, `examples/sample_model_graph.json`, tests and the design doc together, bump the format version, and record the breaking change under `Changed` in the `CHANGELOG.md` `Unreleased` section.
