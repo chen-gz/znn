@@ -14,10 +14,33 @@ pub const SCHEMA_VERSION = "2.0";
 /// 导出 JSON 的 JSON Schema (draft 2020-12)，逐字段描述 serializeJson 的输出
 pub const SCHEMA_JSON = @embedFile("model_graph.schema.json");
 
+/// 张量节点分类枚举 (Tensor Node Kind)
+pub const NodeKind = enum {
+    Param,
+    Input,
+    Buffer,
+    Activation,
+
+    pub fn asString(self: NodeKind) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn fromString(str: []const u8) ?NodeKind {
+        if (std.meta.stringToEnum(NodeKind, str)) |k| return k;
+        if (std.ascii.eqlIgnoreCase(str, "param")) return .Param;
+        if (std.ascii.eqlIgnoreCase(str, "input")) return .Input;
+        if (std.ascii.eqlIgnoreCase(str, "buffer")) return .Buffer;
+        if (std.ascii.eqlIgnoreCase(str, "activation")) return .Activation;
+        return null;
+    }
+};
+
 /// 单个计算图节点的详细可视化元数据
 pub const NodeData = struct {
+    pub const Kind = NodeKind;
+
     name: []const u8,
-    kind: []const u8, // "Param", "Input", "Buffer", "Activation"
+    kind: NodeKind,
     module: []const u8, // 节点所属模块的完整路径 ("" 表示根)
     shape_str: []const u8,
     elements: usize,
@@ -214,7 +237,7 @@ fn appendNodeData(
 
         try nodes.append(allocator, .{
             .name = name,
-            .kind = "Activation",
+            .kind = .Activation,
             .module = module,
             .shape_str = shape_str,
             .elements = elements,
@@ -240,7 +263,7 @@ fn appendNodeData(
 
         try nodes.append(allocator, .{
             .name = name,
-            .kind = if (t.is_buffer) "Buffer" else "Input",
+            .kind = if (t.is_buffer) .Buffer else .Input,
             .module = module,
             .shape_str = shape_str,
             .elements = elements,
@@ -265,7 +288,7 @@ fn appendNodeData(
     if (t.is_custom_initialized) {
         try nodes.append(allocator, .{
             .name = name,
-            .kind = "Param",
+            .kind = .Param,
             .module = module,
             .shape_str = shape_str,
             .elements = elements,
@@ -280,7 +303,7 @@ fn appendNodeData(
     if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
         try nodes.append(allocator, .{
             .name = name,
-            .kind = "Param",
+            .kind = .Param,
             .module = module,
             .shape_str = shape_str,
             .elements = elements,
@@ -314,7 +337,7 @@ fn appendNodeData(
 
     try nodes.append(allocator, .{
         .name = name,
-        .kind = "Param",
+        .kind = .Param,
         .module = module,
         .shape_str = shape_str,
         .elements = elements,
@@ -876,7 +899,7 @@ pub const graph_ir = struct {
 
         for (node.nodes.items) |leaf| {
             total_bytes += leaf.bytes;
-            if (std.mem.eql(u8, leaf.kind, "Param")) {
+            if (leaf.kind == .Param) {
                 total_params += leaf.elements;
                 param_count += 1;
             }
@@ -975,7 +998,7 @@ pub const graph_ir = struct {
         // 2. 为尚未显式注册公式的节点与其所属模块注入推导公式
         for (nodes.items) |node| {
             if (!formulas.contains(node.name)) {
-                if (std.mem.eql(u8, node.kind, "Activation")) {
+                if (node.kind == .Activation) {
                     if (formulas.get(node.inferred_act)) |act_form| {
                         try formulas.put(try arena_alloc.dupe(u8, node.name), try arena_alloc.dupe(u8, act_form));
                         continue;
@@ -1007,7 +1030,7 @@ pub const graph_ir = struct {
         for (nodes.items) |node| {
             const m = try ensureModule(&ctx, node.module);
             try m.nodes.append(arena_alloc, node);
-            if (std.mem.eql(u8, node.kind, "Param")) {
+            if (node.kind == .Param) {
                 try m.parameters.append(arena_alloc, node);
             }
         }
@@ -1035,19 +1058,18 @@ pub const graph_ir = struct {
             .total_nodes = nodes.items.len,
         };
         for (nodes.items) |n| {
-            if (std.mem.eql(u8, n.kind, "Param")) {
-                summary.param_nodes += 1;
-                if (std.mem.eql(u8, n.status, "CUSTOM_INIT")) {
-                    summary.custom_init_count += 1;
-                } else if (std.mem.eql(u8, n.status, "AUTO_GRAPH")) {
-                    summary.auto_graph_count += 1;
-                }
-            } else if (std.mem.eql(u8, n.kind, "Input")) {
-                summary.input_nodes += 1;
-            } else if (std.mem.eql(u8, n.kind, "Buffer")) {
-                summary.buffer_nodes += 1;
-            } else {
-                summary.activation_nodes += 1;
+            switch (n.kind) {
+                .Param => {
+                    summary.param_nodes += 1;
+                    if (std.mem.eql(u8, n.status, "CUSTOM_INIT")) {
+                        summary.custom_init_count += 1;
+                    } else if (std.mem.eql(u8, n.status, "AUTO_GRAPH")) {
+                        summary.auto_graph_count += 1;
+                    }
+                },
+                .Input => summary.input_nodes += 1,
+                .Buffer => summary.buffer_nodes += 1,
+                .Activation => summary.activation_nodes += 1,
             }
         }
 
@@ -1216,7 +1238,7 @@ pub const graph_ir = struct {
             try buf.appendSlice(allocator, "{\"name\": ");
             try writeEscapedJsonString(buf, allocator, leaf.name);
             try buf.appendSlice(allocator, ",\"kind\": ");
-            try writeEscapedJsonString(buf, allocator, leaf.kind);
+            try writeEscapedJsonString(buf, allocator, leaf.kind.asString());
             try buf.appendSlice(allocator, ",\"module\": ");
             try writeEscapedJsonString(buf, allocator, leaf.module);
             try buf.appendSlice(allocator, ",\"shape\": ");
