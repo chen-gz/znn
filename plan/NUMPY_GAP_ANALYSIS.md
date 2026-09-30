@@ -35,7 +35,7 @@
 
 ### 3.1 标量类型系统与多精度支持（Dtype System）
 * **现状痛点**：
-  * [`src/tensor.zig`](file:///Users/guangzong/Documents/znn/src/tensor.zig) 中的数据缓冲区直接定义为 `data: []f32` 与 `grad: []f32`。
+  * [`src/tensor.zig`](../src/tensor.zig) 中的数据缓冲区直接定义为 `data: []f32` 与 `grad: []f32`。
   * **后果**：无法原生支持混合精度训练（FP16 / BF16 / FP32 AMP）与量化推理（INT8 / INT4）；词表索引等离散特征需要借助 `f32` 强转存储。
 * **对齐目标**：
   * 将 `Tensor` 重构为泛型数据结构：`pub fn Tensor(comptime T: type) type`。

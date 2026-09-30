@@ -198,7 +198,7 @@ flowchart LR
 ```
 
 ### 7.1 局部图与端口化模型 (Scoped Local Graph & Ports)
-* **消除扁平全局泄露**：不再导出杂乱无序的全局巨型图，每个复合模块仅导出自身局部拓扑；
+* **局部图**：每个复合模块只导出自身的局部拓扑（直接子模块、自身算子、常量缓冲区与端口），完整规范见 [model-graph-visualization.md](model-graph-visualization.md)；
 * **输入/输出端口化**：模块与外部环境的张量交互通过显式声明的 `@in<k>` 与 `@out<k>` 虚拟端口完成；
 * **LCA 跨层收归法则**：跨越多个层级的深层依赖关系，通过最近公共祖先 (Lowest Common Ancestor) 路径解析，确保每层模块视图拓扑自闭合；
 * **节点分类枚举 (`NodeKind`)**：严格将张量节点细分为四类：
@@ -212,7 +212,7 @@ flowchart LR
 ## 8. 代码质量、测试与基准规范 (Testing & Benchmarks)
 
 1. **测试全覆盖**：
-   - 128+ 极限单元测试，涵盖所有数学算子正向/反向梯度精度校验、极限广播边界、长文本自回归生成、多层 GPT 结构一致性；
+   - 单元测试涵盖所有数学算子正向/反向梯度精度校验、极限广播边界、长文本自回归生成、多层 GPT 结构一致性；
    - 通过 `zig build test` 秒级验证。
 2. **代码覆盖率追踪 (`kcov`)**：
    - 内置覆盖率测试流水线 (`zig build coverage`)，全库行覆盖率保持在 91%+ 以上。
@@ -223,7 +223,7 @@ flowchart LR
 
 ## 9. 核心架构演进与瓶颈诊断清单 (Architectural Bottlenecks & Roadmap)
 
-以下关键瓶颈已正式列入技术演进追踪体系（详见 `plan/TODO.md` 与 `README.md`）：
+以下关键瓶颈已列入技术演进追踪（详见 [`plan/TODO.md`](../plan/TODO.md)）：
 
 ### 9.1 跨平台 CPU Fallback 多核并行瓶颈 (对应问题 3)
 * **现状定位**：

@@ -35,7 +35,7 @@
   - update the exporter and `src/nn/model_graph.schema.json` (field descriptions and `enum` lists matching the Zig enums),
   - regenerate `examples/sample_model_graph.json` and `examples/minimal_model_graph.json` with `zig build run-report`,
   - copy the schema and both samples to `public/tools/visualizer/` in chen-gz.github.io and update its consumers,
-  - update the tests and the design doc (`doc/visualization-model-edge-design.md` in chen-gz.github.io),
+  - update the tests, `doc/model-graph-visualization.md` and the full specification (`doc/visualization-model-edge-design.md` in chen-gz.github.io),
   - for breaking changes, bump the format version and record the change under `Changed` in the `CHANGELOG.md` `Unreleased` section.
 
 ## 4. Configuration Structs (配置结构体默认值)
