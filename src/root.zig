@@ -951,6 +951,16 @@ test "GRPO group advantages and loss" {
         const numerical_grad = (loss_plus - loss_minus) / (2.0 * eps);
         try std.testing.expectApproxEqAbs(numerical_grad, new_t.grad[i], 1e-3);
     }
+
+    // 4. Test Graph-integrated grpoLossGraph with graph.backward
+    const new_t_graph = try graph.tensorNDWithData(&.{4}, &new_logps, true);
+    const scaled_new = try graph.mulScalar(new_t_graph, 1.0);
+    const g_grpo_loss = try nn.grpoLossGraph(&graph, old_t, scaled_new, &sample_advs, &ref_logps, 0.05, 0.2);
+    try std.testing.expectApproxEqAbs(loss_eval, g_grpo_loss.data[0], 1e-5);
+    try graph.backward(g_grpo_loss);
+    for (0..4) |i| {
+        try std.testing.expectApproxEqAbs(new_t.grad[i], new_t_graph.grad[i], 1e-5);
+    }
 }
 
 test "MoELayer Top-K routing and autograd" {

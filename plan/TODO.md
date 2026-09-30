@@ -95,9 +95,9 @@
 - [x] **1.5.2 完善 `MLALayer.forward` 训练前向与反向求导路径 (`transformer.zig`)**
   - [x] 修复 [`MLALayer.forward`](../src/nn/transformer.zig) 未使用 `q_all`、`w_kr` 及因果注意力（直接 `k_c + v_c`）的占位实现，补全基于计算图的完整潜在多头注意力（Content + RoPE + Scaled Dot-Product Attention）前向与反向传播。
 
-- [ ] **1.5.3 大词表交叉熵与 LLM 后训练 Loss 计算图集成 (`autodiff/`, `transformer.zig`)**
-  - [ ] 扩展 [`Graph.softmaxCrossEntropy`](../src/autodiff/graph.zig) 支持 `usize` / `u32` 标签（突破 `[]const u8` 最多 256 类的限制）。
-  - [ ] 将 [`maskedCrossEntropyLoss`](../src/nn/transformer.zig)、[`dpoLoss`](../src/nn/transformer.zig) 与 [`grpoLoss`](../src/nn/transformer.zig) 接入动态计算图 `Graph`，支持端到端 `graph.backward(loss)`。
+- [x] **1.5.3 大词表交叉熵与 LLM 后训练 Loss 计算图集成 (`autodiff/`, `transformer.zig`)**
+  - [x] 扩展 [`Graph.softmaxCrossEntropy`](../src/autodiff/graph.zig) 支持 `usize` / `u32` 标签（突破 `[]const u8` 最多 256 类的限制）。
+  - [x] 将 [`maskedCrossEntropyLoss`](../src/nn/transformer.zig)、[`dpoLoss`](../src/nn/transformer.zig) 与 [`grpoLoss`](../src/nn/transformer.zig) 接入动态计算图 `Graph`，支持端到端 `graph.backward(loss)`。
 
 - [ ] **1.5.4 非连续张量视图（Strided Views）在广播、反向传播与 `reshape` 中的内存安全 (`shape.zig`, `core.zig`, `autodiff/`)**
   - [ ] 修复 [`broadcastBinaryOpRaw`](../src/tensor/shape.zig) 及 [`Op.backward`](../src/autodiff/op.zig) 中仅凭 `A_shape.eq(B_shape)` 就跳过步长与 `offset` 检查直接遍历底层切片的越界/读错数据问题。

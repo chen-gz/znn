@@ -107,23 +107,25 @@ pub const Op = struct {
             .SoftmaxCrossEntropy => {
                 const logits = self.inputs[0];
                 const loss = self.outputs[0];
-                const targets = self.context.SoftmaxCrossEntropy.targets;
-                const probs = self.context.SoftmaxCrossEntropy.probs;
- 
+                const ctx = &self.context.SoftmaxCrossEntropy;
+                const targets = ctx.targets;
+                const probs = ctx.probs;
+
                 const B_size = logits.shape.dims[0];
                 const D = logits.shape.dims[1];
                 var loss_sum: f32 = 0.0;
- 
+                var total_w: f32 = 0.0;
+
                 for (0..B_size) |i| {
+                    const w: f32 = if (ctx.mask) |m| m[i] else 1.0;
+                    if (w <= 0.0) continue;
+
                     const row = logits.data[i * D .. (i + 1) * D];
-                    
-                    // 1) 寻找最大值 max_val 用于减法防止指数溢出 (Softmax 数值稳定性)
                     var max_val = row[0];
                     for (row) |val| {
                         if (val > max_val) max_val = val;
                     }
-                    
-                    // 2) 计算非归一化指数项 e^{x_j - max} 并求和
+
                     var sum: f32 = 0.0;
                     const row_probs = probs[i * D .. (i + 1) * D];
                     for (0..D) |j| {
@@ -131,21 +133,71 @@ pub const Op = struct {
                         row_probs[j] = e;
                         sum += e;
                     }
-                    
-                    // 3) 归一化计算概率
+
                     for (0..D) |j| {
                         row_probs[j] /= sum;
                     }
-                    
-                    // 4) 提取 Target 类别的预测概率计算负对数似然损失
+
                     const target_idx = targets[i];
-                    const prob = row_probs[target_idx];
-                    const clipped = @max(prob, 1e-15); // 防止 log(0)
-                    loss_sum += -@log(clipped);
+                    if (ctx.mask != null) {
+                        const log_sum_exp = max_val + @log(sum);
+                        loss_sum += (log_sum_exp - row[target_idx]) * w;
+                    } else {
+                        const prob = row_probs[target_idx];
+                        const clipped = @max(prob, 1e-15);
+                        loss_sum += -@log(clipped);
+                    }
+                    total_w += w;
                 }
-                
-                // 5) 计算 Batch 范围内的均值 Loss
-                loss.data[0] = loss_sum / @as(f32, @floatFromInt(B_size));
+
+                ctx.total_weight = total_w;
+                loss.data[0] = if (total_w > 0.0) loss_sum / total_w else 0.0;
+            },
+            .DpoLoss => {
+                const pi_chosen = self.inputs[0];
+                const pi_rejected = self.inputs[1];
+                const loss = self.outputs[0];
+                const ctx = self.context.DpoLoss;
+                const N = pi_chosen.data.len;
+
+                var total_loss: f32 = 0.0;
+                for (0..N) |i| {
+                    const log_ratio_chosen = pi_chosen.data[i] - ctx.ref_chosen[i];
+                    const log_ratio_rejected = pi_rejected.data[i] - ctx.ref_rejected[i];
+                    const z = ctx.beta * (log_ratio_chosen - log_ratio_rejected);
+                    const loss_i = if (z > 0.0)
+                        @log(1.0 + @exp(-z))
+                    else
+                        -z + @log(1.0 + @exp(z));
+                    total_loss += loss_i;
+                }
+                loss.data[0] = if (N > 0) total_loss / @as(f32, @floatFromInt(N)) else 0.0;
+            },
+            .GrpoLoss => {
+                const old_logps = self.inputs[0];
+                const new_logps = self.inputs[1];
+                const loss = self.outputs[0];
+                const ctx = self.context.GrpoLoss;
+                const N = old_logps.data.len;
+
+                var total_obj: f32 = 0.0;
+                for (0..N) |i| {
+                    const ratio = @exp(new_logps.data[i] - old_logps.data[i]);
+                    const adv = ctx.advantages[i];
+                    const s1 = ratio * adv;
+                    const clipped_ratio = std.math.clamp(ratio, 1.0 - ctx.clip_eps, 1.0 + ctx.clip_eps);
+                    const s2 = clipped_ratio * adv;
+                    const surrogate = @min(s1, s2);
+
+                    var kl: f32 = 0.0;
+                    if (ctx.beta > 0.0) {
+                        const ref = if (ctx.ref_logps) |refs| refs[i] else old_logps.data[i];
+                        const u = ref - new_logps.data[i];
+                        kl = @exp(u) - u - 1.0;
+                    }
+                    total_obj += (surrogate - ctx.beta * kl);
+                }
+                loss.data[0] = if (N > 0) -(total_obj / @as(f32, @floatFromInt(N))) else 0.0;
             },
             .BceWithLogitsLoss, .SigmoidCrossEntropy => {
                 const logits = self.inputs[0];
@@ -963,18 +1015,87 @@ pub const Op = struct {
             //   最后除以样本数 M 得到平均样本梯度。
             .SoftmaxCrossEntropy => {
                 const logits = self.inputs[0];
+                const loss = self.outputs[0];
+                const dL = loss.grad[0];
                 const M = logits.shape.dims[0];
                 const N = logits.shape.dims[1];
                 const ctx = &self.context.SoftmaxCrossEntropy;
 
-                const scale = 1.0 / @as(f32, @floatFromInt(M));
+                if (logits.requires_grad) {
+                    const denom = if (ctx.mask != null) ctx.total_weight else @as(f32, @floatFromInt(M));
+                    if (denom > 0.0) {
+                        for (0..M) |i| {
+                            const w: f32 = if (ctx.mask) |m| m[i] else 1.0;
+                            if (w <= 0.0) continue;
+                            const scale = dL * (w / denom);
+                            const label = ctx.targets[i];
+                            const p_row = ctx.probs[i * N .. (i + 1) * N];
+                            const dLogits_row = logits.grad[i * N .. (i + 1) * N];
+                            for (0..N) |j| {
+                                dLogits_row[j] += scale * (p_row[j] - (if (j == label) @as(f32, 1.0) else 0.0));
+                            }
+                        }
+                    }
+                }
+            },
+            .DpoLoss => {
+                const pi_chosen = self.inputs[0];
+                const pi_rejected = self.inputs[1];
+                const loss = self.outputs[0];
+                const dL = loss.grad[0];
+                const ctx = self.context.DpoLoss;
+                const N = pi_chosen.data.len;
+                if (N > 0) {
+                    const inv_n = dL / @as(f32, @floatFromInt(N));
+                    for (0..N) |i| {
+                        const log_ratio_chosen = pi_chosen.data[i] - ctx.ref_chosen[i];
+                        const log_ratio_rejected = pi_rejected.data[i] - ctx.ref_rejected[i];
+                        const z = ctx.beta * (log_ratio_chosen - log_ratio_rejected);
+                        // d/dz (-log(sigmoid(z))) = -sigmoid(-z) = -1 / (1 + exp(z))
+                        const sig_neg_z: f32 = if (z >= 0.0)
+                            @exp(-z) / (1.0 + @exp(-z))
+                        else
+                            1.0 / (1.0 + @exp(z));
+                        const dz = -inv_n * ctx.beta * sig_neg_z;
+                        if (pi_chosen.requires_grad) {
+                            pi_chosen.grad[i] += dz;
+                        }
+                        if (pi_rejected.requires_grad) {
+                            pi_rejected.grad[i] -= dz;
+                        }
+                    }
+                }
+            },
+            .GrpoLoss => {
+                const old_logps = self.inputs[0];
+                const new_logps = self.inputs[1];
+                const loss = self.outputs[0];
+                const dL = loss.grad[0];
+                const ctx = self.context.GrpoLoss;
+                const N = old_logps.data.len;
+                if (N > 0 and new_logps.requires_grad) {
+                    const inv_n = dL / @as(f32, @floatFromInt(N));
+                    for (0..N) |i| {
+                        const ratio = @exp(new_logps.data[i] - old_logps.data[i]);
+                        const adv = ctx.advantages[i];
+                        var d_surrogate: f32 = 0.0;
+                        if (adv >= 0.0) {
+                            if (ratio <= 1.0 + ctx.clip_eps) {
+                                d_surrogate = ratio * adv;
+                            }
+                        } else {
+                            if (ratio >= 1.0 - ctx.clip_eps) {
+                                d_surrogate = ratio * adv;
+                            }
+                        }
 
-                for (0..M) |i| {
-                    const label = ctx.targets[i];
-                    const p_row = ctx.probs[i * N .. (i + 1) * N];
-                    const dLogits_row = logits.grad[i * N .. (i + 1) * N];
-                    for (0..N) |j| {
-                        dLogits_row[j] += scale * (p_row[j] - (if (j == label) @as(f32, 1.0) else 0.0));
+                        var d_kl: f32 = 0.0;
+                        if (ctx.beta > 0.0) {
+                            const ref = if (ctx.ref_logps) |refs| refs[i] else old_logps.data[i];
+                            d_kl = 1.0 - @exp(ref - new_logps.data[i]);
+                        }
+
+                        new_logps.grad[i] += -inv_n * (d_surrogate - ctx.beta * d_kl);
                     }
                 }
             },

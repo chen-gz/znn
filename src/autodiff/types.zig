@@ -47,6 +47,8 @@ pub const OpType = enum {
     BceWithLogitsLoss, // 二元交叉熵带 Logits 损失函数
     SigmoidCrossEntropy, // Sigmoid 交叉熵损失 (BCE with logits)
     SoftmaxCrossEntropy, // 结合 Softmax 与交叉熵损失（数值稳定性更好）
+    DpoLoss, // 直接偏好优化损失 (Direct Preference Optimization Loss)
+    GrpoLoss, // 组相对策略优化损失 (Group Relative Policy Optimization Loss)
     L1Loss, // L1 正则化 / Lasso Loss: lambda * sum(|w|)
     L2Loss, // L2 正则化 / Ridge Loss: 0.5 * lambda * sum(w^2)
 
@@ -91,6 +93,8 @@ pub const OpType = enum {
             .BceWithLogitsLoss => "\\mathcal{L} = \\max(x, 0) - x \\cdot y + \\log(1 + e^{-|x|})",
             .SigmoidCrossEntropy => "\\mathcal{L} = \\max(x, 0) - x \\cdot y + \\log(1 + e^{-|x|})",
             .SoftmaxCrossEntropy => "\\mathcal{L} = -\\log \\left( \\frac{e^{z_y}}{\\sum_j e^{z_j}} \\right)",
+            .DpoLoss => "\\mathcal{L}_{\\text{DPO}} = -\\log \\sigma(\\beta (\\log \\frac{\\pi_\\theta(y_w)}{\\pi_{\\text{ref}}(y_w)} - \\log \\frac{\\pi_\\theta(y_l)}{\\pi_{\\text{ref}}(y_l)}))",
+            .GrpoLoss => "\\mathcal{L}_{\\text{GRPO}} = -\\frac{1}{N} \\sum [\\min(r_t A_t, \\text{clip}(r_t) A_t) - \\beta D_{\\text{KL}}]",
             .L1Loss => "\\mathcal{L}_{\\text{reg}} = \\lambda \\sum |w|",
             .L2Loss => "\\mathcal{L}_{\\text{reg}} = \\frac{1}{2} \\lambda \\sum w^2",
         };
@@ -191,7 +195,20 @@ pub const OpContext = union(enum) {
     SigmoidCrossEntropy: void,
     SoftmaxCrossEntropy: struct {
         probs: []f32,
-        targets: []const u8,
+        targets: []const usize,
+        mask: ?[]const f32 = null,
+        total_weight: f32 = 0.0,
+    },
+    DpoLoss: struct {
+        ref_chosen: []const f32,
+        ref_rejected: []const f32,
+        beta: f32,
+    },
+    GrpoLoss: struct {
+        advantages: []const f32,
+        ref_logps: ?[]const f32,
+        beta: f32,
+        clip_eps: f32,
     },
     L1Loss: struct {
         lambda: f32,

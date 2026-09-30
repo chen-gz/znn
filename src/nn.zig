@@ -100,11 +100,15 @@ pub const GPTConfig = transformer.GPTConfig;
 pub const GPT = transformer.GPT;
 pub const LoRALinear = transformer.LoRALinear;
 pub const maskedCrossEntropyLoss = transformer.maskedCrossEntropyLoss;
+pub const maskedCrossEntropyLossGraph = transformer.maskedCrossEntropyLossGraph;
 pub const sftCrossEntropyLoss = transformer.sftCrossEntropyLoss;
+pub const sftCrossEntropyLossGraph = transformer.sftCrossEntropyLossGraph;
 pub const dpoLoss = transformer.dpoLoss;
+pub const dpoLossGraph = transformer.dpoLossGraph;
 pub const computeGroupAdvantages = transformer.computeGroupAdvantages;
 pub const computeGRPOLoss = transformer.computeGRPOLoss;
 pub const grpoLoss = transformer.grpoLoss;
+pub const grpoLossGraph = transformer.grpoLossGraph;
 pub const sampleTopP = transformer.sampleTopP;
 pub const sampleTopK = transformer.sampleTopK;
 
@@ -530,13 +534,50 @@ test "maskedCrossEntropyLoss and dpoLoss" {
     const loss = try maskedCrossEntropyLoss(logits, &targets, &mask, allocator);
     try std.testing.expect(loss > 0.0 and loss < 1.0);
 
-    // DPO Loss test
+    // Graph-integrated maskedCrossEntropyLoss
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const g_logits = try graph.tensorNDWithData(&.{ 3, 4 }, logits.data, true);
+    const g_loss = try maskedCrossEntropyLossGraph(&graph, g_logits, &targets, &mask);
+    try std.testing.expectApproxEqAbs(loss, g_loss.data[0], 1e-5);
+    try graph.backward(g_loss);
+
+    // Token 0 has mask=0 -> gradient must be 0
+    for (g_logits.grad[0..4]) |g| {
+        try std.testing.expectEqual(@as(f32, 0.0), g);
+    }
+    // Token 1 and 2 have mask=1 -> target class gradient must be negative
+    try std.testing.expect(g_logits.grad[1 * 4 + 1] < 0.0);
+    try std.testing.expect(g_logits.grad[2 * 4 + 2] < 0.0);
+
+    // Large vocabulary (> 256) softmaxCrossEntropy test with u32 labels
+    const big_logits = try graph.zeros(&.{ 2, 300 }, true);
+    big_logits.data[0 * 300 + 280] = 5.0;
+    big_logits.data[1 * 300 + 299] = 5.0;
+    const big_targets = [_]u32{ 280, 299 };
+    const big_loss = try graph.softmaxCrossEntropy(big_logits, &big_targets);
+    try graph.backward(big_loss);
+    try std.testing.expect(big_logits.grad[0 * 300 + 280] < 0.0);
+    try std.testing.expect(big_logits.grad[1 * 300 + 299] < 0.0);
+
+    // DPO Loss test (Eager and Graph autograd)
     const pi_w = [_]f32{-1.2};
     const pi_l = [_]f32{-2.8};
     const ref_w = [_]f32{-1.5};
     const ref_l = [_]f32{-2.0};
     const d_loss = dpoLoss(&pi_w, &pi_l, &ref_w, &ref_l, 0.1);
     try std.testing.expect(d_loss > 0.0);
+
+    const g_pi_w = try graph.tensorNDWithData(&.{1}, &pi_w, true);
+    const g_pi_l = try graph.tensorNDWithData(&.{1}, &pi_l, true);
+    const g_dpo = try dpoLossGraph(&graph, g_pi_w, g_pi_l, &ref_w, &ref_l, 0.1);
+    try std.testing.expectApproxEqAbs(d_loss, g_dpo.data[0], 1e-6);
+    try graph.backward(g_dpo);
+    // Increasing chosen log-prob decreases DPO loss (grad < 0); increasing rejected increases loss (grad > 0)
+    try std.testing.expect(g_pi_w.grad[0] < 0.0);
+    try std.testing.expect(g_pi_l.grad[0] > 0.0);
+    try std.testing.expectApproxEqAbs(-g_pi_w.grad[0], g_pi_l.grad[0], 1e-6);
 }
 
 test "LayerNorm forward and backward autograd" {

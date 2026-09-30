@@ -738,14 +738,22 @@ pub const Graph = struct {
     }
 
     // 损失函数 Softmax + Cross Entropy 结合前向传播
-    // 在 logits 的行维度计算 Softmax 概率分布，并与 targets 分类标签计算交叉熵损失
-    pub fn softmaxCrossEntropy(self: *Graph, logits: *Tensor, targets: []const u8) !*Tensor {
-        const req_grad = self.enable_grad and logits.requires_grad;
-        const loss = try self.tensor(1, 1, req_grad);
-
+    // 在 logits 的行维度计算 Softmax 概率分布，并与 targets 分类标签（支持 u8/u32/usize 等任意整型切片）计算交叉熵损失
+    pub fn softmaxCrossEntropy(self: *Graph, logits: *Tensor, targets: anytype) !*Tensor {
         const B = logits.shape.dims[0];
         const N = logits.shape.dims[1];
+        if (targets.len != B) return error.ShapeMismatch;
+
         const allocator = self.arena.allocator();
+        const targets_copy = try allocator.alloc(usize, B);
+        for (0..B) |i| {
+            const label: usize = @intCast(targets[i]);
+            if (label >= N) return error.IndexOutOfBounds;
+            targets_copy[i] = label;
+        }
+
+        const req_grad = self.enable_grad and logits.requires_grad;
+        const loss = try self.tensor(1, 1, req_grad);
 
         var loss_sum: f32 = 0.0;
         if (req_grad) {
@@ -777,7 +785,7 @@ pub const Graph = struct {
 
             // 2. 计算平均交叉熵损失值：L = -1/B * sum(log(prob_target))
             for (0..B) |i| {
-                const label = targets[i];
+                const label = targets_copy[i];
                 const prob = probs[i * N + label];
                 const clipped = @max(prob, 1e-15); // 微小值剪裁，避免 log(0) 产生 -inf
                 loss_sum += -@log(clipped);
@@ -797,7 +805,9 @@ pub const Graph = struct {
                 .context = .{
                     .SoftmaxCrossEntropy = .{
                         .probs = probs,
-                        .targets = targets,
+                        .targets = targets_copy,
+                        .mask = null,
+                        .total_weight = @as(f32, @floatFromInt(B)),
                     },
                 },
             };
@@ -814,12 +824,240 @@ pub const Graph = struct {
                 for (logits_row) |val| {
                     sum += @exp(val - max_val);
                 }
-                const label = targets[i];
+                const label = targets_copy[i];
                 const prob = @exp(logits_row[label] - max_val) / sum;
                 const clipped = @max(prob, 1e-15);
                 loss_sum += -@log(clipped);
             }
             loss.data[0] = loss_sum / @as(f32, @floatFromInt(B));
+        }
+
+        return loss;
+    }
+
+    // 监督微调 (SFT) 掩码交叉熵损失：仅对 mask[i] > 0 的位置计算交叉熵并支持 Autograd 反向传播
+    pub fn maskedCrossEntropyLoss(self: *Graph, logits: *Tensor, targets: anytype, mask: []const f32) !*Tensor {
+        const B = logits.shape.dims[0];
+        const N = logits.shape.dims[1];
+        if (targets.len != B or mask.len != B) return error.ShapeMismatch;
+
+        const allocator = self.arena.allocator();
+        const targets_copy = try allocator.alloc(usize, B);
+        for (0..B) |i| {
+            const label: usize = @intCast(targets[i]);
+            if (label >= N) return error.IndexOutOfBounds;
+            targets_copy[i] = label;
+        }
+        const mask_copy = try allocator.alloc(f32, B);
+        @memcpy(mask_copy, mask);
+
+        const req_grad = self.enable_grad and logits.requires_grad;
+        const loss = try self.tensor(1, 1, req_grad);
+
+        var empty_probs: [0]f32 = .{};
+        const probs: []f32 = if (req_grad) try allocator.alloc(f32, B * N) else &empty_probs;
+        if (req_grad) @memset(probs, 0.0);
+
+        var total_loss: f32 = 0.0;
+        var total_weight: f32 = 0.0;
+
+        for (0..B) |i| {
+            const w = mask_copy[i];
+            if (w <= 0.0) continue;
+
+            const logits_row = logits.data[i * N .. (i + 1) * N];
+            var max_val = logits_row[0];
+            for (logits_row[1..]) |val| {
+                if (val > max_val) max_val = val;
+            }
+
+            var sum_exp: f32 = 0.0;
+            if (req_grad) {
+                const probs_row = probs[i * N .. (i + 1) * N];
+                for (logits_row, probs_row) |val, *p| {
+                    const e = @exp(val - max_val);
+                    p.* = e;
+                    sum_exp += e;
+                }
+                for (probs_row) |*p| {
+                    p.* /= sum_exp;
+                }
+            } else {
+                for (logits_row) |val| {
+                    sum_exp += @exp(val - max_val);
+                }
+            }
+
+            const log_sum_exp = max_val + @log(sum_exp);
+            const loss_i = log_sum_exp - logits_row[targets_copy[i]];
+            total_loss += loss_i * w;
+            total_weight += w;
+        }
+
+        loss.data[0] = if (total_weight > 0.0) total_loss / total_weight else 0.0;
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 1);
+            inputs[0] = logits;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = loss;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .SoftmaxCrossEntropy,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{
+                    .SoftmaxCrossEntropy = .{
+                        .probs = probs,
+                        .targets = targets_copy,
+                        .mask = mask_copy,
+                        .total_weight = total_weight,
+                    },
+                },
+            };
+            loss.creator = o;
+            try self.recordOp(o);
+        }
+
+        return loss;
+    }
+
+    // 直接偏好优化 (DPO) 损失函数：支持对策略模型对数概率 pi_chosen_logps / pi_rejected_logps 的计算图反向传播
+    pub fn dpoLoss(
+        self: *Graph,
+        pi_chosen_logps: *Tensor,
+        pi_rejected_logps: *Tensor,
+        ref_chosen_logps: []const f32,
+        ref_rejected_logps: []const f32,
+        beta: f32,
+    ) !*Tensor {
+        const N = pi_chosen_logps.data.len;
+        if (pi_rejected_logps.data.len != N or ref_chosen_logps.len != N or ref_rejected_logps.len != N) {
+            return error.ShapeMismatch;
+        }
+
+        const allocator = self.arena.allocator();
+        const ref_c_copy = try allocator.alloc(f32, N);
+        @memcpy(ref_c_copy, ref_chosen_logps);
+        const ref_r_copy = try allocator.alloc(f32, N);
+        @memcpy(ref_r_copy, ref_rejected_logps);
+
+        const req_grad = self.enable_grad and (pi_chosen_logps.requires_grad or pi_rejected_logps.requires_grad);
+        const loss = try self.tensor(1, 1, req_grad);
+
+        var total_loss: f32 = 0.0;
+        for (0..N) |i| {
+            const log_ratio_chosen = pi_chosen_logps.data[i] - ref_c_copy[i];
+            const log_ratio_rejected = pi_rejected_logps.data[i] - ref_r_copy[i];
+            const z = beta * (log_ratio_chosen - log_ratio_rejected);
+            const loss_i = if (z > 0.0)
+                @log(1.0 + @exp(-z))
+            else
+                -z + @log(1.0 + @exp(z));
+            total_loss += loss_i;
+        }
+        loss.data[0] = if (N > 0) total_loss / @as(f32, @floatFromInt(N)) else 0.0;
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 2);
+            inputs[0] = pi_chosen_logps;
+            inputs[1] = pi_rejected_logps;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = loss;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .DpoLoss,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{
+                    .DpoLoss = .{
+                        .ref_chosen = ref_c_copy,
+                        .ref_rejected = ref_r_copy,
+                        .beta = beta,
+                    },
+                },
+            };
+            loss.creator = o;
+            try self.recordOp(o);
+        }
+
+        return loss;
+    }
+
+    // 组相对策略优化 (GRPO) 损失函数：支持在计算图中对 new_logps 自动微分求导
+    pub fn grpoLoss(
+        self: *Graph,
+        old_logps: *Tensor,
+        new_logps: *Tensor,
+        advantages: []const f32,
+        ref_logps: ?[]const f32,
+        beta: f32,
+        clip_eps: f32,
+    ) !*Tensor {
+        const N = old_logps.data.len;
+        if (new_logps.data.len != N or advantages.len != N) return error.ShapeMismatch;
+        if (ref_logps) |refs| {
+            if (refs.len != N) return error.ShapeMismatch;
+        }
+
+        const allocator = self.arena.allocator();
+        const adv_copy = try allocator.alloc(f32, N);
+        @memcpy(adv_copy, advantages);
+
+        var ref_copy: ?[]const f32 = null;
+        if (ref_logps) |refs| {
+            const rc = try allocator.alloc(f32, N);
+            @memcpy(rc, refs);
+            ref_copy = rc;
+        }
+
+        const req_grad = self.enable_grad and new_logps.requires_grad;
+        const loss = try self.tensor(1, 1, req_grad);
+
+        var total_obj: f32 = 0.0;
+        for (0..N) |i| {
+            const ratio = @exp(new_logps.data[i] - old_logps.data[i]);
+            const adv = adv_copy[i];
+            const s1 = ratio * adv;
+            const clipped_ratio = std.math.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps);
+            const s2 = clipped_ratio * adv;
+            const surrogate = @min(s1, s2);
+
+            var kl: f32 = 0.0;
+            if (beta > 0.0) {
+                const ref = if (ref_copy) |refs| refs[i] else old_logps.data[i];
+                const u = ref - new_logps.data[i];
+                kl = @exp(u) - u - 1.0;
+            }
+            total_obj += (surrogate - beta * kl);
+        }
+        loss.data[0] = if (N > 0) -(total_obj / @as(f32, @floatFromInt(N))) else 0.0;
+
+        if (req_grad) {
+            const inputs = try allocator.alloc(*Tensor, 2);
+            inputs[0] = old_logps;
+            inputs[1] = new_logps;
+            const outputs = try allocator.alloc(*Tensor, 1);
+            outputs[0] = loss;
+
+            const o = try allocator.create(Op);
+            o.* = Op{
+                .op_type = .GrpoLoss,
+                .inputs = inputs,
+                .outputs = outputs,
+                .context = .{
+                    .GrpoLoss = .{
+                        .advantages = adv_copy,
+                        .ref_logps = ref_copy,
+                        .beta = beta,
+                        .clip_eps = clip_eps,
+                    },
+                },
+            };
+            loss.creator = o;
+            try self.recordOp(o);
         }
 
         return loss;
