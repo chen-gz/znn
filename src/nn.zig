@@ -539,7 +539,7 @@ test "maskedCrossEntropyLoss and dpoLoss" {
     try std.testing.expect(d_loss > 0.0);
 }
 
-test "LayerNorm forward pass" {
+test "LayerNorm forward and backward autograd" {
     const allocator = std.testing.allocator;
     var ln = try LayerNorm.init(allocator, 4, 1e-5);
     defer ln.deinit(allocator);
@@ -552,13 +552,37 @@ test "LayerNorm forward pass" {
     defer tensor.free(allocator, y);
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 4 }, y.shape.dims[0..2]);
-    // Mean of normalized output should be close to 0.0
     var sum: f32 = 0.0;
     for (y.data[0..4]) |v| sum += v;
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), sum / 4.0, 1e-4);
+
+    // Graph mode forward + backward
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const gx = try graph.tensorNDWithData(&.{ 2, 4 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 1.0, 3.0 }, true);
+    const gy = try ln.forward(allocator, &graph, gx);
+    try std.testing.expect(gy.creator != null);
+    try std.testing.expectEqual(autodiff.OpType.LayerNorm, gy.creator.?.op_type);
+
+    const target = try graph.tensorNDWithData(&.{ 2, 4 }, &[_]f32{ 0.5, -0.5, 1.0, -1.0, -0.5, 0.5, -1.0, 1.0 }, false);
+    const loss = try graph.mseLoss(gy, target);
+    try graph.backward(loss);
+
+    var x_grad_norm: f32 = 0.0;
+    for (gx.grad) |g| x_grad_norm += @abs(g);
+    try std.testing.expect(x_grad_norm > 1e-4);
+
+    var w_grad_norm: f32 = 0.0;
+    for (ln.weight.grad) |g| w_grad_norm += @abs(g);
+    try std.testing.expect(w_grad_norm > 1e-4);
+
+    var b_grad_norm: f32 = 0.0;
+    for (ln.bias.grad) |g| b_grad_norm += @abs(g);
+    try std.testing.expect(b_grad_norm > 1e-4);
 }
 
-test "BatchNorm2d forward pass" {
+test "BatchNorm2d forward and backward autograd" {
     const allocator = std.testing.allocator;
     var bn = try BatchNorm2d.init(allocator, 2, 1e-5, 0.1);
     defer bn.deinit(allocator);
@@ -571,9 +595,40 @@ test "BatchNorm2d forward pass" {
     defer tensor.free(allocator, y);
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 2, 2, 2 }, y.shape.dims[0..4]);
+
+    // Graph mode forward + backward
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const gx = try graph.tensorND(&.{ 2, 2, 2, 2 }, true);
+    for (gx.data, 0..) |*p, i| {
+        const fi = @as(f32, @floatFromInt(i));
+        p.* = @sin(fi * 1.3) + 0.2 * fi;
+    }
+    const gy = try bn.forward(allocator, &graph, gx);
+    try std.testing.expect(gy.creator != null);
+    try std.testing.expectEqual(autodiff.OpType.BatchNorm2d, gy.creator.?.op_type);
+
+    for (gy.grad, 0..) |*g, i| {
+        const fi = @as(f32, @floatFromInt(i));
+        g.* = @cos(fi * 0.7) - 0.1 * fi;
+    }
+    try graph.backwardWithGrad(gy);
+
+    var gx_grad_norm: f32 = 0.0;
+    for (gx.grad) |g| gx_grad_norm += @abs(g);
+    try std.testing.expect(gx_grad_norm > 1e-4);
+
+    var gamma_grad_norm: f32 = 0.0;
+    for (bn.gamma.grad) |g| gamma_grad_norm += @abs(g);
+    try std.testing.expect(gamma_grad_norm > 1e-4);
+
+    var beta_grad_norm: f32 = 0.0;
+    for (bn.beta.grad) |g| beta_grad_norm += @abs(g);
+    try std.testing.expect(beta_grad_norm > 1e-4);
 }
 
-test "Dropout and AvgPool2D forward passes" {
+test "Dropout and AvgPool2D forward and backward passes" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(42);
     const rand = prng.random();
@@ -596,6 +651,28 @@ test "Dropout and AvgPool2D forward passes" {
     defer tensor.free(allocator, pooled);
     try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2, 2 }, pooled.shape.dims[0..4]);
     try std.testing.expectApproxEqAbs(@as(f32, 4.0), pooled.data[0], 1e-5);
+
+    // Graph mode Dropout + AvgPool2D backward
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const g_img = try graph.tensorND(&.{ 1, 1, 4, 4 }, true);
+    for (g_img.data, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i + 1));
+
+    const g_dropped = try drop.forward(allocator, &graph, g_img, rand);
+    try std.testing.expect(g_dropped.creator != null);
+    try std.testing.expectEqual(autodiff.OpType.Dropout, g_dropped.creator.?.op_type);
+
+    const g_pooled = try pool.forward(allocator, &graph, g_dropped);
+    try std.testing.expect(g_pooled.creator != null);
+    try std.testing.expectEqual(autodiff.OpType.AvgPool2D, g_pooled.creator.?.op_type);
+
+    @memset(g_pooled.grad, 1.0);
+    try graph.backwardWithGrad(g_pooled);
+
+    var img_grad_sum: f32 = 0.0;
+    for (g_img.grad) |g| img_grad_sum += g;
+    try std.testing.expect(img_grad_sum > 0.0);
 }
 
 test "KVCache initialization and reset" {

@@ -33,7 +33,11 @@ pub const OpType = enum {
     Conv2D, // 二维卷积
     ConvTranspose2D, // 二维转置卷积 / 反卷积
     MaxPool2D, // 二维最大池化
+    AvgPool2D, // 二维平均池化
     RmsNorm, // RMSNorm 归一化
+    LayerNorm, // LayerNorm 层归一化
+    BatchNorm2d, // 二维批量归一化
+    Dropout, // 随机丢弃正则化
     Embedding, // 嵌入查找 (Embedding Lookup)
 
     // --- 损失函数与正则化 (Loss Functions & Regularization) ---
@@ -74,7 +78,11 @@ pub const OpType = enum {
             .Conv2D => "y = x \\ast W + b",
             .ConvTranspose2D => "y = x \\ast_{\\text{deconv}} W + b",
             .MaxPool2D => "y = \\max_{k \\times k}(x)",
+            .AvgPool2D => "y = \\frac{1}{k^2} \\sum_{k \\times k} x",
             .RmsNorm => "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
+            .LayerNorm => "y = \\frac{x - \\mu}{\\sqrt{\\sigma^2 + \\epsilon}} \\odot \\gamma + \\beta",
+            .BatchNorm2d => "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta",
+            .Dropout => "y = \\frac{m \\odot x}{1 - p}",
             .Embedding => "y = W_e[\\text{indices}]",
             .MseLoss => "\\mathcal{L} = \\frac{1}{N} \\sum (y - \\hat{y})^2",
             .BceLoss => "\\mathcal{L} = -\\frac{1}{N} \\sum [y \\log \\hat{y} + (1-y) \\log(1-\\hat{y})]",
@@ -147,8 +155,24 @@ pub const OpContext = union(enum) {
         pool_size: usize,
         stride: usize,
     },
+    AvgPool2D: struct {
+        kernel_size: usize,
+        stride: usize,
+    },
     RmsNorm: struct {
         eps: f32,
+    },
+    LayerNorm: struct {
+        eps: f32,
+    },
+    BatchNorm2d: struct {
+        eps: f32,
+        training: bool,
+        save_mean: []f32,
+        save_inv_std: []f32,
+    },
+    Dropout: struct {
+        mask_scale: []f32,
     },
     Embedding: void,
 

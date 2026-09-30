@@ -161,33 +161,7 @@ pub const LayerNorm = struct {
                 _ = g.registerModuleType(n, self.module_type) catch {};
             }
         }
-        const dim = self.weight.shape.dims[0];
-        const num_elements = x.data.len;
-        const batch_items = num_elements / dim;
-
-        const out = if (graph) |g| try g.tensorND(x.shape.dims[0..x.shape.len], x.requires_grad) else try tensor.zeros(allocator, x.shape.dims[0..x.shape.len]);
-
-        for (0..batch_items) |b| {
-            const row = x.data[b * dim .. (b + 1) * dim];
-            const out_row = out.data[b * dim .. (b + 1) * dim];
-
-            var sum: f32 = 0.0;
-            for (row) |val| sum += val;
-            const mean = sum / @as(f32, @floatFromInt(dim));
-
-            var var_sum: f32 = 0.0;
-            for (row) |val| {
-                const diff = val - mean;
-                var_sum += diff * diff;
-            }
-            const variance = var_sum / @as(f32, @floatFromInt(dim));
-            const std_inv = 1.0 / @sqrt(variance + self.eps);
-
-            for (0..dim) |i| {
-                out_row[i] = (row[i] - mean) * std_inv * self.weight.data[i] + self.bias.data[i];
-            }
-        }
-        return out;
+        return try x.layerNorm(self.weight, self.bias, self.eps, allocator, graph);
     }
 };
 
@@ -296,17 +270,27 @@ pub const BatchNorm2d = struct {
                 _ = g.setModuleFormula(n, formula) catch {};
                 _ = g.registerModuleType(n, self.module_type) catch {};
             }
+            return try g.batchNorm2d(
+                x,
+                self.gamma,
+                self.beta,
+                self.running_mean,
+                self.running_var,
+                self.eps,
+                self.momentum,
+                self.training,
+            );
         }
-        std.debug.assert(x.shape.len == 4); // [N, C, H, W]
+        if (x.shape.len != 4) return error.IncompatibleDimensions;
         const N = x.shape.dims[0];
         const C = x.shape.dims[1];
         const H = x.shape.dims[2];
         const W = x.shape.dims[3];
-        std.debug.assert(C == self.num_features);
+        if (C != self.num_features) return error.ShapeMismatch;
 
         const spatial_size = H * W;
         const total_samples = N * spatial_size;
-        const out = if (graph) |g| try g.tensorND(x.shape.dims[0..4], x.requires_grad) else try tensor.zeros(allocator, x.shape.dims[0..4]);
+        const out = try tensor.zeros(allocator, x.shape.dims[0..4]);
 
         for (0..C) |c| {
             var mean: f32 = 0.0;
@@ -357,17 +341,58 @@ pub const BatchNorm2d = struct {
 pub const Dropout = struct {
     p: f32,                 // 丢弃概率 (0.0 <= p < 1.0)
     training: bool = true,  // 是否处于训练模式
+    name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "Dropout",
+
+    pub const formula = "y = \\frac{m \\odot x}{1 - p}";
 
     pub fn init(p: f32) Dropout {
         return .{ .p = p, .training = true };
+    }
+
+    pub fn setName(self: *Dropout, name: []const u8) void {
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+    }
+
+    pub fn setNameFormatted(self: *Dropout, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("dropout");
+        }
+    }
+
+    pub fn getName(self: *const Dropout) ?[]const u8 {
+        return self.name;
+    }
+
+    pub fn registerFormula(self: *const Dropout, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+        }
     }
 
     pub fn forward(self: Dropout, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor, random: ?std.Random) !*Tensor {
         if (!self.training or self.p == 0.0 or random == null) {
             return x;
         }
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
+            }
+            return try g.dropout(x, self.p, random.?);
+        }
 
-        const out = if (graph) |g| try g.tensorND(x.shape.dims[0..x.shape.len], x.requires_grad) else try tensor.zeros(allocator, x.shape.dims[0..x.shape.len]);
+        const out = try tensor.zeros(allocator, x.shape.dims[0..x.shape.len]);
         const scale = 1.0 / (1.0 - self.p);
         const rand = random.?;
 
@@ -386,43 +411,52 @@ pub const Dropout = struct {
 pub const AvgPool2D = struct {
     kernel_size: usize,
     stride: usize,
+    name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "AvgPool2D",
+
+    pub const formula = "y = \\frac{1}{k^2} \\sum_{k \\times k} x";
 
     pub fn init(kernel_size: usize, stride: usize) AvgPool2D {
         return .{ .kernel_size = kernel_size, .stride = stride };
     }
 
+    pub fn setName(self: *AvgPool2D, name: []const u8) void {
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+    }
+
+    pub fn setNameFormatted(self: *AvgPool2D, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("avgpool2d");
+        }
+    }
+
+    pub fn getName(self: *const AvgPool2D) ?[]const u8 {
+        return self.name;
+    }
+
+    pub fn registerFormula(self: *const AvgPool2D, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+        }
+    }
+
     pub fn forward(self: AvgPool2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        std.debug.assert(x.shape.len == 4);
-        const N = x.shape.dims[0];
-        const C = x.shape.dims[1];
-        const H = x.shape.dims[2];
-        const W = x.shape.dims[3];
-
-        const out_h = (H - self.kernel_size) / self.stride + 1;
-        const out_w = (W - self.kernel_size) / self.stride + 1;
-        const out = if (graph) |g| try g.tensorND(&.{ N, C, out_h, out_w }, x.requires_grad) else try tensor.zeros(allocator, &.{ N, C, out_h, out_w });
-        const pool_area = @as(f32, @floatFromInt(self.kernel_size * self.kernel_size));
-
-        for (0..N) |n| {
-            for (0..C) |c| {
-                for (0..out_h) |oh| {
-                    for (0..out_w) |ow| {
-                        const ih_start = oh * self.stride;
-                        const iw_start = ow * self.stride;
-                        var sum: f32 = 0.0;
-
-                        for (0..self.kernel_size) |kh| {
-                            for (0..self.kernel_size) |kw| {
-                                const ih = ih_start + kh;
-                                const iw = iw_start + kw;
-                                sum += x.data[((n * C + c) * H + ih) * W + iw];
-                            }
-                        }
-                        out.data[((n * C + c) * out_h + oh) * out_w + ow] = sum / pool_area;
-                    }
-                }
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
             }
         }
-        return out;
+        return try x.avgpool2d(self.kernel_size, self.stride, allocator, graph);
     }
 };

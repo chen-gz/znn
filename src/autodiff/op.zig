@@ -512,6 +512,50 @@ pub const Op = struct {
                     }
                 }
             },
+            .AvgPool2D => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const kernel_size = self.context.AvgPool2D.kernel_size;
+                const stride = self.context.AvgPool2D.stride;
+
+                const N = A.shape.dims[0];
+                const C_ch = A.shape.dims[1];
+                const H = A.shape.dims[2];
+                const W = A.shape.dims[3];
+                const H_out = C.shape.dims[2];
+                const W_out = C.shape.dims[3];
+                const pool_area = @as(f32, @floatFromInt(kernel_size * kernel_size));
+
+                const s_n = A.strides.dims[0];
+                const s_c = A.strides.dims[1];
+                const s_h = A.strides.dims[2];
+                const s_w = A.strides.dims[3];
+
+                const o_n = C.strides.dims[0];
+                const o_c = C.strides.dims[1];
+                const o_h = C.strides.dims[2];
+                const o_w = C.strides.dims[3];
+
+                for (0..N) |n| {
+                    for (0..C_ch) |c_| {
+                        for (0..H_out) |oh| {
+                            for (0..W_out) |ow| {
+                                var sum_val: f32 = 0.0;
+                                for (0..kernel_size) |kh| {
+                                    for (0..kernel_size) |kw| {
+                                        const ih = oh * stride + kh;
+                                        const iw = ow * stride + kw;
+                                        if (ih < H and iw < W) {
+                                            sum_val += A.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
+                                        }
+                                    }
+                                }
+                                C.data[n * o_n + c_ * o_c + oh * o_h + ow * o_w] = sum_val / pool_area;
+                            }
+                        }
+                    }
+                }
+            },
             .Softmax => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
@@ -560,6 +604,72 @@ pub const Op = struct {
                     for (row_in, row_out, G.data) |x_val, *y_val, g_val| {
                         y_val.* = x_val / rms * g_val;
                     }
+                }
+            },
+            .LayerNorm => {
+                const X = self.inputs[0];
+                const G = self.inputs[1];
+                const B = self.inputs[2];
+                const Y = self.outputs[0];
+                const eps = self.context.LayerNorm.eps;
+                const D = X.shape.dims[X.shape.len - 1];
+                const M = X.data.len / D;
+                const d_f = @as(f32, @floatFromInt(D));
+
+                for (0..M) |i| {
+                    const row_in = X.data[i * D .. (i + 1) * D];
+                    const row_out = Y.data[i * D .. (i + 1) * D];
+
+                    var sum_x: f32 = 0.0;
+                    for (row_in) |val| sum_x += val;
+                    const mean_val = sum_x / d_f;
+
+                    var var_sum: f32 = 0.0;
+                    for (row_in) |val| {
+                        const diff = val - mean_val;
+                        var_sum += diff * diff;
+                    }
+                    const inv_std = 1.0 / @sqrt(var_sum / d_f + eps);
+
+                    for (0..D) |j| {
+                        row_out[j] = (row_in[j] - mean_val) * inv_std * G.data[j] + B.data[j];
+                    }
+                }
+            },
+            .BatchNorm2d => {
+                const X = self.inputs[0];
+                const G = self.inputs[1];
+                const B = self.inputs[2];
+                const Y = self.outputs[0];
+                const ctx = self.context.BatchNorm2d;
+
+                const N = X.shape.dims[0];
+                const C = X.shape.dims[1];
+                const H = X.shape.dims[2];
+                const W = X.shape.dims[3];
+                const spatial_size = H * W;
+
+                for (0..C) |c_| {
+                    const mean_val = ctx.save_mean[c_];
+                    const inv_std = ctx.save_inv_std[c_];
+                    const g_val = G.data[c_];
+                    const b_val = B.data[c_];
+
+                    for (0..N) |n| {
+                        const in_slice = X.data[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
+                        const out_slice = Y.data[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
+                        for (in_slice, out_slice) |val, *o| {
+                            o.* = (val - mean_val) * inv_std * g_val + b_val;
+                        }
+                    }
+                }
+            },
+            .Dropout => {
+                const X = self.inputs[0];
+                const Y = self.outputs[0];
+                const mask_scale = self.context.Dropout.mask_scale;
+                for (X.data, Y.data, mask_scale) |val, *o, m| {
+                    o.* = val * m;
                 }
             },
             .BatchMatMul => {
@@ -1478,6 +1588,54 @@ pub const Op = struct {
                     }
                 }
             },
+            .AvgPool2D => {
+                const A = self.inputs[0];
+                const C = self.outputs[0];
+                const N = A.shape.dims[0];
+                const C_ch = A.shape.dims[1];
+                const H = A.shape.dims[2];
+                const W = A.shape.dims[3];
+                const H_out = C.shape.dims[2];
+                const W_out = C.shape.dims[3];
+
+                const kernel_size = self.context.AvgPool2D.kernel_size;
+                const stride = self.context.AvgPool2D.stride;
+                const pool_area = @as(f32, @floatFromInt(kernel_size * kernel_size));
+
+                const s_n = A.strides.dims[0];
+                const s_c = A.strides.dims[1];
+                const s_h = A.strides.dims[2];
+                const s_w = A.strides.dims[3];
+
+                const o_n = C.strides.dims[0];
+                const o_c = C.strides.dims[1];
+                const o_h = C.strides.dims[2];
+                const o_w = C.strides.dims[3];
+
+                if (A.requires_grad) {
+                    for (0..N) |n| {
+                        for (0..C_ch) |c_| {
+                            for (0..H_out) |oh| {
+                                for (0..W_out) |ow| {
+                                    const grad_val = C.grad[n * o_n + c_ * o_c + oh * o_h + ow * o_w];
+                                    if (grad_val == 0.0) continue;
+                                    const distributed_grad = grad_val / pool_area;
+
+                                    for (0..kernel_size) |kh| {
+                                        for (0..kernel_size) |kw| {
+                                            const ih = oh * stride + kh;
+                                            const iw = ow * stride + kw;
+                                            if (ih < H and iw < W) {
+                                                A.grad[n * s_n + c_ * s_c + ih * s_h + iw * s_w] += distributed_grad;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
             .Softmax => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
@@ -1538,6 +1696,135 @@ pub const Op = struct {
                             const term2 = row_in[j] * scale * scale * sum_dy_g_x / @as(f32, @floatFromInt(D));
                             row_grad_in[j] += scale * (term1 - term2);
                         }
+                    }
+                }
+            },
+            .LayerNorm => {
+                const X = self.inputs[0];
+                const G = self.inputs[1];
+                const B = self.inputs[2];
+                const Y = self.outputs[0];
+                const eps = self.context.LayerNorm.eps;
+                const D = X.shape.dims[X.shape.len - 1];
+                const M = X.data.len / D;
+                const d_f = @as(f32, @floatFromInt(D));
+
+                for (0..M) |i| {
+                    const row_in = X.data[i * D .. (i + 1) * D];
+                    const row_grad_out = Y.grad[i * D .. (i + 1) * D];
+
+                    var sum_x: f32 = 0.0;
+                    for (row_in) |val| sum_x += val;
+                    const mean_val = sum_x / d_f;
+
+                    var var_sum: f32 = 0.0;
+                    for (row_in) |val| {
+                        const diff = val - mean_val;
+                        var_sum += diff * diff;
+                    }
+                    const inv_std = 1.0 / @sqrt(var_sum / d_f + eps);
+
+                    if (B.requires_grad) {
+                        for (0..D) |j| {
+                            B.grad[j] += row_grad_out[j];
+                        }
+                    }
+
+                    if (G.requires_grad) {
+                        for (0..D) |j| {
+                            const x_hat = (row_in[j] - mean_val) * inv_std;
+                            G.grad[j] += row_grad_out[j] * x_hat;
+                        }
+                    }
+
+                    if (X.requires_grad) {
+                        const row_grad_in = X.grad[i * D .. (i + 1) * D];
+                        var sum_dx_hat: f32 = 0.0;
+                        var sum_dx_hat_x_hat: f32 = 0.0;
+                        for (0..D) |j| {
+                            const x_hat = (row_in[j] - mean_val) * inv_std;
+                            const dx_hat = row_grad_out[j] * G.data[j];
+                            sum_dx_hat += dx_hat;
+                            sum_dx_hat_x_hat += dx_hat * x_hat;
+                        }
+                        for (0..D) |j| {
+                            const x_hat = (row_in[j] - mean_val) * inv_std;
+                            const dx_hat = row_grad_out[j] * G.data[j];
+                            row_grad_in[j] += (inv_std / d_f) * (d_f * dx_hat - sum_dx_hat - x_hat * sum_dx_hat_x_hat);
+                        }
+                    }
+                }
+            },
+            .BatchNorm2d => {
+                const X = self.inputs[0];
+                const G = self.inputs[1];
+                const B = self.inputs[2];
+                const Y = self.outputs[0];
+                const ctx = self.context.BatchNorm2d;
+
+                const N = X.shape.dims[0];
+                const C = X.shape.dims[1];
+                const H = X.shape.dims[2];
+                const W = X.shape.dims[3];
+                const spatial_size = H * W;
+                const m_f = @as(f32, @floatFromInt(N * spatial_size));
+
+                for (0..C) |c_| {
+                    const mean_val = ctx.save_mean[c_];
+                    const inv_std = ctx.save_inv_std[c_];
+                    const g_val = G.data[c_];
+
+                    var dbeta: f32 = 0.0;
+                    var dgamma: f32 = 0.0;
+                    for (0..N) |n| {
+                        const in_slice = X.data[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
+                        const dy_slice = Y.grad[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
+                        for (in_slice, dy_slice) |x_val, dy_val| {
+                            const x_hat = (x_val - mean_val) * inv_std;
+                            dbeta += dy_val;
+                            dgamma += dy_val * x_hat;
+                        }
+                    }
+
+                    if (B.requires_grad) {
+                        B.grad[c_] += dbeta;
+                    }
+                    if (G.requires_grad) {
+                        G.grad[c_] += dgamma;
+                    }
+
+                    if (X.requires_grad) {
+                        if (ctx.training) {
+                            const factor = (g_val * inv_std) / m_f;
+                            for (0..N) |n| {
+                                const in_slice = X.data[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
+                                const dy_slice = Y.grad[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
+                                const dx_slice = X.grad[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
+                                for (in_slice, dy_slice, dx_slice) |x_val, dy_val, *dx_val| {
+                                    const x_hat = (x_val - mean_val) * inv_std;
+                                    dx_val.* += factor * (m_f * dy_val - dbeta - x_hat * dgamma);
+                                }
+                            }
+                        } else {
+                            const factor = g_val * inv_std;
+                            for (0..N) |n| {
+                                const dy_slice = Y.grad[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
+                                const dx_slice = X.grad[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
+                                for (dy_slice, dx_slice) |dy_val, *dx_val| {
+                                    dx_val.* += factor * dy_val;
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            .Dropout => {
+                const X = self.inputs[0];
+                const Y = self.outputs[0];
+                const mask_scale = self.context.Dropout.mask_scale;
+                if (X.requires_grad) {
+                    for (X.grad, Y.grad, mask_scale) |*dx, dy, m| {
+                        dx.* += dy * m;
                     }
                 }
             },
