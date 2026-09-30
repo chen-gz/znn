@@ -47,6 +47,7 @@ pub const Conv2D = core.Conv2D;
 pub const ConvTranspose2D = core.ConvTranspose2D;
 pub const Module = core.Module;
 pub const deinitModel = core.deinitModel;
+pub const zeroGradModel = core.zeroGradModel;
 pub const collectParameters = core.collectParameters;
 pub const Sequential = core.Sequential;
 pub const sequential = core.sequential;
@@ -2074,3 +2075,45 @@ test "Visualization enums match the enum lists of the published JSON Schema" {
 
     try std.testing.expectEqualStrings("module", Check.prop(defs, "ModuleNode", "kind").get("const").?.string);
 }
+
+test "Comptime reflection supports slice modules, optional bias, and frozen LoRA base weights" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    // 1. MoELayer ([]MLP fields: routed_experts and shared_experts)
+    var moe = try MoELayer.init(allocator, 4, 8, 3, 1, 2, random);
+    defer deinitModel(&moe, allocator);
+    const moe_params = try collectParameters(&moe, allocator);
+    defer allocator.free(moe_params);
+    // gate (w + b = 2) + 3 routed experts (each c_fc.w, c_fc.b, c_proj.w, c_proj.b = 4) + 1 shared expert (4) = 18
+    try std.testing.expectEqual(@as(usize, 18), moe_params.len);
+    for (moe_params) |p| p.grad[0] = 1.0;
+    zeroGradModel(&moe);
+    for (moe_params) |p| try std.testing.expectApproxEqAbs(@as(f32, 0.0), p.grad[0], 1e-6);
+
+    // 2. StackedLSTM ([]LSTMCell field: layers)
+    var stacked_lstm = try StackedLSTM.init(allocator, 4, 6, 2, random);
+    defer deinitModel(&stacked_lstm, allocator);
+    const lstm_params = try collectParameters(&stacked_lstm, allocator);
+    defer allocator.free(lstm_params);
+    // 2 layers * 4 gates * 4 parameters (w_ih/w_hh Linear weights + bias) = 32
+    try std.testing.expectEqual(@as(usize, 32), lstm_params.len);
+
+    // 3. ConvTranspose2D (?*Tensor field: bias)
+    var deconv = try ConvTranspose2D.init(allocator, 2, 3, 2, 1, 0, true, random);
+    defer deinitModel(&deconv, allocator);
+    const deconv_params = try collectParameters(&deconv, allocator);
+    defer allocator.free(deconv_params);
+    try std.testing.expectEqual(@as(usize, 2), deconv_params.len);
+
+    // 4. LoRALinear (frozen weight, trainable lora_a, lora_b, and optional bias)
+    var lora = try LoRALinear.initWithBias(allocator, 4, 3, 2, 4.0, true, random);
+    defer deinitModel(&lora, allocator);
+    const lora_params = try collectParameters(&lora, allocator);
+    defer allocator.free(lora_params);
+    // weight is frozen (requires_grad == false), only lora_a, lora_b, bias collected = 3
+    try std.testing.expect(!lora.weight.requires_grad);
+    try std.testing.expectEqual(@as(usize, 3), lora_params.len);
+}
+
