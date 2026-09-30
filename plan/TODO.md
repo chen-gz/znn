@@ -86,6 +86,51 @@
 
 ---
 
+### Phase 1.5 (P0/P1): 框架架构深度审查专项修复 (Architectural Audit & Framework Fixes)
+
+- [ ] **1.5.1 补全核心层 Autograd `Op` 注册与反向传播闭环 (`normalization.zig`, `autodiff/`)**
+  - [ ] 在 [`OpType`](../src/autodiff/types.zig) 中新增 `LayerNorm`、`BatchNorm2d`、`Dropout`、`AvgPool2D`，并在 [`Graph`](../src/autodiff/graph.zig) 与 [`Op`](../src/autodiff/op.zig) 中实现其前向/反向传播与数学公式推导。
+  - [ ] 修复 [`LayerNorm.forward`](../src/nn/normalization.zig)、[`BatchNorm2d.forward`](../src/nn/normalization.zig)、[`Dropout.forward`](../src/nn/normalization.zig) 与 [`AvgPool2D.forward`](../src/nn/normalization.zig) 在 `graph != null` 时未挂载 `Op` 导致梯度静默截断的问题。
+
+- [ ] **1.5.2 完善 `MLALayer.forward` 训练前向与反向求导路径 (`transformer.zig`)**
+  - [ ] 修复 [`MLALayer.forward`](../src/nn/transformer.zig) 未使用 `q_all`、`w_kr` 及因果注意力（直接 `k_c + v_c`）的占位实现，补全基于计算图的完整潜在多头注意力（Content + RoPE + Scaled Dot-Product Attention）前向与反向传播。
+
+- [ ] **1.5.3 大词表交叉熵与 LLM 后训练 Loss 计算图集成 (`autodiff/`, `transformer.zig`)**
+  - [ ] 扩展 [`Graph.softmaxCrossEntropy`](../src/autodiff/graph.zig) 支持 `usize` / `u32` 标签（突破 `[]const u8` 最多 256 类的限制）。
+  - [ ] 将 [`maskedCrossEntropyLoss`](../src/nn/transformer.zig)、[`dpoLoss`](../src/nn/transformer.zig) 与 [`grpoLoss`](../src/nn/transformer.zig) 接入动态计算图 `Graph`，支持端到端 `graph.backward(loss)`。
+
+- [ ] **1.5.4 非连续张量视图（Strided Views）在广播、反向传播与 `reshape` 中的内存安全 (`shape.zig`, `core.zig`, `autodiff/`)**
+  - [ ] 修复 [`broadcastBinaryOpRaw`](../src/tensor/shape.zig) 及 [`Op.backward`](../src/autodiff/op.zig) 中仅凭 `A_shape.eq(B_shape)` 就跳过步长与 `offset` 检查直接遍历底层切片的越界/读错数据问题。
+  - [ ] 修复 [`Graph.reshape`](../src/autodiff/graph.zig) 对非连续张量直接共享 `data` 切片且未维护 `is_view` 的隐患。
+
+- [ ] **1.5.5 Comptime 模型反射支持动态切片 `[]T` 与可选参数 `?*Tensor` (`nn/core.zig`)**
+  - [ ] 在 [`collectParametersInternal`](../src/nn/core.zig)、[`deinitModel`](../src/nn/core.zig) 与 [`zeroGradModel`](../src/nn/core.zig) 中支持结构体切片字段（如 `MoELayer` 的 `[]MLP`、`StackedLSTM` 的 `[]LSTMCell`）及 `?*Tensor` 字段（如 `ConvTranspose2D.bias`、`LoRALinear.bias`），并正确冻结 `LoRALinear` 基础权重梯度。
+
+- [ ] **1.5.6 Safetensors 序列化覆盖度与无序加载兼容性 (`nn/serialization.zig`)**
+  - [ ] 在 [`writeModelTensors`](../src/nn/serialization.zig)、[`writeModelData`](../src/nn/serialization.zig) 与 [`loadModelTensors`](../src/nn/serialization.zig) 中支持 `?*Tensor` 与子模块切片 `[]T`。
+  - [ ] 移除 [`loadTensorData`](../src/nn/serialization.zig) 中对文件张量物理存储顺序必须与 Zig 字段顺序一致（`start_offset >= current_offset.*`）的强假设，改为按偏移量随机访问读取，兼容外部导出的 Safetensors 文件。
+
+- [ ] **1.5.7 消除 `Tensor`、`Graph` 与 `Op.forward` 的算子前向三重重复 (`tensor/core.zig`, `autodiff/graph.zig`, `autodiff/op.zig`)**
+  - [ ] 复用统一的前向计算实现，消除 [`Op.forward`](../src/autodiff/op.zig) 与 [`Graph`](../src/autodiff/graph.zig) 中重复手写的数百行前向算子代码。
+
+- [ ] **1.5.8 收敛 `Tensor` 与 `GenericTensor(T)` 双轨割裂 (`tensor/types.zig`, `tensor/core.zig`, `nn/core.zig`)**
+  - [ ] 打通 `Tensor` 与 `GenericTensor(T)` 的互操作接口：支持 [`Embedding`](../src/nn/core.zig) 直接接收整型索引切片/张量（无需先转为 `f32`），支持 [`Tensor.where`](../src/tensor/core.zig) / [`Tensor.maskedFill`](../src/tensor/core.zig) 接收 `BoolTensor`，并为 `GenericTensor(T)` 补齐核心逐元素与归约方法。
+
+- [ ] **1.5.9 补全归约、数学初等函数、索引与视图算子的 Autograd 支持 (`tensor/core.zig`, `autodiff/`)**
+  - [ ] 为按轴归约 `sum`、`mean`、`variance`、初等函数 `sqrt`、`exp`、`log`、`abs`、条件选择 `where`、`maskedFill` 以及视图算子 `squeeze`、`unsqueeze`、`slice` 接入 `graph: ?*autodiff.Graph` 与反向传播。
+
+- [ ] **1.5.10 统一 `nn` 模块元数据、补全可视化 Scope 覆盖并拆分巨型测试文件 (`nn/`, `root.zig`, `build.zig`)**
+  - [ ] 为 [`RNN`](../src/nn/recurrent.zig)、[`LSTM`](../src/nn/recurrent.zig)、[`StackedLSTM`](../src/nn/recurrent.zig)、[`GRU`](../src/nn/recurrent.zig)、[`MoELayer`](../src/nn/transformer.zig)、[`MLALayer`](../src/nn/transformer.zig)、[`LoRALinear`](../src/nn/transformer.zig) 补齐命名接口与 `Graph.enterModule` 作用域追踪。
+  - [ ] 将 [`src/root.zig`](../src/root.zig) 与 [`src/nn.zig`](../src/nn.zig) 中的庞大内联测试拆分为独立测试文件（`src/tests.zig`、`src/nn/tests.zig`），并用表驱动循环精简 [`build.zig`](../build.zig) 中 16 个示例程序的重复构建定义。
+
+- [ ] **1.5.11 核心算子性能与功能优化 (`transformer.zig`, `cblas.zig`, `tensor/core.zig`, `nn/core.zig`)**
+  - [ ] **`MoELayer` 稀疏激活**：修复 [`MoELayer.forward`](../src/nn/transformer.zig) 对未选中专家仍执行全量前向计算且未严格置零非 Top-K 门控概率的问题。
+  - [ ] **`CausalSelfAttention` 掩码广播优化**：将因果掩码从每次分配两份 $[B, n_h, T, T]$ 缩减为单份 $[1, 1, T, T]$ 广播张量。
+  - [ ] **`cblas_sgemm_fallback` `TransB` SIMD 加速**：为 [`cblas_sgemm_fallback`](../src/cblas.zig) 的 `NoTrans × Trans` 分支（对应 `MatMul` 反向传播计算 $dA \mathrel{+}= dC \cdot B^T$）实现 8 路 `@Vector(8, f32)` 向量化内积。
+  - [ ] **`Conv2D` 步长/填充扩展与 `im2col + sgemm` 加速**：为 [`Conv2D`](../src/nn/core.zig) 与 [`Tensor.conv2d`](../src/tensor/core.zig) 增加可配置 `stride` 与 `padding` 支持，并用 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向计算。
+
+---
+
 ### Phase 2 (P1): 泛型数据类型与跨平台高性能加速 (Generic DTypes & High-Perf Math)
 
 - [x] **2.1 张量泛型化与多精度支持 (Generic Tensor Type)**
@@ -102,7 +147,7 @@
 
 - [ ] **2.3 线性代数算法升级 (Numerical Linear Algebra)**
   - [ ] 引入 Cholesky 分解 ($A = LL^T$) 与前代/回代求解器，替代线性回归/岭回归中现有的高斯-若尔当消元法 [`solveLinearSystem`](../src/tensor.zig)。
-  - [ ] 增加 QR 分解与奇异值分解（SVD）基础支持，提升病态矩阵求解稳定性。
+  - [x] 增加 QR 分解与奇异值分解（SVD）基础支持，提升病态矩阵求解稳定性。
 
 - [ ] **2.4 多核 CPU 并行化 (Multi-Threading)**
   - [ ] 引入轻量级工作窃取（Work-stealing）或分块线程池调度器。
