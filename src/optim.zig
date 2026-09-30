@@ -54,6 +54,16 @@ fn readF32(reader: anytype) !f32 {
     return @bitCast(bits);
 }
 
+pub const SGDConfig = struct {
+    lr: f32 = 0.01,
+    momentum: f32 = 0.0,
+
+    pub const default: SGDConfig = .{};
+    pub fn defaultConfig() SGDConfig {
+        return .{};
+    }
+};
+
 pub const SGDOptimizer = struct {
     allocator: std.mem.Allocator,
     params: []*Tensor,
@@ -62,7 +72,11 @@ pub const SGDOptimizer = struct {
     momentum: f32,
     step_count: u64 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, model: anytype, config: struct { lr: f32, momentum: f32 = 0.0 }) !SGDOptimizer {
+    pub fn initDefault(allocator: std.mem.Allocator, model: anytype) !SGDOptimizer {
+        return init(allocator, model, SGDConfig.default);
+    }
+
+    pub fn init(allocator: std.mem.Allocator, model: anytype, config: SGDConfig) !SGDOptimizer {
         const params = try nn.collectParameters(model, allocator);
         errdefer allocator.free(params);
 
@@ -211,6 +225,18 @@ pub const SGDOptimizer = struct {
     }
 };
 
+pub const AdamConfig = struct {
+    lr: f32 = 0.001,
+    beta1: f32 = 0.9,
+    beta2: f32 = 0.999,
+    eps: f32 = 1e-8,
+
+    pub const default: AdamConfig = .{};
+    pub fn defaultConfig() AdamConfig {
+        return .{};
+    }
+};
+
 pub const AdamOptimizer = struct {
     allocator: std.mem.Allocator,
     params: []*Tensor,
@@ -222,12 +248,11 @@ pub const AdamOptimizer = struct {
     eps: f32,
     t: f32, // Timestep
 
-    pub fn init(allocator: std.mem.Allocator, model: anytype, config: struct {
-        lr: f32 = 0.001,
-        beta1: f32 = 0.9,
-        beta2: f32 = 0.999,
-        eps: f32 = 1e-8,
-    }) !AdamOptimizer {
+    pub fn initDefault(allocator: std.mem.Allocator, model: anytype) !AdamOptimizer {
+        return init(allocator, model, AdamConfig.default);
+    }
+
+    pub fn init(allocator: std.mem.Allocator, model: anytype, config: AdamConfig) !AdamOptimizer {
         const params = try nn.collectParameters(model, allocator);
         errdefer allocator.free(params);
 
@@ -546,10 +571,15 @@ pub const AdamWOptimizer = struct {
 
 /// 带有线性预热 (Linear Warmup) 的余弦退火学习率调度器
 pub const CosineScheduler = struct {
-    max_lr: f32,
-    min_lr: f32,
-    warmup_steps: u64,
-    max_steps: u64,
+    max_lr: f32 = 1e-3,
+    min_lr: f32 = 1e-5,
+    warmup_steps: u64 = 100,
+    max_steps: u64 = 1000,
+
+    pub const default: CosineScheduler = .{};
+    pub fn defaultOptions() CosineScheduler {
+        return .{};
+    }
 
     pub fn init(max_lr: f32, min_lr: f32, warmup_steps: u64, max_steps: u64) CosineScheduler {
         return .{
@@ -580,9 +610,14 @@ pub const CosineScheduler = struct {
 
 /// 固定步长阶梯衰减学习率调度器 (StepLR)
 pub const StepLRScheduler = struct {
-    base_lr: f32,
-    step_size: u64,
-    gamma: f32,
+    base_lr: f32 = 1e-3,
+    step_size: u64 = 100,
+    gamma: f32 = 0.1,
+
+    pub const default: StepLRScheduler = .{};
+    pub fn defaultOptions() StepLRScheduler {
+        return .{};
+    }
 
     pub fn init(base_lr: f32, step_size: u64, gamma: f32) StepLRScheduler {
         std.debug.assert(step_size > 0);
@@ -601,9 +636,14 @@ pub const StepLRScheduler = struct {
 
 /// 纯线性预热学习率调度器 (Linear Warmup)
 pub const LinearWarmupScheduler = struct {
-    start_lr: f32,
-    target_lr: f32,
-    warmup_steps: u64,
+    start_lr: f32 = 0.0,
+    target_lr: f32 = 1e-3,
+    warmup_steps: u64 = 100,
+
+    pub const default: LinearWarmupScheduler = .{};
+    pub fn defaultOptions() LinearWarmupScheduler {
+        return .{};
+    }
 
     pub fn init(start_lr: f32, target_lr: f32, warmup_steps: u64) LinearWarmupScheduler {
         std.debug.assert(warmup_steps > 0);
@@ -625,8 +665,13 @@ pub const LinearWarmupScheduler = struct {
 
 /// 指数衰减学习率调度器 (ExponentialLR)
 pub const ExponentialLRScheduler = struct {
-    base_lr: f32,
-    gamma: f32,
+    base_lr: f32 = 1e-3,
+    gamma: f32 = 0.95,
+
+    pub const default: ExponentialLRScheduler = .{};
+    pub fn defaultOptions() ExponentialLRScheduler {
+        return .{};
+    }
 
     pub fn init(base_lr: f32, gamma: f32) ExponentialLRScheduler {
         return .{
@@ -702,6 +747,11 @@ pub const GradClipConfig = union(enum) {
     norm: f32,
     value: f32,
     none: void,
+
+    pub const default: GradClipConfig = .{ .none = {} };
+    pub fn defaultConfig() GradClipConfig {
+        return .{ .none = {} };
+    }
 };
 
 /// 统一梯度裁剪执行函数

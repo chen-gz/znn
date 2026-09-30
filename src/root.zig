@@ -37,6 +37,16 @@ pub const bf16 = tensor.bf16;
 pub const DType = tensor.DType;
 pub const SliceRange = tensor.SliceRange;
 
+pub const SGDConfig = optim.SGDConfig;
+pub const AdamConfig = optim.AdamConfig;
+pub const AdamWConfig = optim.AdamWConfig;
+pub const CosineScheduler = optim.CosineScheduler;
+pub const StepLRScheduler = optim.StepLRScheduler;
+pub const LinearWarmupScheduler = optim.LinearWarmupScheduler;
+pub const ExponentialLRScheduler = optim.ExponentialLRScheduler;
+pub const LRScheduler = optim.LRScheduler;
+pub const GradClipConfig = optim.GradClipConfig;
+
 
 pub fn measureTime(comptime func: anytype, args: anytype) !struct {
     result: @TypeOf(@call(.auto, func, args)),

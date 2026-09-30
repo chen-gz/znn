@@ -416,6 +416,15 @@ pub const RidgeRegression = struct {
     alpha: f32 = 1.0,
     model: ?ModelResult = null,
 
+    pub const default: RidgeRegression = .{};
+    pub fn defaultOptions() RidgeRegression {
+        return .{};
+    }
+
+    pub fn initDefault() RidgeRegression {
+        return .{};
+    }
+
     pub fn init(alpha: f32) RidgeRegression {
         return .{ .alpha = alpha };
     }
@@ -446,6 +455,15 @@ pub const LassoRegression = struct {
     max_iter: usize = 1000,
     tol: f32 = 1e-4,
     model: ?ModelResult = null,
+
+    pub const default: LassoRegression = .{};
+    pub fn defaultOptions() LassoRegression {
+        return .{};
+    }
+
+    pub fn initDefault() LassoRegression {
+        return .{};
+    }
 
     pub fn init(alpha: f32, max_iter: usize, tol: f32) LassoRegression {
         return .{
@@ -482,6 +500,15 @@ pub const ElasticNetRegression = struct {
     max_iter: usize = 1000,
     tol: f32 = 1e-4,
     model: ?ModelResult = null,
+
+    pub const default: ElasticNetRegression = .{};
+    pub fn defaultOptions() ElasticNetRegression {
+        return .{};
+    }
+
+    pub fn initDefault() ElasticNetRegression {
+        return .{};
+    }
 
     pub fn init(alpha: f32, l1_ratio: f32, max_iter: usize, tol: f32) ElasticNetRegression {
         return .{

@@ -1817,11 +1817,16 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
 
 /// GPT 模型配置结构体
 pub const GPTConfig = struct {
-    vocab_size: usize,      // 词表大小 (Vocab Size)，决定输入和输出层的映射维度
-    block_size: usize,      // 最大上下文长度/时间步长度 (Context Length / Block Size)
-    n_embd: usize,          // 隐藏特征嵌入维度 (Embedding Dimension)
-    n_head: usize,          // 多头注意力头数 (Attention Heads)
-    n_layer: usize,         // Transformer 块堆叠的层数 (Number of Decoder Layers)
+    vocab_size: usize = 50257,      // 词表大小 (Vocab Size)，决定输入和输出层的映射维度
+    block_size: usize = 1024,       // 最大上下文长度/时间步长度 (Context Length / Block Size)
+    n_embd: usize = 768,           // 隐藏特征嵌入维度 (Embedding Dimension)
+    n_head: usize = 12,            // 多头注意力头数 (Attention Heads)
+    n_layer: usize = 12,           // Transformer 块堆叠的层数 (Number of Decoder Layers)
+
+    pub const default: GPTConfig = .{};
+    pub fn defaultConfig() GPTConfig {
+        return .{};
+    }
 };
 
 /// 泛型 GPT 模型定义函数
@@ -2025,6 +2030,25 @@ pub const LoRALinear = struct {
     out_features: usize,
     r: usize,
     scaling: f32,
+
+    pub const Options = struct {
+        r: usize = 8,
+        lora_alpha: f32 = 16.0,
+
+        pub const default: Options = .{};
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    pub fn initDefault(
+        allocator: std.mem.Allocator,
+        in_features: usize,
+        out_features: usize,
+        random: std.Random,
+    ) !LoRALinear {
+        return init(allocator, in_features, out_features, Options.default.r, Options.default.lora_alpha, random);
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
