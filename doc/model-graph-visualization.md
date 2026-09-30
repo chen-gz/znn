@@ -1,81 +1,45 @@
-# ZNN 计算图拓扑边与层次化可视化导出设计 (Visualization Model Edge Design v2)
+# ZNN 模型图导出 (Model Graph Export)
 
-本文档定义 `znn` 模型计算图导出与 Web 端交互式可视化（Schema 2.0）的权威数据协议与实现规范。
+`znn` 把一次 `forward` 的计算图导出为分层的模型图 JSON，供 chen-gz.github.io 的 `/visualizer` 页面渲染。完整规范（局部图模型、端口解析、残差判定、前端渲染与 GPT 黄金边集）见 chen-gz.github.io 仓库的 `doc/visualization-model-edge-design.md`。
 
----
+## 1. 流程
 
-## 1. 架构目标与 v1 问题诊断
-
-在早期的计算图导出设计（v1 / Schema 1.0）中，存在若干结构性缺陷：
-1. **模块内部细节向外泄露**：子模块内部的微观算子与临时张量节点，在顶层视图中被错误展开为全局扁平边，造成图谱极端臃肿；
-2. **作用域推断不可靠**：早期的算子作用域依赖输入张量所属模块进行启发式猜测，当跨模块张量传递时极易误判；
-3. **缺少端口抽象**：无法清晰表达一个复合模块的输入（Inputs）与输出（Outputs）边界；
-4. **残差连接拓扑混乱**：跳跃连接（Skip Connection）在展开后跨越多个层级，导致连线严重交叉重叠。
-
-在 **Schema 2.0** 中，上述问题通过“**局部封闭律 (Local Encapsulation)**”与“**端口化抽象 (Port Abstraction)**”彻底解决。
-
----
-
-## 2. 核心设计原则 (Design Principles)
-
-1. **显式作用域记录 (Explicit Module Scoping)**：
-   - 依赖 `Graph.enterModule` 与 `Graph.enterChildScope` 运行栈；
-   - 算子与张量在创建瞬间立即绑定所属模块路径 (`Op.scope`, `Tensor.scope`)，彻底废弃基于输入的启发式推断。
-2. **每个模块携带独立的局部图 (Scoped Local Graph)**：
-   - 每个复合模块导出自己的 `ports`、`flow_nodes` 与 `edges`；
-   - 外部调用者仅看到模块的黑盒端口，点击进入后才展开内部流图。
-3. **最近公共祖先拓扑收归 (LCA Edge Routing)**：
-   - 跨越不同模块的边，自动在两者的最近公共祖先 (Lowest Common Ancestor) 作用域中收归为对应的端口连线。
-4. **透明算子折叠 (Transparent Operator Folding)**：
-   - 针对无参数、纯形状变换的透明算子（如 `Reshape`、`Transpose`），支持在导出时折叠或作为边的变换属性（`transforms: ["reshape", "transpose"]`）依附于数据边上。
-5. **张量节点分类强类型化 (`NodeKind`)**：
-   - 明确分为 `Param`、`Input`、`Buffer` 与 `Activation` 四种形态。
-
----
-
-## 3. Schema 2.0 数据结构规范
-
-导出的 JSON 数据结构遵循 `src/nn/model_graph.schema.json` 定义：
-
-```typescript
-export interface ModelHierarchyGraph {
-  schema_version: "2.0";
-  model_name: string;
-  default_scope: string; // 默认展示的顶层作用域 (通常为 "")
-  summary: {
-    total_params: number;
-    total_memory_bytes: number;
-    activation_nodes: number;
-    buffer_nodes: number;
-  };
-  modules: Record<string, ModuleNode>; // 键为全路径，如 "", "gpt.layers.0", "gpt.layers.0.attn"
-  nodes: NodeData[];                   // 所有底层张量元数据列表
-  ops: OpData[];                       // 所有算子元数据列表
-}
-
-export interface ModuleNode {
-  path: string;
-  name: string;
-  module_type: string;
-  param_count: number;
-  memory_bytes: number;
-  formula?: string; // 显式数学公式，如 "y = x W^T + b"
-  submodules: string[]; // 直接子模块列表
-  ports: {
-    inputs: PortEntry[];   // 虚拟输入端口，如 id: "@in0", ref: "gpt.x"
-    outputs: PortEntry[];  // 虚拟输出端口，如 id: "@out0", ref: "gpt.layers.11.out"
-  };
-  flow_nodes: FlowNode[];  // 当前局部图中的节点 (子模块、内部算子或端口)
-  edges: EdgeData[];       // 当前局部图中的有向连线
-}
+```text
+Module.forward ──(作用域栈)──▶ autodiff.Graph ──graph_ir.build──▶ ModelHierarchyGraph ──serializeJson──▶ JSON
 ```
 
----
+* **模块作用域**：每个模块在 `forward` 开头调用 `Graph.enterModule(graph, self.name, self.module_type)`，并以 `defer scope.exit()` 退出；模块内部的子逻辑用 `Graph.enterChildScope`（例如注意力核心 `core`）。算子与张量在创建时记录所在作用域（`Op.scope`、`Tensor.scope`）。
+* **局部图**：root、有子模块的模块，以及无参数但在自身作用域内执行了算子的模块，各自导出 `ports`、`flow_nodes`、`edges`。节点是直接子模块、自身算子、常量缓冲区与边界端口 `@in<k>` / `@out<k>`；端口的 `ref` 在最近公共祖先作用域中解析。
+* **透明算子**：`Reshape`、`Transpose`、`RepeatKV` 不作为节点，按执行顺序折叠进边的 `transforms`。
+* **残差**：终点为 Add、且起点在局部图内可达该 Add 另一条入边来源的边标记 `is_skip`。
 
-## 4. 与 Web 前端 (chen-gz.github.io/visualizer) 的契约与协同升级
+## 2. JSON 格式
 
-遵循项目全局规范中的“**生产端与消费端同步升级 (Upgrade Producer and Consumer Together)**”原则：
-* `znn` 作为生产端 (`src/nn/visualization.zig`)；
-* `chen-gz.github.io` 作为消费端 (`src/utils/model-graph.ts`, `src/scripts/visualizer.ts`, `src/pages/visualizer.astro`)；
-* 共享权威 Schema 文件：`model_graph.schema.json`；
-* 共享基准样本文件：`examples/sample_model_graph.json` 与 `public/tools/visualizer/sample_model_graph.json` 保持 100% 字节级一致。
+* 格式由 [`src/nn/model_graph.schema.json`](../src/nn/model_graph.schema.json)（JSON Schema draft 2020-12，schema `2.0`）定义，每个字段都有 `description`，所有对象不允许未声明字段；导出端通过 `visualization.SCHEMA_JSON` 嵌入。
+* 顶层字段：`version`、`summary`、`default_scope`、`root`；`root` 是递归的 `ModuleNode`（`children`、`parameters`、`ops`、`nodes`、`ports`、`flow_nodes`、`edges` 等）。
+* 取值受限的字段在代码中是枚举类型，测试断言其标签与 schema 的 `enum` 列表一致：
+
+| schema 字段 | Zig 枚举 |
+| :--- | :--- |
+| `TensorNode.kind` | `NodeKind` |
+| `TensorNode.status` / `ParamEntry.status` | `NodeStatus` |
+| `FlowNode.kind` | `FlowNodeKind` |
+| `Edge.kind` | `EdgeKind` |
+
+## 3. 代码与测试
+
+| 位置 | 内容 |
+| :--- | :--- |
+| `src/autodiff/graph.zig` | 作用域栈、`enterModule` / `enterChildScope` |
+| `src/nn/visualization.zig` | 模块树、局部图构建、枚举、JSON 序列化 |
+| `src/nn.zig` | 作用域归属、黄金边集、schema 一致性与枚举一致性测试 |
+| `examples/export_model_report.zig` | `zig build run-report` 导出 `examples/sample_model_graph.json`（2 层 GPT）与 `examples/minimal_model_graph.json`（单个 `Linear`） |
+
+## 4. 修改导出格式
+
+在同一变更中完成（与 [`AGENTS.md`](../AGENTS.md) §3 一致）：
+
+1. 修改导出端与 `model_graph.schema.json`。
+2. 运行 `zig build test` 与 `zig build run-report`。
+3. 把 schema 与两个样例逐字节复制到 chen-gz.github.io 的 `public/tools/visualizer/`，同步修改渲染端与规范文档。
+4. 在 `CHANGELOG.md` 的 `Unreleased` 小节记录。

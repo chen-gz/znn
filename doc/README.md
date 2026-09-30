@@ -22,30 +22,13 @@
 | 模块 | 文档名称 | 核心主题与内容概要 |
 | :--- | :--- | :--- |
 | **01. 系统全景架构** | [系统全景架构设计 (architecture.md)](architecture.md) | 系统分层模型、张量引擎与跨步内存、反向传播与动态计算图、参数反射、前沿 Transformer 与循环网络、解耦优化器与学习率调度器、Safetensors 与二进制 Checkpoint、内存生命周期与软硬件加速。 |
-| **02. 计算图可视化模型** | [计算图拓扑边与可视化模型导出 (model-graph-visualization.md)](model-graph-visualization.md) | 可视化 JSON Schema 2.0 规范、模块作用域栈（`enterModule` / `enterChildScope`）、端口化局部图模型（`@in<k>` / `@out<k>`）、跨层 LCA 拓扑收归规则、与前端 Web Visualizer 数据契约。 |
+| **02. 模型图导出** | [模型图导出 (model-graph-visualization.md)](model-graph-visualization.md) | 模块作用域（`enterModule` / `enterChildScope`）、作用域局部图与端口（`@in<k>` / `@out<k>`）、透明算子折叠、JSON Schema 与枚举字段、修改导出格式的步骤。 |
 | **03. 技术差距分析** | [现代 NumPy 2.x 差距诊断 (NUMPY_GAP_ANALYSIS.md)](../plan/NUMPY_GAP_ANALYSIS.md) | 9 大能力维度深度对比表（泛型 Dtype、零拷贝切片、多轴归约、线性代数等）、设计权衡与演进阶段规划。 |
 | **04. 研发任务清单** | [架构诊断与分阶段任务跟踪 (TODO.md)](../plan/TODO.md) | 6 大核心维度的成熟度诊断与演进状态跟踪、P0 至 P3 分阶段攻坚任务明细。 |
 | **05. 版本更新历史** | [版本发布与变更日志 (CHANGELOG.md)](../CHANGELOG.md) | 语义化版本记录、各版本特性增加（`Added`）、架构变更（`Changed`）与修复（`Fixed`）。 |
 
 ---
 
-## 🛠️ 快速上手与验证
+## 🛠️ 构建与运行
 
-```bash
-# 1. 运行全量单元测试 (128+ 测试用例)
-zig build test
-
-# 2. 运行自动化代码覆盖率分析 (基于 kcov)
-zig build coverage
-# 或自动打开浏览器查看报告:
-zig build coverage -- --open
-
-# 3. 运行微基准测试与系统级 Benchmark
-zig build bench -Doptimize=ReleaseFast -- --suite gemm
-zig build bench -Doptimize=ReleaseFast -- --suite models
-
-# 4. 运行端到端工作流示例
-zig build run-shakespeare   # TinyShakespeare 自回归文本生成训练
-zig build run-llm           # 完整 LLM Pipeline (BPE + SwiGLU + AdamW + SFT + LoRA + DPO)
-zig build run-gan           # 生成对抗网络 (GAN) 对抗训练
-```
+构建、测试、覆盖率、基准测试与示例命令见仓库根目录的 [`README.md`](../README.md)。
