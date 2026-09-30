@@ -53,6 +53,11 @@ pub const SliceRange = struct {
     start: ?usize = null,
     end: ?usize = null,
     step: usize = 1,
+
+    pub const default: SliceRange = .{};
+    pub fn defaultOptions() SliceRange {
+        return .{};
+    }
 };
 
 /// 通用标量类型转换函数
