@@ -20,6 +20,8 @@ pub const visualization = @import("nn/visualization.zig");
 pub const graph_ir = visualization.graph_ir;
 pub const generateJson = visualization.generateJson;
 pub const exportJson = visualization.exportJson;
+pub const NodeKind = visualization.NodeKind;
+pub const NodeData = visualization.NodeData;
 
 
 // ============================================================================
@@ -1897,3 +1899,23 @@ test "Model graph JSON export conforms to the published JSON Schema" {
         \\ "children": [], "parameters": [], "ops": [], "ports": {"inputs": [], "outputs": []}, "flow_nodes": [], "edges": [], "nodes": []}}
     ));
 }
+
+test "NodeKind enum conversions and NodeData typing" {
+    try std.testing.expectEqualStrings("Param", NodeKind.Param.asString());
+    try std.testing.expectEqualStrings("Input", NodeKind.Input.asString());
+    try std.testing.expectEqualStrings("Buffer", NodeKind.Buffer.asString());
+    try std.testing.expectEqualStrings("Activation", NodeKind.Activation.asString());
+
+    try std.testing.expectEqual(NodeKind.Param, NodeKind.fromString("Param"));
+    try std.testing.expectEqual(NodeKind.Input, NodeKind.fromString("Input"));
+    try std.testing.expectEqual(NodeKind.Buffer, NodeKind.fromString("Buffer"));
+    try std.testing.expectEqual(NodeKind.Activation, NodeKind.fromString("Activation"));
+
+    try std.testing.expectEqual(NodeKind.Param, NodeKind.fromString("param"));
+    try std.testing.expectEqual(NodeKind.Input, NodeKind.fromString("input"));
+    try std.testing.expectEqual(NodeKind.Buffer, NodeKind.fromString("buffer"));
+    try std.testing.expectEqual(NodeKind.Activation, NodeKind.fromString("activation"));
+
+    try std.testing.expect(NodeKind.fromString("Unknown") == null);
+}
+
