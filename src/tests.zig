@@ -57,7 +57,7 @@ test "basic imports and struct definitions" {
     try std.testing.expect(@TypeOf(nn.SwiGLU) == type);
     try std.testing.expect(@TypeOf(nn.LoRALinear) == type);
     try std.testing.expect(@TypeOf(nn.TransformerDecoder) == fn(comptime usize) type);
-    try std.testing.expect(@TypeOf(autodiff.Tensor) == type);
+    try std.testing.expect(@TypeOf(autodiff.Graph) == type);
     try std.testing.expect(@TypeOf(tensor.Tensor) == type);
     try std.testing.expect(@TypeOf(optim.SGDOptimizer) == type);
     try std.testing.expect(@TypeOf(optim.AdamOptimizer) == type);
