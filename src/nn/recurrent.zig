@@ -9,6 +9,23 @@ const Linear = core.Linear;
 // 循环神经网络模块 (Recurrent Neural Network Modules)
 // ============================================================================
 
+/// 未传入初始状态时创建的全零状态 `[batch, hidden]`。
+/// 它由模块内部生成，因此标记为常量缓冲区并命名为 `{module}.{state}` (如 `lstm.h_0`)，
+/// 在模型图中不会被当作模型输入。
+fn zeroState(
+    graph: *autodiff.Graph,
+    module_name: ?[]const u8,
+    batch_size: usize,
+    hidden_dim: usize,
+    comptime state_fmt: []const u8,
+    state_args: anytype,
+) !*Tensor {
+    const state = try graph.zeros(&.{ batch_size, hidden_dim }, false);
+    state.is_buffer = true;
+    if (module_name) |n| state.setNameFormatted("{s}." ++ state_fmt, .{n} ++ state_args);
+    return state;
+}
+
 /// 单步经典 Elman RNN 单元 (RNNCell)
 /// 隐状态更新公式：h_t = tanh(W_ih * x_t + W_hh * h_{t-1} + b)
 pub const RNNCell = struct {
@@ -179,7 +196,7 @@ pub const RNN = struct {
             h_curr = h;
         } else {
             const batch_size = inputs[0].shape.dims[0];
-            h_curr = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
+            h_curr = try zeroState(graph, self.name, batch_size, self.hidden_dim, "h_0", .{});
         }
 
         for (inputs, 0..) |x_t, t| {
@@ -464,13 +481,13 @@ pub const LSTM = struct {
         if (h_0) |h| {
             h_curr = h;
         } else {
-            h_curr = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
+            h_curr = try zeroState(graph, self.name, batch_size, self.hidden_dim, "h_0", .{});
         }
 
         if (c_0) |c| {
             c_curr = c;
         } else {
-            c_curr = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
+            c_curr = try zeroState(graph, self.name, batch_size, self.hidden_dim, "c_0", .{});
         }
 
         for (inputs, 0..) |x_t, t| {
@@ -624,13 +641,13 @@ pub const StackedLSTM = struct {
             if (h_0) |h_inits| {
                 h_states[l] = h_inits[l];
             } else {
-                h_states[l] = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
+                h_states[l] = try zeroState(graph, self.name, batch_size, self.hidden_dim, "h_0_{d}", .{l});
             }
 
             if (c_0) |c_inits| {
                 c_states[l] = c_inits[l];
             } else {
-                c_states[l] = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
+                c_states[l] = try zeroState(graph, self.name, batch_size, self.hidden_dim, "c_0_{d}", .{l});
             }
         }
 
@@ -876,7 +893,7 @@ pub const GRU = struct {
             h_curr = h;
         } else {
             const batch_size = inputs[0].shape.dims[0];
-            h_curr = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
+            h_curr = try zeroState(graph, self.name, batch_size, self.hidden_dim, "h_0", .{});
         }
 
         for (inputs, 0..) |x_t, t| {

@@ -2754,3 +2754,48 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
 }
 
 
+
+test "Recurrent zero initial states are named module buffers" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(2468);
+    const random = prng.random();
+
+    const expectBuffer = struct {
+        fn check(g: *const autodiff.Graph, name: []const u8, scope: []const u8) !void {
+            for (g.tensors.items) |t| {
+                if (t.name) |n| if (std.mem.eql(u8, n, name)) {
+                    try std.testing.expect(t.is_buffer);
+                    try std.testing.expect(!t.requires_grad);
+                    try std.testing.expectEqualStrings(scope, t.scope);
+                    return;
+                };
+            }
+            return error.TestExpectedBufferNotFound;
+        }
+    };
+
+    {
+        var m = try LSTM.init(allocator, 4, 3, random);
+        defer m.deinit(allocator);
+        m.setName("lstm");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        var inps = [_]*Tensor{ try g.ones(&.{ 2, 4 }, false), try g.ones(&.{ 2, 4 }, false) };
+        _ = try m.forward(&g, &inps, null, null);
+        try expectBuffer.check(&g, "lstm.h_0", "lstm");
+        try expectBuffer.check(&g, "lstm.c_0", "lstm");
+    }
+
+    {
+        var m = try StackedLSTM.init(allocator, 4, 3, 2, random);
+        defer m.deinit(allocator);
+        m.setName("stacked_lstm");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        var inps = [_]*Tensor{ try g.ones(&.{ 2, 4 }, false), try g.ones(&.{ 2, 4 }, false) };
+        _ = try m.forwardSequence(&g, &inps, null, null);
+        for ([_][]const u8{ "stacked_lstm.h_0_0", "stacked_lstm.c_0_0", "stacked_lstm.h_0_1", "stacked_lstm.c_0_1" }) |name| {
+            try expectBuffer.check(&g, name, "stacked_lstm");
+        }
+    }
+}
