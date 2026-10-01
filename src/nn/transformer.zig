@@ -483,6 +483,11 @@ pub const MoELayer = struct {
     gate: Linear,
     routed_experts: []MLP,
     shared_experts: []MLP,
+    name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "MoELayer",
+
+    pub const formula = "y = \\sum_{i \\in \\text{TopK}(g(x))} p_i(x) E_i(x) + \\sum_{j} E^{\\text{shared}}_j(x)";
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -533,6 +538,48 @@ pub const MoELayer = struct {
         };
     }
 
+    pub fn setName(self: *MoELayer, name: []const u8) void {
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.gate.setNameFormatted("{s}.gate", .{self.name.?});
+        for (self.routed_experts, 0..) |*exp, i| {
+            exp.setNameFormatted("{s}.routed_{d}", .{ self.name.?, i });
+        }
+        for (self.shared_experts, 0..) |*exp, i| {
+            exp.setNameFormatted("{s}.shared_{d}", .{ self.name.?, i });
+        }
+    }
+
+    pub fn setNameFormatted(self: *MoELayer, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("moe");
+        }
+    }
+
+    pub fn getName(self: *const MoELayer) ?[]const u8 {
+        return self.name;
+    }
+
+    pub fn registerFormula(self: *const MoELayer, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+            try graph.registerModuleType(n, self.module_type);
+            try self.gate.registerFormula(graph);
+            for (self.routed_experts) |*exp| {
+                try exp.registerFormula(graph);
+            }
+            for (self.shared_experts) |*exp| {
+                try exp.registerFormula(graph);
+            }
+        }
+    }
+
     pub fn deinit(self: MoELayer, allocator: std.mem.Allocator) void {
         self.gate.deinit(allocator);
         for (self.routed_experts) |exp| exp.deinit(allocator);
@@ -548,6 +595,14 @@ pub const MoELayer = struct {
     }
 
     pub fn forward(self: MoELayer, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
+            }
+        }
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
@@ -1281,6 +1336,11 @@ pub const MLALayer = struct {
     w_uk: Linear,          // Content Key 上投影: d_c -> n_head * head_dim
     w_uv: Linear,          // Content Value 上投影: d_c -> n_head * head_dim
     o_proj: Linear,        // 输出投影: n_head * head_dim -> dim
+    name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "MLALayer",
+
+    pub const formula = "c_t^{KV} = x_t W^{DKV}, \\quad y = \\text{MLA}(Q, c^{KV}, k^R) W^O";
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1327,6 +1387,46 @@ pub const MLALayer = struct {
         };
     }
 
+    pub fn setName(self: *MLALayer, name: []const u8) void {
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.q_proj.setNameFormatted("{s}.q_proj", .{self.name.?});
+        self.w_dkv.setNameFormatted("{s}.w_dkv", .{self.name.?});
+        self.w_kr.setNameFormatted("{s}.w_kr", .{self.name.?});
+        self.w_uk.setNameFormatted("{s}.w_uk", .{self.name.?});
+        self.w_uv.setNameFormatted("{s}.w_uv", .{self.name.?});
+        self.o_proj.setNameFormatted("{s}.o_proj", .{self.name.?});
+    }
+
+    pub fn setNameFormatted(self: *MLALayer, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("mla");
+        }
+    }
+
+    pub fn getName(self: *const MLALayer) ?[]const u8 {
+        return self.name;
+    }
+
+    pub fn registerFormula(self: *const MLALayer, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+            try graph.registerModuleType(n, self.module_type);
+            try self.q_proj.registerFormula(graph);
+            try self.w_dkv.registerFormula(graph);
+            try self.w_kr.registerFormula(graph);
+            try self.w_uk.registerFormula(graph);
+            try self.w_uv.registerFormula(graph);
+            try self.o_proj.registerFormula(graph);
+        }
+    }
+
     pub fn deinit(self: MLALayer, allocator: std.mem.Allocator) void {
         self.q_proj.deinit(allocator);
         self.w_dkv.deinit(allocator);
@@ -1347,6 +1447,14 @@ pub const MLALayer = struct {
 
     /// 全序列前向传播 (支持 Autograd 梯度回传与 Eager 模式)
     pub fn forward(self: MLALayer, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
+            }
+        }
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         const B = if (is_3d) old_shape.dims[0] else 1;
@@ -2125,6 +2233,11 @@ pub const LoRALinear = struct {
     out_features: usize,
     r: usize,
     scaling: f32,
+    name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
+    module_type: []const u8 = "LoRALinear",
+
+    pub const formula = "y = x W_0 + \\frac{\\alpha}{r} (x A) B + b";
 
     pub const Options = struct {
         r: usize = 8,
@@ -2135,6 +2248,38 @@ pub const LoRALinear = struct {
             return .{};
         }
     };
+
+    pub fn setName(self: *LoRALinear, name: []const u8) void {
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
+        self.lora_a.setNameFormatted("{s}.lora_a", .{self.name.?});
+        self.lora_b.setNameFormatted("{s}.lora_b", .{self.name.?});
+        if (self.bias) |b| b.setNameFormatted("{s}.bias", .{self.name.?});
+    }
+
+    pub fn setNameFormatted(self: *LoRALinear, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("lora_linear");
+        }
+    }
+
+    pub fn getName(self: *const LoRALinear) ?[]const u8 {
+        return self.name;
+    }
+
+    pub fn registerFormula(self: *const LoRALinear, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+            try graph.registerModuleType(n, self.module_type);
+        }
+    }
 
     pub fn initDefault(
         allocator: std.mem.Allocator,
@@ -2221,6 +2366,14 @@ pub const LoRALinear = struct {
 
     /// 前向传播：Y = X * W_0 + (X * A) * B * scaling (+ bias)
     pub fn forward(self: LoRALinear, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        defer module_scope.exit();
+        if (graph) |g| {
+            if (self.name) |n| {
+                _ = g.setModuleFormula(n, formula) catch {};
+                _ = g.registerModuleType(n, self.module_type) catch {};
+            }
+        }
         // 1. 冻结主干前向：x * W_0
         const base_out = try x.matmul(self.weight, allocator, graph);
         defer if (graph == null) tensor.free(allocator, base_out);

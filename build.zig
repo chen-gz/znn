@@ -1,39 +1,128 @@
 const std = @import("std");
 
-// Although this function looks imperative, it does not perform the build
-// directly and instead it mutates the build graph (`b`) that will be then
-// executed by an external runner. The functions in `std.Build` implement a DSL
-// for defining build steps and express dependencies between them, allowing the
-// build runner to parallelize the build automatically (and the cache system to
-// know when a step doesn't need to be re-run).
+const ExampleTarget = struct {
+    name: []const u8,
+    src: []const u8,
+    run_step: []const u8,
+    run_desc: []const u8,
+    alias_step: ?[]const u8 = null,
+    alias_desc: ?[]const u8 = null,
+    forward_args: bool = false,
+    test_name: ?[]const u8 = null,
+};
+
+const examples = [_]ExampleTarget{
+    .{
+        .name = "zig_ml",
+        .src = "examples/fashion_mnist.zig",
+        .run_step = "run",
+        .run_desc = "Run the MLP Fashion MNIST app",
+        .forward_args = true,
+        .test_name = "exe_tests",
+    },
+    .{
+        .name = "linear_regression",
+        .src = "examples/linear_regression.zig",
+        .run_step = "run-lr",
+        .run_desc = "Run the linear regression app",
+    },
+    .{
+        .name = "logistic_regression",
+        .src = "examples/logistic_regression.zig",
+        .run_step = "run-logr",
+        .run_desc = "Run the logistic regression app",
+    },
+    .{
+        .name = "ridge_regression",
+        .src = "examples/ridge_regression.zig",
+        .run_step = "run-ridge",
+        .run_desc = "Run the ridge regression app",
+    },
+    .{
+        .name = "cnn",
+        .src = "examples/cnn.zig",
+        .run_step = "run-cnn",
+        .run_desc = "Run the CNN Fashion MNIST app",
+        .test_name = "cnn_tests",
+    },
+    .{
+        .name = "transformer_embedding",
+        .src = "examples/transformer_embedding.zig",
+        .run_step = "run-emb",
+        .run_desc = "Run the Transformer Embedding example",
+    },
+    .{
+        .name = "transformer_attention",
+        .src = "examples/transformer_attention.zig",
+        .run_step = "run-att",
+        .run_desc = "Run the Transformer Attention example",
+    },
+    .{
+        .name = "transformer_block",
+        .src = "examples/transformer_block.zig",
+        .run_step = "run-block",
+        .run_desc = "Run the Transformer Block example",
+    },
+    .{
+        .name = "transformer_gpt",
+        .src = "examples/transformer_gpt.zig",
+        .run_step = "run-gpt",
+        .run_desc = "Run the Transformer GPT example",
+    },
+    .{
+        .name = "export_model_report",
+        .src = "examples/export_model_report.zig",
+        .run_step = "run-report",
+        .run_desc = "Run the Model Graph JSON export example",
+    },
+    .{
+        .name = "llm_training",
+        .src = "examples/llm_training.zig",
+        .run_step = "run-llm",
+        .run_desc = "Run the End-to-End LLM Pipeline example",
+    },
+    .{
+        .name = "train_shakespeare",
+        .src = "examples/train_shakespeare.zig",
+        .run_step = "run-shakespeare",
+        .run_desc = "Run the TinyShakespeare GPT training and generation example",
+    },
+    .{
+        .name = "gan",
+        .src = "examples/gan.zig",
+        .run_step = "run-gan",
+        .run_desc = "Run the Generative Adversarial Network (GAN) example",
+    },
+    .{
+        .name = "regularized_regression",
+        .src = "examples/regularized_regression.zig",
+        .run_step = "run-reg",
+        .run_desc = "Run the Regularized Regression (Ridge, Lasso, Elastic Net) example",
+    },
+    .{
+        .name = "cross_validation",
+        .src = "examples/cross_validation.zig",
+        .run_step = "run-cv",
+        .run_desc = "Run the 5-Fold Cross-Validation hyperparameter tuning example",
+    },
+    .{
+        .name = "benchmark",
+        .src = "examples/benchmark.zig",
+        .run_step = "run-bench",
+        .run_desc = "Run the znn performance benchmark suite",
+        .alias_step = "bench",
+        .alias_desc = "Run the znn performance benchmark suite (alias for run-bench)",
+        .forward_args = true,
+        .test_name = "bench_tests",
+    },
+};
+
 pub fn build(b: *std.Build) void {
-    // Standard target options allow the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
     const target = b.standardTargetOptions(.{});
-    // Standard optimization options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
-    // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    // This creates a module, which represents a collection of source files alongside
-    // some compilation options, such as optimization mode and linked system libraries.
-    // Zig modules are the preferred way of making Zig code available to consumers.
-    // addModule defines a module that we intend to make available for importing
-    // to our consumers. We must give it a name because a Zig package can expose
-    // multiple modules and consumers will need to be able to specify which
-    // module they want to access.
     const mod = b.addModule("zig_ml", .{
-        // The root source file is the "entry point" of this module. Users of
-        // this module will only be able to access public declarations contained
-        // in this file, which means that if you have declarations that you
-        // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
         .root_source_file = b.path("src/root.zig"),
-        // Later on we'll use this module as the root module of a test executable
-        // which requires us to specify a target.
         .target = target,
         .link_libc = true,
     });
@@ -41,510 +130,61 @@ pub fn build(b: *std.Build) void {
         mod.linkFramework("Accelerate", .{});
     }
 
-    // Here we define an executable. An executable needs to have a root module
-    // which needs to expose a `main` function. While we could add a main function
-    // to the module defined above, it's sometimes preferable to split business
-    // logic and the CLI into two separate modules.
-    //
-    // If your goal is to create a Zig library for others to use, consider if
-    // it might benefit from also exposing a CLI tool. A parser library for a
-    // data serialization format could also bundle a CLI syntax checker, for example.
-    //
-    // If instead your goal is to create an executable, consider if users might
-    // be interested in also being able to embed the core functionality of your
-    // program in their own executable in order to avoid the overhead involved in
-    // subprocessing your CLI tool.
-    //
-    // If neither case applies to you, feel free to delete the declaration you
-    // don't need and to put everything under a single module.
-    const exe = b.addExecutable(.{
-        .name = "zig_ml",
-        .root_module = b.createModule(.{
-            // b.createModule defines a new module just like b.addModule but,
-            // unlike b.addModule, it does not expose the module to consumers of
-            // this package, which is why in this case we don't have to give it a name.
-            .root_source_file = b.path("examples/fashion_mnist.zig"),
-            // Target and optimization levels must be explicitly wired in when
-            // defining an executable or library (in the root module), and you
-            // can also hardcode a specific target for an executable or library
-            // definition if desireable (e.g. firmware for embedded devices).
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            // List of modules available for import in source files part of the
-            // root module.
-            .imports = &.{
-                // Here "zig_ml" is the name you will use in your source code to
-                // import this module (e.g. `@import("zig_ml")`). The name is
-                // repeated because you are allowed to rename your imports, which
-                // can be extremely useful in case of collisions (which can happen
-                // importing modules from different packages).
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_mod = exe.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_mod.linkFramework("Accelerate", .{});
-    }
+    const test_step = b.step("test", "Run tests");
 
-    // This declares intent for the executable to be installed into the
-    // install prefix when running `zig build` (i.e. when executing the default
-    // step). By default the install prefix is `zig-out/` but can be overridden
-    // by passing `--prefix` or `-p`.
-    b.installArtifact(exe);
-
-    // Define Linear Regression binary target
-    const exe_lr = b.addExecutable(.{
-        .name = "linear_regression",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/linear_regression.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_lr_mod = exe_lr.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_lr_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_lr);
-
-    // Define Logistic Regression binary target
-    const exe_logr = b.addExecutable(.{
-        .name = "logistic_regression",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/logistic_regression.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_logr_mod = exe_logr.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_logr_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_logr);
-
-    // Define Ridge Regression binary target
-    const exe_ridge = b.addExecutable(.{
-        .name = "ridge_regression",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/ridge_regression.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_ridge_mod = exe_ridge.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_ridge_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_ridge);
-
-
-    // Define CNN binary target
-    const exe_cnn = b.addExecutable(.{
-        .name = "cnn",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/cnn.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_cnn_mod = exe_cnn.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_cnn_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_cnn);
-
-    // Define Transformer Embedding example binary
-    const exe_emb = b.addExecutable(.{
-        .name = "transformer_embedding",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/transformer_embedding.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_emb_mod = exe_emb.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_emb_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_emb);
-
-    const run_emb_step = b.step("run-emb", "Run the Transformer Embedding example");
-    const run_emb_cmd = b.addRunArtifact(exe_emb);
-    run_emb_step.dependOn(&run_emb_cmd.step);
-    run_emb_cmd.step.dependOn(b.getInstallStep());
-
-    // Define Transformer Attention example binary
-    const exe_att = b.addExecutable(.{
-        .name = "transformer_attention",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/transformer_attention.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_att_mod = exe_att.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_att_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_att);
-
-    const run_att_step = b.step("run-att", "Run the Transformer Attention example");
-    const run_att_cmd = b.addRunArtifact(exe_att);
-    run_att_step.dependOn(&run_att_cmd.step);
-    run_att_cmd.step.dependOn(b.getInstallStep());
-
-    // Define Transformer Block example binary
-    const exe_block = b.addExecutable(.{
-        .name = "transformer_block",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/transformer_block.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_block_mod = exe_block.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_block_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_block);
-
-    const run_block_step = b.step("run-block", "Run the Transformer Block example");
-    const run_block_cmd = b.addRunArtifact(exe_block);
-    run_block_step.dependOn(&run_block_cmd.step);
-    run_block_cmd.step.dependOn(b.getInstallStep());
-
-    // Define Transformer GPT example binary
-    const exe_gpt = b.addExecutable(.{
-        .name = "transformer_gpt",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/transformer_gpt.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_gpt_mod = exe_gpt.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_gpt_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_gpt);
-
-    const run_gpt_step = b.step("run-gpt", "Run the Transformer GPT example");
-    const run_gpt_cmd = b.addRunArtifact(exe_gpt);
-    run_gpt_step.dependOn(&run_gpt_cmd.step);
-    run_gpt_cmd.step.dependOn(b.getInstallStep());
-
-    // Define Model Report Export example binary
-    const exe_report = b.addExecutable(.{
-        .name = "export_model_report",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/export_model_report.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_report_mod = exe_report.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_report_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_report);
-
-    const run_report_step = b.step("run-report", "Run the Model Graph JSON export example");
-    const run_report_cmd = b.addRunArtifact(exe_report);
-    run_report_step.dependOn(&run_report_cmd.step);
-    run_report_cmd.step.dependOn(b.getInstallStep());
-
-    // Define LLM Training end-to-end example binary
-    const exe_llm = b.addExecutable(.{
-        .name = "llm_training",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/llm_training.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_llm_mod = exe_llm.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_llm_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_llm);
-
-    const run_llm_step = b.step("run-llm", "Run the End-to-End LLM Pipeline example");
-    const run_llm_cmd = b.addRunArtifact(exe_llm);
-    run_llm_step.dependOn(&run_llm_cmd.step);
-    run_llm_cmd.step.dependOn(b.getInstallStep());
-
-    // Define TinyShakespeare Training example binary
-    const exe_shakespeare = b.addExecutable(.{
-        .name = "train_shakespeare",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/train_shakespeare.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_shakespeare_mod = exe_shakespeare.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_shakespeare_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_shakespeare);
-
-    const run_shakespeare_step = b.step("run-shakespeare", "Run the TinyShakespeare GPT training and generation example");
-    const run_shakespeare_cmd = b.addRunArtifact(exe_shakespeare);
-    run_shakespeare_step.dependOn(&run_shakespeare_cmd.step);
-    run_shakespeare_cmd.step.dependOn(b.getInstallStep());
-
-    // Define GAN example binary
-    const exe_gan = b.addExecutable(.{
-        .name = "gan",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/gan.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_gan_mod = exe_gan.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_gan_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_gan);
-
-    const run_gan_step = b.step("run-gan", "Run the Generative Adversarial Network (GAN) example");
-    const run_gan_cmd = b.addRunArtifact(exe_gan);
-    run_gan_step.dependOn(&run_gan_cmd.step);
-    run_gan_cmd.step.dependOn(b.getInstallStep());
-
-    // Define Regularized Regression (Ridge, Lasso, Elastic Net) binary
-    const exe_reg = b.addExecutable(.{
-        .name = "regularized_regression",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/regularized_regression.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_reg_mod = exe_reg.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_reg_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_reg);
-
-    const run_reg_step = b.step("run-reg", "Run the Regularized Regression (Ridge, Lasso, Elastic Net) example");
-    const run_reg_cmd = b.addRunArtifact(exe_reg);
-    run_reg_step.dependOn(&run_reg_cmd.step);
-    run_reg_cmd.step.dependOn(b.getInstallStep());
-
-    // Define 5-Fold Cross-Validation binary
-    const exe_cv = b.addExecutable(.{
-        .name = "cross_validation",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/cross_validation.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_cv_mod = exe_cv.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_cv_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_cv);
-
-    const run_cv_step = b.step("run-cv", "Run the 5-Fold Cross-Validation hyperparameter tuning example");
-    const run_cv_cmd = b.addRunArtifact(exe_cv);
-    run_cv_step.dependOn(&run_cv_cmd.step);
-    run_cv_cmd.step.dependOn(b.getInstallStep());
-
-    // Define Benchmark binary target
-    const exe_bench = b.addExecutable(.{
-        .name = "benchmark",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/benchmark.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zig_ml", .module = mod },
-            },
-        }),
-    });
-    const exe_bench_mod = exe_bench.root_module;
-    if (target.result.os.tag == .macos) {
-        exe_bench_mod.linkFramework("Accelerate", .{});
-    }
-    b.installArtifact(exe_bench);
-
-    const run_bench_step = b.step("run-bench", "Run the znn performance benchmark suite");
-    const run_bench_cmd = b.addRunArtifact(exe_bench);
-    run_bench_step.dependOn(&run_bench_cmd.step);
-    run_bench_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| {
-        run_bench_cmd.addArgs(args);
-    }
-
-    const bench_step = b.step("bench", "Run the znn performance benchmark suite (alias for run-bench)");
-    bench_step.dependOn(&run_bench_cmd.step);
-
-
-    // This creates a top level step. Top level steps have a name and can be
-    // invoked by name when running `zig build` (e.g. `zig build run`).
-    // This will evaluate the `run` step rather than the default step.
-    // For a top level step to actually do something, it must depend on other
-    // steps (e.g. a Run step, as we will see in a moment).
-    const run_step = b.step("run", "Run the MLP Fashion MNIST app");
-
-    // This creates a RunArtifact step in the build graph. A RunArtifact step
-    // invokes an executable compiled by Zig. Steps will only be executed by the
-    // runner if invoked directly by the user (in the case of top level steps)
-    // or if another step depends on it, so it's up to you to define when and
-    // how this Run step will be executed. In our case we want to run it when
-    // the user runs `zig build run`, so we create a dependency link.
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
-
-    // By making the run step depend on the default step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    // Run step for linear regression
-    const run_lr_step = b.step("run-lr", "Run the linear regression app");
-    const run_lr_cmd = b.addRunArtifact(exe_lr);
-    run_lr_step.dependOn(&run_lr_cmd.step);
-    run_lr_cmd.step.dependOn(b.getInstallStep());
-
-    // Run step for logistic regression
-    const run_logr_step = b.step("run-logr", "Run the logistic regression app");
-    const run_logr_cmd = b.addRunArtifact(exe_logr);
-    run_logr_step.dependOn(&run_logr_cmd.step);
-    run_logr_cmd.step.dependOn(b.getInstallStep());
-
-    // Run step for ridge regression
-    const run_ridge_step = b.step("run-ridge", "Run the ridge regression app");
-    const run_ridge_cmd = b.addRunArtifact(exe_ridge);
-    run_ridge_step.dependOn(&run_ridge_cmd.step);
-    run_ridge_cmd.step.dependOn(b.getInstallStep());
-
-
-    // Run step for CNN
-    const run_cnn_step = b.step("run-cnn", "Run the CNN Fashion MNIST app");
-    const run_cnn_cmd = b.addRunArtifact(exe_cnn);
-    run_cnn_step.dependOn(&run_cnn_cmd.step);
-    run_cnn_cmd.step.dependOn(b.getInstallStep());
-
-    // Creates an executable that will run `test` blocks from the provided module.
-    // Here `mod` needs to define a target, which is why earlier we made sure to
-    // set the releative field.
     const mod_tests = b.addTest(.{
         .root_module = mod,
         .name = "root_tests",
     });
-
-    // A run step that will run the test executable.
     const run_mod_tests = b.addRunArtifact(mod_tests);
-
-    // Creates an executable that will run `test` blocks from the executable's
-    // root module. Note that test executables only test one module at a time,
-    // hence why we have to create two separate ones.
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-        .name = "exe_tests",
-    });
-
-    // A run step that will run the second test executable.
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
-    const cnn_tests = b.addTest(.{
-        .root_module = exe_cnn.root_module,
-        .name = "cnn_tests",
-    });
-    const run_cnn_tests = b.addRunArtifact(cnn_tests);
-
-    const bench_tests = b.addTest(.{
-        .root_module = exe_bench.root_module,
-        .name = "bench_tests",
-    });
-    const run_bench_tests = b.addRunArtifact(bench_tests);
-
-    // A top level step for running all tests. dependOn can be called multiple
-    // times and since the two run steps do not depend on one another, this will
-    // make the two of them run in parallel.
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_mod_tests.step);
-    test_step.dependOn(&run_exe_tests.step);
-    test_step.dependOn(&run_cnn_tests.step);
-    test_step.dependOn(&run_bench_tests.step);
-
-    // Copy the test binaries to zig-out/bin/ so kcov can access them cleanly
     const install_mod_tests = b.addInstallArtifact(mod_tests, .{});
-    const install_exe_tests = b.addInstallArtifact(exe_tests, .{});
-    const install_cnn_tests = b.addInstallArtifact(cnn_tests, .{});
-    const install_bench_tests = b.addInstallArtifact(bench_tests, .{});
+    test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&install_mod_tests.step);
-    test_step.dependOn(&install_exe_tests.step);
-    test_step.dependOn(&install_cnn_tests.step);
-    test_step.dependOn(&install_bench_tests.step);
+
+    for (examples) |ex| {
+        const exe = b.addExecutable(.{
+            .name = ex.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(ex.src),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{
+                    .{ .name = "zig_ml", .module = mod },
+                },
+            }),
+        });
+        if (target.result.os.tag == .macos) {
+            exe.root_module.linkFramework("Accelerate", .{});
+        }
+        b.installArtifact(exe);
+
+        const run_step = b.step(ex.run_step, ex.run_desc);
+        const run_cmd = b.addRunArtifact(exe);
+        run_step.dependOn(&run_cmd.step);
+        run_cmd.step.dependOn(b.getInstallStep());
+        if (ex.forward_args) {
+            if (b.args) |args| {
+                run_cmd.addArgs(args);
+            }
+        }
+
+        if (ex.alias_step) |alias_name| {
+            const alias = b.step(alias_name, ex.alias_desc orelse ex.run_desc);
+            alias.dependOn(&run_cmd.step);
+        }
+
+        if (ex.test_name) |tname| {
+            const exe_test = b.addTest(.{
+                .root_module = exe.root_module,
+                .name = tname,
+            });
+            const run_exe_test = b.addRunArtifact(exe_test);
+            const install_exe_test = b.addInstallArtifact(exe_test, .{});
+            test_step.dependOn(&run_exe_test.step);
+            test_step.dependOn(&install_exe_test.step);
+        }
+    }
 
     // Code coverage step using kcov
     const coverage_step = b.step("coverage", "Generate and display test code coverage report using kcov");
@@ -555,9 +195,7 @@ pub fn build(b: *std.Build) void {
     }
     coverage_step.dependOn(&coverage_cmd.step);
 
-    // ========================================================================
     // Dataset Download Step (Pure Zig: zig build download-dataset -- tinyshakespeare)
-    // ========================================================================
     const dataset_opt = b.option([]const u8, "dataset", "Dataset name to download (fashion_mnist, mnist, tinyshakespeare, wikitext2, tinystories, alpaca, all_llm)") orelse "fashion_mnist";
 
     const exe_download = b.addExecutable(.{
@@ -585,16 +223,4 @@ pub fn build(b: *std.Build) void {
 
     const download_data_step = b.step("download-data", "Alias for download-dataset");
     download_data_step.dependOn(&download_cmd.step);
-
-    // Just like flags, top level steps are also listed in the `--help` menu.
-    //
-    // The Zig build system is entirely implemented in userland, which means
-    // that it cannot hook into private compiler APIs. All compilation work
-    // orchestrated by the build system will result in other Zig compiler
-    // subcommands being invoked with the right flags defined. You can observe
-    // these invocations when one fails (or you pass a flag to increase
-    // verbosity) to validate assumptions and diagnose problems.
-    //
-    // Lastly, the Zig build system is relatively simple and self-contained,
-    // and reading its source code will allow you to master it.
 }
