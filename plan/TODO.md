@@ -119,9 +119,9 @@
 - [x] **1.5.9 补全归约、数学初等函数、索引与视图算子的 Autograd 支持 (`tensor/core.zig`, `autodiff/`)**
   - [x] 为按轴归约 `sum`、`mean`、`variance`、初等函数 `sqrt`、`exp`、`log`、`abs`、条件选择 `where`、`maskedFill` 以及视图算子 `squeeze`、`unsqueeze`、`slice` 接入 `graph: ?*autodiff.Graph` 与反向传播。
 
-- [ ] **1.5.10 统一 `nn` 模块元数据、补全可视化 Scope 覆盖并拆分巨型测试文件 (`nn/`, `root.zig`, `build.zig`)**
-  - [ ] 为 [`RNN`](../src/nn/recurrent.zig)、[`LSTM`](../src/nn/recurrent.zig)、[`StackedLSTM`](../src/nn/recurrent.zig)、[`GRU`](../src/nn/recurrent.zig)、[`MoELayer`](../src/nn/transformer.zig)、[`MLALayer`](../src/nn/transformer.zig)、[`LoRALinear`](../src/nn/transformer.zig) 补齐命名接口与 `Graph.enterModule` 作用域追踪。
-  - [ ] 将 [`src/root.zig`](../src/root.zig) 与 [`src/nn.zig`](../src/nn.zig) 中的庞大内联测试拆分为独立测试文件（`src/tests.zig`、`src/nn/tests.zig`），并用表驱动循环精简 [`build.zig`](../build.zig) 中 16 个示例程序的重复构建定义。
+- [x] **1.5.10 统一 `nn` 模块元数据、补全可视化 Scope 覆盖并拆分巨型测试文件 (`nn/`, `root.zig`, `build.zig`)**
+  - [x] 为 [`RNN`](../src/nn/recurrent.zig)、[`LSTM`](../src/nn/recurrent.zig)、[`StackedLSTM`](../src/nn/recurrent.zig)、[`GRU`](../src/nn/recurrent.zig)、[`MoELayer`](../src/nn/transformer.zig)、[`MLALayer`](../src/nn/transformer.zig)、[`LoRALinear`](../src/nn/transformer.zig) 补齐命名接口与 `Graph.enterModule` 作用域追踪。
+  - [x] 将 [`src/root.zig`](../src/root.zig) 与 [`src/nn.zig`](../src/nn.zig) 中的庞大内联测试拆分为独立测试文件（`src/tests.zig`、`src/nn/tests.zig`），并用表驱动循环精简 [`build.zig`](../build.zig) 中 16 个示例程序的重复构建定义。
 
 - [ ] **1.5.11 核心算子性能与功能优化 (`transformer.zig`, `cblas.zig`, `tensor/core.zig`, `nn/core.zig`)**
   - [ ] **`MoELayer` 稀疏激活**：修复 [`MoELayer.forward`](../src/nn/transformer.zig) 对未选中专家仍执行全量前向计算且未严格置零非 Top-K 门控概率的问题。

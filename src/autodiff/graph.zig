@@ -169,6 +169,16 @@ pub const Graph = struct {
             if (std.mem.eql(u8, m_type, "TransformerBlock")) return "h_l = x_l + \\text{Attention}(\\text{RMSNorm}(x_l)), \\quad x_{l+1} = \\text{TransformerBlock}(x_l) = h_l + \\text{MLP}(\\text{RMSNorm}(h_l))";
             if (std.mem.eql(u8, m_type, "TransformerDecoder")) return "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)";
             if (std.mem.eql(u8, m_type, "GPT")) return "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]";
+            if (std.mem.eql(u8, m_type, "RNNCell")) return "h_t = \\tanh(x_t W_{ih}^T + b_{ih} + h_{t-1} W_{hh}^T + b_{hh})";
+            if (std.mem.eql(u8, m_type, "RNN")) return "h_{1:T} = \\text{RNN}(x_{1:T}, h_0)";
+            if (std.mem.eql(u8, m_type, "LSTMCell")) return "c_t = f_t \\odot c_{t-1} + i_t \\odot \\tilde{c}_t, \\quad h_t = o_t \\odot \\tanh(c_t)";
+            if (std.mem.eql(u8, m_type, "LSTM")) return "(h_{1:T}, c_{1:T}) = \\text{LSTM}(x_{1:T}, h_0, c_0)";
+            if (std.mem.eql(u8, m_type, "StackedLSTM")) return "h^{(L)}_{1:T} = \\text{StackedLSTM}(x_{1:T})";
+            if (std.mem.eql(u8, m_type, "GRUCell")) return "h_t = (1 - z_t) \\odot h_{t-1} + z_t \\odot \\tanh(W_h x_t + U_h (r_t \\odot h_{t-1}))";
+            if (std.mem.eql(u8, m_type, "GRU")) return "h_{1:T} = \\text{GRU}(x_{1:T}, h_0)";
+            if (std.mem.eql(u8, m_type, "MoELayer")) return "y = \\sum_{i \\in \\text{TopK}(g(x))} p_i(x) E_i(x) + \\sum_{j} E^{\\text{shared}}_j(x)";
+            if (std.mem.eql(u8, m_type, "MLALayer")) return "c_t^{KV} = x_t W^{DKV}, \\quad y = \\text{MLA}(Q, c^{KV}, k^R) W^O";
+            if (std.mem.eql(u8, m_type, "LoRALinear")) return "y = x W_0 + \\frac{\\alpha}{r} (x A) B + b";
         }
 
         return "y = f(x; \\theta)";
