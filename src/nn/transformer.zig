@@ -573,6 +573,7 @@ pub const MoELayer = struct {
         const keep_node = try graph.tensorND(&.{ N, E }, false);
         keep_node.is_buffer = true;
         const keep_mask = keep_node.data;
+        @memset(keep_mask, 0.0);
 
         const expert_active = try graph.arenaAllocator().alloc(bool, E);
         @memset(expert_active, false);
@@ -637,7 +638,6 @@ pub const MoELayer = struct {
 
         var acc: ?*Tensor = null;
         for (self.routed_experts, 0..) |exp, e| {
-            if (!expert_active[e]) continue; // 跳过整批均未被选中的专家
             const exp_out = try exp.forward(graph, x_2d); // [N, D]
             const weighted = try graph.mul(exp_out, prob_cols[e]); // [N, D] * [N, 1] -> [N, D]
             if (acc) |a| {

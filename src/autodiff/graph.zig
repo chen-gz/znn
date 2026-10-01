@@ -360,7 +360,7 @@ pub const Graph = struct {
 
         try self.tensors.append(self.backing_allocator, C);
 
-        if (req_grad) {
+        if (self.enable_grad) {
             const inps_copy = try allocator.alloc(*Tensor, inputs.len);
             @memcpy(inps_copy, inputs);
             const outs_copy = try allocator.alloc(*Tensor, 1);
@@ -389,6 +389,7 @@ pub const Graph = struct {
         context: OpContext,
         req_grad: bool,
     ) !*Tensor {
+        _ = req_grad;
         var temp_op = Op{
             .op_type = op_type,
             .inputs = @constCast(inputs),
@@ -397,7 +398,7 @@ pub const Graph = struct {
         };
         try temp_op.forward(self.backing_allocator);
 
-        if (req_grad) {
+        if (self.enable_grad) {
             const allocator = self.arena.allocator();
             const inps_copy = try allocator.alloc(*Tensor, inputs.len);
             @memcpy(inps_copy, inputs);
@@ -467,7 +468,7 @@ pub const Graph = struct {
             try self.tensors.append(self.backing_allocator, out);
         }
 
-        if (req_grad) {
+        if (self.enable_grad) {
             const inps = try allocator.alloc(*Tensor, 1);
             inps[0] = input;
             const outs_copy = try allocator.alloc(*Tensor, num_splits);
@@ -1154,7 +1155,7 @@ pub const Graph = struct {
             }
         }
 
-        if (req_grad) {
+        if (self.enable_grad) {
             const inputs = try allocator.alloc(*Tensor, 3);
             inputs[0] = X;
             inputs[1] = G;
@@ -1199,7 +1200,7 @@ pub const Graph = struct {
             }
         }
 
-        if (req_grad) {
+        if (self.enable_grad) {
             const inputs = try allocator.alloc(*Tensor, 1);
             inputs[0] = X;
             const outputs = try allocator.alloc(*Tensor, 1);

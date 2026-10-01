@@ -14,19 +14,25 @@ const ThreeLayerMLP = struct {
     module_type: []const u8 = "MLP",
 
     pub fn init(allocator: std.mem.Allocator, random: std.Random) !ThreeLayerMLP {
-        var fc1 = try nn.Linear.init(allocator, 16, 32, random);
-        var fc2 = try nn.Linear.init(allocator, 32, 16, random);
-        var fc3 = try nn.Linear.init(allocator, 16, 10, random);
-        fc1.setName("mlp.fc1");
-        fc2.setName("mlp.fc2");
-        fc3.setName("mlp.fc3");
-        return .{ .fc1 = fc1, .fc2 = fc2, .fc3 = fc3 };
+        const fc1 = try nn.Linear.init(allocator, 16, 32, random);
+        const fc2 = try nn.Linear.init(allocator, 32, 16, random);
+        const fc3 = try nn.Linear.init(allocator, 16, 10, random);
+        var mlp = ThreeLayerMLP{ .fc1 = fc1, .fc2 = fc2, .fc3 = fc3 };
+        mlp.setName("mlp");
+        return mlp;
     }
 
     pub fn deinit(self: ThreeLayerMLP, allocator: std.mem.Allocator) void {
         self.fc1.deinit(allocator);
         self.fc2.deinit(allocator);
         self.fc3.deinit(allocator);
+    }
+
+    pub fn setName(self: *ThreeLayerMLP, name: []const u8) void {
+        self.name = name;
+        self.fc1.setName("mlp.fc1");
+        self.fc2.setName("mlp.fc2");
+        self.fc3.setName("mlp.fc3");
     }
 
     pub fn forward(self: *const ThreeLayerMLP, g: *autodiff.Graph, x: *Tensor) !*Tensor {
@@ -98,6 +104,7 @@ pub fn main() !void {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
                 var model = try ThreeLayerMLP.init(alloc, rnd);
                 defer model.deinit(alloc);
+                model.setName("mlp");
 
                 const x = try g.ones(&.{ 2, 16 }, false);
                 x.setName("inputs.x");
@@ -333,6 +340,8 @@ pub fn main() !void {
 
                 const z = try g.ones(&.{ 4, 2 }, false);
                 z.setName("inputs.z");
+                const scope = try g.enterModule("generator", "Generator");
+                defer scope.exit();
                 const fake_x = try net_g.forward(g, z);
                 fake_x.setName("outputs.fake_x");
             }
@@ -359,6 +368,8 @@ pub fn main() !void {
 
                 const x = try g.ones(&.{ 4, 2 }, false);
                 x.setName("inputs.x");
+                const scope = try g.enterModule("discriminator", "Discriminator");
+                defer scope.exit();
                 const logits = try net_d.forward(g, x);
                 logits.setName("outputs.logits");
             }

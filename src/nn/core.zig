@@ -104,22 +104,21 @@ pub const Linear = struct {
 
     /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "fc1"，自动设置 "fc1.weight" 与 "fc1.bias")
     pub fn setName(self: *Linear, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
-        self.bias.setNameFormatted("{s}.bias", .{self.name.?});
+        self.name = name;
+        self.weight.setNameFormatted("{s}.weight", .{name});
+        self.bias.setNameFormatted("{s}.bias", .{name});
     }
 
     /// 使用格式化模板为层设置人类可读的名称 (如 "{s}.fc1", parent_name)
     pub fn setNameFormatted(self: *Linear, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
+        if (std.fmt.bufPrint(&self.name_buf, fmt, args)) |s| {
+            self.name = s;
         } else |_| {
-            self.setName("linear");
+            self.name = "linear";
+        }
+        if (self.name) |n| {
+            self.weight.setNameFormatted("{s}.weight", .{n});
+            self.bias.setNameFormatted("{s}.bias", .{n});
         }
     }
 

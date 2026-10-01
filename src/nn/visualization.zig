@@ -1132,8 +1132,8 @@ pub const graph_ir = struct {
             }
         }
 
-        // 5. 默认展示作用域：根只包裹一个模型容器时展示该容器，否则展示根
-        const default_scope: []const u8 = if (root.children.items.len == 1) root.children.items[0].path else "";
+        // 5. 默认展示作用域：根只包裹一个模型容器且该容器包含局部边时展示该容器，否则展示根
+        const default_scope: []const u8 = if (root.children.items.len == 1 and root.children.items[0].edges.items.len > 0) root.children.items[0].path else "";
 
         return .{
             .arena = arena,
