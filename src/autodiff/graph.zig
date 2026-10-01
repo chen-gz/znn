@@ -967,13 +967,25 @@ pub const Graph = struct {
     }
 
     pub fn conv2d(self: *Graph, A: *Tensor, weight: *Tensor, bias: ?*Tensor) !*Tensor {
+        return self.conv2dWithConfig(A, weight, bias, 1, 0);
+    }
+
+    pub fn conv2dWithConfig(
+        self: *Graph,
+        A: *Tensor,
+        weight: *Tensor,
+        bias: ?*Tensor,
+        stride: usize,
+        padding: usize,
+    ) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.conv2d(weight, bias, allocator, null);
+        const C = try A.conv2dWithConfig(weight, bias, stride, padding, allocator, null);
         const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
+        const ctx: OpContext = .{ .Conv2D = .{ .stride = stride, .padding = padding } };
         if (bias) |b| {
-            return self.registerSingleOutputOp(C, &.{ A, weight, b }, .Conv2D, .{ .Conv2D = {} }, req_grad);
+            return self.registerSingleOutputOp(C, &.{ A, weight, b }, .Conv2D, ctx, req_grad);
         } else {
-            return self.registerSingleOutputOp(C, &.{ A, weight }, .Conv2D, .{ .Conv2D = {} }, req_grad);
+            return self.registerSingleOutputOp(C, &.{ A, weight }, .Conv2D, ctx, req_grad);
         }
     }
 
@@ -1813,8 +1825,8 @@ pub const Graph = struct {
                             .Gelu => return .gelu,
                             .Silu => return .silu,
                             .LeakyRelu => return .{ .leaky_relu = op.context.LeakyRelu.alpha },
-                            // 如果经过了 MatMul/AddBias/Add 等中间运算，顺着它的 output 继续往后看
-                            .MatMul, .BatchMatMul, .AddBias, .Add, .Reshape, .Transpose => {
+                            // 如果经过了 MatMul/Conv2D/AddBias/Add 等中间运算，顺着它的 output 继续往后看
+                            .MatMul, .BatchMatMul, .Conv2D, .ConvTranspose2D, .AddBias, .Add, .Reshape, .Transpose => {
                                 if (op.outputs.len > 0) {
                                     current = op.outputs[0];
                                     break;

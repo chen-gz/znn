@@ -813,11 +813,26 @@ pub const Tensor = struct {
     }
 
     pub fn conv2d(self: *Tensor, weight: *Tensor, bias: ?*Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        return self.conv2dWithConfig(weight, bias, 1, 0, allocator, graph);
+    }
+
+    pub fn conv2dWithConfig(
+        self: *Tensor,
+        weight: *Tensor,
+        bias: ?*Tensor,
+        stride: usize,
+        padding: usize,
+        allocator: std.mem.Allocator,
+        graph: ?*autodiff.Graph,
+    ) anyerror!*Tensor {
         if (graph) |g| {
-            return try g.conv2d(self, weight, bias);
+            return try g.conv2dWithConfig(self, weight, bias, stride, padding);
         }
         if (self.shape.len != 4 or weight.shape.len != 4) {
             return error.IncompatibleDimensions;
+        }
+        if (stride == 0) {
+            return error.InvalidStride;
         }
         const N = self.shape.dims[0];
         const C_in = self.shape.dims[1];
@@ -833,17 +848,83 @@ pub const Tensor = struct {
             if (b.shape.len != 1 or b.shape.dims[0] != C_out) return error.ShapeMismatch;
         }
 
-        if (H < KH or W < KW) return error.KernelBiggerThanInput;
+        const H_padded = H + 2 * padding;
+        const W_padded = W + 2 * padding;
+        if (H_padded < KH or W_padded < KW) return error.KernelBiggerThanInput;
 
-        const H_out = H - KH + 1;
-        const W_out = W - KW + 1;
+        const H_out = (H_padded - KH) / stride + 1;
+        const W_out = (W_padded - KW) / stride + 1;
 
         const out = try zeros(allocator, &.{ N, C_out, H_out, W_out });
+        errdefer out.deinit(allocator);
 
         const s_n = self.strides.dims[0];
         const s_c = self.strides.dims[1];
         const s_h = self.strides.dims[2];
         const s_w = self.strides.dims[3];
+
+        const K_col = C_in * KH * KW;
+        const L_out = H_out * W_out;
+
+        if (weight.isContiguous() and K_col > 0 and L_out > 0 and C_out > 0) {
+            const col_buf = try allocator.alloc(f32, K_col * L_out);
+            defer allocator.free(col_buf);
+
+            for (0..N) |n| {
+                // im2col: 展平当前样本的所有感受野窗口为 [K_col, L_out] 矩阵
+                for (0..C_in) |ci| {
+                    for (0..KH) |kh| {
+                        for (0..KW) |kw| {
+                            const k_row = (ci * KH + kh) * KW + kw;
+                            const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
+                            for (0..H_out) |h_out| {
+                                const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
+                                if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) {
+                                    @memset(col_row[h_out * W_out .. (h_out + 1) * W_out], 0.0);
+                                    continue;
+                                }
+                                const ih: usize = @intCast(ih_signed);
+                                for (0..W_out) |w_out| {
+                                    const iw_signed: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
+                                    if (iw_signed >= 0 and iw_signed < @as(isize, @intCast(W))) {
+                                        const iw: usize = @intCast(iw_signed);
+                                        col_row[h_out * W_out + w_out] = self.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
+                                    } else {
+                                        col_row[h_out * W_out + w_out] = 0.0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                const out_n = out.data[n * C_out * L_out .. (n + 1) * C_out * L_out];
+                if (bias) |b| {
+                    const b_stride = b.strides.dims[0];
+                    for (0..C_out) |co| {
+                        @memset(out_n[co * L_out .. (co + 1) * L_out], b.data[co * b_stride]);
+                    }
+                }
+
+                c.cblas_sgemm(
+                    c.CblasRowMajor,
+                    c.CblasNoTrans,
+                    c.CblasNoTrans,
+                    @intCast(C_out),
+                    @intCast(L_out),
+                    @intCast(K_col),
+                    1.0,
+                    weight.data.ptr,
+                    @intCast(K_col),
+                    col_buf.ptr,
+                    @intCast(L_out),
+                    if (bias != null) @as(f32, 1.0) else @as(f32, 0.0),
+                    out_n.ptr,
+                    @intCast(L_out),
+                );
+            }
+            return out;
+        }
 
         const w_co = weight.strides.dims[0];
         const w_ci = weight.strides.dims[1];
@@ -857,20 +938,26 @@ pub const Tensor = struct {
 
         for (0..N) |n| {
             for (0..C_out) |co| {
-                const b_val = if (bias) |b| b.data[co] else 0.0;
-                for (0..H_out) |h| {
-                    for (0..W_out) |w| {
+                const b_val = if (bias) |b| b.data[co * b.strides.dims[0]] else 0.0;
+                for (0..H_out) |h_out| {
+                    for (0..W_out) |w_out| {
                         var acc: f32 = b_val;
                         for (0..C_in) |ci| {
                             for (0..KH) |kh| {
+                                const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
+                                if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
+                                const ih: usize = @intCast(ih_signed);
                                 for (0..KW) |kw| {
-                                    const input_val = self.data[n * s_n + ci * s_c + (h + kh) * s_h + (w + kw) * s_w];
+                                    const iw_signed: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
+                                    if (iw_signed < 0 or iw_signed >= @as(isize, @intCast(W))) continue;
+                                    const iw: usize = @intCast(iw_signed);
+                                    const input_val = self.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
                                     const weight_val = weight.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
                                     acc += input_val * weight_val;
                                 }
                             }
                         }
-                        out.data[n * o_n + co * o_c + h * o_h + w * o_w] = acc;
+                        out.data[n * o_n + co * o_c + h_out * o_h + w_out * o_w] = acc;
                     }
                 }
             }

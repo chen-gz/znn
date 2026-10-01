@@ -123,11 +123,11 @@
   - [x] 为 [`RNN`](../src/nn/recurrent.zig)、[`LSTM`](../src/nn/recurrent.zig)、[`StackedLSTM`](../src/nn/recurrent.zig)、[`GRU`](../src/nn/recurrent.zig)、[`MoELayer`](../src/nn/transformer.zig)、[`MLALayer`](../src/nn/transformer.zig)、[`LoRALinear`](../src/nn/transformer.zig) 补齐命名接口与 `Graph.enterModule` 作用域追踪。
   - [x] 将 [`src/root.zig`](../src/root.zig) 与 [`src/nn.zig`](../src/nn.zig) 中的庞大内联测试拆分为独立测试文件（`src/tests.zig`、`src/nn/tests.zig`），并用表驱动循环精简 [`build.zig`](../build.zig) 中 16 个示例程序的重复构建定义。
 
-- [ ] **1.5.11 核心算子性能与功能优化 (`transformer.zig`, `cblas.zig`, `tensor/core.zig`, `nn/core.zig`)**
-  - [ ] **`MoELayer` 稀疏激活**：修复 [`MoELayer.forward`](../src/nn/transformer.zig) 对未选中专家仍执行全量前向计算且未严格置零非 Top-K 门控概率的问题。
-  - [ ] **`CausalSelfAttention` 掩码广播优化**：将因果掩码从每次分配两份 $[B, n_h, T, T]$ 缩减为单份 $[1, 1, T, T]$ 广播张量。
-  - [ ] **`cblas_sgemm_fallback` `TransB` SIMD 加速**：为 [`cblas_sgemm_fallback`](../src/cblas.zig) 的 `NoTrans × Trans` 分支（对应 `MatMul` 反向传播计算 $dA \mathrel{+}= dC \cdot B^T$）实现 8 路 `@Vector(8, f32)` 向量化内积。
-  - [ ] **`Conv2D` 步长/填充扩展与 `im2col + sgemm` 加速**：为 [`Conv2D`](../src/nn/core.zig) 与 [`Tensor.conv2d`](../src/tensor/core.zig) 增加可配置 `stride` 与 `padding` 支持，并用 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向计算。
+- [x] **1.5.11 核心算子性能与功能优化 (`transformer.zig`, `cblas.zig`, `tensor/core.zig`, `nn/core.zig`)**
+  - [x] **`MoELayer` 稀疏激活**：修复 [`MoELayer.forward`](../src/nn/transformer.zig) 对未选中专家仍执行全量前向计算且未严格置零非 Top-K 门控概率的问题。
+  - [x] **`CausalSelfAttention` 掩码广播优化**：将因果掩码从每次分配两份 $[B, n_h, T, T]$ 缩减为单份 $[1, 1, T, T]$ 广播张量。
+  - [x] **`cblas_sgemm_fallback` `TransB` SIMD 加速**：为 [`cblas_sgemm_fallback`](../src/cblas.zig) 的 `NoTrans × Trans` 分支（对应 `MatMul` 反向传播计算 $dA \mathrel{+}= dC \cdot B^T$）实现 8 路 `@Vector(8, f32)` 向量化内积。
+  - [x] **`Conv2D` 步长/填充扩展与 `im2col + sgemm` 加速**：为 [`Conv2D`](../src/nn/core.zig) 与 [`Tensor.conv2d`](../src/tensor/core.zig) 增加可配置 `stride` 与 `padding` 支持，并用 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向计算。
 
 ---
 

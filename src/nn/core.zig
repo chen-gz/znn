@@ -169,13 +169,28 @@ pub const Linear = struct {
 pub const Conv2D = struct {
     weight: *Tensor,
     bias: *Tensor,
+    stride: usize = 1,
+    padding: usize = 0,
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Conv2D",
 
     /// 构造卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
     pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random_opt: anytype) !Conv2D {
-        var c = try initUninitialized(allocator, in_channels, out_channels, kernel_size);
+        return initWithConfig(allocator, in_channels, out_channels, kernel_size, 1, 0, random_opt);
+    }
+
+    /// 构造支持自定义 stride 与 padding 的卷积层
+    pub fn initWithConfig(
+        allocator: std.mem.Allocator,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+        random_opt: anytype,
+    ) !Conv2D {
+        var c = try initUninitializedWithConfig(allocator, in_channels, out_channels, kernel_size, stride, padding);
         const ArgT = @TypeOf(random_opt);
         if (ArgT == std.Random) {
             c.customInit(random_opt, InitOptions.default);
@@ -189,10 +204,33 @@ pub const Conv2D = struct {
 
     /// 纯结构与内存初始化 (无随机数，交由 Graph.initWeights 自动探查推导)
     pub fn initClean(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize) !Conv2D {
-        return initUninitialized(allocator, in_channels, out_channels, kernel_size);
+        return initUninitializedWithConfig(allocator, in_channels, out_channels, kernel_size, 1, 0);
+    }
+
+    pub fn initCleanWithConfig(
+        allocator: std.mem.Allocator,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+    ) !Conv2D {
+        return initUninitializedWithConfig(allocator, in_channels, out_channels, kernel_size, stride, padding);
     }
 
     pub fn initUninitialized(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize) !Conv2D {
+        return initUninitializedWithConfig(allocator, in_channels, out_channels, kernel_size, 1, 0);
+    }
+
+    pub fn initUninitializedWithConfig(
+        allocator: std.mem.Allocator,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        padding: usize,
+    ) !Conv2D {
+        if (stride == 0) return error.InvalidStride;
         const weight = try createPersistentTensor(allocator, out_channels, in_channels * kernel_size * kernel_size, true);
         errdefer freePersistentTensor(allocator, weight);
         weight.shape = Shape.init(&.{ out_channels, in_channels, kernel_size, kernel_size });
@@ -206,6 +244,8 @@ pub const Conv2D = struct {
         return Conv2D{
             .weight = weight,
             .bias = bias,
+            .stride = stride,
+            .padding = padding,
         };
     }
 
@@ -281,9 +321,9 @@ pub const Conv2D = struct {
                 _ = g.setModuleFormula(n, formula) catch {};
                 _ = g.registerModuleType(n, self.module_type) catch {};
             }
-            return try g.conv2d(x, self.weight, self.bias);
+            return try g.conv2dWithConfig(x, self.weight, self.bias, self.stride, self.padding);
         }
-        return try x.conv2d(self.weight, self.bias, allocator, null);
+        return try x.conv2dWithConfig(self.weight, self.bias, self.stride, self.padding, allocator, null);
     }
 };
 
