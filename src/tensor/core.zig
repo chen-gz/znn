@@ -378,40 +378,77 @@ pub const Tensor = struct {
         return C;
     }
 
-    /// 逐元素开平方 (np.sqrt)
-    pub fn sqrt(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+    fn unaryMathEager(self: *const Tensor, allocator: std.mem.Allocator, comptime math_fn: fn (f32) f32) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, a_val| {
-            c_val.* = @sqrt(a_val);
+        if (self.isContiguous() and self.data.len >= C.data.len) {
+            for (C.data, self.data[0..C.data.len]) |*c_val, a_val| {
+                c_val.* = math_fn(a_val);
+            }
+        } else {
+            var coord = [_]usize{0} ** 8;
+            const len = self.shape.len;
+            for (0..C.data.len) |dest_i| {
+                var src_idx: usize = 0;
+                for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
+                C.data[dest_i] = math_fn(self.data[src_idx]);
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < self.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
+            }
         }
         return C;
+    }
+
+    /// 逐元素开平方 (np.sqrt)
+    pub fn sqrt(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.sqrt(self);
+        }
+        return self.unaryMathEager(allocator, struct {
+            fn op(x: f32) f32 {
+                return @sqrt(x);
+            }
+        }.op);
     }
 
     /// 逐元素自然指数 (np.exp)
-    pub fn exp(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, a_val| {
-            c_val.* = @exp(a_val);
+    pub fn exp(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.exp(self);
         }
-        return C;
+        return self.unaryMathEager(allocator, struct {
+            fn op(x: f32) f32 {
+                return @exp(x);
+            }
+        }.op);
     }
 
     /// 逐元素自然对数 (np.log)
-    pub fn log(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, a_val| {
-            c_val.* = @log(a_val);
+    pub fn log(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.log(self);
         }
-        return C;
+        return self.unaryMathEager(allocator, struct {
+            fn op(x: f32) f32 {
+                return @log(x);
+            }
+        }.op);
     }
 
     /// 逐元素绝对值 (np.abs)
-    pub fn abs(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, a_val| {
-            c_val.* = @abs(a_val);
+    pub fn abs(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.abs(self);
         }
-        return C;
+        return self.unaryMathEager(allocator, struct {
+            fn op(x: f32) f32 {
+                return @abs(x);
+            }
+        }.op);
     }
 
     pub fn bceWithLogitsLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
@@ -1443,7 +1480,10 @@ pub const Tensor = struct {
     }
 
     /// 通用多维张量沿指定轴或全局求和归约 (Sum Reduction)
-    pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
+    pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.sum(self, axis, keepdims);
+        }
         if (axis) |ax| {
             if (ax >= self.shape.len) return error.DimensionOutOfBounds;
             const reduce_size = self.shape.dims[ax];
@@ -1572,8 +1612,11 @@ pub const Tensor = struct {
     }
 
     /// 通用多维张量沿指定轴或全局均值归约 (Mean Reduction)
-    pub fn mean(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
-        const C = try self.sum(axis, keepdims, allocator);
+    pub fn mean(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.mean(self, axis, keepdims);
+        }
+        const C = try self.sum(axis, keepdims, allocator, null);
         const count = if (axis) |ax| @as(f32, @floatFromInt(self.shape.dims[ax])) else @as(f32, @floatFromInt(self.shape.numel()));
         for (C.data) |*val| {
             val.* /= count;
@@ -1582,8 +1625,17 @@ pub const Tensor = struct {
     }
 
     /// 通用多维张量沿指定轴或全局方差 (Variance Reduction)
-    pub fn variance(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
-        const mean_t = try self.mean(axis, true, allocator);
+    pub fn variance(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.variance(self, axis, keepdims, ddof);
+        }
+        if (axis) |ax| {
+            if (ax >= self.shape.len) return error.DimensionOutOfBounds;
+        }
+        const count = if (axis) |ax| self.shape.dims[ax] else self.shape.numel();
+        if (count <= ddof) return error.InvalidDDOF;
+
+        const mean_t = try self.mean(axis, true, allocator, null);
         defer free(allocator, mean_t);
 
         const diff = try self.sub(mean_t, allocator, null);
@@ -1591,12 +1643,7 @@ pub const Tensor = struct {
         const sq = try diff.mul(diff, allocator, null);
         defer free(allocator, sq);
 
-        const sum_sq = try sq.sum(axis, keepdims, allocator);
-        const count = if (axis) |ax| self.shape.dims[ax] else self.shape.numel();
-        if (count <= ddof) {
-            free(allocator, sum_sq);
-            return error.InvalidDDOF;
-        }
+        const sum_sq = try sq.sum(axis, keepdims, allocator, null);
         const denom = @as(f32, @floatFromInt(count - ddof));
         for (sum_sq.data) |*val| {
             val.* /= denom;
@@ -1605,8 +1652,11 @@ pub const Tensor = struct {
     }
 
     /// 通用多维张量沿指定轴或全局标准差 (Standard Deviation Reduction)
-    pub fn stdDev(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
-        const var_t = try self.variance(axis, keepdims, ddof, allocator);
+    pub fn stdDev(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.stdDev(self, axis, keepdims, ddof);
+        }
+        const var_t = try self.variance(axis, keepdims, ddof, allocator, null);
         for (var_t.data) |*val| {
             val.* = @sqrt(@max(val.*, 0.0));
         }
@@ -1614,7 +1664,10 @@ pub const Tensor = struct {
     }
 
     /// 依据布尔/条件张量 (支持 `*Tensor` 或 `*BoolTensor` / `*GenericTensor(T)`) 在两个候选张量间进行逐元素选择 (NumPy np.where)
-    pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+    pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.where(cond, x, y);
+        }
         const s_xy = try broadcastShapes(x.shape, y.shape);
         const target_shape = try broadcastShapes(cond.shape, s_xy);
         const C = try zeros(allocator, target_shape.dims[0..target_shape.len]);
@@ -1659,7 +1712,10 @@ pub const Tensor = struct {
     }
 
     /// 根据 mask (支持 `*Tensor` 或 `*BoolTensor` / `*GenericTensor(T)`) 将满足真值条件的元素赋值为指定标量值（返回新分配副本）
-    pub fn maskedFill(self: *Tensor, mask: anytype, value: f32, allocator: std.mem.Allocator) !*Tensor {
+    pub fn maskedFill(self: *Tensor, mask: anytype, value: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.maskedFill(self, mask, value);
+        }
         if (!self.shape.eq(mask.shape)) return error.ShapeMismatch;
         const C = try self.contiguous(allocator);
         if (mask.isContiguous() and mask.data.len >= C.data.len) {
@@ -1803,12 +1859,12 @@ pub const Tensor = struct {
     }
 
     /// 压缩单维度 (Squeeze): 移除所有为 1 的维度，或移除指定为 1 的维度
-    pub fn squeeze(self: *Tensor, axis: ?usize, allocator: std.mem.Allocator) !*Tensor {
+    pub fn squeeze(self: *Tensor, axis: ?usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (axis) |ax| {
             if (ax >= self.shape.len) return error.DimensionOutOfBounds;
             if (self.shape.dims[ax] != 1) return error.CannotSqueezeDimension;
             if (self.shape.len == 1) {
-                return self.contiguous(allocator);
+                return self.reshape(&.{1}, allocator, graph);
             }
             var new_dims = [_]usize{0} ** 8;
             var dest_d: usize = 0;
@@ -1818,7 +1874,7 @@ pub const Tensor = struct {
                     dest_d += 1;
                 }
             }
-            return self.reshape(new_dims[0..dest_d], allocator, null);
+            return self.reshape(new_dims[0..dest_d], allocator, graph);
         } else {
             var new_dims = [_]usize{0} ** 8;
             var dest_d: usize = 0;
@@ -1832,12 +1888,12 @@ pub const Tensor = struct {
                 new_dims[0] = 1;
                 dest_d = 1;
             }
-            return self.reshape(new_dims[0..dest_d], allocator, null);
+            return self.reshape(new_dims[0..dest_d], allocator, graph);
         }
     }
 
     /// 扩充单维度 (Unsqueeze / expand_dims): 在指定位置插入一个大小为 1 的新维度
-    pub fn unsqueeze(self: *Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+    pub fn unsqueeze(self: *Tensor, dim: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (dim > self.shape.len) return error.DimensionOutOfBounds;
         if (self.shape.len >= 8) return error.MaxDimensionsExceeded;
 
@@ -1851,12 +1907,16 @@ pub const Tensor = struct {
                 src_d += 1;
             }
         }
-        return self.reshape(new_dims[0..(self.shape.len + 1)], allocator, null);
+        return self.reshape(new_dims[0..(self.shape.len + 1)], allocator, graph);
     }
 
     /// 跨步零拷贝切片 (Strided View Slicing)
-    /// 返回一个共享底层内存缓冲区的零拷贝视图张量 (is_view = true)
-    pub fn slice(self: *Tensor, ranges: []const SliceRange, allocator: std.mem.Allocator) !*Tensor {
+    /// 当 graph == null 时返回一个共享底层内存缓冲区的零拷贝视图张量 (is_view = true)；
+    /// 当 graph != null 时在计算图中注册可微的 Slice 算子
+    pub fn slice(self: *Tensor, ranges: []const SliceRange, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.slice(self, ranges);
+        }
         if (ranges.len > self.shape.len) return error.DimensionOutOfBounds;
 
         var new_dims = [_]usize{0} ** 8;

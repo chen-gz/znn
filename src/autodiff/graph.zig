@@ -782,9 +782,9 @@ pub const Graph = struct {
         );
     }
 
-    pub fn randomNormal(self: *Graph, shape_slice: []const usize, random: std.Random, mean: f32, stddev: f32, requires_grad: bool) !*Tensor {
+    pub fn randomNormal(self: *Graph, shape_slice: []const usize, random: std.Random, mean_val: f32, stddev: f32, requires_grad: bool) !*Tensor {
         const t = try self.tensorND(shape_slice, requires_grad);
-        t.fillNormal(random, mean, stddev);
+        t.fillNormal(random, mean_val, stddev);
         return t;
     }
 
@@ -1264,6 +1264,208 @@ pub const Graph = struct {
             .Embedding,
             .{ .Embedding = {} },
             self.enable_grad and W.requires_grad,
+        );
+    }
+
+    pub fn sqrt(self: *Graph, A: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.sqrt(allocator, null);
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Sqrt,
+            .{ .Sqrt = {} },
+            self.enable_grad and A.requires_grad,
+        );
+    }
+
+    pub fn exp(self: *Graph, A: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.exp(allocator, null);
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Exp,
+            .{ .Exp = {} },
+            self.enable_grad and A.requires_grad,
+        );
+    }
+
+    pub fn log(self: *Graph, A: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.log(allocator, null);
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Log,
+            .{ .Log = {} },
+            self.enable_grad and A.requires_grad,
+        );
+    }
+
+    pub fn abs(self: *Graph, A: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.abs(allocator, null);
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Abs,
+            .{ .Abs = {} },
+            self.enable_grad and A.requires_grad,
+        );
+    }
+
+    pub fn sum(self: *Graph, A: *Tensor, axis: ?usize, keepdims: bool) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.sum(axis, keepdims, allocator, null);
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Sum,
+            .{ .Sum = .{ .axis = axis, .keepdims = keepdims } },
+            self.enable_grad and A.requires_grad,
+        );
+    }
+
+    pub fn mean(self: *Graph, A: *Tensor, axis: ?usize, keepdims: bool) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try A.mean(axis, keepdims, allocator, null);
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Mean,
+            .{ .Mean = .{ .axis = axis, .keepdims = keepdims } },
+            self.enable_grad and A.requires_grad,
+        );
+    }
+
+    pub fn variance(self: *Graph, A: *Tensor, axis: ?usize, keepdims: bool, ddof: usize) !*Tensor {
+        if (axis) |ax| {
+            if (ax >= A.shape.len) return error.DimensionOutOfBounds;
+        }
+        const count = if (axis) |ax| A.shape.dims[ax] else A.shape.numel();
+        if (count <= ddof) return error.InvalidDDOF;
+
+        const mean_t = try self.mean(A, axis, true);
+        const diff = try self.sub(A, mean_t);
+        const sq = try self.mul(diff, diff);
+        const sum_sq = try self.sum(sq, axis, keepdims);
+        return try self.divScalar(sum_sq, @as(f32, @floatFromInt(count - ddof)));
+    }
+
+    pub fn stdDev(self: *Graph, A: *Tensor, axis: ?usize, keepdims: bool, ddof: usize) !*Tensor {
+        const var_t = try self.variance(A, axis, keepdims, ddof);
+        return try self.sqrt(var_t);
+    }
+
+    pub fn where(self: *Graph, cond: anytype, X: *Tensor, Y: *Tensor) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try Tensor.where(cond, X, Y, allocator, null);
+        const mask_buf = try allocator.alloc(bool, C.data.len);
+        const cond_strides = tensor_mod.computeBroadcastStrides(cond.shape, cond.strides, C.shape);
+        const rank = C.shape.len;
+        var indices = [_]usize{0} ** 8;
+        for (0..C.data.len) |c_flat| {
+            var cond_flat: usize = 0;
+            for (0..rank) |d| cond_flat += indices[d] * cond_strides.dims[d];
+            mask_buf[c_flat] = tensor_mod.isTruthyScalar(cond.data[cond_flat]);
+            var d = rank;
+            while (d > 0) {
+                d -= 1;
+                indices[d] += 1;
+                if (indices[d] < C.shape.dims[d]) break;
+                indices[d] = 0;
+            }
+        }
+        return self.registerSingleOutputOp(
+            C,
+            &.{ X, Y },
+            .Where,
+            .{ .Where = .{ .mask = mask_buf } },
+            self.enable_grad and (X.requires_grad or Y.requires_grad),
+        );
+    }
+
+    pub fn maskedFill(self: *Graph, X: *Tensor, mask: anytype, value: f32) !*Tensor {
+        const allocator = self.arena.allocator();
+        const C = try X.maskedFill(mask, value, allocator, null);
+        const mask_buf = try allocator.alloc(bool, C.data.len);
+        if (mask.isContiguous() and mask.data.len >= C.data.len) {
+            for (mask_buf, mask.data[0..C.data.len]) |*mb, mv| {
+                mb.* = tensor_mod.isTruthyScalar(mv);
+            }
+        } else {
+            var coord = [_]usize{0} ** 8;
+            const len = mask.shape.len;
+            for (mask_buf) |*mb| {
+                var m_idx: usize = 0;
+                for (0..len) |d| m_idx += coord[d] * mask.strides.dims[d];
+                mb.* = tensor_mod.isTruthyScalar(mask.data[m_idx]);
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < mask.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
+            }
+        }
+        return self.registerSingleOutputOp(
+            C,
+            &.{X},
+            .MaskedFill,
+            .{ .MaskedFill = .{ .mask = mask_buf, .value = value } },
+            self.enable_grad and X.requires_grad,
+        );
+    }
+
+    pub fn squeeze(self: *Graph, A: *Tensor, axis: ?usize) !*Tensor {
+        return A.squeeze(axis, self.arena.allocator(), self);
+    }
+
+    pub fn unsqueeze(self: *Graph, A: *Tensor, dim: usize) !*Tensor {
+        return A.unsqueeze(dim, self.arena.allocator(), self);
+    }
+
+    pub fn slice(self: *Graph, A: *Tensor, ranges: []const tensor_mod.SliceRange) !*Tensor {
+        if (ranges.len > A.shape.len) return error.DimensionOutOfBounds;
+
+        var new_dims = [_]usize{0} ** 8;
+        var new_strides = [_]usize{0} ** 8;
+        var offset: usize = 0;
+
+        for (0..A.shape.len) |d| {
+            const dim_size = A.shape.dims[d];
+            const stride = A.strides.dims[d];
+            const range = if (d < ranges.len) ranges[d] else tensor_mod.SliceRange{};
+            if (range.step == 0) return error.InvalidStep;
+
+            const start = range.start orelse 0;
+            const end = range.end orelse dim_size;
+
+            if (start > dim_size or end > dim_size) return error.IndexOutOfBounds;
+            if (end < start) return error.InvalidSliceRange;
+
+            const slice_len = if (end > start) (end - start + range.step - 1) / range.step else 0;
+            new_dims[d] = slice_len;
+            new_strides[d] = stride * range.step;
+            offset += start * stride;
+        }
+
+        const req_grad = self.enable_grad and A.requires_grad;
+        const C = try self.tensorND(new_dims[0..A.shape.len], req_grad);
+        return self.runAndRecordPreallocatedOp(
+            C,
+            &.{A},
+            .Slice,
+            .{
+                .Slice = .{
+                    .offset = offset,
+                    .strides = new_strides,
+                    .rank = A.shape.len,
+                },
+            },
+            req_grad,
         );
     }
 

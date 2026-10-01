@@ -257,7 +257,7 @@ pub fn stack(allocator: std.mem.Allocator, inputs: []const *Tensor, axis: usize)
     defer allocator.free(unsqueezed);
 
     for (inputs, 0..) |t, i| {
-        unsqueezed[i] = try t.unsqueeze(axis, allocator);
+        unsqueezed[i] = try t.unsqueeze(axis, allocator, null);
     }
     defer {
         for (unsqueezed) |u| {
@@ -278,19 +278,19 @@ pub fn tile(t: *Tensor, reps: []const usize, allocator: std.mem.Allocator) !*Ten
 }
 
 pub fn sqrt(t: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-    return t.sqrt(allocator);
+    return t.sqrt(allocator, null);
 }
 
 pub fn exp(t: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-    return t.exp(allocator);
+    return t.exp(allocator, null);
 }
 
 pub fn log(t: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-    return t.log(allocator);
+    return t.log(allocator, null);
 }
 
 pub fn abs(t: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-    return t.abs(allocator);
+    return t.abs(allocator, null);
 }
 
 /// 沿指定维度将张量均等切分为 num_splits 个子张量 (Split)
@@ -338,34 +338,36 @@ pub fn split(allocator: std.mem.Allocator, input: *Tensor, num_splits: usize, di
 
 const tensorSplit = split;
 
-pub const where = Tensor.where;
+pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+    return Tensor.where(cond, x, y, allocator, null);
+}
 
 pub fn sum(t: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
-    return t.sum(axis, keepdims, allocator);
+    return t.sum(axis, keepdims, allocator, null);
 }
 
 pub fn mean(t: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
-    return t.mean(axis, keepdims, allocator);
+    return t.mean(axis, keepdims, allocator, null);
 }
 
 pub fn variance(t: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
-    return t.variance(axis, keepdims, ddof, allocator);
+    return t.variance(axis, keepdims, ddof, allocator, null);
 }
 
 pub fn stdDev(t: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
-    return t.stdDev(axis, keepdims, ddof, allocator);
+    return t.stdDev(axis, keepdims, ddof, allocator, null);
 }
 
 pub fn squeeze(t: *Tensor, axis: ?usize, allocator: std.mem.Allocator) !*Tensor {
-    return t.squeeze(axis, allocator);
+    return t.squeeze(axis, allocator, null);
 }
 
 pub fn unsqueeze(t: *Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
-    return t.unsqueeze(dim, allocator);
+    return t.unsqueeze(dim, allocator, null);
 }
 
 pub fn slice(t: *Tensor, ranges: []const SliceRange, allocator: std.mem.Allocator) !*Tensor {
-    return t.slice(ranges, allocator);
+    return t.slice(ranges, allocator, null);
 }
 
 pub fn clip(t: *Tensor, min_val: f32, max_val: f32, allocator: std.mem.Allocator) !*Tensor {

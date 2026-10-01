@@ -10,6 +10,14 @@ pub const OpType = enum {
     MulScalar, // 标量乘法（张量缩放）
     Div, // 张量逐元素除法（支持多维广播）
     DivScalar, // 标量除法
+    Sqrt, // 逐元素平方根
+    Exp, // 逐元素自然指数
+    Log, // 逐元素自然对数
+    Abs, // 逐元素绝对值
+    Sum, // 张量按轴或全局求和归约
+    Mean, // 张量按轴或全局均值归约
+    Where, // 按条件张量逐元素选择
+    MaskedFill, // 按掩码张量填充标量值
     MatMul, // 矩阵乘法
     BatchMatMul, // 批量矩阵乘法 (Batched Matrix Multiplication)
 
@@ -19,6 +27,7 @@ pub const OpType = enum {
     Concat, // 张量沿指定维度拼接
     Split, // 张量沿指定维度切分
     RepeatKV, // GQA 注意力中沿 Head 维度复制广播 Key/Value 张量
+    Slice, // 多维跨步切片
 
     // --- 激活函数与非线性变换 (Activation Functions) ---
     Relu, // 激活函数 ReLU
@@ -64,6 +73,14 @@ pub const OpType = enum {
             .MulScalar => "y = c \\cdot x",
             .Div => "C = A \\oslash B",
             .DivScalar => "y = \\frac{x}{c}",
+            .Sqrt => "y = \\sqrt{x}",
+            .Exp => "y = e^x",
+            .Log => "y = \\ln(x)",
+            .Abs => "y = |x|",
+            .Sum => "y = \\sum x",
+            .Mean => "y = \\frac{1}{N} \\sum x",
+            .Where => "y = \\text{where}(c, x, y)",
+            .MaskedFill => "y_i = \\begin{cases} v & m_i \\\\ x_i & \\neg m_i \\end{cases}",
             .MatMul => "C = A \\cdot B",
             .BatchMatMul => "C_{b, h} = A_{b, h} \\cdot B_{b, h}",
             .Reshape => "y = \\text{reshape}(x, \\text{new\\_shape})",
@@ -71,6 +88,7 @@ pub const OpType = enum {
             .Concat => "y = [x_1, x_2, \\dots, x_k]",
             .Split => "[y_1, y_2, \\dots, y_k] = \\text{split}(x)",
             .RepeatKV => "y = \\text{repeat\\_kv}(x, \\text{groups})",
+            .Slice => "y = x[\\text{ranges}]",
             .Relu => "y = \\max(0, x)",
             .LeakyRelu => "y = \\max(\\alpha x, x)",
             .Gelu => "y = 0.5 x \\left(1 + \\text{erf}\\left(\\frac{x}{\\sqrt{2}}\\right)\\right)",
@@ -121,6 +139,25 @@ pub const OpContext = union(enum) {
     DivScalar: struct {
         val: f32,
     },
+    Sqrt: void,
+    Exp: void,
+    Log: void,
+    Abs: void,
+    Sum: struct {
+        axis: ?usize,
+        keepdims: bool,
+    },
+    Mean: struct {
+        axis: ?usize,
+        keepdims: bool,
+    },
+    Where: struct {
+        mask: []bool,
+    },
+    MaskedFill: struct {
+        mask: []bool,
+        value: f32,
+    },
     MatMul: void,
     BatchMatMul: void,
 
@@ -138,6 +175,11 @@ pub const OpContext = union(enum) {
     },
     RepeatKV: struct {
         groups: usize,
+    },
+    Slice: struct {
+        offset: usize,
+        strides: [8]usize,
+        rank: usize,
     },
 
     // --- 激活函数与非线性变换 ---
