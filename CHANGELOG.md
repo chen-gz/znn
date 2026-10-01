@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 新增作用域归属测试与黄金边集测试 (`src/nn.zig`)。
 - **可视化 JSON Schema (`src/nn/model_graph.schema.json`)**: 以 JSON Schema (draft 2020-12) 逐字段描述 schema 2.0 导出格式 (所有对象 `additionalProperties: false`，字段均带 `description`)，通过 `visualization.SCHEMA_JSON` 嵌入；新增一致性测试，用 GPT 与单个 `Linear` 的导出结果校验 schema，并验证未声明字段与错误版本会被拒绝。
 - `examples/export_model_report.zig` 额外导出单个 `Linear` 层的最小参考 JSON `examples/minimal_model_graph.json` (可视化器 JSON 格式指南中的模板)。
+- **图书全模型计算图导出 (`examples/export_book_models.zig`, `build.zig`)**: 新增 `zig build run-book-models` 步骤，导出专著各章节涉及的全部 18 个经典模型（`linear`、`mlp`、`rnn`、`lstm`、`stacked_lstm`、`gru`、`embedding`、`attention`、`transformer_block`、`gpt`、`swiglu`、`lora_linear`、`layernorm`、`mla`、`deepseek_moe`、`gan_generator`、`gan_discriminator`、`conv2d`）的 schema 2.0 计算图 JSON。
 
 - **Autograd 算子扩展与 LLM 后训练 Loss 求导 (`src/autodiff/`, `src/tensor/core.zig`, `src/nn/`)**:
   - 新增 `LayerNorm`、`BatchNorm2d`、`Dropout`、`AvgPool2D`、`RoPE`、`MaskedCrossEntropyLoss`、`DpoLoss`、`GrpoLoss`、`Sqrt`、`Exp`、`Log`、`Abs`、`Sum`、`Mean`、`Variance`、`Where`、`MaskedFill`、`Squeeze`、`Unsqueeze`、`Slice` 等算子的计算图前向/反向传播与可视化数学公式。
@@ -59,6 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **训练路径与反射/序列化完整性 (`src/nn/transformer.zig`, `src/nn/core.zig`, `src/nn/serialization.zig`)**:
   - 修复 `MLALayer.forward` 未使用 `q_all`、`w_kr` 及因果注意力的占位实现，补全完整潜在多头注意力训练与求导路径。
   - 修复 `collectParameters`、`deinitModel`、`zeroGradModel` 及 Safetensors 序列化对动态切片字段 (`[]T`) 与可选张量 (`?*Tensor`) 的遗漏，支持无序偏移量的 Safetensors 文件加载，并默认冻结 `LoRALinear` 基础权重梯度。
+- **可视化残差可达性判定 BFS 优化 (`src/nn/visualization.zig`)**: 将 `markSkips` 中递归 DFS 的 `reaches` 重构为带已访问哈希表 (`std.StringHashMap(void)`) 的线性 BFS，彻底解决多分支复合模块（如 LSTM、StackedLSTM、MoE）可达性检查指数爆炸卡死的问题。
 
 ## [0.2.7] - 2026-09-27
 
