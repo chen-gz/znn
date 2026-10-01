@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 修复 `MLALayer.forward` 未使用 `q_all`、`w_kr` 及因果注意力的占位实现，补全完整潜在多头注意力训练与求导路径。
   - 修复 `collectParameters`、`deinitModel`、`zeroGradModel` 及 Safetensors 序列化对动态切片字段 (`[]T`) 与可选张量 (`?*Tensor`) 的遗漏，支持无序偏移量的 Safetensors 文件加载，并默认冻结 `LoRALinear` 基础权重梯度。
 - **可视化残差可达性判定 BFS 优化 (`src/nn/visualization.zig`)**: 将 `markSkips` 中递归 DFS 的 `reaches` 重构为带已访问哈希表 (`std.StringHashMap(void)`) 的线性 BFS，彻底解决多分支复合模块（如 LSTM、StackedLSTM、MoE）可达性检查指数爆炸卡死的问题。
+- **循环网络零初始状态归类 (`src/nn/recurrent.zig`)**: `RNN` / `LSTM` / `StackedLSTM` / `GRU` 在未传入初始状态时创建的全零 `h_0` / `c_0` 标记为模块常量缓冲区，并命名为 `{module}.h_0`、`{module}.c_0` (`StackedLSTM` 为 `{module}.h_0_{l}` / `{module}.c_0_{l}`)；此前它们被自动命名为 `{module}.input_k` 并计入 `summary.input_nodes`。重新生成 `examples/models/{rnn,lstm,stacked_lstm,gru}.json`。
 
 ## [0.2.7] - 2026-09-27
 
