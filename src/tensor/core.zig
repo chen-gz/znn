@@ -17,6 +17,7 @@ pub const bf16 = types_mod.bf16;
 pub const SliceRange = types_mod.SliceRange;
 pub const GenericTensor = types_mod.GenericTensor;
 pub const convertScalar = types_mod.convertScalar;
+pub const isTruthyScalar = types_mod.isTruthyScalar;
 
 const ops_mod = @import("ops.zig");
 pub const array = ops_mod.array;
@@ -1230,29 +1231,87 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn embedding(self: *Tensor, indices: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+    inline fn indexScalarToUsize(val: anytype, vocab_size: usize) !usize {
+        const V = @TypeOf(val);
+        if (@typeInfo(V) == .float) {
+            if (val < 0.0) return error.IndexOutOfBounds;
+            const idx = @as(usize, @intFromFloat(val));
+            if (idx >= vocab_size) return error.IndexOutOfBounds;
+            return idx;
+        } else if (@typeInfo(V) == .int or @typeInfo(V) == .comptime_int) {
+            if (val < 0) return error.IndexOutOfBounds;
+            const idx = @as(usize, @intCast(val));
+            if (idx >= vocab_size) return error.IndexOutOfBounds;
+            return idx;
+        } else {
+            @compileError("Unsupported embedding index scalar type: " ++ @typeName(V));
+        }
+    }
+
+    pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
             return try g.embedding(self, indices);
         }
-        const B = indices.shape.dims[0];
-        const T = indices.shape.dims[1];
-        const D = self.shape.dims[1];
+        if (self.shape.len != 2) return error.IncompatibleDimensions;
         const VocabSize = self.shape.dims[0];
+        const D = self.shape.dims[1];
 
-        const Y = try zeros(allocator, &.{ B, T, D });
+        const IdxT = @TypeOf(indices);
+        const idx_info = @typeInfo(IdxT);
+        const is_tensor_like = idx_info == .pointer and idx_info.pointer.size == .one and
+            @typeInfo(idx_info.pointer.child) == .@"struct" and
+            @hasField(idx_info.pointer.child, "shape");
 
-        for (0..B) |b| {
-            for (0..T) |t| {
-                const idx_f = indices.data[b * T + t];
-                const idx = @as(usize, @intFromFloat(idx_f));
-                std.debug.assert(idx < VocabSize);
+        if (is_tensor_like) {
+            const in_rank = indices.shape.len;
+            if (in_rank == 0 or in_rank >= 8) return error.MaxDimensionsExceeded;
+            var out_dims = [_]usize{0} ** 8;
+            for (0..in_rank) |d| out_dims[d] = indices.shape.dims[d];
+            out_dims[in_rank] = D;
 
+            const Y = try zeros(allocator, out_dims[0 .. in_rank + 1]);
+            errdefer free(allocator, Y);
+
+            const num_indices = indices.shape.numel();
+            if (indices.isContiguous() and indices.data.len >= num_indices) {
+                for (0..num_indices) |i| {
+                    const idx = try indexScalarToUsize(indices.data[i], VocabSize);
+                    const w_row = self.data[idx * D .. (idx + 1) * D];
+                    const y_row = Y.data[i * D .. (i + 1) * D];
+                    @memcpy(y_row, w_row);
+                }
+            } else {
+                var coord = [_]usize{0} ** 8;
+                for (0..num_indices) |i| {
+                    var flat_idx: usize = 0;
+                    for (0..in_rank) |d| flat_idx += coord[d] * indices.strides.dims[d];
+                    const idx = try indexScalarToUsize(indices.data[flat_idx], VocabSize);
+                    const w_row = self.data[idx * D .. (idx + 1) * D];
+                    const y_row = Y.data[i * D .. (i + 1) * D];
+                    @memcpy(y_row, w_row);
+
+                    var d = in_rank;
+                    while (d > 0) {
+                        d -= 1;
+                        coord[d] += 1;
+                        if (coord[d] < indices.shape.dims[d]) break;
+                        coord[d] = 0;
+                    }
+                }
+            }
+            return Y;
+        } else {
+            const T_len = indices.len;
+            const Y = try zeros(allocator, &.{ T_len, D });
+            errdefer free(allocator, Y);
+            for (0..T_len) |i| {
+                const idx = try indexScalarToUsize(indices[i], VocabSize);
                 const w_row = self.data[idx * D .. (idx + 1) * D];
-                const y_row = Y.data[(b * T + t) * D .. (b * T + t + 1) * D];
+                const y_row = Y.data[i * D .. (i + 1) * D];
                 @memcpy(y_row, w_row);
             }
+            return Y;
         }
-        return Y;
     }
 
 
@@ -1554,9 +1613,8 @@ pub const Tensor = struct {
         return var_t;
     }
 
-    /// 依据布尔/条件张量在两个候选张量间进行逐元素选择 (NumPy np.where)
-    /// out[i] = if (cond[i] != 0.0) x[i] else y[i]
-    pub fn where(cond: *Tensor, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+    /// 依据布尔/条件张量 (支持 `*Tensor` 或 `*BoolTensor` / `*GenericTensor(T)`) 在两个候选张量间进行逐元素选择 (NumPy np.where)
+    pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const s_xy = try broadcastShapes(x.shape, y.shape);
         const target_shape = try broadcastShapes(cond.shape, s_xy);
         const C = try zeros(allocator, target_shape.dims[0..target_shape.len]);
@@ -1565,7 +1623,7 @@ pub const Tensor = struct {
             cond.data.len >= C.data.len and x.data.len >= C.data.len and y.data.len >= C.data.len)
         {
             for (C.data, cond.data[0..C.data.len], x.data[0..C.data.len], y.data[0..C.data.len]) |*out_v, c_v, x_v, y_v| {
-                out_v.* = if (c_v != 0.0) x_v else y_v;
+                out_v.* = if (isTruthyScalar(c_v)) x_v else y_v;
             }
             return C;
         }
@@ -1586,7 +1644,7 @@ pub const Tensor = struct {
                 y_flat += indices[d] * y_strides.dims[d];
             }
 
-            C.data[c_flat] = if (cond.data[cond_flat] != 0.0) x.data[x_flat] else y.data[y_flat];
+            C.data[c_flat] = if (isTruthyScalar(cond.data[cond_flat])) x.data[x_flat] else y.data[y_flat];
 
             var d: usize = rank;
             while (d > 0) {
@@ -1600,13 +1658,13 @@ pub const Tensor = struct {
         return C;
     }
 
-    /// 根据 mask 将满足条件 (mask != 0) 的元素赋值为指定标量值（返回新分配副本）
-    pub fn maskedFill(self: *Tensor, mask: *Tensor, value: f32, allocator: std.mem.Allocator) !*Tensor {
+    /// 根据 mask (支持 `*Tensor` 或 `*BoolTensor` / `*GenericTensor(T)`) 将满足真值条件的元素赋值为指定标量值（返回新分配副本）
+    pub fn maskedFill(self: *Tensor, mask: anytype, value: f32, allocator: std.mem.Allocator) !*Tensor {
         if (!self.shape.eq(mask.shape)) return error.ShapeMismatch;
         const C = try self.contiguous(allocator);
         if (mask.isContiguous() and mask.data.len >= C.data.len) {
             for (C.data, mask.data[0..C.data.len]) |*out_v, m_v| {
-                if (m_v != 0.0) {
+                if (isTruthyScalar(m_v)) {
                     out_v.* = value;
                 }
             }
@@ -1618,7 +1676,7 @@ pub const Tensor = struct {
                 for (0..len) |d| {
                     m_idx += coord[d] * mask.strides.dims[d];
                 }
-                if (mask.data[m_idx] != 0.0) {
+                if (isTruthyScalar(mask.data[m_idx])) {
                     out_v.* = value;
                 }
                 var d = len;
@@ -1633,16 +1691,115 @@ pub const Tensor = struct {
         return C;
     }
 
-    /// 原地条件掩码填充
-    pub fn maskedFill_(self: *Tensor, mask: *Tensor, value: f32) !*Tensor {
+    /// 原地条件掩码填充 (支持 `*Tensor` 或 `*BoolTensor` / `*GenericTensor(T)`)
+    pub fn maskedFill_(self: *Tensor, mask: anytype, value: f32) !*Tensor {
         if (self.requires_grad or self.creator != null) return error.InPlaceOpOnGraphTensor;
         if (!self.shape.eq(mask.shape)) return error.ShapeMismatch;
-        for (self.data, mask.data) |*out_v, m_v| {
-            if (m_v != 0.0) {
-                out_v.* = value;
+        if (self.isContiguous() and mask.isContiguous() and self.data.len >= self.shape.numel() and mask.data.len >= self.shape.numel()) {
+            const count = self.shape.numel();
+            for (self.data[0..count], mask.data[0..count]) |*out_v, m_v| {
+                if (isTruthyScalar(m_v)) {
+                    out_v.* = value;
+                }
+            }
+        } else {
+            var coord = [_]usize{0} ** 8;
+            const len = self.shape.len;
+            const count = self.shape.numel();
+            for (0..count) |_| {
+                var s_idx: usize = 0;
+                var m_idx: usize = 0;
+                for (0..len) |d| {
+                    s_idx += coord[d] * self.strides.dims[d];
+                    m_idx += coord[d] * mask.strides.dims[d];
+                }
+                if (isTruthyScalar(mask.data[m_idx])) {
+                    self.data[s_idx] = value;
+                }
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < self.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
             }
         }
         return self;
+    }
+
+    fn compareScalarOp(self: *const Tensor, val: f32, allocator: std.mem.Allocator, comptime cmp_fn: fn (f32, f32) bool) !*GenericTensor(bool) {
+        const out = try GenericTensor(bool).init(allocator, self.shape.dims[0..self.shape.len], null);
+        errdefer out.deinit(allocator);
+        if (self.isContiguous() and self.data.len >= out.data.len) {
+            for (self.data[0..out.data.len], out.data) |a, *b| {
+                b.* = cmp_fn(a, val);
+            }
+        } else {
+            var coord = [_]usize{0} ** 8;
+            const len = self.shape.len;
+            for (0..out.data.len) |dest_i| {
+                var src_idx: usize = 0;
+                for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
+                out.data[dest_i] = cmp_fn(self.data[src_idx], val);
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < self.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
+            }
+        }
+        return out;
+    }
+
+    pub fn gtScalar(self: *const Tensor, val: f32, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+        return self.compareScalarOp(val, allocator, struct {
+            fn cmp(a: f32, b: f32) bool {
+                return a > b;
+            }
+        }.cmp);
+    }
+
+    pub fn geScalar(self: *const Tensor, val: f32, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+        return self.compareScalarOp(val, allocator, struct {
+            fn cmp(a: f32, b: f32) bool {
+                return a >= b;
+            }
+        }.cmp);
+    }
+
+    pub fn ltScalar(self: *const Tensor, val: f32, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+        return self.compareScalarOp(val, allocator, struct {
+            fn cmp(a: f32, b: f32) bool {
+                return a < b;
+            }
+        }.cmp);
+    }
+
+    pub fn leScalar(self: *const Tensor, val: f32, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+        return self.compareScalarOp(val, allocator, struct {
+            fn cmp(a: f32, b: f32) bool {
+                return a <= b;
+            }
+        }.cmp);
+    }
+
+    pub fn eqScalar(self: *const Tensor, val: f32, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+        return self.compareScalarOp(val, allocator, struct {
+            fn cmp(a: f32, b: f32) bool {
+                return a == b;
+            }
+        }.cmp);
+    }
+
+    pub fn neScalar(self: *const Tensor, val: f32, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+        return self.compareScalarOp(val, allocator, struct {
+            fn cmp(a: f32, b: f32) bool {
+                return a != b;
+            }
+        }.cmp);
     }
 
     /// 压缩单维度 (Squeeze): 移除所有为 1 的维度，或移除指定为 1 的维度

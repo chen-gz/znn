@@ -1566,21 +1566,39 @@ pub const Op = struct {
                 const X = self.inputs[1];
                 const Y = self.outputs[0];
 
-                const B = X.shape.dims[0];
-                const T = X.shape.dims[1];
                 const D = W.shape.dims[1];
+                const num_indices = X.shape.numel();
 
                 if (W.requires_grad) {
-                    for (0..B) |b| {
-                        for (0..T) |t| {
-                            const idx_f = X.data[b * T + t];
-                            const idx = @as(usize, @intFromFloat(idx_f));
-
+                    if (X.isContiguous() and X.data.len >= num_indices) {
+                        for (0..num_indices) |i| {
+                            const idx = @as(usize, @intFromFloat(X.data[i]));
                             const w_grad_row = W.grad[idx * D .. (idx + 1) * D];
-                            const y_grad_row = Y.grad[(b * T + t) * D .. (b * T + t + 1) * D];
+                            const y_grad_row = Y.grad[i * D .. (i + 1) * D];
 
                             for (w_grad_row, y_grad_row) |*wg, yg| {
                                 wg.* += yg;
+                            }
+                        }
+                    } else {
+                        var coord = [_]usize{0} ** 8;
+                        const rank = X.shape.len;
+                        for (0..num_indices) |i| {
+                            var x_flat: usize = 0;
+                            for (0..rank) |d| x_flat += coord[d] * X.strides.dims[d];
+                            const idx = @as(usize, @intFromFloat(X.data[x_flat]));
+                            const w_grad_row = W.grad[idx * D .. (idx + 1) * D];
+                            const y_grad_row = Y.grad[i * D .. (i + 1) * D];
+
+                            for (w_grad_row, y_grad_row) |*wg, yg| {
+                                wg.* += yg;
+                            }
+                            var d = rank;
+                            while (d > 0) {
+                                d -= 1;
+                                coord[d] += 1;
+                                if (coord[d] < X.shape.dims[d]) break;
+                                coord[d] = 0;
                             }
                         }
                     }
