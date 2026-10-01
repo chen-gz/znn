@@ -76,6 +76,12 @@ const examples = [_]ExampleTarget{
         .run_desc = "Run the Model Graph JSON export example",
     },
     .{
+        .name = "export_book_models",
+        .src = "examples/export_book_models.zig",
+        .run_step = "run-book-models",
+        .run_desc = "Export all book model architecture graphs to JSON",
+    },
+    .{
         .name = "llm_training",
         .src = "examples/llm_training.zig",
         .run_step = "run-llm",

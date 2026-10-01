@@ -871,12 +871,23 @@ const LocalGraphBuilder = struct {
         return null;
     }
 
-    fn reaches(self: *const LocalGraphBuilder, from: []const u8, target: []const u8, depth: usize) bool {
-        if (depth > self.module.edges.items.len) return false;
-        for (self.module.edges.items) |e| {
-            if (!std.mem.eql(u8, e.from, from)) continue;
-            if (std.mem.eql(u8, e.to, target)) return true;
-            if (self.reaches(e.to, target, depth + 1)) return true;
+    fn reaches(self: *LocalGraphBuilder, from: []const u8, target: []const u8) bool {
+        var queue: std.ArrayList([]const u8) = .empty;
+        var visited = std.StringHashMap(void).init(self.arena);
+        queue.append(self.arena, from) catch return false;
+        visited.put(from, {}) catch return false;
+
+        var head: usize = 0;
+        while (head < queue.items.len) : (head += 1) {
+            const curr = queue.items[head];
+            for (self.module.edges.items) |e| {
+                if (!std.mem.eql(u8, e.from, curr)) continue;
+                if (std.mem.eql(u8, e.to, target)) return true;
+                if (!visited.contains(e.to)) {
+                    visited.put(e.to, {}) catch return false;
+                    queue.append(self.arena, e.to) catch return false;
+                }
+            }
         }
         return false;
     }
@@ -892,7 +903,7 @@ const LocalGraphBuilder = struct {
             for (edges, 0..) |other, j| {
                 if (i == j or !std.mem.eql(u8, other.to, e.to)) continue;
                 if (std.mem.eql(u8, other.from, e.from)) continue;
-                if (self.reaches(e.from, other.from, 0)) {
+                if (self.reaches(e.from, other.from)) {
                     e.is_skip = true;
                     break;
                 }
