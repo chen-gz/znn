@@ -512,20 +512,20 @@ pub const Tensor = struct {
     }
 
     pub fn sigmoidCrossEntropy(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        return self.bceWithLogitsLoss(targets, allocator, graph);
+    }
+
+    pub fn mseLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
         if (graph) |g| {
-            return try g.sigmoidCrossEntropy(self, targets);
+            return try g.mseLoss(self, targets);
         }
-        const loss = try zeros(allocator, &.{1, 1});
         const N = self.data.len;
         if (N != targets.data.len) return error.ShapeMismatch;
-
+        const loss = try zeros(allocator, &.{ 1, 1 });
         var loss_sum: f32 = 0.0;
         for (0..N) |i| {
-            const x = self.data[i];
-            const y = targets.data[i];
-            const max_val = @max(x, 0.0);
-            const abs_val = @abs(x);
-            loss_sum += max_val - x * y + @log(1.0 + @exp(-abs_val));
+            const diff = self.data[i] - targets.data[i];
+            loss_sum += diff * diff;
         }
         loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
         return loss;
@@ -541,6 +541,19 @@ pub const Tensor = struct {
             sum_sq += v * v;
         }
         loss.data[0] = 0.5 * lambda * sum_sq;
+        return loss;
+    }
+
+    pub fn l1Loss(self: *Tensor, lambda: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.l1Loss(self, lambda);
+        }
+        const loss = try zeros(allocator, &.{ 1, 1 });
+        var sum_abs: f32 = 0.0;
+        for (self.data) |v| {
+            sum_abs += @abs(v);
+        }
+        loss.data[0] = lambda * sum_abs;
         return loss;
     }
 
@@ -1131,6 +1144,32 @@ pub const Tensor = struct {
                 }
                 if (2 * half < rot_dim) {
                     row_out[D - 1] = row_in[D - 1];
+                }
+            }
+        }
+        return Y;
+    }
+
+    pub fn repeatKV(self: *Tensor, groups: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+        if (graph) |g| {
+            return try g.repeatKV(self, groups);
+        }
+        if (self.shape.len != 4) return error.IncompatibleDimensions;
+        const B = self.shape.dims[0];
+        const n_kv = self.shape.dims[1];
+        const T = self.shape.dims[2];
+        const hs = self.shape.dims[3];
+        const nh = n_kv * groups;
+
+        const Y = try zeros(allocator, &.{ B, nh, T, hs });
+        const head_bytes = T * hs;
+        for (0..B) |b| {
+            for (0..n_kv) |kv_h| {
+                const src = self.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
+                for (0..groups) |g| {
+                    const h = kv_h * groups + g;
+                    const dest = Y.data[((b * nh + h) * head_bytes) .. ((b * nh + h + 1) * head_bytes)];
+                    @memcpy(dest, src);
                 }
             }
         }

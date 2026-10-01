@@ -110,8 +110,8 @@
   - [x] 在 [`writeModelTensors`](../src/nn/serialization.zig)、[`writeModelData`](../src/nn/serialization.zig) 与 [`loadModelTensors`](../src/nn/serialization.zig) 中支持 `?*Tensor` 与子模块切片 `[]T`。
   - [x] 移除 [`loadTensorData`](../src/nn/serialization.zig) 中对文件张量物理存储顺序必须与 Zig 字段顺序一致（`start_offset >= current_offset.*`）的强假设，改为按偏移量随机访问读取，兼容外部导出的 Safetensors 文件。
 
-- [ ] **1.5.7 消除 `Tensor`、`Graph` 与 `Op.forward` 的算子前向三重重复 (`tensor/core.zig`, `autodiff/graph.zig`, `autodiff/op.zig`)**
-  - [ ] 复用统一的前向计算实现，消除 [`Op.forward`](../src/autodiff/op.zig) 与 [`Graph`](../src/autodiff/graph.zig) 中重复手写的数百行前向算子代码。
+- [x] **1.5.7 消除 `Tensor`、`Graph` 与 `Op.forward` 的算子前向三重重复 (`tensor/core.zig`, `autodiff/graph.zig`, `autodiff/op.zig`)**
+  - [x] 复用统一的前向计算实现，消除 [`Op.forward`](../src/autodiff/op.zig) 与 [`Graph`](../src/autodiff/graph.zig) 中重复手写的数百行前向算子代码。
 
 - [ ] **1.5.8 收敛 `Tensor` 与 `GenericTensor(T)` 双轨割裂 (`tensor/types.zig`, `tensor/core.zig`, `nn/core.zig`)**
   - [ ] 打通 `Tensor` 与 `GenericTensor(T)` 的互操作接口：支持 [`Embedding`](../src/nn/core.zig) 直接接收整型索引切片/张量（无需先转为 `f32`），支持 [`Tensor.where`](../src/tensor/core.zig) / [`Tensor.maskedFill`](../src/tensor/core.zig) 接收 `BoolTensor`，并为 `GenericTensor(T)` 补齐核心逐元素与归约方法。
