@@ -51,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 所有 nn 模块统一为 `forward(self, graph: *autodiff.Graph, x, ...)`，移除 Eager/Graph 双分支、`graph == null` 时的手动释放与 `free_*` 标记；`RNN` / `LSTM` / `StackedLSTM` / `GRU` 的输出切片分配在图 arena 中。
   - `CausalSelfAttention.forwardInference` 与 `MLALayer.forwardInference` 内部使用局部无梯度图；`engine.evalClassificationStep` 改用无梯度图计算损失与准确率。
   - `src/tensor/ops.zig` 中依赖 `Graph` 的测试迁移至 `src/autodiff/tests.zig`；`examples/sample_model_graph.json` 重新生成 (因果掩码为 `[1, 1, 16, 16]`)。
+  - `src/autodiff.zig` 只导出自身 API (`Graph`、`Op`、`OpType`、`OpContext`)；不再转出 `tensor`、`Tensor`、`Shape`、`computeContiguousStrides`、`transposeShape`，`types` / `op` / `graph` 子模块改为私有。张量类型统一从 `tensor` 模块引用。
 
 ### Fixed
 - 修复算子依据输入推断归属导致的模块错配、`.core` 伪节点合成、端口名与真实节点冲突、残差判定依赖边顺序、根作用域边与顶层 `edges` 层级错位等问题 (详见 chen-gz.github.io `doc/visualization-model-edge-design.md`)。
