@@ -68,16 +68,11 @@ pub const RMSNorm = struct {
         }
     }
 
-    pub fn forward(self: RMSNorm, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: RMSNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
-        return try x.rmsNorm(self.weight, self.eps, allocator, graph);
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
+        return try graph.rmsNorm(x, self.weight, self.eps);
     }
 };
 
@@ -152,16 +147,11 @@ pub const LayerNorm = struct {
         }
     }
 
-    pub fn forward(self: LayerNorm, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: LayerNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
-        return try x.layerNorm(self.weight, self.bias, self.eps, allocator, graph);
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
+        return try graph.layerNorm(x, self.weight, self.bias, self.eps);
     }
 };
 
@@ -262,78 +252,20 @@ pub const BatchNorm2d = struct {
         }
     }
 
-    pub fn forward(self: *BatchNorm2d, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: *BatchNorm2d, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-            return try g.batchNorm2d(
-                x,
-                self.gamma,
-                self.beta,
-                self.running_mean,
-                self.running_var,
-                self.eps,
-                self.momentum,
-                self.training,
-            );
-        }
-        if (x.shape.len != 4) return error.IncompatibleDimensions;
-        const N = x.shape.dims[0];
-        const C = x.shape.dims[1];
-        const H = x.shape.dims[2];
-        const W = x.shape.dims[3];
-        if (C != self.num_features) return error.ShapeMismatch;
-
-        const spatial_size = H * W;
-        const total_samples = N * spatial_size;
-        const out = try tensor.zeros(allocator, x.shape.dims[0..4]);
-
-        for (0..C) |c| {
-            var mean: f32 = 0.0;
-            var variance: f32 = 0.0;
-
-            if (self.training) {
-                var sum: f32 = 0.0;
-                for (0..N) |n| {
-                    const c_slice = x.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
-                    for (c_slice) |val| sum += val;
-                }
-                mean = sum / @as(f32, @floatFromInt(total_samples));
-
-                var var_sum: f32 = 0.0;
-                for (0..N) |n| {
-                    const c_slice = x.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
-                    for (c_slice) |val| {
-                        const diff = val - mean;
-                        var_sum += diff * diff;
-                    }
-                }
-                variance = var_sum / @as(f32, @floatFromInt(total_samples));
-
-                self.running_mean.data[c] = (1.0 - self.momentum) * self.running_mean.data[c] + self.momentum * mean;
-                self.running_var.data[c] = (1.0 - self.momentum) * self.running_var.data[c] + self.momentum * variance;
-            } else {
-                mean = self.running_mean.data[c];
-                variance = self.running_var.data[c];
-            }
-
-            const inv_std = 1.0 / @sqrt(variance + self.eps);
-            const g = self.gamma.data[c];
-            const b = self.beta.data[c];
-
-            for (0..N) |n| {
-                const in_slice = x.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
-                const out_slice = out.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
-                for (in_slice, out_slice) |val, *o| {
-                    o.* = (val - mean) * inv_std * g + b;
-                }
-            }
-        }
-        return out;
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
+        return try graph.batchNorm2d(
+            x,
+            self.gamma,
+            self.beta,
+            self.running_mean,
+            self.running_var,
+            self.eps,
+            self.momentum,
+            self.training,
+        );
     }
 };
 
@@ -378,32 +310,14 @@ pub const Dropout = struct {
         }
     }
 
-    pub fn forward(self: Dropout, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor, random: ?std.Random) !*Tensor {
+    pub fn forward(self: Dropout, graph: *autodiff.Graph, x: *Tensor, random: ?std.Random) !*Tensor {
         if (!self.training or self.p == 0.0 or random == null) {
             return x;
         }
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-            return try g.dropout(x, self.p, random.?);
-        }
-
-        const out = try tensor.zeros(allocator, x.shape.dims[0..x.shape.len]);
-        const scale = 1.0 / (1.0 - self.p);
-        const rand = random.?;
-
-        for (x.data, out.data) |val, *o| {
-            if (rand.float(f32) < self.p) {
-                o.* = 0.0;
-            } else {
-                o.* = val * scale;
-            }
-        }
-        return out;
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
+        return try graph.dropout(x, self.p, random.?);
     }
 };
 
@@ -448,15 +362,10 @@ pub const AvgPool2D = struct {
         }
     }
 
-    pub fn forward(self: AvgPool2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: AvgPool2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
-        return try x.avgpool2d(self.kernel_size, self.stride, allocator, graph);
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
+        return try graph.avgpool2d(x, self.kernel_size, self.stride);
     }
 };

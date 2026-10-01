@@ -129,8 +129,9 @@ test "Embedding Module" {
     x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
     x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
 
-    const y_eager = try emb.forward(arena, null, x);
-    defer tensor.free(arena, y_eager);
+    var y_eager_graph = autodiff.Graph.initNoGrad(arena);
+    defer y_eager_graph.deinit();
+    const y_eager = try emb.forward(&y_eager_graph, x);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
 }
 
@@ -149,7 +150,7 @@ test "Embedding Module Graph Mode" {
     x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
     x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
 
-    const y = try emb.forward(arena, &graph, x);
+    const y = try emb.forward(&graph, x);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
@@ -177,8 +178,9 @@ test "RMSNorm Module" {
     x.data[0] = 1.0; x.data[1] = 2.0; x.data[2] = 3.0; x.data[3] = 4.0;
     x.data[4] = 5.0; x.data[5] = 6.0; x.data[6] = 7.0; x.data[7] = 8.0;
 
-    const y_eager = try norm.forward(arena, null, x);
-    defer tensor.free(arena, y_eager);
+    var y_eager_graph = autodiff.Graph.initNoGrad(arena);
+    defer y_eager_graph.deinit();
+    const y_eager = try norm.forward(&y_eager_graph, x);
     try std.testing.expectEqualSlices(usize, &.{2, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
 
     var graph = autodiff.Graph.init(arena);
@@ -187,7 +189,7 @@ test "RMSNorm Module" {
     const x_node = try graph.tensorND(&.{2, 4}, true);
     @memcpy(x_node.data, x.data);
 
-    const y = try norm.forward(arena, &graph, x_node);
+    const y = try norm.forward(&graph, x_node);
     try std.testing.expectEqualSlices(usize, &.{2, 4}, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
@@ -228,8 +230,9 @@ test "MLP Module" {
         val.* = @as(f32, @floatFromInt(i)) * 0.1;
     }
 
-    const y_eager = try mlp.forward(arena, null, x_3d);
-    defer tensor.free(arena, y_eager);
+    var y_eager_graph = autodiff.Graph.initNoGrad(arena);
+    defer y_eager_graph.deinit();
+    const y_eager = try mlp.forward(&y_eager_graph, x_3d);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
 
     var graph = autodiff.Graph.init(arena);
@@ -238,7 +241,7 @@ test "MLP Module" {
     const x_node = try graph.tensorND(&.{2, 3, 4}, true);
     @memcpy(x_node.data, x_3d.data);
 
-    const y = try mlp.forward(arena, &graph, x_node);
+    const y = try mlp.forward(&graph, x_node);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
@@ -275,8 +278,9 @@ test "CausalSelfAttention Module" {
         val.* = @as(f32, @floatFromInt(i)) * 0.1;
     }
 
-    const y_eager = try attn.forward(arena, null, x_3d);
-    defer tensor.free(arena, y_eager);
+    var y_eager_graph = autodiff.Graph.initNoGrad(arena);
+    defer y_eager_graph.deinit();
+    const y_eager = try attn.forward(&y_eager_graph, x_3d);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 8}, y_eager.shape.dims[0..y_eager.shape.len]);
 
     var graph = autodiff.Graph.init(arena);
@@ -285,7 +289,7 @@ test "CausalSelfAttention Module" {
     const x_node = try graph.tensorND(&.{2, 3, 8}, true);
     @memcpy(x_node.data, x_3d.data);
 
-    const y = try attn.forward(arena, &graph, x_node);
+    const y = try attn.forward(&graph, x_node);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 8}, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
@@ -329,8 +333,9 @@ test "GPT Module" {
     x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
     x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
 
-    const y_eager = try gpt.forward(arena, null, x);
-    defer tensor.free(arena, y_eager);
+    var y_eager_graph = autodiff.Graph.initNoGrad(arena);
+    defer y_eager_graph.deinit();
+    const y_eager = try gpt.forward(&y_eager_graph, x);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 10}, y_eager.shape.dims[0..y_eager.shape.len]);
 
     var graph = autodiff.Graph.init(arena);
@@ -339,7 +344,7 @@ test "GPT Module" {
     const x_node = try graph.tensorND(&.{2, 3}, false);
     @memcpy(x_node.data, x.data);
 
-    const y = try gpt.forward(arena, &graph, x_node);
+    const y = try gpt.forward(&graph, x_node);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 10}, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
@@ -399,7 +404,7 @@ test "Sequential container chaining" {
     const x = try graph.tensor(2, 10, false);
     @memset(x.data, 0.5);
 
-    const y = try seq.forward(allocator, &graph, x);
+    const y = try seq.forward(&graph, x);
     try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
@@ -415,13 +420,14 @@ test "Sequential container chaining" {
     // Two Linear layers each with weight and bias = 4 parameter tensors
     try std.testing.expectEqual(@as(usize, 4), params.len);
 
-    // Test eager forward (graph == null) without memory leak
+    // Inference forward on a no-grad graph without memory leak
     const eager_in = try createPersistentTensor(allocator, 2, 10, false);
     defer freePersistentTensor(allocator, eager_in);
     @memset(eager_in.data, 0.5);
 
-    const eager_out = try seq.forward(allocator, null, eager_in);
-    defer freePersistentTensor(allocator, eager_out);
+    var eager_out_graph = autodiff.Graph.initNoGrad(allocator);
+    defer eager_out_graph.deinit();
+    const eager_out = try seq.forward(&eager_out_graph, eager_in);
     try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, eager_out.shape.dims[0..eager_out.shape.len]);
 }
 
@@ -439,7 +445,7 @@ test "SwiGLU forward and backward autograd" {
     const x = try graph.tensor(2, 4, true);
     @memset(x.data, 0.5);
 
-    const y = try swiglu.forward(allocator, &graph, x);
+    const y = try swiglu.forward(&graph, x);
     try std.testing.expectEqualSlices(usize, &.{ 2, 4 }, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
@@ -473,8 +479,8 @@ test "LoRALinear forward and fuse" {
     @memset(x.data, 1.0);
 
     // Initial forward: since B=0, LoRA output must match Base Weight output exactly
-    const y = try lora.forward(allocator, &graph, x);
-    const base_y = try x.matmul(lora.weight, allocator, null);
+    const y = try lora.forward(&graph, x);
+    const base_y = try x.matmul(lora.weight, allocator);
     defer tensor.free(allocator, base_y);
 
     for (y.data, base_y.data) |y_val, by_val| {
@@ -493,7 +499,7 @@ test "LoRALinear forward and fuse" {
     // Test fuse
     lora.fuse();
     @memset(lora.lora_b.data, 0.0);
-    const fused_out = try x.matmul(lora.weight, allocator, null);
+    const fused_out = try x.matmul(lora.weight, allocator);
     defer tensor.free(allocator, fused_out);
     try std.testing.expect(fused_out.data[0] != base_y.data[0]);
 }
@@ -570,8 +576,9 @@ test "LayerNorm forward and backward autograd" {
     defer tensor.free(allocator, x);
     @memcpy(x.data, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0 });
 
-    const y = try ln.forward(allocator, null, x);
-    defer tensor.free(allocator, y);
+    var y_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_graph.deinit();
+    const y = try ln.forward(&y_graph, x);
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 4 }, y.shape.dims[0..2]);
     var sum: f32 = 0.0;
@@ -583,7 +590,7 @@ test "LayerNorm forward and backward autograd" {
     defer graph.deinit();
 
     const gx = try graph.tensorNDWithData(&.{ 2, 4 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 1.0, 3.0 }, true);
-    const gy = try ln.forward(allocator, &graph, gx);
+    const gy = try ln.forward(&graph, gx);
     try std.testing.expect(gy.creator != null);
     try std.testing.expectEqual(autodiff.OpType.LayerNorm, gy.creator.?.op_type);
 
@@ -613,8 +620,9 @@ test "BatchNorm2d forward and backward autograd" {
     defer tensor.free(allocator, x);
     for (x.data, 0..) |*p, i| p.* = @as(f32, @floatFromInt(i));
 
-    const y = try bn.forward(allocator, null, x);
-    defer tensor.free(allocator, y);
+    var y_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_graph.deinit();
+    const y = try bn.forward(&y_graph, x);
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 2, 2, 2 }, y.shape.dims[0..4]);
 
@@ -627,7 +635,7 @@ test "BatchNorm2d forward and backward autograd" {
         const fi = @as(f32, @floatFromInt(i));
         p.* = @sin(fi * 1.3) + 0.2 * fi;
     }
-    const gy = try bn.forward(allocator, &graph, gx);
+    const gy = try bn.forward(&graph, gx);
     try std.testing.expect(gy.creator != null);
     try std.testing.expectEqual(autodiff.OpType.BatchNorm2d, gy.creator.?.op_type);
 
@@ -660,8 +668,9 @@ test "Dropout and AvgPool2D forward and backward passes" {
     defer tensor.free(allocator, x);
     @memset(x.data, 1.0);
 
-    const y_drop = try drop.forward(allocator, null, x, rand);
-    defer tensor.free(allocator, y_drop);
+    var y_drop_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_drop_graph.deinit();
+    const y_drop = try drop.forward(&y_drop_graph, x, rand);
     try std.testing.expectEqual(10, y_drop.data.len);
 
     const pool = AvgPool2D.init(2, 2);
@@ -669,8 +678,9 @@ test "Dropout and AvgPool2D forward and backward passes" {
     defer tensor.free(allocator, img);
     @memset(img.data, 4.0);
 
-    const pooled = try pool.forward(allocator, null, img);
-    defer tensor.free(allocator, pooled);
+    var pooled_graph = autodiff.Graph.initNoGrad(allocator);
+    defer pooled_graph.deinit();
+    const pooled = try pool.forward(&pooled_graph, img);
     try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2, 2 }, pooled.shape.dims[0..4]);
     try std.testing.expectApproxEqAbs(@as(f32, 4.0), pooled.data[0], 1e-5);
 
@@ -681,11 +691,11 @@ test "Dropout and AvgPool2D forward and backward passes" {
     const g_img = try graph.tensorND(&.{ 1, 1, 4, 4 }, true);
     for (g_img.data, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i + 1));
 
-    const g_dropped = try drop.forward(allocator, &graph, g_img, rand);
+    const g_dropped = try drop.forward(&graph, g_img, rand);
     try std.testing.expect(g_dropped.creator != null);
     try std.testing.expectEqual(autodiff.OpType.Dropout, g_dropped.creator.?.op_type);
 
-    const g_pooled = try pool.forward(allocator, &graph, g_dropped);
+    const g_pooled = try pool.forward(&graph, g_dropped);
     try std.testing.expect(g_pooled.creator != null);
     try std.testing.expectEqual(autodiff.OpType.AvgPool2D, g_pooled.creator.?.op_type);
 
@@ -724,7 +734,7 @@ test "RNNCell and RNN forward and backward autograd" {
     for (x0.data, 0..) |*p, i| p.* = @as(f32, @floatFromInt(i)) * 0.1;
     const h0 = try graph.zeros(&.{ 2, 3 }, true);
 
-    const h1 = try cell.forward(allocator, &graph, x0, h0);
+    const h1 = try cell.forward(&graph, x0, h0);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, h1.shape.dims[0..2]);
 
     @memset(h1.grad, 1.0);
@@ -747,8 +757,7 @@ test "RNNCell and RNN forward and backward autograd" {
     @memset(x_seq_1.data, -0.5);
 
     const inputs = [_]*Tensor{ x_seq_0, x_seq_1 };
-    const res = try rnn.forward(allocator, &graph_seq, &inputs, null);
-    defer allocator.free(res.outputs);
+    const res = try rnn.forward(&graph_seq, &inputs, null);
 
     try std.testing.expectEqual(2, res.outputs.len);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, res.h_n.shape.dims[0..2]);
@@ -784,7 +793,7 @@ test "LSTMCell and LSTM forward and backward autograd" {
     const h0 = try graph.zeros(&.{ 2, 3 }, true);
     const c0 = try graph.zeros(&.{ 2, 3 }, true);
 
-    const state = try cell.forward(allocator, &graph, x0, h0, c0);
+    const state = try cell.forward(&graph, x0, h0, c0);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, state.h.shape.dims[0..2]);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, state.c.shape.dims[0..2]);
 
@@ -808,8 +817,7 @@ test "LSTMCell and LSTM forward and backward autograd" {
     @memset(x_seq_1.data, -0.2);
 
     const inputs = [_]*Tensor{ x_seq_0, x_seq_1 };
-    const res = try lstm.forward(allocator, &graph_seq, &inputs, null, null);
-    defer allocator.free(res.outputs);
+    const res = try lstm.forward(&graph_seq, &inputs, null, null);
 
     try std.testing.expectEqual(2, res.outputs.len);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, res.h_n.shape.dims[0..2]);
@@ -843,10 +851,7 @@ test "StackedLSTM forward and backward autograd" {
     @memset(x1.data, -0.3);
 
     const inputs = [_]*Tensor{ x0, x1 };
-    const res = try stacked.forwardSequence(allocator, &graph, &inputs, null, null);
-    defer allocator.free(res.outputs);
-    defer allocator.free(res.h_n);
-    defer allocator.free(res.c_n);
+    const res = try stacked.forwardSequence(&graph, &inputs, null, null);
 
     try std.testing.expectEqual(2, res.outputs.len);
     try std.testing.expectEqual(2, res.h_n.len);
@@ -877,7 +882,7 @@ test "GRUCell and GRU forward and backward autograd" {
     for (x0.data, 0..) |*p, i| p.* = @as(f32, @floatFromInt(i)) * 0.1;
     const h0 = try graph.zeros(&.{ 2, 3 }, true);
 
-    const h1 = try cell.forward(allocator, &graph, x0, h0);
+    const h1 = try cell.forward(&graph, x0, h0);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, h1.shape.dims[0..2]);
 
     @memset(h1.grad, 1.0);
@@ -900,8 +905,7 @@ test "GRUCell and GRU forward and backward autograd" {
     @memset(x_seq_1.data, -0.4);
 
     const inputs = [_]*Tensor{ x_seq_0, x_seq_1 };
-    const res = try gru.forward(allocator, &graph_seq, &inputs, null);
-    defer allocator.free(res.outputs);
+    const res = try gru.forward(&graph_seq, &inputs, null);
 
     try std.testing.expectEqual(2, res.outputs.len);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, res.h_n.shape.dims[0..2]);
@@ -977,8 +981,9 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
     const x_zeros = try tensor.zeros(allocator, &.{ 1, 4 });
     defer tensor.free(allocator, x_zeros);
 
-    const rms_out = try rms.forward(allocator, null, x_zeros);
-    defer tensor.free(allocator, rms_out);
+    var rms_out_graph = autodiff.Graph.initNoGrad(allocator);
+    defer rms_out_graph.deinit();
+    const rms_out = try rms.forward(&rms_out_graph, x_zeros);
 
     for (rms_out.data) |v| {
         try std.testing.expectEqual(@as(f32, 0.0), v);
@@ -992,8 +997,9 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
     defer tensor.free(allocator, x_uniform);
     @memset(x_uniform.data, 3.0);
 
-    const ln_out = try ln.forward(allocator, null, x_uniform);
-    defer tensor.free(allocator, ln_out);
+    var ln_out_graph = autodiff.Graph.initNoGrad(allocator);
+    defer ln_out_graph.deinit();
+    const ln_out = try ln.forward(&ln_out_graph, x_uniform);
 
     for (ln_out.data) |v| {
         try std.testing.expectApproxEqAbs(@as(f32, 0.0), v, 1e-4);
@@ -1008,14 +1014,17 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
     defer tensor.free(allocator, x_test);
     @memset(x_test.data, 2.5);
 
-    const y_drop0 = try drop0.forward(allocator, null, x_test, prng.random());
+    var y_drop0_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_drop0_graph.deinit();
+    const y_drop0 = try drop0.forward(&y_drop0_graph, x_test, prng.random());
     try std.testing.expectEqual(x_test, y_drop0);
     for (y_drop0.data) |v| {
         try std.testing.expectApproxEqAbs(@as(f32, 2.5), v, 1e-5);
     }
 
-    const y_heavy = try drop_heavy.forward(allocator, null, x_test, prng.random());
-    defer tensor.free(allocator, y_heavy);
+    var y_heavy_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_heavy_graph.deinit();
+    const y_heavy = try drop_heavy.forward(&y_heavy_graph, x_test, prng.random());
     for (y_heavy.data) |v| {
         try std.testing.expectEqual(@as(f32, 0.0), v);
     }
@@ -1365,7 +1374,7 @@ test "Hierarchical module naming and interactive HTML report export" {
     const input_tokens = try graph.zeros(&.{ 2, 8, 64 }, false);
     input_tokens.setName("inputs.token_embeddings");
 
-    const block_out = try block.forward(allocator, &graph, input_tokens);
+    const block_out = try block.forward(&graph, input_tokens);
     block_out.setName("activations.block_0_out");
 
     // 4. 生成递归结构 JSON (后端生成递归数据结构，直接提供给前端解析)
@@ -1528,7 +1537,7 @@ test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivit
     const input_tokens = try graph.tensorNDWithData(&.{ batch_size, seq_len }, token_data, false);
     input_tokens.setName("inputs.token_ids");
 
-    const logits = try gpt.forward(allocator, &graph, input_tokens);
+    const logits = try gpt.forward(&graph, input_tokens);
     logits.setName("outputs.logits");
 
     // 3. 构建 ModelHierarchyGraph 与 JSON
@@ -1658,7 +1667,7 @@ test "Explicit module scopes attribute ops and tensors to the executing module" 
     for (&token_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
     const input_tokens = try graph.tensorNDWithData(&.{ 2, 8 }, &token_data, false);
     input_tokens.setName("inputs.token_ids");
-    _ = try gpt.forward(allocator, &graph, input_tokens);
+    _ = try gpt.forward(&graph, input_tokens);
 
     // forward 结束后作用域栈必须完全弹出
     try std.testing.expectEqualStrings("", graph.currentScope());
@@ -1727,7 +1736,7 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     for (&token_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
     const input_tokens = try graph.tensorNDWithData(&.{ 2, 8 }, &token_data, false);
     input_tokens.setName("inputs.token_ids");
-    const logits = try gpt.forward(allocator, &graph, input_tokens);
+    const logits = try gpt.forward(&graph, input_tokens);
     logits.setName("outputs.logits");
 
     const json_data = try graph.formatJson(allocator);
@@ -1963,7 +1972,7 @@ test "Model graph JSON export conforms to the published JSON Schema" {
         for (&token_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
         const input_tokens = try graph.tensorNDWithData(&.{ 2, 4 }, &token_data, false);
         input_tokens.setName("inputs.token_ids");
-        const logits = try gpt.forward(allocator, &graph, input_tokens);
+        const logits = try gpt.forward(&graph, input_tokens);
         logits.setName("outputs.logits");
 
         const json_data = try graph.formatJson(allocator);
@@ -1983,7 +1992,7 @@ test "Model graph JSON export conforms to the published JSON Schema" {
         for (&x_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i)) * 0.1;
         const x = try graph.tensorNDWithData(&.{ 2, 8 }, &x_data, false);
         x.setName("inputs.x");
-        const y = try linear.forward(allocator, &graph, x);
+        const y = try linear.forward(&graph, x);
         y.setName("outputs.y");
 
         const json_data = try graph.formatJson(allocator);
@@ -2214,7 +2223,7 @@ test "Recurrent and Transformer modules naming and Graph scope registration" {
 
     const x = try graph.tensor(2, 4, true);
     @memset(x.data, 0.2);
-    const out_lora = try lora.forward(allocator, &graph, x);
+    const out_lora = try lora.forward(&graph, x);
     try std.testing.expectEqualStrings("proj_lora", out_lora.creator.?.scope);
     try std.testing.expectEqualStrings(LoRALinear.formula, graph.inferModuleFormula("proj_lora"));
 }
@@ -2242,7 +2251,7 @@ test "Conv2D with stride and padding forward and backward (im2col + sgemm)" {
         v.* = @as(f32, @floatFromInt(idx + 1));
     }
 
-    const out = try conv.forward(allocator, &graph, x);
+    const out = try conv.forward(&graph, x);
     try std.testing.expectEqual(@as(usize, 4), out.shape.len);
     try std.testing.expectEqual(@as(usize, 1), out.shape.dims[0]);
     try std.testing.expectEqual(@as(usize, 2), out.shape.dims[1]);
@@ -2285,7 +2294,7 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
     @memset(x.data, 1.0);
 
     // Graph mode forward + backward
-    const out_g = try moe.forward(allocator, &graph, x);
+    const out_g = try moe.forward(&graph, x);
     const loss = try graph.sum(out_g, null, false);
     try graph.backward(loss);
 
@@ -2302,8 +2311,9 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
     }
 
     // Eager mode forward should match Graph mode output
-    const out_e = try moe.forward(allocator, null, x);
-    defer out_e.deinit(allocator);
+    var out_e_graph = autodiff.Graph.initNoGrad(allocator);
+    defer out_e_graph.deinit();
+    const out_e = try moe.forward(&out_e_graph, x);
     for (out_g.data, out_e.data) |vg, ve| {
         try std.testing.expectApproxEqAbs(vg, ve, 1e-4);
     }

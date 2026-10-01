@@ -115,7 +115,7 @@ pub fn main(init: std.process.Init) !void {
         @memcpy(x_node.data, x_input);
 
         // 前向传播
-        const logits = try model.forward(allocator, &graph, x_node);
+        const logits = try model.forward(&graph, x_node);
         const logits_2d = try graph.reshape(logits, &.{ batch_size * block_size, vocab_size });
         const loss = try graph.softmaxCrossEntropy(logits_2d, y_target);
 
@@ -165,7 +165,7 @@ pub fn main(init: std.process.Init) !void {
             x_eval.data[i] = @as(f32, @floatFromInt(tok));
         }
 
-        const logits = try model.forward(allocator, &g, x_eval);
+        const logits = try model.forward(&g, x_eval);
         const last_logits = logits.data[(cur_len - 1) * vocab_size .. cur_len * vocab_size];
 
         const next_token = try nn.sampleTopP(last_logits, vocab_size, 0.65, 0.85, random, allocator);

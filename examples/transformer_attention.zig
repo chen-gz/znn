@@ -61,7 +61,7 @@ pub fn main() !void {
     const x_node = try graph.tensorND(&.{1, 3, 8}, false);
     @memcpy(x_node.data, x.data);
 
-    const y = try att.forward(allocator, &graph, x_node);
+    const y = try att.forward(&graph, x_node);
     std.debug.print("Output (Shape: [1, 3, 8]):\n", .{});
     y.print();
 

@@ -85,7 +85,7 @@ pub fn main() !void {
         @memcpy(x_node.data, x_data);
 
         // Forward
-        const logits = try model.forward(allocator, &graph, x_node); // Shape [5, 6, 5]
+        const logits = try model.forward(&graph, x_node); // Shape [5, 6, 5]
 
         const logits_reshaped = try graph.reshape(logits, &.{ batch_size * block_size, vocab_size });
 
@@ -126,7 +126,7 @@ pub fn main() !void {
             x_node.data[idx] = @as(f32, @floatFromInt(val));
         }
 
-        const logits = try model.forward(allocator, &graph, x_node); // Shape [1, T, V]
+        const logits = try model.forward(&graph, x_node); // Shape [1, T, V]
         
         const start = (@as(usize, seq_len) - 1) * @as(usize, vocab_size);
         const end = @as(usize, seq_len) * @as(usize, vocab_size);

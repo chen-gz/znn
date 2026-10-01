@@ -54,9 +54,10 @@ pub fn main() !void {
     x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
     x.print();
 
-    std.debug.print("\n--- 1. Eager Mode Forward ---\n", .{});
-    const y_eager = try emb.forward(allocator, null, x);
-    defer tensor.free(allocator, y_eager);
+    std.debug.print("\n--- 1. Inference Forward (no-grad graph) ---\n", .{});
+    var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_eager_graph.deinit();
+    const y_eager = try emb.forward(&y_eager_graph, x);
     std.debug.print("Output (Shape: [2, 3, 4]):\n", .{});
     y_eager.print();
 
@@ -67,7 +68,7 @@ pub fn main() !void {
     const x_node = try graph.tensorND(&.{2, 3}, false);
     @memcpy(x_node.data, x.data);
 
-    const y = try emb.forward(allocator, &graph, x_node);
+    const y = try emb.forward(&graph, x_node);
     std.debug.print("Graph Output (Shape: [2, 3, 4]):\n", .{});
     y.print();
 

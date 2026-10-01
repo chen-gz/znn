@@ -82,29 +82,20 @@ pub const RNNCell = struct {
     /// x: [batch_size, input_dim], h_prev: [batch_size, hidden_dim]
     pub fn forward(
         self: RNNCell,
-        allocator: std.mem.Allocator,
-        graph: ?*autodiff.Graph,
+        graph: *autodiff.Graph,
         x: *Tensor,
         h_prev: *Tensor,
     ) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
 
-        const x_proj = try self.weight_ih.forward(allocator, graph, x);
-        defer if (graph == null) tensor.free(allocator, x_proj);
-        const h_proj = try self.weight_hh.forward(allocator, graph, h_prev);
-        defer if (graph == null) tensor.free(allocator, h_proj);
+        const x_proj = try self.weight_ih.forward(graph, x);
+        const h_proj = try self.weight_hh.forward(graph, h_prev);
 
-        const sum = if (graph) |g| try g.add(x_proj, h_proj) else try x_proj.add(h_proj, allocator, null);
-        defer if (graph == null) tensor.free(allocator, sum);
+        const sum = try graph.add(x_proj, h_proj);
 
-        return if (graph) |g| try g.tanh(sum) else try sum.tanh(allocator, null);
+        return try graph.tanh(sum);
     }
 };
 
@@ -171,38 +162,28 @@ pub const RNN = struct {
     /// h_0: 初始隐状态 [batch_size, hidden_dim]，若为 null 则自动置零
     pub fn forward(
         self: RNN,
-        allocator: std.mem.Allocator,
-        graph: ?*autodiff.Graph,
+        graph: *autodiff.Graph,
         inputs: []const *Tensor,
         h_0: ?*Tensor,
     ) !struct { outputs: []*Tensor, h_n: *Tensor } {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
 
         std.debug.assert(inputs.len > 0);
         const seq_len = inputs.len;
-        const outputs = try allocator.alloc(*Tensor, seq_len);
+        const outputs = try graph.arenaAllocator().alloc(*Tensor, seq_len);
 
         var h_curr: *Tensor = undefined;
         if (h_0) |h| {
             h_curr = h;
         } else {
             const batch_size = inputs[0].shape.dims[0];
-            if (graph) |g| {
-                h_curr = try g.zeros(&.{ batch_size, self.hidden_dim }, false);
-            } else {
-                h_curr = try tensor.zeros(allocator, &.{ batch_size, self.hidden_dim });
-            }
+            h_curr = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
         }
 
         for (inputs, 0..) |x_t, t| {
-            const h_next = try self.cell.forward(allocator, graph, x_t, h_curr);
+            const h_next = try self.cell.forward(graph, x_t, h_curr);
             outputs[t] = h_next;
             h_curr = h_next;
         }
@@ -354,72 +335,47 @@ pub const LSTMCell = struct {
     /// c_prev: [batch_size, hidden_dim]
     pub fn forward(
         self: LSTMCell,
-        allocator: std.mem.Allocator,
-        graph: ?*autodiff.Graph,
+        graph: *autodiff.Graph,
         x: *Tensor,
         h_prev: *Tensor,
         c_prev: *Tensor,
     ) !LSTMState {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
 
         // 1. 遗忘门: f_t = sigmoid(W_f * x + U_f * h_prev)
-        const f_x = try self.w_ih_f.forward(allocator, graph, x);
-        defer if (graph == null) tensor.free(allocator, f_x);
-        const f_h = try self.w_hh_f.forward(allocator, graph, h_prev);
-        defer if (graph == null) tensor.free(allocator, f_h);
-        const f_sum = if (graph) |g| try g.add(f_x, f_h) else try f_x.add(f_h, allocator, null);
-        defer if (graph == null) tensor.free(allocator, f_sum);
-        const f_t = if (graph) |g| try g.sigmoid(f_sum) else try f_sum.sigmoid(allocator, null);
-        defer if (graph == null) tensor.free(allocator, f_t);
+        const f_x = try self.w_ih_f.forward(graph, x);
+        const f_h = try self.w_hh_f.forward(graph, h_prev);
+        const f_sum = try graph.add(f_x, f_h);
+        const f_t = try graph.sigmoid(f_sum);
 
         // 2. 输入门: i_t = sigmoid(W_i * x + U_i * h_prev)
-        const i_x = try self.w_ih_i.forward(allocator, graph, x);
-        defer if (graph == null) tensor.free(allocator, i_x);
-        const i_h = try self.w_hh_i.forward(allocator, graph, h_prev);
-        defer if (graph == null) tensor.free(allocator, i_h);
-        const i_sum = if (graph) |g| try g.add(i_x, i_h) else try i_x.add(i_h, allocator, null);
-        defer if (graph == null) tensor.free(allocator, i_sum);
-        const i_t = if (graph) |g| try g.sigmoid(i_sum) else try i_sum.sigmoid(allocator, null);
-        defer if (graph == null) tensor.free(allocator, i_t);
+        const i_x = try self.w_ih_i.forward(graph, x);
+        const i_h = try self.w_hh_i.forward(graph, h_prev);
+        const i_sum = try graph.add(i_x, i_h);
+        const i_t = try graph.sigmoid(i_sum);
 
         // 3. 候选状态: c_cand = tanh(W_c * x + U_c * h_prev)
-        const c_x = try self.w_ih_c.forward(allocator, graph, x);
-        defer if (graph == null) tensor.free(allocator, c_x);
-        const c_h = try self.w_hh_c.forward(allocator, graph, h_prev);
-        defer if (graph == null) tensor.free(allocator, c_h);
-        const c_sum = if (graph) |g| try g.add(c_x, c_h) else try c_x.add(c_h, allocator, null);
-        defer if (graph == null) tensor.free(allocator, c_sum);
-        const c_cand = if (graph) |g| try g.tanh(c_sum) else try c_sum.tanh(allocator, null);
-        defer if (graph == null) tensor.free(allocator, c_cand);
+        const c_x = try self.w_ih_c.forward(graph, x);
+        const c_h = try self.w_hh_c.forward(graph, h_prev);
+        const c_sum = try graph.add(c_x, c_h);
+        const c_cand = try graph.tanh(c_sum);
 
         // 4. 输出门: o_t = sigmoid(W_o * x + U_o * h_prev)
-        const o_x = try self.w_ih_o.forward(allocator, graph, x);
-        defer if (graph == null) tensor.free(allocator, o_x);
-        const o_h = try self.w_hh_o.forward(allocator, graph, h_prev);
-        defer if (graph == null) tensor.free(allocator, o_h);
-        const o_sum = if (graph) |g| try g.add(o_x, o_h) else try o_x.add(o_h, allocator, null);
-        defer if (graph == null) tensor.free(allocator, o_sum);
-        const o_t = if (graph) |g| try g.sigmoid(o_sum) else try o_sum.sigmoid(allocator, null);
-        defer if (graph == null) tensor.free(allocator, o_t);
+        const o_x = try self.w_ih_o.forward(graph, x);
+        const o_h = try self.w_hh_o.forward(graph, h_prev);
+        const o_sum = try graph.add(o_x, o_h);
+        const o_t = try graph.sigmoid(o_sum);
 
         // 5. 细胞状态更新: C_t = f_t * C_{t-1} + i_t * c_cand
-        const f_c_prev = if (graph) |g| try g.mul(f_t, c_prev) else try f_t.mul(c_prev, allocator, null);
-        defer if (graph == null) tensor.free(allocator, f_c_prev);
-        const i_c_cand = if (graph) |g| try g.mul(i_t, c_cand) else try i_t.mul(c_cand, allocator, null);
-        defer if (graph == null) tensor.free(allocator, i_c_cand);
-        const c_t = if (graph) |g| try g.add(f_c_prev, i_c_cand) else try f_c_prev.add(i_c_cand, allocator, null);
+        const f_c_prev = try graph.mul(f_t, c_prev);
+        const i_c_cand = try graph.mul(i_t, c_cand);
+        const c_t = try graph.add(f_c_prev, i_c_cand);
 
         // 6. 隐状态更新: h_t = o_t * tanh(C_t)
-        const tanh_c = if (graph) |g| try g.tanh(c_t) else try c_t.tanh(allocator, null);
-        defer if (graph == null) tensor.free(allocator, tanh_c);
-        const h_t = if (graph) |g| try g.mul(o_t, tanh_c) else try o_t.mul(tanh_c, allocator, null);
+        const tanh_c = try graph.tanh(c_t);
+        const h_t = try graph.mul(o_t, tanh_c);
 
         return LSTMState{
             .h = h_t,
@@ -488,24 +444,18 @@ pub const LSTM = struct {
 
     pub fn forward(
         self: LSTM,
-        allocator: std.mem.Allocator,
-        graph: ?*autodiff.Graph,
+        graph: *autodiff.Graph,
         inputs: []const *Tensor,
         h_0: ?*Tensor,
         c_0: ?*Tensor,
     ) !struct { outputs: []*Tensor, h_n: *Tensor, c_n: *Tensor } {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
 
         std.debug.assert(inputs.len > 0);
         const seq_len = inputs.len;
-        const outputs = try allocator.alloc(*Tensor, seq_len);
+        const outputs = try graph.arenaAllocator().alloc(*Tensor, seq_len);
 
         const batch_size = inputs[0].shape.dims[0];
         var h_curr: *Tensor = undefined;
@@ -514,25 +464,17 @@ pub const LSTM = struct {
         if (h_0) |h| {
             h_curr = h;
         } else {
-            if (graph) |g| {
-                h_curr = try g.zeros(&.{ batch_size, self.hidden_dim }, false);
-            } else {
-                h_curr = try tensor.zeros(allocator, &.{ batch_size, self.hidden_dim });
-            }
+            h_curr = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
         }
 
         if (c_0) |c| {
             c_curr = c;
         } else {
-            if (graph) |g| {
-                c_curr = try g.zeros(&.{ batch_size, self.hidden_dim }, false);
-            } else {
-                c_curr = try tensor.zeros(allocator, &.{ batch_size, self.hidden_dim });
-            }
+            c_curr = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
         }
 
         for (inputs, 0..) |x_t, t| {
-            const state = try self.cell.forward(allocator, graph, x_t, h_curr, c_curr);
+            const state = try self.cell.forward(graph, x_t, h_curr, c_curr);
             outputs[t] = state.h;
             h_curr = state.h;
             c_curr = state.c;
@@ -635,26 +577,20 @@ pub const StackedLSTM = struct {
 
     pub fn forwardStep(
         self: StackedLSTM,
-        allocator: std.mem.Allocator,
-        graph: ?*autodiff.Graph,
+        graph: *autodiff.Graph,
         x_t: *Tensor,
         h_prevs: []const *Tensor,
         c_prevs: []const *Tensor,
         h_outs: []*Tensor,
         c_outs: []*Tensor,
     ) !void {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
 
         var cur_in = x_t;
         for (0..self.num_layers) |l| {
-            const state = try self.layers[l].forward(allocator, graph, cur_in, h_prevs[l], c_prevs[l]);
+            const state = try self.layers[l].forward(graph, cur_in, h_prevs[l], c_prevs[l]);
             h_outs[l] = state.h;
             c_outs[l] = state.c;
             cur_in = state.h;
@@ -663,8 +599,7 @@ pub const StackedLSTM = struct {
 
     pub fn forwardSequence(
         self: StackedLSTM,
-        allocator: std.mem.Allocator,
-        graph: ?*autodiff.Graph,
+        graph: *autodiff.Graph,
         inputs: []const *Tensor,
         h_0: ?[]const *Tensor,
         c_0: ?[]const *Tensor,
@@ -673,50 +608,37 @@ pub const StackedLSTM = struct {
         h_n: []*Tensor,
         c_n: []*Tensor,
     } {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
 
         std.debug.assert(inputs.len > 0);
         const seq_len = inputs.len;
         const L = self.num_layers;
         const batch_size = inputs[0].shape.dims[0];
 
-        var h_states = try allocator.alloc(*Tensor, L);
-        var c_states = try allocator.alloc(*Tensor, L);
+        var h_states = try graph.arenaAllocator().alloc(*Tensor, L);
+        var c_states = try graph.arenaAllocator().alloc(*Tensor, L);
 
         for (0..L) |l| {
             if (h_0) |h_inits| {
                 h_states[l] = h_inits[l];
             } else {
-                if (graph) |g| {
-                    h_states[l] = try g.zeros(&.{ batch_size, self.hidden_dim }, false);
-                } else {
-                    h_states[l] = try tensor.zeros(allocator, &.{ batch_size, self.hidden_dim });
-                }
+                h_states[l] = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
             }
 
             if (c_0) |c_inits| {
                 c_states[l] = c_inits[l];
             } else {
-                if (graph) |g| {
-                    c_states[l] = try g.zeros(&.{ batch_size, self.hidden_dim }, false);
-                } else {
-                    c_states[l] = try tensor.zeros(allocator, &.{ batch_size, self.hidden_dim });
-                }
+                c_states[l] = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
             }
         }
 
-        const outputs = try allocator.alloc(*Tensor, seq_len);
+        const outputs = try graph.arenaAllocator().alloc(*Tensor, seq_len);
         for (inputs, 0..) |x_t, t| {
             var cur_in = x_t;
             for (0..L) |l| {
-                const state = try self.layers[l].forward(allocator, graph, cur_in, h_states[l], c_states[l]);
+                const state = try self.layers[l].forward(graph, cur_in, h_states[l], c_states[l]);
                 h_states[l] = state.h;
                 c_states[l] = state.c;
                 cur_in = state.h;
@@ -839,64 +761,41 @@ pub const GRUCell = struct {
 
     pub fn forward(
         self: GRUCell,
-        allocator: std.mem.Allocator,
-        graph: ?*autodiff.Graph,
+        graph: *autodiff.Graph,
         x: *Tensor,
         h_prev: *Tensor,
     ) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
 
         // 1. 重置门: r_t = sigmoid(W_r * x + U_r * h_prev)
-        const r_x = try self.w_ih_r.forward(allocator, graph, x);
-        defer if (graph == null) tensor.free(allocator, r_x);
-        const r_h = try self.w_hh_r.forward(allocator, graph, h_prev);
-        defer if (graph == null) tensor.free(allocator, r_h);
-        const r_sum = if (graph) |g| try g.add(r_x, r_h) else try r_x.add(r_h, allocator, null);
-        defer if (graph == null) tensor.free(allocator, r_sum);
-        const r_t = if (graph) |g| try g.sigmoid(r_sum) else try r_sum.sigmoid(allocator, null);
-        defer if (graph == null) tensor.free(allocator, r_t);
+        const r_x = try self.w_ih_r.forward(graph, x);
+        const r_h = try self.w_hh_r.forward(graph, h_prev);
+        const r_sum = try graph.add(r_x, r_h);
+        const r_t = try graph.sigmoid(r_sum);
 
         // 2. 更新门: z_t = sigmoid(W_z * x + U_z * h_prev)
-        const z_x = try self.w_ih_z.forward(allocator, graph, x);
-        defer if (graph == null) tensor.free(allocator, z_x);
-        const z_h = try self.w_hh_z.forward(allocator, graph, h_prev);
-        defer if (graph == null) tensor.free(allocator, z_h);
-        const z_sum = if (graph) |g| try g.add(z_x, z_h) else try z_x.add(z_h, allocator, null);
-        defer if (graph == null) tensor.free(allocator, z_sum);
-        const z_t = if (graph) |g| try g.sigmoid(z_sum) else try z_sum.sigmoid(allocator, null);
-        defer if (graph == null) tensor.free(allocator, z_t);
+        const z_x = try self.w_ih_z.forward(graph, x);
+        const z_h = try self.w_hh_z.forward(graph, h_prev);
+        const z_sum = try graph.add(z_x, z_h);
+        const z_t = try graph.sigmoid(z_sum);
 
         // 3. 候选隐状态: h_tilde = tanh(W_h * x + U_h * (r_t * h_prev))
-        const rh = if (graph) |g| try g.mul(r_t, h_prev) else try r_t.mul(h_prev, allocator, null);
-        defer if (graph == null) tensor.free(allocator, rh);
-        const h_x = try self.w_ih_h.forward(allocator, graph, x);
-        defer if (graph == null) tensor.free(allocator, h_x);
-        const h_h = try self.w_hh_h.forward(allocator, graph, rh);
-        defer if (graph == null) tensor.free(allocator, h_h);
-        const cand_sum = if (graph) |g| try g.add(h_x, h_h) else try h_x.add(h_h, allocator, null);
-        defer if (graph == null) tensor.free(allocator, cand_sum);
-        const h_tilde = if (graph) |g| try g.tanh(cand_sum) else try cand_sum.tanh(allocator, null);
-        defer if (graph == null) tensor.free(allocator, h_tilde);
+        const rh = try graph.mul(r_t, h_prev);
+        const h_x = try self.w_ih_h.forward(graph, x);
+        const h_h = try self.w_hh_h.forward(graph, rh);
+        const cand_sum = try graph.add(h_x, h_h);
+        const h_tilde = try graph.tanh(cand_sum);
 
         // 4. 隐状态融合: h_t = (1 - z_t) * h_prev + z_t * h_tilde
-        const neg_z = if (graph) |g| try g.mulScalar(z_t, -1.0) else try z_t.mulScalar(-1.0, allocator, null);
-        defer if (graph == null) tensor.free(allocator, neg_z);
-        const one_minus_z = if (graph) |g| try g.addScalar(neg_z, 1.0) else try neg_z.addScalar(1.0, allocator, null);
-        defer if (graph == null) tensor.free(allocator, one_minus_z);
+        const neg_z = try graph.mulScalar(z_t, -1.0);
+        const one_minus_z = try graph.addScalar(neg_z, 1.0);
 
-        const term1 = if (graph) |g| try g.mul(one_minus_z, h_prev) else try one_minus_z.mul(h_prev, allocator, null);
-        defer if (graph == null) tensor.free(allocator, term1);
-        const term2 = if (graph) |g| try g.mul(z_t, h_tilde) else try z_t.mul(h_tilde, allocator, null);
-        defer if (graph == null) tensor.free(allocator, term2);
+        const term1 = try graph.mul(one_minus_z, h_prev);
+        const term2 = try graph.mul(z_t, h_tilde);
 
-        return if (graph) |g| try g.add(term1, term2) else try term1.add(term2, allocator, null);
+        return try graph.add(term1, term2);
     }
 };
 
@@ -960,38 +859,28 @@ pub const GRU = struct {
 
     pub fn forward(
         self: GRU,
-        allocator: std.mem.Allocator,
-        graph: ?*autodiff.Graph,
+        graph: *autodiff.Graph,
         inputs: []const *Tensor,
         h_0: ?*Tensor,
     ) !struct { outputs: []*Tensor, h_n: *Tensor } {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
 
         std.debug.assert(inputs.len > 0);
         const seq_len = inputs.len;
-        const outputs = try allocator.alloc(*Tensor, seq_len);
+        const outputs = try graph.arenaAllocator().alloc(*Tensor, seq_len);
 
         var h_curr: *Tensor = undefined;
         if (h_0) |h| {
             h_curr = h;
         } else {
             const batch_size = inputs[0].shape.dims[0];
-            if (graph) |g| {
-                h_curr = try g.zeros(&.{ batch_size, self.hidden_dim }, false);
-            } else {
-                h_curr = try tensor.zeros(allocator, &.{ batch_size, self.hidden_dim });
-            }
+            h_curr = try graph.zeros(&.{ batch_size, self.hidden_dim }, false);
         }
 
         for (inputs, 0..) |x_t, t| {
-            const h_next = try self.cell.forward(allocator, graph, x_t, h_curr);
+            const h_next = try self.cell.forward(graph, x_t, h_curr);
             outputs[t] = h_next;
             h_curr = h_next;
         }

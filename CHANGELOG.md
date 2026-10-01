@@ -45,6 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `MoELayer.forward` 实现 Top-K 稀疏门控掩码与活跃专家筛选，跳过未命中专家的前向计算。
   - `CausalSelfAttention.forward` 将因果掩码从每次分配两份 `[B, nh, T, T]` 优化为单份 `[1, 1, T, T]` 广播张量。
   - `cblas_sgemm_fallback` 的 `NoTrans × Trans` 分支新增 8 路 `@Vector(8, f32)` SIMD 向量化内积快路径。
+- **Tensor ← Graph ← nn 单向解耦 (`src/tensor/`, `src/autodiff/`, `src/nn/`, `src/engine.zig`, `examples/`)**:
+  - `Tensor` 方法与 `tensor.concat` / `tensor.split` 不再接收 `graph: ?*autodiff.Graph` 参数，只保留纯计算内核；`Tensor` 对 autodiff 仅保留数据字段 `creator: ?*Op`。新增 `Tensor.squeezedShape` / `unsqueezedShape` 供 `Graph.squeeze` / `unsqueeze` 复用；删除 `tensorSplit` 别名。
+  - `Graph` 新增 `initNoGrad` (推理用无梯度图) 与 `arenaAllocator`；`enterModule` / `enterChildScope` 改为 `Graph` 方法。
+  - 所有 nn 模块统一为 `forward(self, graph: *autodiff.Graph, x, ...)`，移除 Eager/Graph 双分支、`graph == null` 时的手动释放与 `free_*` 标记；`RNN` / `LSTM` / `StackedLSTM` / `GRU` 的输出切片分配在图 arena 中。
+  - `CausalSelfAttention.forwardInference` 与 `MLALayer.forwardInference` 内部使用局部无梯度图；`engine.evalClassificationStep` 改用无梯度图计算损失与准确率。
+  - `src/tensor/ops.zig` 中依赖 `Graph` 的测试迁移至 `src/autodiff/tests.zig`；`examples/sample_model_graph.json` 重新生成 (因果掩码为 `[1, 1, 16, 16]`)。
 
 ### Fixed
 - 修复算子依据输入推断归属导致的模块错配、`.core` 伪节点合成、端口名与真实节点冲突、残差判定依赖边顺序、根作用域边与顶层 `edges` 层级错位等问题 (详见 chen-gz.github.io `doc/visualization-model-edge-design.md`)。

@@ -116,16 +116,11 @@ pub const Embedding = struct {
 
     /// 查找映射前向传播
     /// 输入 x 为包含 Token ID 的任意维度 Tensor、`GenericTensor(IntT)` 或整数切片，输出形状为 x.shape + [embedding_dim]
-    pub fn forward(self: Embedding, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: anytype) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: Embedding, graph: *autodiff.Graph, x: anytype) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
-        return try self.weight.embedding(x, allocator, graph);
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
+        return try graph.embedding(self.weight, x);
     }
 };
 
@@ -251,62 +246,38 @@ pub const MLP = struct {
 
     /// 前向传播逻辑
     /// 支持输入 2D Tensor [B*T, D] 或 3D Tensor [B, T, D]
-    pub fn forward(self: MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: MLP, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
-        
+
         // 1. 如果输入是 3D [B, T, D]，则将其打平为 2D [B*T, D] 以满足 Linear 矩阵乘法的输入规范
         if (is_3d) {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
             const D = old_shape.dims[2];
-            if (graph) |g| {
-                x_2d = try g.reshape(x, &.{ B * T, D });
-            } else {
-                x_2d = try x.reshape(&.{ B * T, D }, allocator, null);
-            }
-        }
-        defer {
-            // Eager 模式下需要释放临时 reshape 生成的 Tensor 内存
-            if (is_3d and graph == null) {
-                tensor.free(allocator, x_2d);
-            }
+            x_2d = try graph.reshape(x, &.{ B * T, D });
         }
 
         // 2. 升维映射: [B*T, D] -> [B*T, hidden_dim]
-        const h1 = try self.c_fc.forward(allocator, graph, x_2d);
-        defer if (graph == null) tensor.free(allocator, h1);
+        const h1 = try self.c_fc.forward(graph, x_2d);
 
         // 3. GELU 激活函数引入非线性
-        const a1 = if (graph) |g| try g.gelu(h1) else try h1.gelu(allocator, null);
-        defer if (graph == null) tensor.free(allocator, a1);
-        if (graph != null) {
-            if (self.name) |mod_name| a1.setNameFormatted("{s}.gelu", .{mod_name});
-        }
+        const a1 = try graph.gelu(h1);
+        if (self.name) |mod_name| a1.setNameFormatted("{s}.gelu", .{mod_name});
 
         // 4. 降维投射回原始特征维度: [B*T, hidden_dim] -> [B*T, D]
-        const h2 = try self.c_proj.forward(allocator, graph, a1);
+        const h2 = try self.c_proj.forward(graph, a1);
 
         // 5. 如果输入原本是 3D，需要将输出再重新恢复成 3D 形状: [B, T, D]
         if (is_3d) {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
             const D = old_shape.dims[2];
-            if (graph) |g| {
-                return try g.reshape(h2, &.{ B, T, D });
-            } else {
-                defer tensor.free(allocator, h2);
-                return try h2.reshape(&.{ B, T, D }, allocator, null);
-            }
+            return try graph.reshape(h2, &.{ B, T, D });
         }
         return h2;
     }
@@ -400,15 +371,10 @@ pub const SwiGLU = struct {
     }
 
     /// 前向传播逻辑：支持 2D [B*T, D] 或 3D [B, T, D]
-    pub fn forward(self: SwiGLU, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: SwiGLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
@@ -417,47 +383,29 @@ pub const SwiGLU = struct {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
             const D = old_shape.dims[2];
-            if (graph) |g| {
-                x_2d = try g.reshape(x, &.{ B * T, D });
-            } else {
-                x_2d = try x.reshape(&.{ B * T, D }, allocator, null);
-            }
-        }
-        defer {
-            if (is_3d and graph == null) {
-                tensor.free(allocator, x_2d);
-            }
+            x_2d = try graph.reshape(x, &.{ B * T, D });
         }
 
         // 1. 计算 gate 投影: [B*T, D] -> [B*T, hidden_dim]
-        const gate = try self.w_gate.forward(allocator, graph, x_2d);
-        defer if (graph == null) tensor.free(allocator, gate);
+        const gate = try self.w_gate.forward(graph, x_2d);
 
         // 2. 计算 up 投影: [B*T, D] -> [B*T, hidden_dim]
-        const up = try self.w_up.forward(allocator, graph, x_2d);
-        defer if (graph == null) tensor.free(allocator, up);
+        const up = try self.w_up.forward(graph, x_2d);
 
         // 3. 计算 SiLU(gate) 激活
-        const silu_gate = if (graph) |g| try g.silu(gate) else try gate.silu(allocator, null);
-        defer if (graph == null) tensor.free(allocator, silu_gate);
+        const silu_gate = try graph.silu(gate);
 
         // 4. 逐元素乘法: SiLU(gate) * up
-        const hidden = if (graph) |g| try g.mul(silu_gate, up) else try silu_gate.mul(up, allocator, null);
-        defer if (graph == null) tensor.free(allocator, hidden);
+        const hidden = try graph.mul(silu_gate, up);
 
         // 5. 降维投射回原始特征维度: [B*T, hidden_dim] -> [B*T, D]
-        const out = try self.w_down.forward(allocator, graph, hidden);
+        const out = try self.w_down.forward(graph, hidden);
 
         if (is_3d) {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
             const D = old_shape.dims[2];
-            if (graph) |g| {
-                return try g.reshape(out, &.{ B, T, D });
-            } else {
-                defer tensor.free(allocator, out);
-                return try out.reshape(&.{ B, T, D }, allocator, null);
-            }
+            return try graph.reshape(out, &.{ B, T, D });
         }
         return out;
     }
@@ -474,7 +422,7 @@ pub const SwiGLU = struct {
 /// 2. 可选隔离常驻共享专家列表 (shared_experts, 均无条件激活)
 /// 3. 动态门控路由网络 gate: Linear(dim -> num_routed_experts)
 /// 4. 门控概率归一化与稀疏加权聚合输出
-/// 5. 完备支持 Eager 模式与 Autograd 计算图模式前向与反向传播
+/// 5. 基于计算图的前向与反向传播 (推理时传入 `Graph.initNoGrad` 构建的无梯度计算图)
 pub const MoELayer = struct {
     dim: usize,
     num_routed_experts: usize,
@@ -594,15 +542,10 @@ pub const MoELayer = struct {
         for (self.shared_experts) |exp| exp.zeroGrad();
     }
 
-    pub fn forward(self: MoELayer, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: MoELayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
@@ -611,16 +554,7 @@ pub const MoELayer = struct {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
             const D = old_shape.dims[2];
-            if (graph) |g| {
-                x_2d = try g.reshape(x, &.{ B * T, D });
-            } else {
-                x_2d = try x.reshape(&.{ B * T, D }, allocator, null);
-            }
-        }
-        defer {
-            if (is_3d and graph == null) {
-                tensor.free(allocator, x_2d);
-            }
+            x_2d = try graph.reshape(x, &.{ B * T, D });
         }
 
         const N = x_2d.shape.dims[0];
@@ -628,20 +562,19 @@ pub const MoELayer = struct {
         const K = self.top_k;
 
         // 1. 门控打分: [N, D] -> [N, E]
-        const gate_logits = try self.gate.forward(allocator, graph, x_2d);
-        defer if (graph == null) tensor.free(allocator, gate_logits);
+        const gate_logits = try self.gate.forward(graph, x_2d);
 
         // 2. 构造 Top-K 掩码并执行 Softmax 归一化
-        const mask_data = try allocator.alloc(f32, N * E);
-        defer allocator.free(mask_data);
+        const mask_node = try graph.tensorND(&.{ N, E }, false);
+        mask_node.is_buffer = true;
+        const mask_data = mask_node.data;
         @memset(mask_data, -1e9);
 
-        const keep_mask = try allocator.alloc(f32, N * E);
-        defer allocator.free(keep_mask);
-        @memset(keep_mask, 0.0);
+        const keep_node = try graph.tensorND(&.{ N, E }, false);
+        keep_node.is_buffer = true;
+        const keep_mask = keep_node.data;
 
-        const expert_active = try allocator.alloc(bool, E);
-        defer allocator.free(expert_active);
+        const expert_active = try graph.arenaAllocator().alloc(bool, E);
         @memset(expert_active, false);
 
         // 对每一行寻找 Top-K 个最大的索引
@@ -697,135 +630,47 @@ pub const MoELayer = struct {
 
         var total_routed: *Tensor = undefined;
 
-        if (graph) |g| {
-            const mask_node = try g.tensorNDWithData(&.{ N, E }, mask_data, false);
-            mask_node.is_buffer = true;
-            const keep_node = try g.tensorNDWithData(&.{ N, E }, keep_mask, false);
-            keep_node.is_buffer = true;
-            const masked_logits = try g.add(gate_logits, mask_node);
-            const raw_probs = try g.softmax(masked_logits); // [N, E]
-            const probs = try g.mul(raw_probs, keep_node); // 严格置零非 Top-K 概率
-            const prob_cols = try g.split(probs, E, 1); // E 个 [N, 1]
+        const masked_logits = try graph.add(gate_logits, mask_node);
+        const raw_probs = try graph.softmax(masked_logits); // [N, E]
+        const probs = try graph.mul(raw_probs, keep_node); // 严格置零非 Top-K 概率
+        const prob_cols = try graph.split(probs, E, 1); // E 个 [N, 1]
 
-            var acc: ?*Tensor = null;
-            for (self.routed_experts, 0..) |exp, e| {
-                if (!expert_active[e]) continue; // 跳过整批均未被选中的专家
-                const exp_out = try exp.forward(allocator, graph, x_2d); // [N, D]
-                const weighted = try g.mul(exp_out, prob_cols[e]); // [N, D] * [N, 1] -> [N, D]
-                if (acc) |a| {
-                    acc = try g.add(a, weighted);
-                } else {
-                    acc = weighted;
-                }
+        var acc: ?*Tensor = null;
+        for (self.routed_experts, 0..) |exp, e| {
+            if (!expert_active[e]) continue; // 跳过整批均未被选中的专家
+            const exp_out = try exp.forward(graph, x_2d); // [N, D]
+            const weighted = try graph.mul(exp_out, prob_cols[e]); // [N, D] * [N, 1] -> [N, D]
+            if (acc) |a| {
+                acc = try graph.add(a, weighted);
+            } else {
+                acc = weighted;
             }
-            total_routed = acc.?;
-        } else {
-            // Eager 模式：稀疏激活，仅对选中的专家收集对应的活跃 Token 子集执行前向传播
-            const mask_t = try tensor.array(allocator, &.{ N, E }, mask_data);
-            defer tensor.free(allocator, mask_t);
-            const masked_logits = try gate_logits.add(mask_t, allocator, null);
-            defer tensor.free(allocator, masked_logits);
-            const probs = try masked_logits.softmax(allocator, null);
-            defer tensor.free(allocator, probs);
-            for (probs.data, keep_mask) |*p, km| {
-                p.* *= km;
-            }
-
-            const out_accum = try tensor.zeros(allocator, &.{ N, self.dim });
-            errdefer tensor.free(allocator, out_accum);
-
-            const active_rows = try allocator.alloc(usize, N);
-            defer allocator.free(active_rows);
-
-            for (self.routed_experts, 0..) |exp, e| {
-                if (!expert_active[e]) continue;
-                var m_e: usize = 0;
-                for (0..N) |row| {
-                    if (keep_mask[row * E + e] > 0.0) {
-                        active_rows[m_e] = row;
-                        m_e += 1;
-                    }
-                }
-                if (m_e == 0) continue;
-
-                if (m_e == N) {
-                    const exp_out = try exp.forward(allocator, null, x_2d);
-                    defer tensor.free(allocator, exp_out);
-                    for (0..N) |row| {
-                        const p = probs.data[row * E + e];
-                        for (0..self.dim) |d| {
-                            out_accum.data[row * self.dim + d] += p * exp_out.data[row * self.dim + d];
-                        }
-                    }
-                } else {
-                    const x_sub = try tensor.zeros(allocator, &.{ m_e, self.dim });
-                    defer tensor.free(allocator, x_sub);
-                    for (active_rows[0..m_e], 0..) |row, sub_i| {
-                        @memcpy(
-                            x_sub.data[sub_i * self.dim .. (sub_i + 1) * self.dim],
-                            x_2d.data[row * self.dim .. (row + 1) * self.dim],
-                        );
-                    }
-                    const exp_out = try exp.forward(allocator, null, x_sub);
-                    defer tensor.free(allocator, exp_out);
-                    for (active_rows[0..m_e], 0..) |row, sub_i| {
-                        const p = probs.data[row * E + e];
-                        for (0..self.dim) |d| {
-                            out_accum.data[row * self.dim + d] += p * exp_out.data[sub_i * self.dim + d];
-                        }
-                    }
-                }
-            }
-            total_routed = out_accum;
         }
-        defer if (graph == null and self.num_shared_experts > 0) tensor.free(allocator, total_routed);
+        total_routed = acc.?;
 
         // 3. 计算常驻共享专家 (Shared Experts)
         var total_shared: ?*Tensor = null;
         for (self.shared_experts) |exp| {
-            const s_out = try exp.forward(allocator, graph, x_2d);
-            defer if (graph == null) tensor.free(allocator, s_out);
+            const s_out = try exp.forward(graph, x_2d);
 
             if (total_shared) |s| {
-                if (graph) |g| {
-                    total_shared = try g.add(s, s_out);
-                } else {
-                    const new_s = try s.add(s_out, allocator, null);
-                    tensor.free(allocator, s);
-                    total_shared = new_s;
-                }
+                total_shared = try graph.add(s, s_out);
             } else {
-                if (graph) |_| {
-                    total_shared = s_out;
-                } else {
-                    const cloned_s = try tensor.zeros(allocator, s_out.shape.dims[0..s_out.shape.len]);
-                    @memcpy(cloned_s.data, s_out.data);
-                    total_shared = cloned_s;
-                }
+                total_shared = s_out;
             }
         }
-        defer if (graph == null and total_shared != null) tensor.free(allocator, total_shared.?);
 
         // 4. 合并 Routed 与 Shared 专家
         var final_2d = total_routed;
         if (total_shared) |s| {
-            if (graph) |g| {
-                final_2d = try g.add(total_routed, s);
-            } else {
-                final_2d = try total_routed.add(s, allocator, null);
-            }
+            final_2d = try graph.add(total_routed, s);
         }
 
         if (is_3d) {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
             const D = old_shape.dims[2];
-            if (graph) |g| {
-                return try g.reshape(final_2d, &.{ B, T, D });
-            } else {
-                defer tensor.free(allocator, final_2d);
-                return try final_2d.reshape(&.{ B, T, D }, allocator, null);
-            }
+            return try graph.reshape(final_2d, &.{ B, T, D });
         }
 
         return final_2d;
@@ -956,20 +801,11 @@ pub const CausalSelfAttention = struct {
     /// 前向注意力计算流程
     /// 输入 x 的形状必须为 3D: [B, T, C]
     /// 其中 B 为批次大小 (Batch Size)，T 为时间步长度 (Sequence Length)，C 为通道特征维数 (n_embd)
-    pub fn forward(self: CausalSelfAttention, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: CausalSelfAttention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-                var buf: [128]u8 = undefined;
-                if (std.fmt.bufPrint(&buf, "{s}.core", .{n})) |core_name| {
-                    _ = g.setModuleFormula(core_name, core_formula) catch {};
-                    _ = g.registerModuleType(core_name, "ScaledDotProductAttention") catch {};
-                } else |_| {}
-            }
-        }
+        try self.registerFormula(graph);
+
         const B = x.shape.dims[0];
         const T = x.shape.dims[1];
         const C = x.shape.dims[2];
@@ -979,225 +815,95 @@ pub const CausalSelfAttention = struct {
         const groups = nh / n_kv;
 
         // 1. 将 3D 输入 [B, T, C] 展平为 2D [B*T, C] 便于做常规的线性矩阵映射
-        var x_2d = x;
-        if (graph) |g| {
-            x_2d = try g.reshape(x, &.{ B * T, C });
-        } else {
-            x_2d = try x.reshape(&.{ B * T, C }, allocator, null);
-        }
-        defer if (graph == null) tensor.free(allocator, x_2d);
+        const x_2d = try graph.reshape(x, &.{ B * T, C });
 
         // 2. 投影计算 Query, Key, Value
-        const q_2d = try self.q_attn.forward(allocator, graph, x_2d);
-        defer if (graph == null) tensor.free(allocator, q_2d);
-        const k_2d = try self.k_attn.forward(allocator, graph, x_2d);
-        defer if (graph == null) tensor.free(allocator, k_2d);
-        const v_2d = try self.v_attn.forward(allocator, graph, x_2d);
-        defer if (graph == null) tensor.free(allocator, v_2d);
+        const q_2d = try self.q_attn.forward(graph, x_2d);
+        const k_2d = try self.k_attn.forward(graph, x_2d);
+        const v_2d = try self.v_attn.forward(graph, x_2d);
 
         // 3. 将投影后的数据重新塑形为 4D 多头结构:
         // q: [B*T, C] -> [B, T, nh, hs]
         // k, v: [B*T, n_kv*hs] -> [B, T, n_kv, hs]
-        var q_4d = q_2d;
-        var k_4d = k_2d;
-        var v_4d = v_2d;
-        if (graph) |g| {
-            q_4d = try g.reshape(q_2d, &.{ B, T, nh, hs });
-            k_4d = try g.reshape(k_2d, &.{ B, T, n_kv, hs });
-            v_4d = try g.reshape(v_2d, &.{ B, T, n_kv, hs });
-        } else {
-            q_4d = try q_2d.reshape(&.{ B, T, nh, hs }, allocator, null);
-            k_4d = try k_2d.reshape(&.{ B, T, n_kv, hs }, allocator, null);
-            v_4d = try v_2d.reshape(&.{ B, T, n_kv, hs }, allocator, null);
-        }
-        defer if (graph == null) {
-            tensor.free(allocator, q_4d);
-            tensor.free(allocator, k_4d);
-            tensor.free(allocator, v_4d);
-        };
+        const q_4d = try graph.reshape(q_2d, &.{ B, T, nh, hs });
+        const k_4d = try graph.reshape(k_2d, &.{ B, T, n_kv, hs });
+        const v_4d = try graph.reshape(v_2d, &.{ B, T, n_kv, hs });
 
         // 4. 转置特征轴，使得 Head 维度排在前部以进行 Batch 矩阵乘法
         // q: [B, T, nh, hs] -> [B, nh, T, hs]
         // k, v: [B, T, n_kv, hs] -> [B, n_kv, T, hs]
-        var q = q_4d;
-        var k_raw = k_4d;
-        var v_raw = v_4d;
-        if (graph) |g| {
-            q = try g.transposeND(q_4d, 1, 2);
-            k_raw = try g.transposeND(k_4d, 1, 2);
-            v_raw = try g.transposeND(v_4d, 1, 2);
-        } else {
-            q = try q_4d.transpose(1, 2, allocator, null);
-            k_raw = try k_4d.transpose(1, 2, allocator, null);
-            v_raw = try v_4d.transpose(1, 2, allocator, null);
-        }
-        defer if (graph == null) {
-            tensor.free(allocator, q);
-            tensor.free(allocator, k_raw);
-            tensor.free(allocator, v_raw);
-        };
+        const q = try graph.transposeND(q_4d, 1, 2);
+        const k_raw = try graph.transposeND(k_4d, 1, 2);
+        const v_raw = try graph.transposeND(v_4d, 1, 2);
 
         // 4.5 GQA 广播扩展: 如果 n_kv < nh，沿 Head 轴复制 groups 次匹配 Query
         var k = k_raw;
         var v = v_raw;
-        var free_k_rep = false;
-        var free_v_rep = false;
         if (groups > 1) {
-            if (graph) |g| {
-                k = try g.repeatKV(k_raw, groups);
-                v = try g.repeatKV(v_raw, groups);
-            } else {
-                const k_rep = try tensor.zeros(allocator, &.{ B, nh, T, hs });
-                const v_rep = try tensor.zeros(allocator, &.{ B, nh, T, hs });
-                const head_bytes = T * hs;
-                for (0..B) |b| {
-                    for (0..n_kv) |kv_h| {
-                        const src_k = k_raw.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
-                        const src_v = v_raw.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
-                        for (0..groups) |g| {
-                            const h = kv_h * groups + g;
-                            const dest_k = k_rep.data[((b * nh + h) * head_bytes) .. ((b * nh + h + 1) * head_bytes)];
-                            const dest_v = v_rep.data[((b * nh + h) * head_bytes) .. ((b * nh + h + 1) * head_bytes)];
-                            @memcpy(dest_k, src_k);
-                            @memcpy(dest_v, src_v);
-                        }
-                    }
-                }
-                k = k_rep;
-                v = v_rep;
-                free_k_rep = true;
-                free_v_rep = true;
-            }
+            k = try graph.repeatKV(k_raw, groups);
+            v = try graph.repeatKV(v_raw, groups);
         }
-        defer if (free_k_rep) tensor.free(allocator, k);
-        defer if (free_v_rep) tensor.free(allocator, v);
 
         // 注意力核心 (ScaledDotProductAttention) 子作用域: K^T -> QK^T -> 缩放 -> 掩码 -> softmax -> ·V
         // head 切分与合并属于 CausalSelfAttention 本身，不计入核心子作用域
-        const core_scope = try autodiff.Graph.enterChildScope(graph, "core", "ScaledDotProductAttention");
+        const core_scope = try graph.enterChildScope("core", "ScaledDotProductAttention");
         var core_scope_open = true;
         defer if (core_scope_open) core_scope.exit();
 
         // 5. 转置 Key 用于计算点积注意力: [B, nh, T, hs] -> [B, nh, hs, T]
-        var k_t = k;
-        if (graph) |g| {
-            k_t = try g.transposeND(k, 2, 3);
-        } else {
-            k_t = try k.transpose(2, 3, allocator, null);
-        }
-        defer if (graph == null) tensor.free(allocator, k_t);
+        const k_t = try graph.transposeND(k, 2, 3);
 
         // 6. 计算注意力原始得分: Q * K^T
         // 输出矩阵形状: [B, nh, T, hs] * [B, nh, hs, T] -> [B, nh, T, T]
-        var att = q;
-        if (graph) |g| {
-            att = try g.batchMatMul(q, k_t);
-        } else {
-            att = try q.batchMatMul(k_t, allocator, null);
-        }
-        defer if (graph == null) tensor.free(allocator, att);
+        const att = try graph.batchMatMul(q, k_t);
 
         // 7. 缩放得分，除以 sqrt(head_size) 避免梯度消失/爆炸: score = (Q * K^T) / sqrt(hs)
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hs)));
-        var att_scaled = att;
-        if (graph) |g| {
-            att_scaled = try g.mulScalar(att, scale);
-        } else {
-            att_scaled = try att.mulScalar(scale, allocator, null);
-        }
-        defer if (graph == null) tensor.free(allocator, att_scaled);
+        const att_scaled = try graph.mulScalar(att, scale);
 
         // 8. 构造因果掩码 (Causal Mask) 矩阵 [1, 1, T, T] (通过多维广播作用于 [B, nh, T, T])
         // 该矩阵只包含 0 和 -1e9。上三角（未来位置 j > 当前位置 i）部分全部填充 -1e9。
-        const mask_data = try allocator.alloc(f32, T * T);
-        defer allocator.free(mask_data);
-        @memset(mask_data, 0.0);
+        const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
+        mask_node.is_buffer = true;
         for (0..T) |i| {
-            for (0..T) |j| {
-                if (j > i) {
-                    mask_data[i * T + j] = -1e9;
-                }
+            for (i + 1..T) |j| {
+                mask_node.data[i * T + j] = -1e9;
             }
         }
 
         // 9. 将掩码加上注意力得分: score + mask
         // 未来时刻对应的得分将变为极小值 (-1e9)，进而在 Softmax 后权重归零。
-        var att_masked = att_scaled;
-        if (graph) |g| {
-            const mask_node = try g.tensorNDWithData(&.{ 1, 1, T, T }, mask_data, false);
-            mask_node.is_buffer = true;
-            if (self.name) |mod_name| {
-                mask_node.setNameFormatted("{s}.causal_mask", .{mod_name});
-            }
-            att_masked = try g.add(att_scaled, mask_node);
-        } else {
-            const mask = try tensor.array(allocator, &.{ 1, 1, T, T }, mask_data);
-            defer tensor.free(allocator, mask);
-            att_masked = try att_scaled.add(mask, allocator, null);
+        if (self.name) |mod_name| {
+            mask_node.setNameFormatted("{s}.causal_mask", .{mod_name});
         }
-        defer if (graph == null) tensor.free(allocator, att_masked);
+        const att_masked = try graph.add(att_scaled, mask_node);
 
         // 10. Softmax 归一化，得到归一化的注意力概率分布图: [B, nh, T, T]
-        var att_sm = att_masked;
-        if (graph) |g| {
-            att_sm = try g.softmax(att_masked);
-        } else {
-            att_sm = try att_masked.softmax(allocator, null);
-        }
-        defer if (graph == null) tensor.free(allocator, att_sm);
+        const att_sm = try graph.softmax(att_masked);
 
         // 11. 用注意力权重与 Value 相乘: weight * V
         // 形状变化: [B, nh, T, T] * [B, nh, T, hs] -> [B, nh, T, hs]
-        var y_4d = att_sm;
-        if (graph) |g| {
-            y_4d = try g.batchMatMul(att_sm, v);
-        } else {
-            y_4d = try att_sm.batchMatMul(v, allocator, null);
-        }
-        defer if (graph == null) tensor.free(allocator, y_4d);
+        const y_4d = try graph.batchMatMul(att_sm, v);
 
         core_scope.exit();
         core_scope_open = false;
 
         // 12. 将多头的输出转置回去，重新展平拼接成单头向量表示
         // 转置: [B, nh, T, hs] -> [B, T, nh, hs]
-        var y_trans = y_4d;
-        if (graph) |g| {
-            y_trans = try g.transposeND(y_4d, 1, 2);
-        } else {
-            y_trans = try y_4d.transpose(1, 2, allocator, null);
-        }
-        defer if (graph == null) tensor.free(allocator, y_trans);
+        const y_trans = try graph.transposeND(y_4d, 1, 2);
 
         // 整合形状为 3D: [B, T, nh * hs] = [B, T, C]
-        var y_3d = y_trans;
-        if (graph) |g| {
-            y_3d = try g.reshape(y_trans, &.{ B, T, C });
-        } else {
-            y_3d = try y_trans.reshape(&.{ B, T, C }, allocator, null);
-        }
-        defer if (graph == null) tensor.free(allocator, y_3d);
+        const y_3d = try graph.reshape(y_trans, &.{ B, T, C });
 
         // 13. 将输出展平为 2D，以便穿过最后的输出投影线性层 (c_proj)
         // 重塑: [B, T, C] -> [B*T, C]
-        var y_2d = y_3d;
-        if (graph) |g| {
-            y_2d = try g.reshape(y_3d, &.{ B * T, C });
-        } else {
-            y_2d = try y_3d.reshape(&.{ B * T, C }, allocator, null);
-        }
-        defer if (graph == null) tensor.free(allocator, y_2d);
+        const y_2d = try graph.reshape(y_3d, &.{ B * T, C });
 
         // 投影输出映射: [B*T, C] -> [B*T, C]
-        const out_2d = try self.c_proj.forward(allocator, graph, y_2d);
-        defer if (graph == null) tensor.free(allocator, out_2d);
+        const out_2d = try self.c_proj.forward(graph, y_2d);
 
         // 14. 恢复并输出最终的 3D 表示: [B, T, C]
-        if (graph) |g| {
-            return try g.reshape(out_2d, &.{ B, T, C });
-        } else {
-            return try out_2d.reshape(&.{ B, T, C }, allocator, null);
-        }
+        return try graph.reshape(out_2d, &.{ B, T, C });
     }
 
     /// 基于 KVCache 的单步增量自回归推理 (O(1) 增量 Key/Value 计算，O(T) 点积注意力)
@@ -1211,22 +917,17 @@ pub const CausalSelfAttention = struct {
         const groups = nh / n_kv;
         const kv_dim = n_kv * hs;
 
+        // 单步推理使用局部无梯度计算图承载中间张量，函数返回时整体释放
+        var step_g = autodiff.Graph.initNoGrad(allocator);
+        defer step_g.deinit();
+
         // 1. 获取 2D 输入 [B, C]
-        var x_2d = x;
-        var free_x_2d = false;
-        if (x.shape.len != 2) {
-            x_2d = try x.reshape(&.{ B, C }, allocator, null);
-            free_x_2d = true;
-        }
-        defer if (free_x_2d) tensor.free(allocator, x_2d);
+        const x_2d = if (x.shape.len != 2) try step_g.reshape(x, &.{ B, C }) else x;
 
         // 2. 投影当前 Token 的 Q, K, V
-        const q_2d = try self.q_attn.forward(allocator, null, x_2d);
-        defer tensor.free(allocator, q_2d);
-        const k_step = try self.k_attn.forward(allocator, null, x_2d);
-        defer tensor.free(allocator, k_step);
-        const v_step = try self.v_attn.forward(allocator, null, x_2d);
-        defer tensor.free(allocator, v_step);
+        const q_2d = try self.q_attn.forward(&step_g, x_2d);
+        const k_step = try self.k_attn.forward(&step_g, x_2d);
+        const v_step = try self.v_attn.forward(&step_g, x_2d);
 
         // 3. 写入 KVCache
         const t = cache.curr_len;
@@ -1245,12 +946,10 @@ pub const CausalSelfAttention = struct {
         const curr_len = cache.curr_len;
 
         // 4. 注意力计算：对当前 1 个 Query 与缓存中 [0..curr_len] 个 Key 计算点积
-        const y_2d = try tensor.zeros(allocator, &.{ B, C });
-        defer tensor.free(allocator, y_2d);
+        const y_2d = try step_g.zeros(&.{ B, C }, false);
 
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hs)));
-        const scores = try allocator.alloc(f32, curr_len);
-        defer allocator.free(scores);
+        const scores = try step_g.arenaAllocator().alloc(f32, curr_len);
 
         for (0..B) |b| {
             for (0..nh) |h| {
@@ -1292,13 +991,10 @@ pub const CausalSelfAttention = struct {
             }
         }
 
-        // 5. 投影输出
-        const out_proj = try self.c_proj.forward(allocator, null, y_2d);
-        if (x.shape.len == 3) {
-            defer tensor.free(allocator, out_proj);
-            return try out_proj.reshape(&.{ B, 1, C }, allocator, null);
-        }
-        return out_proj;
+        // 5. 投影输出，并拷贝到调用方分配器上 (局部计算图随函数返回释放)
+        const out_proj = try self.c_proj.forward(&step_g, y_2d);
+        const out_shape: []const usize = if (x.shape.len == 3) &.{ B, 1, C } else &.{ B, C };
+        return try tensor.array(allocator, out_shape, out_proj.data);
     }
 };
 
@@ -1485,16 +1181,11 @@ pub const MLALayer = struct {
         self.o_proj.zeroGrad();
     }
 
-    /// 全序列前向传播 (支持 Autograd 梯度回传与 Eager 模式)
-    pub fn forward(self: MLALayer, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    /// 全序列前向传播 (经由计算图执行，支持 Autograd 梯度回传)
+    pub fn forward(self: MLALayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         const B = if (is_3d) old_shape.dims[0] else 1;
@@ -1507,134 +1198,69 @@ pub const MLALayer = struct {
 
         var x_2d = x;
         if (is_3d) {
-            if (graph) |g| {
-                x_2d = try g.reshape(x, &.{ B * T, C });
-            } else {
-                x_2d = try x.reshape(&.{ B * T, C }, allocator, null);
-            }
+            x_2d = try graph.reshape(x, &.{ B * T, C });
         }
-        defer if (is_3d and graph == null) tensor.free(allocator, x_2d);
 
         // 1. 投影 Q, 潜在 c_kv, 解耦 RoPE Key k_r
-        const q_all = try self.q_proj.forward(allocator, graph, x_2d); // [B*T, nh * (hd + dr)]
-        defer if (graph == null) tensor.free(allocator, q_all);
+        const q_all = try self.q_proj.forward(graph, x_2d); // [B*T, nh * (hd + dr)]
 
-        const c_kv = try self.w_dkv.forward(allocator, graph, x_2d); // [B*T, d_c]
-        defer if (graph == null) tensor.free(allocator, c_kv);
+        const c_kv = try self.w_dkv.forward(graph, x_2d); // [B*T, d_c]
 
-        const k_r_2d = try self.w_kr.forward(allocator, graph, x_2d); // [B*T, d_r]
-        defer if (graph == null) tensor.free(allocator, k_r_2d);
+        const k_r_2d = try self.w_kr.forward(graph, x_2d); // [B*T, d_r]
 
         // 2. 上投影还原内容键 Kc 与内容值 Vc
-        const k_c_2d = try self.w_uk.forward(allocator, graph, c_kv); // [B*T, nh * hd]
-        defer if (graph == null) tensor.free(allocator, k_c_2d);
+        const k_c_2d = try self.w_uk.forward(graph, c_kv); // [B*T, nh * hd]
 
-        const v_c_2d = try self.w_uv.forward(allocator, graph, c_kv); // [B*T, nh * hd]
-        defer if (graph == null) tensor.free(allocator, v_c_2d);
+        const v_c_2d = try self.w_uv.forward(graph, c_kv); // [B*T, nh * hd]
 
         // 3. 重塑并转置为 4D 多头结构，对 Query 的 RoPE 子空间与共享 k_r 施加旋转位置编码
-        const q_4d = if (graph) |g| try g.reshape(q_all, &.{ B, T, nh, q_head_dim }) else try q_all.reshape(&.{ B, T, nh, q_head_dim }, allocator, null);
-        defer if (graph == null) tensor.free(allocator, q_4d);
-        const q_trans = if (graph) |g| try g.transposeND(q_4d, 1, 2) else try q_4d.transpose(1, 2, allocator, null);
-        defer if (graph == null) tensor.free(allocator, q_trans);
-        const q_rot = if (graph) |g| try g.ropeOffset(q_trans, 0, hd) else try q_trans.ropeOffset(0, hd, allocator, null);
-        defer if (graph == null) tensor.free(allocator, q_rot);
+        const q_4d = try graph.reshape(q_all, &.{ B, T, nh, q_head_dim });
+        const q_trans = try graph.transposeND(q_4d, 1, 2);
+        const q_rot = try graph.ropeOffset(q_trans, 0, hd);
 
-        const k_c_4d = if (graph) |g| try g.reshape(k_c_2d, &.{ B, T, nh, hd }) else try k_c_2d.reshape(&.{ B, T, nh, hd }, allocator, null);
-        defer if (graph == null) tensor.free(allocator, k_c_4d);
-        const k_c = if (graph) |g| try g.transposeND(k_c_4d, 1, 2) else try k_c_4d.transpose(1, 2, allocator, null);
-        defer if (graph == null) tensor.free(allocator, k_c);
+        const k_c_4d = try graph.reshape(k_c_2d, &.{ B, T, nh, hd });
+        const k_c = try graph.transposeND(k_c_4d, 1, 2);
 
-        const k_r_4d = if (graph) |g| try g.reshape(k_r_2d, &.{ B, 1, T, dr }) else try k_r_2d.reshape(&.{ B, 1, T, dr }, allocator, null);
-        defer if (graph == null) tensor.free(allocator, k_r_4d);
-        const k_r_rot = if (graph) |g| try g.rope(k_r_4d, 0) else try k_r_4d.rope(0, allocator, null);
-        defer if (graph == null) tensor.free(allocator, k_r_rot);
+        const k_r_4d = try graph.reshape(k_r_2d, &.{ B, 1, T, dr });
+        const k_r_rot = try graph.rope(k_r_4d, 0);
 
-        var k_r_heads = k_r_rot;
-        var free_k_r_heads = false;
-        if (nh > 1) {
-            if (graph) |g| {
-                k_r_heads = try g.repeatKV(k_r_rot, nh);
-            } else {
-                const rep = try tensor.zeros(allocator, &.{ B, nh, T, dr });
-                const head_elems = T * dr;
-                for (0..B) |b| {
-                    const src = k_r_rot.data[b * head_elems .. (b + 1) * head_elems];
-                    for (0..nh) |h| {
-                        const dst = rep.data[(b * nh + h) * head_elems .. (b * nh + h + 1) * head_elems];
-                        @memcpy(dst, src);
-                    }
-                }
-                k_r_heads = rep;
-                free_k_r_heads = true;
-            }
-        }
-        defer if (free_k_r_heads) tensor.free(allocator, k_r_heads);
+        const k_r_heads = if (nh > 1) try graph.repeatKV(k_r_rot, nh) else k_r_rot;
 
-        const k_full = if (graph) |g| try g.concat(&.{ k_c, k_r_heads }, 3) else try tensor.concat(allocator, &.{ k_c, k_r_heads }, 3, null);
-        defer if (graph == null) tensor.free(allocator, k_full);
+        const k_full = try graph.concat(&.{ k_c, k_r_heads }, 3);
 
-        const v_4d = if (graph) |g| try g.reshape(v_c_2d, &.{ B, T, nh, hd }) else try v_c_2d.reshape(&.{ B, T, nh, hd }, allocator, null);
-        defer if (graph == null) tensor.free(allocator, v_4d);
-        const v = if (graph) |g| try g.transposeND(v_4d, 1, 2) else try v_4d.transpose(1, 2, allocator, null);
-        defer if (graph == null) tensor.free(allocator, v);
+        const v_4d = try graph.reshape(v_c_2d, &.{ B, T, nh, hd });
+        const v = try graph.transposeND(v_4d, 1, 2);
 
         // 4. 缩放点积因果注意力: Softmax((Q * K^T) / sqrt(hd + dr) + M) * V
-        const k_t = if (graph) |g| try g.transposeND(k_full, 2, 3) else try k_full.transpose(2, 3, allocator, null);
-        defer if (graph == null) tensor.free(allocator, k_t);
+        const k_t = try graph.transposeND(k_full, 2, 3);
 
-        const att = if (graph) |g| try g.batchMatMul(q_rot, k_t) else try q_rot.batchMatMul(k_t, allocator, null);
-        defer if (graph == null) tensor.free(allocator, att);
+        const att = try graph.batchMatMul(q_rot, k_t);
 
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(q_head_dim)));
-        const att_scaled = if (graph) |g| try g.mulScalar(att, scale) else try att.mulScalar(scale, allocator, null);
-        defer if (graph == null) tensor.free(allocator, att_scaled);
+        const att_scaled = try graph.mulScalar(att, scale);
 
-        const mask_data = try allocator.alloc(f32, T * T);
-        defer allocator.free(mask_data);
-        @memset(mask_data, 0.0);
+        const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
+        mask_node.is_buffer = true;
         for (0..T) |i| {
-            for (0..T) |j| {
-                if (j > i) {
-                    mask_data[i * T + j] = -1e9;
-                }
+            for (i + 1..T) |j| {
+                mask_node.data[i * T + j] = -1e9;
             }
         }
-        const mask = try tensor.array(allocator, &.{ 1, 1, T, T }, mask_data);
-        defer tensor.free(allocator, mask);
+        const att_masked = try graph.add(att_scaled, mask_node);
 
-        var att_masked = att_scaled;
-        if (graph) |g| {
-            const mask_node = try g.tensorNDWithData(&.{ 1, 1, T, T }, mask_data, false);
-            mask_node.is_buffer = true;
-            att_masked = try g.add(att_scaled, mask_node);
-        } else {
-            att_masked = try att_scaled.add(mask, allocator, null);
-        }
-        defer if (graph == null) tensor.free(allocator, att_masked);
+        const att_sm = try graph.softmax(att_masked);
 
-        const att_sm = if (graph) |g| try g.softmax(att_masked) else try att_masked.softmax(allocator, null);
-        defer if (graph == null) tensor.free(allocator, att_sm);
-
-        const y_4d = if (graph) |g| try g.batchMatMul(att_sm, v) else try att_sm.batchMatMul(v, allocator, null);
-        defer if (graph == null) tensor.free(allocator, y_4d);
+        const y_4d = try graph.batchMatMul(att_sm, v);
 
         // 5. 合并多头并经输出投影 o_proj 输出特征
-        const y_trans = if (graph) |g| try g.transposeND(y_4d, 1, 2) else try y_4d.transpose(1, 2, allocator, null);
-        defer if (graph == null) tensor.free(allocator, y_trans);
+        const y_trans = try graph.transposeND(y_4d, 1, 2);
 
-        const y_2d = if (graph) |g| try g.reshape(y_trans, &.{ B * T, nh * hd }) else try y_trans.reshape(&.{ B * T, nh * hd }, allocator, null);
-        defer if (graph == null) tensor.free(allocator, y_2d);
+        const y_2d = try graph.reshape(y_trans, &.{ B * T, nh * hd });
 
-        const out_2d = try self.o_proj.forward(allocator, graph, y_2d);
+        const out_2d = try self.o_proj.forward(graph, y_2d);
 
         if (is_3d) {
-            if (graph) |g| {
-                return try g.reshape(out_2d, &.{ B, T, C });
-            } else {
-                defer tensor.free(allocator, out_2d);
-                return try out_2d.reshape(&.{ B, T, C }, allocator, null);
-            }
+            return try graph.reshape(out_2d, &.{ B, T, C });
         }
 
         return out_2d;
@@ -1650,23 +1276,17 @@ pub const MLALayer = struct {
         const dc = self.d_c;
         const dr = self.d_r;
 
-        var x_2d = x;
-        var free_x_2d = false;
-        if (x.shape.len != 2) {
-            x_2d = try x.reshape(&.{ B, C }, allocator, null);
-            free_x_2d = true;
-        }
-        defer if (free_x_2d) tensor.free(allocator, x_2d);
+        // 单步推理使用局部无梯度计算图承载中间张量，函数返回时整体释放
+        var step_g = autodiff.Graph.initNoGrad(allocator);
+        defer step_g.deinit();
+        const step_alloc = step_g.arenaAllocator();
+
+        const x_2d = if (x.shape.len != 2) try step_g.reshape(x, &.{ B, C }) else x;
 
         // 1. 投影当前 Token 的 Q, c_kv 与 k_r
-        const q_all = try self.q_proj.forward(allocator, null, x_2d);
-        defer tensor.free(allocator, q_all);
-
-        const c_kv_step = try self.w_dkv.forward(allocator, null, x_2d);
-        defer tensor.free(allocator, c_kv_step);
-
-        const k_r_step = try self.w_kr.forward(allocator, null, x_2d);
-        defer tensor.free(allocator, k_r_step);
+        const q_all = try self.q_proj.forward(&step_g, x_2d);
+        const c_kv_step = try self.w_dkv.forward(&step_g, x_2d);
+        const k_r_step = try self.w_kr.forward(&step_g, x_2d);
 
         // 2. 施加 RoPE 并写入 MLACache
         const t = cache.curr_len;
@@ -1686,17 +1306,11 @@ pub const MLALayer = struct {
 
         // 3. 矩阵吸收计算注意力
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hd + dr)));
-        const y_concat = try allocator.alloc(f32, B * nh * hd);
-        defer allocator.free(y_concat);
-
-        const scores = try allocator.alloc(f32, curr_len);
-        defer allocator.free(scores);
-
-        const q_absorbed = try allocator.alloc(f32, dc);
-        defer allocator.free(q_absorbed);
-
-        const u_latent = try allocator.alloc(f32, dc);
-        defer allocator.free(u_latent);
+        const y_tensor = try step_g.zeros(&.{ B, nh * hd }, false);
+        const y_concat = y_tensor.data;
+        const scores = try step_alloc.alloc(f32, curr_len);
+        const q_absorbed = try step_alloc.alloc(f32, dc);
+        const u_latent = try step_alloc.alloc(f32, dc);
 
         const q_stride = hd + dr;
 
@@ -1769,16 +1383,10 @@ pub const MLALayer = struct {
             }
         }
 
-        // 4. 投影输出 o_proj
-        const y_tensor = try tensor.array(allocator, &.{ B, nh * hd }, y_concat);
-        defer tensor.free(allocator, y_tensor);
-
-        const out_proj = try self.o_proj.forward(allocator, null, y_tensor);
-        if (x.shape.len == 3) {
-            defer tensor.free(allocator, out_proj);
-            return try out_proj.reshape(&.{ B, 1, C }, allocator, null);
-        }
-        return out_proj;
+        // 4. 投影输出 o_proj，并拷贝到调用方分配器上 (局部计算图随函数返回释放)
+        const out_proj = try self.o_proj.forward(&step_g, y_tensor);
+        const out_shape: []const usize = if (x.shape.len == 3) &.{ B, 1, C } else &.{ B, C };
+        return try tensor.array(allocator, out_shape, out_proj.data);
     }
 };
 
@@ -1881,48 +1489,34 @@ pub const TransformerBlock = struct {
     }
 
     /// 前向传播流程：x -> Block(x) -> out
-    pub fn forward(self: TransformerBlock, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: TransformerBlock, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
         // 1. 第一条支路: RMSNorm -> Attention
-        const x_norm1 = try self.ln_1.forward(allocator, graph, x);
-        defer if (graph == null) tensor.free(allocator, x_norm1);
+        const x_norm1 = try self.ln_1.forward(graph, x);
 
-        const x_attn = try self.attn.forward(allocator, graph, x_norm1);
-        defer if (graph == null) tensor.free(allocator, x_attn);
+        const x_attn = try self.attn.forward(graph, x_norm1);
 
         // 2. 第一条残差混合: x1 = x_l + Attention(RMSNorm(x_l))
-        const x1 = if (graph) |g| try g.add(x, x_attn) else try x.add(x_attn, allocator, null);
-        defer if (graph == null) tensor.free(allocator, x1);
-        if (graph != null and self.name != null) {
-            x1.setNameFormatted("{s}.residual_attn", .{self.name.?});
-            _ = graph.?.setModuleFormula(x1.name.?, "x_1 = x_l + \\text{Attention}(\\text{RMSNorm}(x_l))") catch {};
+        const x1 = try graph.add(x, x_attn);
+        if (self.name) |mod_name| {
+            x1.setNameFormatted("{s}.residual_attn", .{mod_name});
+            try graph.setModuleFormula(x1.name.?, "x_1 = x_l + \\text{Attention}(\\text{RMSNorm}(x_l))");
         }
 
         // 3. 第二条支路: RMSNorm -> MLP
-        const x_norm2 = try self.ln_2.forward(allocator, graph, x1);
-        defer if (graph == null) tensor.free(allocator, x_norm2);
+        const x_norm2 = try self.ln_2.forward(graph, x1);
 
-        const x_mlp = try self.mlp.forward(allocator, graph, x_norm2);
-        defer if (graph == null) tensor.free(allocator, x_mlp);
+        const x_mlp = try self.mlp.forward(graph, x_norm2);
 
         // 4. 第二条残差混合: out = x1 + MLP(RMSNorm(x1))
-        if (graph) |g| {
-            const out = try g.add(x1, x_mlp);
-            if (self.name) |mod_name| {
-                out.setNameFormatted("{s}.residual_mlp", .{mod_name});
-                _ = g.setModuleFormula(out.name.?, "x_{l+1} = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))") catch {};
-            }
-            return out;
-        } else {
-            return try x1.add(x_mlp, allocator, null);
+        const out = try graph.add(x1, x_mlp);
+        if (self.name) |mod_name| {
+            out.setNameFormatted("{s}.residual_mlp", .{mod_name});
+            try graph.setModuleFormula(out.name.?, "x_{l+1} = x_1 + \\text{MLP}(\\text{RMSNorm}(x_1))");
         }
+        return out;
     }
 };
 
@@ -2024,32 +1618,18 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
         }
 
         /// 解码器主干网络的前向传播流程
-        pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-            const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+            const module_scope = try graph.enterModule(self.name, self.module_type);
             defer module_scope.exit();
-            if (graph) |g| {
-                if (self.name) |n| {
-                    _ = g.setModuleFormula(n, formula) catch {};
-                    _ = g.registerModuleType(n, self.module_type) catch {};
-                }
-            }
+            if (self.name) |n| try graph.setModuleFormula(n, formula);
             var current_x = x;
             // 依次贯穿每一层 Block
             for (self.h) |layer| {
-                const next_x = try layer.forward(allocator, graph, current_x);
-                // 释放 Eager 模式下的中间隐特征 Tensor 内存，避免泄漏
-                if (graph == null and current_x != x) {
-                    tensor.free(allocator, current_x);
-                }
-                current_x = next_x;
+                current_x = try layer.forward(graph, current_x);
             }
 
             // 执行最后一层 RMSNorm 映射输出
-            const out = try self.ln_f.forward(allocator, graph, current_x);
-            if (graph == null and current_x != x) {
-                tensor.free(allocator, current_x);
-            }
-            return out;
+            return try self.ln_f.forward(graph, current_x);
         }
     };
 }
@@ -2132,7 +1712,7 @@ pub fn GPT(comptime config: GPTConfig) type {
             // 初始化 Token 嵌入矩阵 [vocab_size, n_embd]
             const token_embedding = try Embedding.init(allocator, config.vocab_size, config.n_embd, random);
             errdefer token_embedding.deinit(allocator);
-            
+
             // 初始化位置嵌入矩阵 [block_size, n_embd]
             const position_embedding = try Embedding.init(allocator, config.block_size, config.n_embd, random);
             errdefer position_embedding.deinit(allocator);
@@ -2179,83 +1759,50 @@ pub fn GPT(comptime config: GPTConfig) type {
         /// 前向推理传播流程
         /// 输入 x 为包含 Token ID 的 2D 张量（支持 `*Tensor` 或 `*GenericTensor(IntT)`），形状为 [B, T]
         /// 输出为未归一化的预测对数 (Logits)，形状为 3D: [B, T, vocab_size]
-        pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: anytype) !*Tensor {
-            const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: anytype) !*Tensor {
+            const module_scope = try graph.enterModule(self.name, self.module_type);
             defer module_scope.exit();
-            if (graph) |g| {
-                if (self.name) |n| {
-                    _ = g.setModuleFormula(n, formula) catch {};
-                    _ = g.registerModuleType(n, self.module_type) catch {};
-                }
-            }
+            if (self.name) |n| try graph.setModuleFormula(n, formula);
             const B = x.shape.dims[0];
             const T = x.shape.dims[1];
 
             // 1. 获取 Token 嵌入向量: [B, T] -> [B, T, n_embd]
-            const tok_emb = try self.token_embedding.forward(allocator, graph, x);
-            defer if (graph == null) tensor.free(allocator, tok_emb);
+            const tok_emb = try self.token_embedding.forward(graph, x);
 
             // 2. 生成对应的时间/位置索引 [0, 1, 2, ... T-1]，并将其转换为 2D 位置 Tensor [B, T]
-            const pos_data = try allocator.alloc(f32, B * T);
-            defer allocator.free(pos_data);
+            const pos_node = try graph.tensorND(&.{ B, T }, false);
             for (0..B) |b| {
                 for (0..T) |t| {
-                    pos_data[b * T + t] = @as(f32, @floatFromInt(t));
+                    pos_node.data[b * T + t] = @as(f32, @floatFromInt(t));
                 }
             }
-            const pos_tensor = try tensor.array(allocator, &.{ B, T }, pos_data);
-            defer tensor.free(allocator, pos_tensor);
-
-            var pos_node = pos_tensor;
-            if (graph) |g| {
-                pos_node = try g.tensorNDWithData(&.{ B, T }, pos_data, false);
-                // 位置索引由输入形状在模型内部生成，属于 GPT 自身的常量缓冲区，而非模型输入
-                pos_node.is_buffer = true;
-                if (self.name) |mod_name| {
-                    pos_node.setNameFormatted("{s}.pos_indices", .{mod_name});
-                }
+            // 位置索引由输入形状在模型内部生成，属于 GPT 自身的常量缓冲区，而非模型输入
+            pos_node.is_buffer = true;
+            if (self.name) |mod_name| {
+                pos_node.setNameFormatted("{s}.pos_indices", .{mod_name});
             }
 
             // 3. 获取对应的 Learned 位置嵌入向量: [B, T] -> [B, T, n_embd]
-            const pos_emb = try self.position_embedding.forward(allocator, graph, pos_node);
-            defer if (graph == null) tensor.free(allocator, pos_emb);
+            const pos_emb = try self.position_embedding.forward(graph, pos_node);
 
             // 4. 将 Token 嵌入和位置嵌入进行求和融合，作为初始隐藏输入: h = tok_emb + pos_emb
-            var h_x = tok_emb;
-            if (graph) |g| {
-                h_x = try g.add(tok_emb, pos_emb);
-                if (self.name) |mod_name| {
-                    h_x.setNameFormatted("{s}.embeddings_sum", .{mod_name});
-                }
-            } else {
-                h_x = try tok_emb.add(pos_emb, allocator, null);
+            const h_x = try graph.add(tok_emb, pos_emb);
+            if (self.name) |mod_name| {
+                h_x.setNameFormatted("{s}.embeddings_sum", .{mod_name});
             }
-            defer if (graph == null) tensor.free(allocator, h_x);
 
             // 5. 将混合后的输入送进层叠的 Decoder 主干网络中依次计算
             // 输出形状保持为: [B, T, n_embd]
-            const decoder_out = try self.decoder.forward(allocator, graph, h_x);
-            defer if (graph == null) tensor.free(allocator, decoder_out);
+            const decoder_out = try self.decoder.forward(graph, h_x);
 
             // 6. 将输出展平为 2D，以便进行最终分类头的全连接投影计算: [B, T, n_embd] -> [B*T, n_embd]
-            var ln_x_2d = decoder_out;
-            if (graph) |g| {
-                ln_x_2d = try g.reshape(decoder_out, &.{ B * T, config.n_embd });
-            } else {
-                ln_x_2d = try decoder_out.reshape(&.{ B * T, config.n_embd }, allocator, null);
-            }
-            defer if (graph == null) tensor.free(allocator, ln_x_2d);
+            const ln_x_2d = try graph.reshape(decoder_out, &.{ B * T, config.n_embd });
 
             // 7. 进行投影以获得词表空间未归一化的分类 Logits: [B*T, n_embd] -> [B*T, vocab_size]
-            const logits_2d = try self.lm_head.forward(allocator, graph, ln_x_2d);
-            defer if (graph == null) tensor.free(allocator, logits_2d);
+            const logits_2d = try self.lm_head.forward(graph, ln_x_2d);
 
             // 8. 将形状重塑还原成 3D 形式返回: [B, T, vocab_size]
-            if (graph) |g| {
-                return try g.reshape(logits_2d, &.{ B, T, config.vocab_size });
-            } else {
-                return try logits_2d.reshape(&.{ B, T, config.vocab_size }, allocator, null);
-            }
+            return try graph.reshape(logits_2d, &.{ B, T, config.vocab_size });
         }
     };
 }
@@ -2405,40 +1952,25 @@ pub const LoRALinear = struct {
     }
 
     /// 前向传播：Y = X * W_0 + (X * A) * B * scaling (+ bias)
-    pub fn forward(self: LoRALinear, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: LoRALinear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
         // 1. 冻结主干前向：x * W_0
-        const base_out = try x.matmul(self.weight, allocator, graph);
-        defer if (graph == null) tensor.free(allocator, base_out);
+        const base_out = try graph.matmul(x, self.weight);
 
         // 2. LoRA 旁路计算：x * A -> [..., r]
-        const lora_xa = try x.matmul(self.lora_a, allocator, graph);
-        defer if (graph == null) tensor.free(allocator, lora_xa);
+        const lora_xa = try graph.matmul(x, self.lora_a);
 
         // (x * A) * B -> [..., out_features]
-        const lora_xab = try lora_xa.matmul(self.lora_b, allocator, graph);
-        defer if (graph == null) tensor.free(allocator, lora_xab);
+        const lora_xab = try graph.matmul(lora_xa, self.lora_b);
 
         // 缩放增量：lora_xab * scaling
-        const scaled_lora = if (graph) |g| try g.mulScalar(lora_xab, self.scaling) else try lora_xab.mulScalar(self.scaling, allocator, null);
-        defer if (graph == null) tensor.free(allocator, scaled_lora);
+        const scaled_lora = try graph.mulScalar(lora_xab, self.scaling);
 
         // 累加主干与旁路：base_out + scaled_lora
-        var out = if (graph) |g| try g.add(base_out, scaled_lora) else try base_out.add(scaled_lora, allocator, null);
-
-        if (self.bias) |b| {
-            const out_with_bias = if (graph) |g| try g.addBias(out, b) else try out.addBias(b, allocator, null);
-            if (graph == null) tensor.free(allocator, out);
-            out = out_with_bias;
-        }
-
+        const out = try graph.add(base_out, scaled_lora);
+        if (self.bias) |b| return try graph.addBias(out, b);
         return out;
     }
 

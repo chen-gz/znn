@@ -346,7 +346,7 @@ pub fn runGemmBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator)
 
         pub fn run(self: *@This()) !void {
             _ = self.arena.reset(.retain_capacity);
-            const C = try self.A.matmul(self.B, self.arena.allocator(), null);
+            const C = try self.A.matmul(self.B, self.arena.allocator());
             std.mem.doNotOptimizeAway(C.data.ptr);
         }
     };
@@ -412,7 +412,7 @@ pub fn runTensorOpBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloca
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                const C = try self.A.add(self.B, self.arena.allocator(), null);
+                const C = try self.A.add(self.B, self.arena.allocator());
                 std.mem.doNotOptimizeAway(C.data.ptr);
             }
         };
@@ -462,7 +462,7 @@ pub fn runTensorOpBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloca
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                const C = try self.A.mul(self.B, self.arena.allocator(), null);
+                const C = try self.A.mul(self.B, self.arena.allocator());
                 std.mem.doNotOptimizeAway(C.data.ptr);
             }
         };
@@ -506,7 +506,7 @@ pub fn runTensorOpBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloca
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                const C = try self.A.add(self.B, self.arena.allocator(), null);
+                const C = try self.A.add(self.B, self.arena.allocator());
                 std.mem.doNotOptimizeAway(C.data.ptr);
             }
         };
@@ -550,7 +550,7 @@ pub fn runTensorOpBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloca
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                const C = try self.A.add(self.B, self.arena.allocator(), null);
+                const C = try self.A.add(self.B, self.arena.allocator());
                 std.mem.doNotOptimizeAway(C.data.ptr);
             }
         };
@@ -587,7 +587,7 @@ pub fn runTensorOpBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloca
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                const B = try self.A.transpose(0, 1, self.arena.allocator(), null);
+                const B = try self.A.transpose(0, 1, self.arena.allocator());
                 std.mem.doNotOptimizeAway(B.data.ptr);
             }
         };
@@ -623,7 +623,7 @@ pub fn runTensorOpBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloca
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                const B = try self.A.transpose(1, 2, self.arena.allocator(), null);
+                const B = try self.A.transpose(1, 2, self.arena.allocator());
                 std.mem.doNotOptimizeAway(B.data.ptr);
             }
         };
@@ -670,10 +670,10 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
             _ = self.arena.reset(.retain_capacity);
             const alloc = self.arena.allocator();
             const out = switch (self.act_type) {
-                .relu => try self.A.relu(alloc, null),
-                .silu => try self.A.silu(alloc, null),
-                .gelu => try self.A.gelu(alloc, null),
-                .sigmoid => try self.A.sigmoid(alloc, null),
+                .relu => try self.A.relu(alloc),
+                .silu => try self.A.silu(alloc),
+                .gelu => try self.A.gelu(alloc),
+                .sigmoid => try self.A.sigmoid(alloc),
             };
             std.mem.doNotOptimizeAway(out.data.ptr);
         }
@@ -718,7 +718,7 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                const out = try self.A.softmax(self.arena.allocator(), null);
+                const out = try self.A.softmax(self.arena.allocator());
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
         };
@@ -762,7 +762,7 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 32, 512 }, self.x_data, true);
-                const out = try self.ln.forward(alloc, &graph, x);
+                const out = try self.ln.forward(&graph, x);
                 @memset(out.grad, 1.0);
                 try graph.backward(out);
                 std.mem.doNotOptimizeAway(x.grad.ptr);
@@ -807,7 +807,7 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 32, 512 }, self.x_data, true);
-                const out = try self.rms.forward(alloc, &graph, x);
+                const out = try self.rms.forward(&graph, x);
                 @memset(out.grad, 1.0);
                 try graph.backward(out);
                 std.mem.doNotOptimizeAway(x.grad.ptr);
@@ -853,7 +853,9 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                const out = try self.linear.forward(self.arena.allocator(), null, self.x);
+                var out_graph = autodiff.Graph.initNoGrad(self.arena.allocator());
+                defer out_graph.deinit();
+                const out = try self.linear.forward(&out_graph, self.x);
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
         };
@@ -897,7 +899,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 64, 784 }, self.x_data, true);
-                const out = try self.linear.forward(alloc, &graph, x);
+                const out = try self.linear.forward(&graph, x);
                 @memset(out.grad, 1.0);
                 self.linear.zeroGrad();
                 try graph.backward(out);
@@ -940,7 +942,9 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                const out = try self.conv.forward(self.arena.allocator(), null, self.x);
+                var out_graph = autodiff.Graph.initNoGrad(self.arena.allocator());
+                defer out_graph.deinit();
+                const out = try self.conv.forward(&out_graph, self.x);
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
         };
@@ -986,7 +990,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 32, 1, 28, 28 }, self.x_data, true);
-                const out = try self.conv.forward(alloc, &graph, x);
+                const out = try self.conv.forward(&graph, x);
                 @memset(out.grad, 1.0);
                 self.conv.zeroGrad();
                 try graph.backward(out);
@@ -1029,7 +1033,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 32, 16, 26, 26 }, self.x_data, true);
-                const out = try x.maxpool2d(2, 2, alloc, &graph);
+                const out = try graph.maxpool2d(x, 2, 2);
                 @memset(out.grad, 1.0);
                 try graph.backward(out);
                 std.mem.doNotOptimizeAway(x.grad.ptr);
@@ -1075,7 +1079,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
-                const out = try self.swiglu.forward(alloc, &graph, x);
+                const out = try self.swiglu.forward(&graph, x);
                 @memset(out.grad, 1.0);
                 self.swiglu.zeroGrad();
                 try graph.backward(out);
@@ -1117,7 +1121,9 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                const out = try self.attn.forward(self.arena.allocator(), null, self.x);
+                var out_graph = autodiff.Graph.initNoGrad(self.arena.allocator());
+                defer out_graph.deinit();
+                const out = try self.attn.forward(&out_graph, self.x);
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
         };
@@ -1161,7 +1167,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
-                const out = try self.attn.forward(alloc, &graph, x);
+                const out = try self.attn.forward(&graph, x);
                 @memset(out.grad, 1.0);
                 self.attn.zeroGrad();
                 try graph.backward(out);
@@ -1208,7 +1214,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
-                const out = try self.block.forward(alloc, &graph, x);
+                const out = try self.block.forward(&graph, x);
                 @memset(out.grad, 1.0);
                 self.block.zeroGrad();
                 try graph.backward(out);
@@ -1297,11 +1303,11 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 @memcpy(x.data, self.x_data);
 
                 // Forward
-                const h1 = try self.fc1.forward(alloc, &graph, x);
-                const a1 = try h1.relu(alloc, &graph);
-                const h2 = try self.fc2.forward(alloc, &graph, a1);
-                const a2 = try h2.relu(alloc, &graph);
-                const logits = try self.fc3.forward(alloc, &graph, a2);
+                const h1 = try self.fc1.forward(&graph, x);
+                const a1 = try graph.relu(h1);
+                const h2 = try self.fc2.forward(&graph, a1);
+                const a2 = try graph.relu(h2);
+                const logits = try self.fc3.forward(&graph, a2);
 
                 // Loss
                 const loss = try graph.softmaxCrossEntropy(logits, &self.targets);
@@ -1394,25 +1400,25 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 const x = try graph.tensor(32, 784, false);
                 @memcpy(x.data, self.x_data);
 
-                const x_reshaped = try x.reshape(&.{ 32, 1, 28, 28 }, alloc, &graph);
+                const x_reshaped = try graph.reshape(x, &.{ 32, 1, 28, 28 });
 
                 // Layer 1
-                const x1 = try self.conv1.forward(alloc, &graph, x_reshaped);
-                const a1 = try x1.relu(alloc, &graph);
-                const p1 = try a1.maxpool2d(2, 2, alloc, &graph);
+                const x1 = try self.conv1.forward(&graph, x_reshaped);
+                const a1 = try graph.relu(x1);
+                const p1 = try graph.maxpool2d(a1, 2, 2);
 
                 // Layer 2
-                const x2 = try self.conv2.forward(alloc, &graph, p1);
-                const a2 = try x2.relu(alloc, &graph);
-                const p2 = try a2.maxpool2d(2, 2, alloc, &graph);
+                const x2 = try self.conv2.forward(&graph, p1);
+                const a2 = try graph.relu(x2);
+                const p2 = try graph.maxpool2d(a2, 2, 2);
 
                 // Layer 3
-                const x3 = try self.conv3.forward(alloc, &graph, p2);
-                const a3 = try x3.relu(alloc, &graph);
+                const x3 = try self.conv3.forward(&graph, p2);
+                const a3 = try graph.relu(x3);
 
                 // Flatten -> Linear
-                const flat = try a3.reshape(&.{ 32, 144 }, alloc, &graph);
-                const logits = try self.fc1.forward(alloc, &graph, flat);
+                const flat = try graph.reshape(a3, &.{ 32, 144 });
+                const logits = try self.fc1.forward(&graph, flat);
 
                 // Loss
                 const loss = try graph.softmaxCrossEntropy(logits, &self.targets);
@@ -1479,7 +1485,7 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
-                const out = try self.block.forward(alloc, &graph, x);
+                const out = try self.block.forward(&graph, x);
 
                 @memset(out.grad, 1.0);
                 self.block.zeroGrad();

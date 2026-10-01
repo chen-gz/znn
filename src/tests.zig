@@ -645,7 +645,7 @@ test "End-to-End LLM Pipeline integration demo" {
     const x = try graph.tensorND(&.{ 2, 4, 8 }, true);
     @memset(x.data, 0.1);
 
-    const out = try swiglu.forward(allocator, &graph, x);
+    const out = try swiglu.forward(&graph, x);
     try std.testing.expectEqualSlices(usize, &.{ 2, 4, 8 }, out.shape.dims[0..out.shape.len]);
 
     @memset(out.grad, 1.0);
@@ -768,7 +768,7 @@ test "GQA CausalSelfAttention and KVCache forwardInference" {
         v.* = @as(f32, @floatFromInt(i % 10)) * 0.1;
     }
 
-    const y = try gqa_attn.forward(allocator, &graph, x_node);
+    const y = try gqa_attn.forward(&graph, x_node);
     try std.testing.expectEqualSlices(usize, &.{ B, T, n_embd }, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
@@ -790,8 +790,9 @@ test "GQA CausalSelfAttention and KVCache forwardInference" {
     defer tensor.free(allocator, x_eager);
     @memcpy(x_eager.data, x_node.data);
 
-    const y_eager = try gqa_attn.forward(allocator, null, x_eager);
-    defer tensor.free(allocator, y_eager);
+    var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_eager_graph.deinit();
+    const y_eager = try gqa_attn.forward(&y_eager_graph, x_eager);
     try std.testing.expectEqualSlices(usize, &.{ B, T, n_embd }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     // 3. Test KVCache forwardInference (3 autoregressive steps)
@@ -919,8 +920,9 @@ test "MoELayer Top-K routing and autograd" {
         v.* = @as(f32, @floatFromInt(i % 5)) * 0.2;
     }
 
-    const y_eager = try moe.forward(allocator, null, x_eager);
-    defer tensor.free(allocator, y_eager);
+    var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_eager_graph.deinit();
+    const y_eager = try moe.forward(&y_eager_graph, x_eager);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, dim }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     // 2. Autograd Graph mode test on 3D input [2, 3, 8]
@@ -930,7 +932,7 @@ test "MoELayer Top-K routing and autograd" {
     const x_node = try graph.tensorND(&.{ 2, 3, dim }, true);
     @memcpy(x_node.data, x_eager.data);
 
-    const y = try moe.forward(allocator, &graph, x_node);
+    const y = try moe.forward(&graph, x_node);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, dim }, y.shape.dims[0..y.shape.len]);
 
     // Backward pass
@@ -982,8 +984,9 @@ test "MLALayer with MLACache matrix absorption inference" {
         v.* = @as(f32, @floatFromInt(i % 7)) * 0.1;
     }
 
-    const y_eager = try mla.forward(allocator, null, x_eager);
-    defer tensor.free(allocator, y_eager);
+    var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_eager_graph.deinit();
+    const y_eager = try mla.forward(&y_eager_graph, x_eager);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, dim }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     // 2. Autograd Graph mode full forward & backward
@@ -993,7 +996,7 @@ test "MLALayer with MLACache matrix absorption inference" {
     const x_node = try graph.tensorND(&.{ 2, 3, dim }, true);
     @memcpy(x_node.data, x_eager.data);
 
-    const y = try mla.forward(allocator, &graph, x_node);
+    const y = try mla.forward(&graph, x_node);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, dim }, y.shape.dims[0..y.shape.len]);
 
     for (y_eager.data, y.data) |ve, vg| {
@@ -1036,8 +1039,9 @@ test "MLALayer with MLACache matrix absorption inference" {
             seq_x.data[step * dim + i] = @as(f32, @floatFromInt(step + i)) * 0.05;
         }
     }
-    const full_out = try mla.forward(allocator, null, seq_x);
-    defer tensor.free(allocator, full_out);
+    var full_out_graph = autodiff.Graph.initNoGrad(allocator);
+    defer full_out_graph.deinit();
+    const full_out = try mla.forward(&full_out_graph, seq_x);
 
     for (0..3) |step| {
         const token_x = try tensor.zeros(allocator, &.{ 1, 1, dim });
@@ -1085,8 +1089,9 @@ test "ConvTranspose2D eager and autograd backward" {
     defer tensor.free(allocator, x_eager);
     @memcpy(x_eager.data, &[_]f32{ 1.0, 2.0, 3.0, 4.0 });
 
-    const y_eager = try conv_t.forward(allocator, null, x_eager);
-    defer tensor.free(allocator, y_eager);
+    var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_eager_graph.deinit();
+    const y_eager = try conv_t.forward(&y_eager_graph, x_eager);
     try std.testing.expectEqualSlices(usize, &.{ 1, 2, 4, 4 }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     // 2. Autograd Graph mode
@@ -1096,7 +1101,7 @@ test "ConvTranspose2D eager and autograd backward" {
     const x_node = try graph.tensorND(&.{ 1, in_channels, 2, 2 }, true);
     @memcpy(x_node.data, x_eager.data);
 
-    const y = try conv_t.forward(allocator, &graph, x_node);
+    const y = try conv_t.forward(&graph, x_node);
     try std.testing.expectEqualSlices(usize, &.{ 1, 2, 4, 4 }, y.shape.dims[0..y.shape.len]);
 
     // Check numerical match between eager and graph forward
@@ -1140,8 +1145,9 @@ test "ConvTranspose2D eager and autograd backward" {
     defer tensor.free(allocator, x_up);
     @memset(x_up.data, 1.0);
 
-    const y_up = try upsample_conv.forward(allocator, null, x_up);
-    defer tensor.free(allocator, y_up);
+    var y_up_graph = autodiff.Graph.initNoGrad(allocator);
+    defer y_up_graph.deinit();
+    const y_up = try upsample_conv.forward(&y_up_graph, x_up);
     // H_out = (3 - 1) * 2 + 4 - 2 = 6, W_out = 6
     try std.testing.expectEqualSlices(usize, &.{ 1, 1, 6, 6 }, y_up.shape.dims[0..y_up.shape.len]);
 }
@@ -1173,12 +1179,10 @@ test "GAN adversarial training step" {
             self.l1.zeroGrad();
             self.l2.zeroGrad();
         }
-        pub fn forward(self: *@This(), alloc: std.mem.Allocator, g: ?*autodiff.Graph, z: *tensor.Tensor) !*tensor.Tensor {
-            const h = try self.l1.forward(alloc, g, z);
-            defer if (g == null) tensor.free(alloc, h);
-            const a = try self.act.forward(alloc, g, h);
-            defer if (g == null) tensor.free(alloc, a);
-            return try self.l2.forward(alloc, g, a);
+        pub fn forward(self: *@This(), g: *autodiff.Graph, z: *tensor.Tensor) !*tensor.Tensor {
+            const h = try self.l1.forward(g, z);
+            const a = try self.act.forward(g, h);
+            return try self.l2.forward(g, a);
         }
     };
 
@@ -1203,12 +1207,10 @@ test "GAN adversarial training step" {
             self.l1.zeroGrad();
             self.l2.zeroGrad();
         }
-        pub fn forward(self: *@This(), alloc: std.mem.Allocator, g: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
-            const h = try self.l1.forward(alloc, g, x);
-            defer if (g == null) tensor.free(alloc, h);
-            const a = try self.act.forward(alloc, g, h);
-            defer if (g == null) tensor.free(alloc, a);
-            return try self.l2.forward(alloc, g, a);
+        pub fn forward(self: *@This(), g: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+            const h = try self.l1.forward(g, x);
+            const a = try self.act.forward(g, h);
+            return try self.l2.forward(g, a);
         }
     };
 
@@ -1236,14 +1238,15 @@ test "GAN adversarial training step" {
         const real_targets = try graph_d.ones(&.{ batch_size, 1 }, false);
 
         const noise_d = try graph_d.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);
-        const fake_eager = try gen.forward(allocator, null, noise_d);
-        defer tensor.free(allocator, fake_eager);
+        var fake_eager_graph = autodiff.Graph.initNoGrad(allocator);
+        defer fake_eager_graph.deinit();
+        const fake_eager = try gen.forward(&fake_eager_graph, noise_d);
 
         const fake_data = try graph_d.array(&.{ batch_size, 2 }, fake_eager.data, false);
         const fake_targets = try graph_d.zeros(&.{ batch_size, 1 }, false);
 
-        const real_logits = try disc.forward(allocator, &graph_d, real_data);
-        const fake_logits = try disc.forward(allocator, &graph_d, fake_data);
+        const real_logits = try disc.forward(&graph_d, real_data);
+        const fake_logits = try disc.forward(&graph_d, fake_data);
 
         const loss_real = try graph_d.bceWithLogitsLoss(real_logits, real_targets);
         const loss_fake = try graph_d.bceWithLogitsLoss(fake_logits, fake_targets);
@@ -1261,10 +1264,10 @@ test "GAN adversarial training step" {
         defer graph_g.deinit();
 
         const noise_g = try graph_g.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);
-        const gen_out = try gen.forward(allocator, &graph_g, noise_g);
+        const gen_out = try gen.forward(&graph_g, noise_g);
         const g_targets = try graph_g.ones(&.{ batch_size, 1 }, false);
 
-        const g_logits = try disc.forward(allocator, &graph_g, gen_out);
+        const g_logits = try disc.forward(&graph_g, gen_out);
         const loss_g = try graph_g.bceWithLogitsLoss(g_logits, g_targets);
 
         gen.zeroGrad();

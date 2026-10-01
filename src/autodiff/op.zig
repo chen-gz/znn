@@ -29,25 +29,25 @@ pub const Op = struct {
     pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         switch (self.op_type) {
             .MatMul => {
-                copyFromEager(self.outputs[0], try self.inputs[0].matmul(self.inputs[1], allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].matmul(self.inputs[1], allocator), allocator);
             },
             .Relu => {
-                copyFromEager(self.outputs[0], try self.inputs[0].relu(allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].relu(allocator), allocator);
             },
             .Gelu => {
-                copyFromEager(self.outputs[0], try self.inputs[0].gelu(allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].gelu(allocator), allocator);
             },
             .Sigmoid => {
-                copyFromEager(self.outputs[0], try self.inputs[0].sigmoid(allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].sigmoid(allocator), allocator);
             },
             .Tanh => {
-                copyFromEager(self.outputs[0], try self.inputs[0].tanh(allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].tanh(allocator), allocator);
             },
             .LeakyRelu => {
-                copyFromEager(self.outputs[0], try self.inputs[0].leakyRelu(self.context.LeakyRelu.alpha, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].leakyRelu(self.context.LeakyRelu.alpha, allocator), allocator);
             },
             .Silu => {
-                copyFromEager(self.outputs[0], try self.inputs[0].silu(allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].silu(allocator), allocator);
             },
             .SoftmaxCrossEntropy => {
                 const logits = self.inputs[0];
@@ -150,27 +150,27 @@ pub const Op = struct {
                 loss.data[0] = if (N > 0) -(total_obj / @as(f32, @floatFromInt(N))) else 0.0;
             },
             .BceWithLogitsLoss, .SigmoidCrossEntropy => {
-                copyFromEager(self.outputs[0], try self.inputs[0].bceWithLogitsLoss(self.inputs[1], allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].bceWithLogitsLoss(self.inputs[1], allocator), allocator);
             },
             .BceLoss => {
-                copyFromEager(self.outputs[0], try self.inputs[0].bceLoss(self.inputs[1], self.context.BceLoss.eps, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].bceLoss(self.inputs[1], self.context.BceLoss.eps, allocator), allocator);
             },
             .Reshape => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
                 if (!C.is_view) {
-                    copyFromEager(C, try A.reshape(C.shape.dims[0..C.shape.len], allocator, null), allocator);
+                    copyFromEager(C, try A.reshape(C.shape.dims[0..C.shape.len], allocator), allocator);
                 }
             },
             .Transpose => {
                 const ctx = self.context.Transpose;
-                copyFromEager(self.outputs[0], try self.inputs[0].transpose(ctx.dim0, ctx.dim1, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].transpose(ctx.dim0, ctx.dim1, allocator), allocator);
             },
             .Concat => {
-                copyFromEager(self.outputs[0], try tensor_mod.concat(allocator, self.inputs, self.context.Concat.dim, null), allocator);
+                copyFromEager(self.outputs[0], try tensor_mod.concat(allocator, self.inputs, self.context.Concat.dim), allocator);
             },
             .Split => {
-                const tmp_outs = try tensor_mod.split(allocator, self.inputs[0], self.outputs.len, self.context.Split.dim, null);
+                const tmp_outs = try tensor_mod.split(allocator, self.inputs[0], self.outputs.len, self.context.Split.dim);
                 defer {
                     for (tmp_outs) |t| t.deinit(allocator);
                     allocator.free(tmp_outs);
@@ -180,61 +180,61 @@ pub const Op = struct {
                 }
             },
             .RepeatKV => {
-                copyFromEager(self.outputs[0], try self.inputs[0].repeatKV(self.context.RepeatKV.groups, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].repeatKV(self.context.RepeatKV.groups, allocator), allocator);
             },
             .MseLoss => {
-                copyFromEager(self.outputs[0], try self.inputs[0].mseLoss(self.inputs[1], allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].mseLoss(self.inputs[1], allocator), allocator);
             },
             .MulScalar => {
-                copyFromEager(self.outputs[0], try self.inputs[0].mulScalar(self.context.MulScalar.val, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].mulScalar(self.context.MulScalar.val, allocator), allocator);
             },
             .DivScalar => {
-                copyFromEager(self.outputs[0], try self.inputs[0].divScalar(self.context.DivScalar.val, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].divScalar(self.context.DivScalar.val, allocator), allocator);
             },
             .AddScalar => {
-                copyFromEager(self.outputs[0], try self.inputs[0].addScalar(self.context.AddScalar.val, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].addScalar(self.context.AddScalar.val, allocator), allocator);
             },
             .SubScalar => {
-                copyFromEager(self.outputs[0], try self.inputs[0].subScalar(self.context.SubScalar.val, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].subScalar(self.context.SubScalar.val, allocator), allocator);
             },
             .Add, .AddBias => {
-                copyFromEager(self.outputs[0], try self.inputs[0].add(self.inputs[1], allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].add(self.inputs[1], allocator), allocator);
             },
             .Sub => {
-                copyFromEager(self.outputs[0], try self.inputs[0].sub(self.inputs[1], allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].sub(self.inputs[1], allocator), allocator);
             },
             .Mul => {
-                copyFromEager(self.outputs[0], try self.inputs[0].mul(self.inputs[1], allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].mul(self.inputs[1], allocator), allocator);
             },
             .Div => {
-                copyFromEager(self.outputs[0], try self.inputs[0].div(self.inputs[1], allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].div(self.inputs[1], allocator), allocator);
             },
             .Conv2D => {
                 const bias = if (self.inputs.len > 2) self.inputs[2] else null;
                 const ctx = self.context.Conv2D;
-                copyFromEager(self.outputs[0], try self.inputs[0].conv2dWithConfig(self.inputs[1], bias, ctx.stride, ctx.padding, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].conv2dWithConfig(self.inputs[1], bias, ctx.stride, ctx.padding, allocator), allocator);
             },
             .ConvTranspose2D => {
                 const bias = if (self.inputs.len > 2) self.inputs[2] else null;
                 const ctx = self.context.ConvTranspose2D;
-                copyFromEager(self.outputs[0], try self.inputs[0].convTranspose2d(self.inputs[1], bias, ctx.stride, ctx.padding, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].convTranspose2d(self.inputs[1], bias, ctx.stride, ctx.padding, allocator), allocator);
             },
             .MaxPool2D => {
                 const ctx = self.context.MaxPool2D;
-                copyFromEager(self.outputs[0], try self.inputs[0].maxpool2d(ctx.pool_size, ctx.stride, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].maxpool2d(ctx.pool_size, ctx.stride, allocator), allocator);
             },
             .AvgPool2D => {
                 const ctx = self.context.AvgPool2D;
-                copyFromEager(self.outputs[0], try self.inputs[0].avgpool2d(ctx.kernel_size, ctx.stride, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].avgpool2d(ctx.kernel_size, ctx.stride, allocator), allocator);
             },
             .Softmax => {
-                copyFromEager(self.outputs[0], try self.inputs[0].softmax(allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].softmax(allocator), allocator);
             },
             .RmsNorm => {
-                copyFromEager(self.outputs[0], try self.inputs[0].rmsNorm(self.inputs[1], self.context.RmsNorm.eps, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].rmsNorm(self.inputs[1], self.context.RmsNorm.eps, allocator), allocator);
             },
             .LayerNorm => {
-                copyFromEager(self.outputs[0], try self.inputs[0].layerNorm(self.inputs[1], self.inputs[2], self.context.LayerNorm.eps, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].layerNorm(self.inputs[1], self.inputs[2], self.context.LayerNorm.eps, allocator), allocator);
             },
             .BatchNorm2d => {
                 const X = self.inputs[0];
@@ -274,39 +274,39 @@ pub const Op = struct {
             },
             .RoPE => {
                 const ctx = self.context.RoPE;
-                copyFromEager(self.outputs[0], try self.inputs[0].ropeOffset(ctx.start_pos, ctx.rotary_offset, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].ropeOffset(ctx.start_pos, ctx.rotary_offset, allocator), allocator);
             },
             .BatchMatMul => {
-                copyFromEager(self.outputs[0], try self.inputs[0].batchMatMul(self.inputs[1], allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].batchMatMul(self.inputs[1], allocator), allocator);
             },
             .Embedding => {
-                copyFromEager(self.outputs[0], try self.inputs[0].embedding(self.inputs[1], allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].embedding(self.inputs[1], allocator), allocator);
             },
             .L2Loss => {
-                copyFromEager(self.outputs[0], try self.inputs[0].l2Loss(self.context.L2Loss.lambda, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].l2Loss(self.context.L2Loss.lambda, allocator), allocator);
             },
             .L1Loss => {
-                copyFromEager(self.outputs[0], try self.inputs[0].l1Loss(self.context.L1Loss.lambda, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].l1Loss(self.context.L1Loss.lambda, allocator), allocator);
             },
             .Sqrt => {
-                copyFromEager(self.outputs[0], try self.inputs[0].sqrt(allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].sqrt(allocator), allocator);
             },
             .Exp => {
-                copyFromEager(self.outputs[0], try self.inputs[0].exp(allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].exp(allocator), allocator);
             },
             .Log => {
-                copyFromEager(self.outputs[0], try self.inputs[0].log(allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].log(allocator), allocator);
             },
             .Abs => {
-                copyFromEager(self.outputs[0], try self.inputs[0].abs(allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].abs(allocator), allocator);
             },
             .Sum => {
                 const ctx = self.context.Sum;
-                copyFromEager(self.outputs[0], try self.inputs[0].sum(ctx.axis, ctx.keepdims, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].sum(ctx.axis, ctx.keepdims, allocator), allocator);
             },
             .Mean => {
                 const ctx = self.context.Mean;
-                copyFromEager(self.outputs[0], try self.inputs[0].mean(ctx.axis, ctx.keepdims, allocator, null), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].mean(ctx.axis, ctx.keepdims, allocator), allocator);
             },
             .Where => {
                 const X = self.inputs[0];
