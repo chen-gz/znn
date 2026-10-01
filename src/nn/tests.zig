@@ -2011,6 +2011,440 @@ test "Model graph JSON export conforms to the published JSON Schema" {
     ));
 }
 
+test "All 18 canonical models export conforming schema and valid ports" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(13579);
+    const random = prng.random();
+
+    const verifyModelJson = struct {
+        fn check(alloc: std.mem.Allocator, json_data: []const u8, model_name: []const u8) !void {
+            // 1. Schema conformance
+            try SchemaCheck.expectConforms(alloc, json_data);
+
+            // 2. Parse and inspect
+            var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json_data, .{});
+            defer parsed.deinit();
+
+            const root = parsed.value.object.get("root").?.object;
+            const ports = root.get("ports").?.object;
+            const in_ports = ports.get("inputs").?.array;
+            const edges = root.get("edges").?.array;
+
+            // At least one input port in root.ports.inputs
+            try std.testing.expect(in_ports.items.len >= 1);
+
+            // Every input port connected in root.edges
+            for (in_ports.items) |inp_val| {
+                const port_id = inp_val.object.get("id").?.string;
+                var connected = false;
+                for (edges.items) |edge_val| {
+                    const from_id = edge_val.object.get("from").?.string;
+                    if (std.mem.eql(u8, from_id, port_id)) {
+                        connected = true;
+                        break;
+                    }
+                }
+                if (!connected) {
+                    std.debug.print("Model {s}: port {s} not connected in root.edges\n", .{ model_name, port_id });
+                    return error.PortNotConnected;
+                }
+            }
+
+            // No graph input tensor has kind: "buffer" or status: "BUFFER"
+            if (root.get("nodes")) |nodes_val| {
+                for (nodes_val.array.items) |node_val| {
+                    const node_obj = node_val.object;
+                    const name = node_obj.get("name").?.string;
+                    if (std.mem.startsWith(u8, name, "inputs.")) {
+                        if (node_obj.get("kind")) |k| {
+                            if (std.ascii.eqlIgnoreCase(k.string, "buffer")) return error.InputMarkedAsBuffer;
+                        }
+                        if (node_obj.get("status")) |s| {
+                            if (std.ascii.eqlIgnoreCase(s.string, "buffer")) return error.InputMarkedAsBuffer;
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    // 1. linear
+    {
+        var m = try Linear.init(allocator, 16, 10, random);
+        defer m.deinit(allocator);
+        m.setName("linear");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 2, 16 }, false);
+        x.setName("inputs.x");
+        const y = try m.forward(&g, x);
+        y.setName("outputs.y");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "linear");
+    }
+
+    // 2. mlp
+    {
+        const TestMLP = struct {
+            fc1: Linear,
+            fc2: Linear,
+            fc3: Linear,
+            name: ?[]const u8 = "mlp",
+            module_type: []const u8 = "MLP",
+
+            pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
+                const fc1 = try Linear.init(alloc, 16, 32, rnd);
+                const fc2 = try Linear.init(alloc, 32, 16, rnd);
+                const fc3 = try Linear.init(alloc, 16, 10, rnd);
+                var mlp = @This(){ .fc1 = fc1, .fc2 = fc2, .fc3 = fc3 };
+                mlp.setName("mlp");
+                return mlp;
+            }
+
+            pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
+                self.fc1.deinit(alloc);
+                self.fc2.deinit(alloc);
+                self.fc3.deinit(alloc);
+            }
+
+            pub fn setName(self: *@This(), name: []const u8) void {
+                self.name = name;
+                self.fc1.setName("mlp.fc1");
+                self.fc2.setName("mlp.fc2");
+                self.fc3.setName("mlp.fc3");
+            }
+
+            pub fn forward(self: *const @This(), g: *autodiff.Graph, x: *Tensor) !*Tensor {
+                const scope = try g.enterModule(self.name, self.module_type);
+                defer scope.exit();
+                const x1 = try self.fc1.forward(g, x);
+                const a1 = try g.relu(x1);
+                const x2 = try self.fc2.forward(g, a1);
+                const a2 = try g.relu(x2);
+                return try self.fc3.forward(g, a2);
+            }
+        };
+
+        var m = try TestMLP.init(allocator, random);
+        defer m.deinit(allocator);
+        m.setName("mlp");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 2, 16 }, false);
+        x.setName("inputs.x");
+        const y = try m.forward(&g, x);
+        y.setName("outputs.logits");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "mlp");
+    }
+
+    // 3. rnn
+    {
+        var m = try RNN.init(allocator, 16, 32, random);
+        defer m.deinit(allocator);
+        m.setName("rnn");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        var inps: [4]*Tensor = undefined;
+        for (0..4) |t| {
+            inps[t] = try g.ones(&.{ 2, 16 }, false);
+            inps[t].setNameFormatted("inputs.x_{d}", .{t});
+        }
+        const res = try m.forward(&g, &inps, null);
+        res.h_n.setName("outputs.h_n");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "rnn");
+    }
+
+    // 4. lstm
+    {
+        var m = try LSTM.init(allocator, 16, 32, random);
+        defer m.deinit(allocator);
+        m.setName("lstm");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        var inps: [4]*Tensor = undefined;
+        for (0..4) |t| {
+            inps[t] = try g.ones(&.{ 2, 16 }, false);
+            inps[t].setNameFormatted("inputs.x_{d}", .{t});
+        }
+        const res = try m.forward(&g, &inps, null, null);
+        res.h_n.setName("outputs.h_n");
+        res.c_n.setName("outputs.c_n");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "lstm");
+    }
+
+    // 5. stacked_lstm
+    {
+        var m = try StackedLSTM.init(allocator, 16, 32, 2, random);
+        defer m.deinit(allocator);
+        m.setName("stacked_lstm");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        var inps: [4]*Tensor = undefined;
+        for (0..4) |t| {
+            inps[t] = try g.ones(&.{ 2, 16 }, false);
+            inps[t].setNameFormatted("inputs.x_{d}", .{t});
+        }
+        const res = try m.forwardSequence(&g, &inps, null, null);
+        for (res.h_n, 0..) |h, l| h.setNameFormatted("outputs.h_l{d}", .{l});
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "stacked_lstm");
+    }
+
+    // 6. gru
+    {
+        var m = try GRU.init(allocator, 16, 32, random);
+        defer m.deinit(allocator);
+        m.setName("gru");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        var inps: [4]*Tensor = undefined;
+        for (0..4) |t| {
+            inps[t] = try g.ones(&.{ 2, 16 }, false);
+            inps[t].setNameFormatted("inputs.x_{d}", .{t});
+        }
+        const res = try m.forward(&g, &inps, null);
+        res.h_n.setName("outputs.h_n");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "gru");
+    }
+
+    // 7. embedding
+    {
+        var m = try Embedding.init(allocator, 128, 32, random);
+        defer m.deinit(allocator);
+        m.setName("embedding");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const tokens = try g.zeros(&.{ 2, 8 }, false);
+        tokens.setName("inputs.token_ids");
+        for (tokens.data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 16));
+        const out = try m.forward(&g, tokens);
+        out.setName("outputs.embeddings");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "embedding");
+    }
+
+    // 8. attention
+    {
+        var m = try CausalSelfAttention.init(allocator, 32, 4, random);
+        defer m.deinit(allocator);
+        m.setName("causal_self_attention");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 2, 4, 32 }, false);
+        x.setName("inputs.x");
+        const out = try m.forward(&g, x);
+        out.setName("outputs.context");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "attention");
+    }
+
+    // 9. transformer_block
+    {
+        var m = try TransformerBlock.init(allocator, 32, 4, random);
+        defer m.deinit(allocator);
+        m.setName("transformer_block");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 2, 4, 32 }, false);
+        x.setName("inputs.x");
+        const out = try m.forward(&g, x);
+        out.setName("outputs.block_out");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "transformer_block");
+    }
+
+    // 10. gpt
+    {
+        const cfg = GPTConfig{
+            .vocab_size = 256,
+            .block_size = 32,
+            .n_embd = 64,
+            .n_head = 4,
+            .n_layer = 2,
+        };
+        var m = try GPT(cfg).init(allocator, random);
+        defer m.deinit(allocator);
+        m.setName("gpt");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const tokens = try g.zeros(&.{ 2, 16 }, false);
+        tokens.setName("inputs.token_ids");
+        for (tokens.data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
+        const logits = try m.forward(&g, tokens);
+        logits.setName("outputs.logits");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "gpt");
+    }
+
+    // 11. swiglu
+    {
+        var m = try SwiGLU.init(allocator, 32, 64, random);
+        defer m.deinit(allocator);
+        m.setName("swiglu");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 2, 4, 32 }, false);
+        x.setName("inputs.x");
+        const out = try m.forward(&g, x);
+        out.setName("outputs.swiglu_out");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "swiglu");
+    }
+
+    // 12. lora_linear
+    {
+        var m = try LoRALinear.init(allocator, 32, 32, 4, 8.0, random);
+        defer m.deinit(allocator);
+        m.setName("lora_linear");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 4, 32 }, false);
+        x.setName("inputs.x");
+        const out = try m.forward(&g, x);
+        out.setName("outputs.adapted_out");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "lora_linear");
+    }
+
+    // 13. layernorm
+    {
+        var m = try LayerNorm.init(allocator, 32, 1e-5);
+        defer m.deinit(allocator);
+        m.setName("layernorm");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 2, 4, 32 }, false);
+        x.setName("inputs.x");
+        const out = try m.forward(&g, x);
+        out.setName("outputs.normed");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "layernorm");
+    }
+
+    // 14. mla
+    {
+        var m = try MLALayer.init(allocator, 32, 4, 8, 16, 8, random);
+        defer m.deinit(allocator);
+        m.setName("mla");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 2, 4, 32 }, false);
+        x.setName("inputs.x");
+        const out = try m.forward(&g, x);
+        out.setName("outputs.mla_out");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "mla");
+    }
+
+    // 15. deepseek_moe
+    {
+        var m = try MoELayer.init(allocator, 32, 64, 4, 1, 2, random);
+        defer m.deinit(allocator);
+        m.setName("deepseek_moe");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 4, 32 }, false);
+        x.setName("inputs.x");
+        const out = try m.forward(&g, x);
+        out.setName("outputs.moe_out");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "deepseek_moe");
+    }
+
+    // 16. gan_generator
+    {
+        var l1 = try Linear.init(allocator, 2, 16, random);
+        l1.setName("generator.fc1");
+        var l2 = try Linear.init(allocator, 16, 16, random);
+        l2.setName("generator.fc2");
+        var l3 = try Linear.init(allocator, 16, 2, random);
+        l3.setName("generator.fc3");
+        var net_g = sequential(.{
+            l1,
+            LeakyReLU{ .alpha = 0.2 },
+            l2,
+            LeakyReLU{ .alpha = 0.2 },
+            l3,
+        });
+        defer net_g.deinit(allocator);
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const z = try g.ones(&.{ 4, 2 }, false);
+        z.setName("inputs.z");
+        const scope = try g.enterModule("generator", "Generator");
+        defer scope.exit();
+        const fake_x = try net_g.forward(&g, z);
+        fake_x.setName("outputs.fake_x");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "gan_generator");
+    }
+
+    // 17. gan_discriminator
+    {
+        var d1 = try Linear.init(allocator, 2, 16, random);
+        d1.setName("discriminator.fc1");
+        var d2 = try Linear.init(allocator, 16, 16, random);
+        d2.setName("discriminator.fc2");
+        var d3 = try Linear.init(allocator, 16, 1, random);
+        d3.setName("discriminator.fc3");
+        var net_d = sequential(.{
+            d1,
+            LeakyReLU{ .alpha = 0.2 },
+            d2,
+            LeakyReLU{ .alpha = 0.2 },
+            d3,
+        });
+        defer net_d.deinit(allocator);
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 4, 2 }, false);
+        x.setName("inputs.x");
+        const scope = try g.enterModule("discriminator", "Discriminator");
+        defer scope.exit();
+        const logits = try net_d.forward(&g, x);
+        logits.setName("outputs.logits");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "gan_discriminator");
+    }
+
+    // 18. conv2d
+    {
+        var m = try Conv2D.init(allocator, 1, 4, 3, random);
+        defer m.deinit(allocator);
+        m.setName("conv2d");
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 1, 1, 8, 8 }, false);
+        x.setName("inputs.x");
+        const out = try m.forward(&g, x);
+        out.setName("outputs.feature_map");
+        const json = try g.formatJson(allocator);
+        defer allocator.free(json);
+        try verifyModelJson.check(allocator, json, "conv2d");
+    }
+}
+
 test "NodeKind enum conversions and NodeData typing" {
     try std.testing.expectEqualStrings("Param", NodeKind.Param.asString());
     try std.testing.expectEqualStrings("Input", NodeKind.Input.asString());
