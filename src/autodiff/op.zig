@@ -20,90 +20,35 @@ pub const Op = struct {
     context: OpContext,     // 算子特有的运行时上下文数据
     scope: []const u8 = "", // 创建该算子时所处的模块作用域完整路径（由 Graph 作用域栈记录，"" 表示图的根作用域）
 
+    fn copyFromEager(dest: *Tensor, tmp: *Tensor, allocator: std.mem.Allocator) void {
+        defer tmp.deinit(allocator);
+        @memcpy(dest.data, tmp.data);
+    }
+
     // 重新执行该算子的前向计算，根据最新输入更新输出张量的数据
     pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
-        _ = allocator;
         switch (self.op_type) {
             .MatMul => {
-                const A = self.inputs[0];
-                const B = self.inputs[1];
-                const C = self.outputs[0];
-                const M = A.shape.dims[0];
-                const K = A.shape.dims[1];
-                const N = B.shape.dims[1];
-                c.cblas_sgemm(
-                    c.CblasRowMajor,
-                    c.CblasNoTrans,
-                    c.CblasNoTrans,
-                    @intCast(M),
-                    @intCast(N),
-                    @intCast(K),
-                    1.0,
-                    A.data.ptr,
-                    @intCast(K),
-                    B.data.ptr,
-                    @intCast(N),
-                    0.0,
-                    C.data.ptr,
-                    @intCast(N),
-                );
+                copyFromEager(self.outputs[0], try self.inputs[0].matmul(self.inputs[1], allocator, null), allocator);
             },
             .Relu => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                for (C.data, A.data) |*c_val, a_val| {
-                    c_val.* = if (a_val > 0.0) a_val else 0.0;
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].relu(allocator, null), allocator);
             },
-            // 前向公式: GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
             .Gelu => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const sqrt_2 = @sqrt(@as(f32, 2.0));
-                for (C.data, A.data) |*c_val, a_val| {
-                    // 使用标准库中的误差函数 erff 进行计算
-                    const erf_val = erff(a_val / sqrt_2);
-                    c_val.* = 0.5 * a_val * (1.0 + erf_val);
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].gelu(allocator, null), allocator);
             },
             .Sigmoid => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                for (C.data, A.data) |*c_val, a_val| {
-                    if (a_val >= 0.0) {
-                        c_val.* = 1.0 / (1.0 + @exp(-a_val));
-                    } else {
-                        const e = @exp(a_val);
-                        c_val.* = e / (1.0 + e);
-                    }
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].sigmoid(allocator, null), allocator);
             },
             .Tanh => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                for (C.data, A.data) |*c_val, a_val| {
-                    c_val.* = std.math.tanh(a_val);
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].tanh(allocator, null), allocator);
             },
             .LeakyRelu => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const alpha = self.context.LeakyRelu.alpha;
-                for (C.data, A.data) |*c_val, a_val| {
-                    c_val.* = if (a_val > 0.0) a_val else alpha * a_val;
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].leakyRelu(self.context.LeakyRelu.alpha, allocator, null), allocator);
             },
             .Silu => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                for (C.data, A.data) |*c_val, a_val| {
-                    const sig = if (a_val >= 0.0) 1.0 / (1.0 + @exp(-a_val)) else @exp(a_val) / (1.0 + @exp(a_val));
-                    c_val.* = a_val * sig;
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].silu(allocator, null), allocator);
             },
-            // 前向公式:
-            // 1. Softmax 归一化概率: p_j = e^{x_j - max} / sum(e^{x_i - max})
-            // 2. 交叉熵损失计算: Loss = -1/B * sum( log(p_target) )
             .SoftmaxCrossEntropy => {
                 const logits = self.inputs[0];
                 const loss = self.outputs[0];
@@ -122,20 +67,25 @@ pub const Op = struct {
 
                     const row = logits.data[i * D .. (i + 1) * D];
                     var max_val = row[0];
-                    for (row) |val| {
+                    for (row[1..]) |val| {
                         if (val > max_val) max_val = val;
                     }
 
                     var sum: f32 = 0.0;
-                    const row_probs = probs[i * D .. (i + 1) * D];
-                    for (0..D) |j| {
-                        const e = @exp(row[j] - max_val);
-                        row_probs[j] = e;
-                        sum += e;
-                    }
-
-                    for (0..D) |j| {
-                        row_probs[j] /= sum;
+                    if (probs.len == B_size * D) {
+                        const row_probs = probs[i * D .. (i + 1) * D];
+                        for (0..D) |j| {
+                            const e = @exp(row[j] - max_val);
+                            row_probs[j] = e;
+                            sum += e;
+                        }
+                        for (0..D) |j| {
+                            row_probs[j] /= sum;
+                        }
+                    } else {
+                        for (row) |val| {
+                            sum += @exp(val - max_val);
+                        }
                     }
 
                     const target_idx = targets[i];
@@ -143,7 +93,7 @@ pub const Op = struct {
                         const log_sum_exp = max_val + @log(sum);
                         loss_sum += (log_sum_exp - row[target_idx]) * w;
                     } else {
-                        const prob = row_probs[target_idx];
+                        const prob = if (probs.len == B_size * D) probs[i * D + target_idx] else (@exp(row[target_idx] - max_val) / sum);
                         const clipped = @max(prob, 1e-15);
                         loss_sum += -@log(clipped);
                     }
@@ -200,512 +150,90 @@ pub const Op = struct {
                 loss.data[0] = if (N > 0) -(total_obj / @as(f32, @floatFromInt(N))) else 0.0;
             },
             .BceWithLogitsLoss, .SigmoidCrossEntropy => {
-                const logits = self.inputs[0];
-                const targets = self.inputs[1];
-                const loss = self.outputs[0];
-                const N = logits.data.len;
-                var loss_sum: f32 = 0.0;
-                for (0..N) |i| {
-                    const x = logits.data[i];
-                    const y = targets.data[i];
-                    const max_x = @max(x, 0.0);
-                    const abs_x = @abs(x);
-                    const l = max_x - x * y + @log(1.0 + @exp(-abs_x));
-                    loss_sum += l;
-                }
-                loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
+                copyFromEager(self.outputs[0], try self.inputs[0].bceWithLogitsLoss(self.inputs[1], allocator, null), allocator);
             },
             .BceLoss => {
-                const probs = self.inputs[0];
-                const targets = self.inputs[1];
-                const loss = self.outputs[0];
-                const eps = self.context.BceLoss.eps;
-                const N = probs.data.len;
-                var loss_sum: f32 = 0.0;
-                for (0..N) |i| {
-                    const p = probs.data[i];
-                    const y = targets.data[i];
-                    const p_clip = @max(p, eps);
-                    const one_minus_p_clip = @max(1.0 - p, eps);
-                    const l = -(y * @log(p_clip) + (1.0 - y) * @log(one_minus_p_clip));
-                    loss_sum += l;
-                }
-                loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
+                copyFromEager(self.outputs[0], try self.inputs[0].bceLoss(self.inputs[1], self.context.BceLoss.eps, allocator, null), allocator);
             },
             .Reshape => {
                 const A = self.inputs[0];
                 const C = self.outputs[0];
                 if (!C.is_view) {
-                    var coord = [_]usize{0} ** 8;
-                    const len = A.shape.len;
-                    for (0..C.data.len) |dest_i| {
-                        var src_idx: usize = 0;
-                        for (0..len) |d| {
-                            src_idx += coord[d] * A.strides.dims[d];
-                        }
-                        C.data[dest_i] = A.data[src_idx];
-
-                        var d = len;
-                        while (d > 0) {
-                            d -= 1;
-                            coord[d] += 1;
-                            if (coord[d] < A.shape.dims[d]) break;
-                            coord[d] = 0;
-                        }
-                    }
+                    copyFromEager(C, try A.reshape(C.shape.dims[0..C.shape.len], allocator, null), allocator);
                 }
             },
             .Transpose => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
                 const ctx = self.context.Transpose;
-                const strides_trans = transposeShape(A.strides, ctx.dim0, ctx.dim1);
-
-                var indices = [_]usize{0} ** 8;
-                const len = C.shape.len;
-                const total_size = C.data.len;
-                for (0..total_size) |dest_flat_idx| {
-                    var src_flat_idx: usize = 0;
-                    for (0..len) |d| {
-                        src_flat_idx += indices[d] * strides_trans.dims[d];
-                    }
-                    C.data[dest_flat_idx] = A.data[src_flat_idx];
-
-                    var d: usize = len;
-                    while (d > 0) {
-                        d -= 1;
-                        indices[d] += 1;
-                        if (indices[d] < C.shape.dims[d]) {
-                            break;
-                        }
-                        indices[d] = 0;
-                    }
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].transpose(ctx.dim0, ctx.dim1, allocator, null), allocator);
             },
             .Concat => {
-                const dim = self.context.Concat.dim;
-                const out = self.outputs[0];
-                const rank = out.shape.len;
-                const concat_dim_total = out.shape.dims[dim];
-
-                var outer_size: usize = 1;
-                for (0..dim) |d| {
-                    outer_size *= out.shape.dims[d];
-                }
-                var inner_size: usize = 1;
-                for (dim + 1..rank) |d| {
-                    inner_size *= out.shape.dims[d];
-                }
-
-                for (0..outer_size) |outer| {
-                    const out_base = outer * concat_dim_total * inner_size;
-                    var offset_dim: usize = 0;
-                    for (self.inputs) |t| {
-                        const d_k = t.shape.dims[dim];
-                        const src_base = outer * d_k * inner_size;
-                        const dest_base = out_base + offset_dim * inner_size;
-                        const copy_len = d_k * inner_size;
-                        @memcpy(out.data[dest_base .. dest_base + copy_len], t.data[src_base .. src_base + copy_len]);
-                        offset_dim += d_k;
-                    }
-                }
+                copyFromEager(self.outputs[0], try tensor_mod.concat(allocator, self.inputs, self.context.Concat.dim, null), allocator);
             },
             .Split => {
-                const dim = self.context.Split.dim;
-                const in = self.inputs[0];
-                const rank = in.shape.len;
-                const dim_size = in.shape.dims[dim];
-                const num_splits = self.outputs.len;
-                const split_dim_size = self.outputs[0].shape.dims[dim];
-
-                var outer_size: usize = 1;
-                for (0..dim) |d| {
-                    outer_size *= in.shape.dims[d];
+                const tmp_outs = try tensor_mod.split(allocator, self.inputs[0], self.outputs.len, self.context.Split.dim, null);
+                defer {
+                    for (tmp_outs) |t| t.deinit(allocator);
+                    allocator.free(tmp_outs);
                 }
-                var inner_size: usize = 1;
-                for (dim + 1..rank) |d| {
-                    inner_size *= in.shape.dims[d];
-                }
-
-                for (0..outer_size) |outer| {
-                    const src_base = outer * dim_size * inner_size;
-                    for (0..num_splits) |k| {
-                        const dest_base = outer * split_dim_size * inner_size;
-                        const src_offset = src_base + k * split_dim_size * inner_size;
-                        const copy_len = split_dim_size * inner_size;
-                        @memcpy(self.outputs[k].data[dest_base .. dest_base + copy_len], in.data[src_offset .. src_offset + copy_len]);
-                    }
+                for (self.outputs, tmp_outs) |dest, src| {
+                    @memcpy(dest.data, src.data);
                 }
             },
             .RepeatKV => {
-                const groups = self.context.RepeatKV.groups;
-                const X = self.inputs[0];
-                const Y = self.outputs[0];
-                const B = X.shape.dims[0];
-                const n_kv = X.shape.dims[1];
-                const T = X.shape.dims[2];
-                const hs = X.shape.dims[3];
-                const head_bytes = T * hs;
-
-                for (0..B) |b| {
-                    for (0..n_kv) |kv_h| {
-                        const src = X.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
-                        for (0..groups) |g| {
-                            const h = kv_h * groups + g;
-                            const dest = Y.data[((b * (n_kv * groups) + h) * head_bytes) .. ((b * (n_kv * groups) + h + 1) * head_bytes)];
-                            @memcpy(dest, src);
-                        }
-                    }
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].repeatKV(self.context.RepeatKV.groups, allocator, null), allocator);
             },
             .MseLoss => {
-                const A = self.inputs[0];
-                const B = self.inputs[1];
-                const C = self.outputs[0];
-                const N = A.data.len;
-                var loss_sum: f32 = 0.0;
-                for (0..N) |i| {
-                    const diff = A.data[i] - B.data[i];
-                    loss_sum += diff * diff;
-                }
-                C.data[0] = loss_sum / @as(f32, @floatFromInt(N));
+                copyFromEager(self.outputs[0], try self.inputs[0].mseLoss(self.inputs[1], allocator, null), allocator);
             },
             .MulScalar => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const val = self.context.MulScalar.val;
-                for (C.data, A.data) |*c_val, a_val| {
-                    c_val.* = a_val * val;
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].mulScalar(self.context.MulScalar.val, allocator, null), allocator);
             },
             .DivScalar => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const val = self.context.DivScalar.val;
-                for (C.data, A.data) |*c_val, a_val| {
-                    c_val.* = a_val / val;
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].divScalar(self.context.DivScalar.val, allocator, null), allocator);
             },
             .AddScalar => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const val = self.context.AddScalar.val;
-                for (C.data, A.data) |*c_val, a_val| {
-                    c_val.* = a_val + val;
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].addScalar(self.context.AddScalar.val, allocator, null), allocator);
             },
             .SubScalar => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const val = self.context.SubScalar.val;
-                for (C.data, A.data) |*c_val, a_val| {
-                    c_val.* = a_val - val;
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].subScalar(self.context.SubScalar.val, allocator, null), allocator);
             },
             .Add, .AddBias => {
-                const A = self.inputs[0];
-                const B = self.inputs[1];
-                const C = self.outputs[0];
-                tensor.broadcastBinaryOpRaw(C.data, C.shape, A.data, A.shape, A.strides, B.data, B.shape, B.strides, struct { fn op(a: f32, b: f32) f32 { return a + b; } }.op);
+                copyFromEager(self.outputs[0], try self.inputs[0].add(self.inputs[1], allocator, null), allocator);
             },
             .Sub => {
-                const A = self.inputs[0];
-                const B = self.inputs[1];
-                const C = self.outputs[0];
-                tensor.broadcastBinaryOpRaw(C.data, C.shape, A.data, A.shape, A.strides, B.data, B.shape, B.strides, struct { fn op(a: f32, b: f32) f32 { return a - b; } }.op);
+                copyFromEager(self.outputs[0], try self.inputs[0].sub(self.inputs[1], allocator, null), allocator);
             },
             .Mul => {
-                const A = self.inputs[0];
-                const B = self.inputs[1];
-                const C = self.outputs[0];
-                tensor.broadcastBinaryOpRaw(C.data, C.shape, A.data, A.shape, A.strides, B.data, B.shape, B.strides, struct { fn op(a: f32, b: f32) f32 { return a * b; } }.op);
+                copyFromEager(self.outputs[0], try self.inputs[0].mul(self.inputs[1], allocator, null), allocator);
             },
             .Div => {
-                const A = self.inputs[0];
-                const B = self.inputs[1];
-                const C = self.outputs[0];
-                tensor.broadcastBinaryOpRaw(C.data, C.shape, A.data, A.shape, A.strides, B.data, B.shape, B.strides, struct { fn op(a: f32, b: f32) f32 { return a / b; } }.op);
+                copyFromEager(self.outputs[0], try self.inputs[0].div(self.inputs[1], allocator, null), allocator);
             },
             .Conv2D => {
-                const A = self.inputs[0];
-                const W = self.inputs[1];
-                const C = self.outputs[0];
                 const bias = if (self.inputs.len > 2) self.inputs[2] else null;
-                
-                const N = A.shape.dims[0];
-                const C_in = A.shape.dims[1];
-                const C_out = W.shape.dims[0];
-                const KH = W.shape.dims[2];
-                const KW = W.shape.dims[3];
-                const H_out = C.shape.dims[2];
-                const W_out = C.shape.dims[3];
-
-                const s_n = A.strides.dims[0];
-                const s_c = A.strides.dims[1];
-                const s_h = A.strides.dims[2];
-                const s_w = A.strides.dims[3];
-
-                const w_co = W.strides.dims[0];
-                const w_ci = W.strides.dims[1];
-                const w_kh = W.strides.dims[2];
-                const w_kw = W.strides.dims[3];
-
-                const o_n = C.strides.dims[0];
-                const o_c = C.strides.dims[1];
-                const o_h = C.strides.dims[2];
-                const o_w = C.strides.dims[3];
-
-                for (0..N) |n| {
-                    for (0..C_out) |co| {
-                        const b_val = if (bias) |b| b.data[co] else 0.0;
-                        for (0..H_out) |h| {
-                            for (0..W_out) |w| {
-                                var sum: f32 = b_val;
-                                for (0..C_in) |ci| {
-                                    for (0..KH) |kh| {
-                                        for (0..KW) |kw| {
-                                            const input_val = A.data[n * s_n + ci * s_c + (h + kh) * s_h + (w + kw) * s_w];
-                                            const weight_val = W.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
-                                            sum += input_val * weight_val;
-                                        }
-                                    }
-                                }
-                                C.data[n * o_n + co * o_c + h * o_h + w * o_w] = sum;
-                            }
-                        }
-                    }
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].conv2d(self.inputs[1], bias, allocator, null), allocator);
             },
             .ConvTranspose2D => {
-                const A = self.inputs[0];
-                const W = self.inputs[1];
-                const C = self.outputs[0];
                 const bias = if (self.inputs.len > 2) self.inputs[2] else null;
-                const stride = self.context.ConvTranspose2D.stride;
-                const padding = self.context.ConvTranspose2D.padding;
-
-                const N = A.shape.dims[0];
-                const C_in = A.shape.dims[1];
-                const H_in = A.shape.dims[2];
-                const W_in = A.shape.dims[3];
-
-                const C_out = W.shape.dims[1];
-                const KH = W.shape.dims[2];
-                const KW = W.shape.dims[3];
-
-                const H_out = C.shape.dims[2];
-                const W_out = C.shape.dims[3];
-
-                for (0..N) |n| {
-                    for (0..C_out) |co| {
-                        const b_val = if (bias) |b| b.data[co] else 0.0;
-                        for (0..H_out) |h| {
-                            for (0..W_out) |w| {
-                                C.data[n * (C_out * H_out * W_out) + co * (H_out * W_out) + h * W_out + w] = b_val;
-                            }
-                        }
-                    }
-                }
-
-                for (0..N) |n| {
-                    for (0..C_in) |ci| {
-                        for (0..H_in) |h| {
-                            for (0..W_in) |w| {
-                                const input_val = A.data[n * (C_in * H_in * W_in) + ci * (H_in * W_in) + h * W_in + w];
-                                if (input_val == 0.0) continue;
-
-                                for (0..C_out) |co| {
-                                    for (0..KH) |kh| {
-                                        const out_h_raw = h * stride + kh;
-                                        if (out_h_raw < padding) continue;
-                                        const out_h = out_h_raw - padding;
-                                        if (out_h >= H_out) continue;
-
-                                        for (0..KW) |kw| {
-                                            const out_w_raw = w * stride + kw;
-                                            if (out_w_raw < padding) continue;
-                                            const out_w = out_w_raw - padding;
-                                            if (out_w >= W_out) continue;
-
-                                            const weight_val = W.data[ci * (C_out * KH * KW) + co * (KH * KW) + kh * KW + kw];
-                                            C.data[n * (C_out * H_out * W_out) + co * (H_out * W_out) + out_h * W_out + out_w] += input_val * weight_val;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                const ctx = self.context.ConvTranspose2D;
+                copyFromEager(self.outputs[0], try self.inputs[0].convTranspose2d(self.inputs[1], bias, ctx.stride, ctx.padding, allocator, null), allocator);
             },
             .MaxPool2D => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const pool_size = self.context.MaxPool2D.pool_size;
-                const stride = self.context.MaxPool2D.stride;
-                
-                const N = A.shape.dims[0];
-                const C_ch = A.shape.dims[1];
-                const H = A.shape.dims[2];
-                const W = A.shape.dims[3];
-                const H_out = C.shape.dims[2];
-                const W_out = C.shape.dims[3];
-
-                const s_n = A.strides.dims[0];
-                const s_c = A.strides.dims[1];
-                const s_h = A.strides.dims[2];
-                const s_w = A.strides.dims[3];
-
-                const o_n = C.strides.dims[0];
-                const o_c = C.strides.dims[1];
-                const o_h = C.strides.dims[2];
-                const o_w = C.strides.dims[3];
-
-                for (0..N) |n| {
-                    for (0..C_ch) |c_| {
-                        for (0..H_out) |h| {
-                            for (0..W_out) |w| {
-                                var max_val = A.data[n * s_n + c_ * s_c + (h * stride) * s_h + (w * stride) * s_w];
-                                for (0..pool_size) |ph| {
-                                    for (0..pool_size) |pw| {
-                                        const ih = h * stride + ph;
-                                        const iw = w * stride + pw;
-                                        if (ih < H and iw < W) {
-                                            const val = A.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
-                                            if (val > max_val) {
-                                                max_val = val;
-                                            }
-                                        }
-                                    }
-                                }
-                                C.data[n * o_n + c_ * o_c + h * o_h + w * o_w] = max_val;
-                            }
-                        }
-                    }
-                }
+                const ctx = self.context.MaxPool2D;
+                copyFromEager(self.outputs[0], try self.inputs[0].maxpool2d(ctx.pool_size, ctx.stride, allocator, null), allocator);
             },
             .AvgPool2D => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const kernel_size = self.context.AvgPool2D.kernel_size;
-                const stride = self.context.AvgPool2D.stride;
-
-                const N = A.shape.dims[0];
-                const C_ch = A.shape.dims[1];
-                const H = A.shape.dims[2];
-                const W = A.shape.dims[3];
-                const H_out = C.shape.dims[2];
-                const W_out = C.shape.dims[3];
-                const pool_area = @as(f32, @floatFromInt(kernel_size * kernel_size));
-
-                const s_n = A.strides.dims[0];
-                const s_c = A.strides.dims[1];
-                const s_h = A.strides.dims[2];
-                const s_w = A.strides.dims[3];
-
-                const o_n = C.strides.dims[0];
-                const o_c = C.strides.dims[1];
-                const o_h = C.strides.dims[2];
-                const o_w = C.strides.dims[3];
-
-                for (0..N) |n| {
-                    for (0..C_ch) |c_| {
-                        for (0..H_out) |oh| {
-                            for (0..W_out) |ow| {
-                                var sum_val: f32 = 0.0;
-                                for (0..kernel_size) |kh| {
-                                    for (0..kernel_size) |kw| {
-                                        const ih = oh * stride + kh;
-                                        const iw = ow * stride + kw;
-                                        if (ih < H and iw < W) {
-                                            sum_val += A.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
-                                        }
-                                    }
-                                }
-                                C.data[n * o_n + c_ * o_c + oh * o_h + ow * o_w] = sum_val / pool_area;
-                            }
-                        }
-                    }
-                }
+                const ctx = self.context.AvgPool2D;
+                copyFromEager(self.outputs[0], try self.inputs[0].avgpool2d(ctx.kernel_size, ctx.stride, allocator, null), allocator);
             },
             .Softmax => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const D = A.shape.dims[A.shape.len - 1];
-                const M = A.data.len / D;
-
-                for (0..M) |i| {
-                    const row_in = A.data[i * D .. (i + 1) * D];
-                    const row_out = C.data[i * D .. (i + 1) * D];
-
-                    var max_val = row_in[0];
-                    for (row_in[1..]) |val| {
-                        if (val > max_val) max_val = val;
-                    }
-
-                    var sum: f32 = 0.0;
-                    for (row_in, row_out) |val, *p| {
-                        const exp_val = @exp(val - max_val);
-                        p.* = exp_val;
-                        sum += exp_val;
-                    }
-
-                    for (row_out) |*p| {
-                        p.* /= sum;
-                    }
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].softmax(allocator, null), allocator);
             },
             .RmsNorm => {
-                const X = self.inputs[0];
-                const G = self.inputs[1];
-                const Y = self.outputs[0];
-                const eps = self.context.RmsNorm.eps;
-                const D = X.shape.dims[X.shape.len - 1];
-                const M = X.data.len / D;
-
-                for (0..M) |i| {
-                    const row_in = X.data[i * D .. (i + 1) * D];
-                    const row_out = Y.data[i * D .. (i + 1) * D];
-
-                    var sum_x2: f32 = 0.0;
-                    for (row_in) |val| {
-                        sum_x2 += val * val;
-                    }
-                    const rms = @sqrt(sum_x2 / @as(f32, @floatFromInt(D)) + eps);
-
-                    for (row_in, row_out, G.data) |x_val, *y_val, g_val| {
-                        y_val.* = x_val / rms * g_val;
-                    }
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].rmsNorm(self.inputs[1], self.context.RmsNorm.eps, allocator, null), allocator);
             },
             .LayerNorm => {
-                const X = self.inputs[0];
-                const G = self.inputs[1];
-                const B = self.inputs[2];
-                const Y = self.outputs[0];
-                const eps = self.context.LayerNorm.eps;
-                const D = X.shape.dims[X.shape.len - 1];
-                const M = X.data.len / D;
-                const d_f = @as(f32, @floatFromInt(D));
-
-                for (0..M) |i| {
-                    const row_in = X.data[i * D .. (i + 1) * D];
-                    const row_out = Y.data[i * D .. (i + 1) * D];
-
-                    var sum_x: f32 = 0.0;
-                    for (row_in) |val| sum_x += val;
-                    const mean_val = sum_x / d_f;
-
-                    var var_sum: f32 = 0.0;
-                    for (row_in) |val| {
-                        const diff = val - mean_val;
-                        var_sum += diff * diff;
-                    }
-                    const inv_std = 1.0 / @sqrt(var_sum / d_f + eps);
-
-                    for (0..D) |j| {
-                        row_out[j] = (row_in[j] - mean_val) * inv_std * G.data[j] + B.data[j];
-                    }
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].layerNorm(self.inputs[1], self.inputs[2], self.context.LayerNorm.eps, allocator, null), allocator);
             },
             .BatchNorm2d => {
                 const X = self.inputs[0];
@@ -744,129 +272,20 @@ pub const Op = struct {
                 }
             },
             .RoPE => {
-                const X = self.inputs[0];
-                const Y = self.outputs[0];
-                const start_pos = self.context.RoPE.start_pos;
-                const rotary_offset = self.context.RoPE.rotary_offset;
-                const D = X.shape.dims[X.shape.len - 1];
-                const T = if (X.shape.len >= 2) X.shape.dims[X.shape.len - 2] else 1;
-                const outer = X.data.len / (T * D);
-                const rot_dim = D - rotary_offset;
-                const half = rot_dim / 2;
-                const rot_dim_f = @as(f32, @floatFromInt(rot_dim));
-
-                for (0..outer) |o| {
-                    for (0..T) |t| {
-                        const row_in = X.data[(o * T + t) * D .. (o * T + t + 1) * D];
-                        const row_out = Y.data[(o * T + t) * D .. (o * T + t + 1) * D];
-                        if (rotary_offset > 0) {
-                            @memcpy(row_out[0..rotary_offset], row_in[0..rotary_offset]);
-                        }
-                        const pos_f = @as(f32, @floatFromInt(start_pos + t));
-                        for (0..half) |i| {
-                            const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
-                            const theta = pos_f * freq;
-                            const cos_t = @cos(theta);
-                            const sin_t = @sin(theta);
-                            const x0 = row_in[rotary_offset + 2 * i];
-                            const x1 = row_in[rotary_offset + 2 * i + 1];
-                            row_out[rotary_offset + 2 * i] = x0 * cos_t - x1 * sin_t;
-                            row_out[rotary_offset + 2 * i + 1] = x0 * sin_t + x1 * cos_t;
-                        }
-                        if (2 * half < rot_dim) {
-                            row_out[D - 1] = row_in[D - 1];
-                        }
-                    }
-                }
+                const ctx = self.context.RoPE;
+                copyFromEager(self.outputs[0], try self.inputs[0].ropeOffset(ctx.start_pos, ctx.rotary_offset, allocator, null), allocator);
             },
             .BatchMatMul => {
-                const A = self.inputs[0];
-                const B = self.inputs[1];
-                const C = self.outputs[0];
-
-                std.debug.assert(A.shape.len == 4);
-                std.debug.assert(B.shape.len == 4);
-                std.debug.assert(C.shape.len == 4);
-
-                const batch_size = A.shape.dims[0];
-                const num_heads = A.shape.dims[1];
-                const M = A.shape.dims[2];
-                const K = A.shape.dims[3];
-                const N = B.shape.dims[3];
-
-                const sA_b = A.strides.dims[0];
-                const sA_h = A.strides.dims[1];
-                const sB_b = B.strides.dims[0];
-                const sB_h = B.strides.dims[1];
-                const sC_b = C.strides.dims[0];
-                const sC_h = C.strides.dims[1];
-
-                for (0..batch_size) |b| {
-                    for (0..num_heads) |h| {
-                        const ptrA = A.data.ptr + b * sA_b + h * sA_h;
-                        const ptrB = B.data.ptr + b * sB_b + h * sB_h;
-                        const ptrC = C.data.ptr + b * sC_b + h * sC_h;
-
-                        c.cblas_sgemm(
-                            c.CblasRowMajor,
-                            c.CblasNoTrans,
-                            c.CblasNoTrans,
-                            @intCast(M),
-                            @intCast(N),
-                            @intCast(K),
-                            1.0,
-                            ptrA,
-                            @intCast(K),
-                            ptrB,
-                            @intCast(N),
-                            0.0,
-                            ptrC,
-                            @intCast(N),
-                        );
-                    }
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].batchMatMul(self.inputs[1], allocator, null), allocator);
             },
             .Embedding => {
-                const W = self.inputs[0];
-                const X = self.inputs[1];
-                const Y = self.outputs[0];
-
-                const B = X.shape.dims[0];
-                const T = X.shape.dims[1];
-                const D = W.shape.dims[1];
-                const VocabSize = W.shape.dims[0];
-
-                for (0..B) |b| {
-                    for (0..T) |t| {
-                        const idx_f = X.data[b * T + t];
-                        const idx = @as(usize, @intFromFloat(idx_f));
-                        std.debug.assert(idx < VocabSize);
-
-                        const w_row = W.data[idx * D .. (idx + 1) * D];
-                        const y_row = Y.data[(b * T + t) * D .. (b * T + t + 1) * D];
-                        @memcpy(y_row, w_row);
-                    }
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].embedding(self.inputs[1], allocator, null), allocator);
             },
             .L2Loss => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const lambda = self.context.L2Loss.lambda;
-                var sum_sq: f32 = 0.0;
-                for (A.data) |v| {
-                    sum_sq += v * v;
-                }
-                C.data[0] = 0.5 * lambda * sum_sq;
+                copyFromEager(self.outputs[0], try self.inputs[0].l2Loss(self.context.L2Loss.lambda, allocator, null), allocator);
             },
             .L1Loss => {
-                const A = self.inputs[0];
-                const C = self.outputs[0];
-                const lambda = self.context.L1Loss.lambda;
-                var sum_abs: f32 = 0.0;
-                for (A.data) |v| {
-                    sum_abs += @abs(v);
-                }
-                C.data[0] = lambda * sum_abs;
+                copyFromEager(self.outputs[0], try self.inputs[0].l1Loss(self.context.L1Loss.lambda, allocator, null), allocator);
             },
         }
     }

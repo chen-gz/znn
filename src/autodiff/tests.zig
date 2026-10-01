@@ -135,5 +135,51 @@ test "autodiff broadcasting add, sub, mul, div backward reduction" {
     try std.testing.expectApproxEqAbs(@as(f32, -3.75), b4.grad[1], 1e-5);
 }
 
+test "autodiff Graph.forward re-evaluates recorded ops consistently with initial forward" {
+    const allocator = std.testing.allocator;
 
+    var graph = Graph.init(allocator);
+    defer graph.deinit();
 
+    const x = try graph.tensorWithData(2, 2, &.{ 1.0, -1.0, 2.0, 0.5 }, true);
+    const w = try graph.tensorWithData(2, 2, &.{ 0.5, 1.5, -1.0, 2.0 }, true);
+    const b = try graph.tensorWithData(1, 2, &.{ 0.1, -0.2 }, true);
+    const g_scale = try graph.tensorWithData(1, 2, &.{ 1.0, 1.0 }, true);
+    const g_shift = try graph.tensorWithData(1, 2, &.{ 0.0, 0.0 }, true);
+
+    const mm = try graph.matmul(x, w);
+    const added = try graph.add(mm, b);
+    const act = try graph.silu(added);
+    const normed = try graph.layerNorm(act, g_scale, g_shift, 1e-5);
+    const labels = [_]usize{ 0, 1 };
+    const ce = try graph.softmaxCrossEntropy(normed, &labels);
+    const l2 = try graph.l2Loss(w, 0.1);
+    const total = try graph.add(ce, l2);
+
+    const initial_total = total.data[0];
+
+    // Modify x in-place and re-run graph.forward(), then compare with a fresh graph built on the updated x
+    x.data[0] = 3.0;
+    x.data[3] = -2.0;
+    try graph.forward();
+    const reevaluated_total = total.data[0];
+    try std.testing.expect(@abs(reevaluated_total - initial_total) > 1e-4);
+
+    var fresh_graph = Graph.init(allocator);
+    defer fresh_graph.deinit();
+    const x2 = try fresh_graph.tensorWithData(2, 2, &.{ 3.0, -1.0, 2.0, -2.0 }, true);
+    const w2 = try fresh_graph.tensorWithData(2, 2, &.{ 0.5, 1.5, -1.0, 2.0 }, true);
+    const b2 = try fresh_graph.tensorWithData(1, 2, &.{ 0.1, -0.2 }, true);
+    const g_scale2 = try fresh_graph.tensorWithData(1, 2, &.{ 1.0, 1.0 }, true);
+    const g_shift2 = try fresh_graph.tensorWithData(1, 2, &.{ 0.0, 0.0 }, true);
+
+    const mm2 = try fresh_graph.matmul(x2, w2);
+    const added2 = try fresh_graph.add(mm2, b2);
+    const act2 = try fresh_graph.silu(added2);
+    const normed2 = try fresh_graph.layerNorm(act2, g_scale2, g_shift2, 1e-5);
+    const ce2 = try fresh_graph.softmaxCrossEntropy(normed2, &labels);
+    const l2_2 = try fresh_graph.l2Loss(w2, 0.1);
+    const total2 = try fresh_graph.add(ce2, l2_2);
+
+    try std.testing.expectApproxEqAbs(total2.data[0], reevaluated_total, 1e-6);
+}

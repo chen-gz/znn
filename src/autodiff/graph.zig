@@ -311,20 +311,46 @@ pub const Graph = struct {
             @memset(C.grad, 0.0);
         }
 
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Reshape,
+            .{ .Reshape = {} },
+            req_grad,
+        );
+    }
+
+    /// 将单输出张量 `C` 注册到计算图中，并在满足梯度条件时构建与记录 `Op` 节点
+    fn registerSingleOutputOp(
+        self: *Graph,
+        C: *Tensor,
+        inputs: []const *Tensor,
+        op_type: OpType,
+        context: OpContext,
+        req_grad: bool,
+    ) !*Tensor {
+        const allocator = self.arena.allocator();
+        C.scope = self.currentScope();
+        C.requires_grad = req_grad;
+        if (req_grad and C.grad.len == 0) {
+            C.grad = try allocator.alloc(f32, C.data.len);
+            @memset(C.grad, 0.0);
+        }
+
         try self.tensors.append(self.backing_allocator, C);
 
         if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
+            const inps_copy = try allocator.alloc(*Tensor, inputs.len);
+            @memcpy(inps_copy, inputs);
+            const outs_copy = try allocator.alloc(*Tensor, 1);
+            outs_copy[0] = C;
 
             const o = try allocator.create(Op);
             o.* = Op{
-                .op_type = .Reshape,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Reshape = {} },
+                .op_type = op_type,
+                .inputs = inps_copy,
+                .outputs = outs_copy,
+                .context = context,
             };
             C.creator = o;
             try self.recordOp(o);
@@ -333,43 +359,52 @@ pub const Graph = struct {
         return C;
     }
 
+    /// 对已通过 `self.tensor*` 预分配并注册的输出张量执行 `Op.forward`，并在需要梯度时记录 `Op` 节点
+    fn runAndRecordPreallocatedOp(
+        self: *Graph,
+        output: *Tensor,
+        inputs: []const *Tensor,
+        op_type: OpType,
+        context: OpContext,
+        req_grad: bool,
+    ) !*Tensor {
+        var temp_op = Op{
+            .op_type = op_type,
+            .inputs = @constCast(inputs),
+            .outputs = @constCast(&[_]*Tensor{output}),
+            .context = context,
+        };
+        try temp_op.forward(self.backing_allocator);
+
+        if (req_grad) {
+            const allocator = self.arena.allocator();
+            const inps_copy = try allocator.alloc(*Tensor, inputs.len);
+            @memcpy(inps_copy, inputs);
+            const outs_copy = try allocator.alloc(*Tensor, 1);
+            outs_copy[0] = output;
+
+            const o = try allocator.create(Op);
+            o.* = temp_op;
+            o.inputs = inps_copy;
+            o.outputs = outs_copy;
+            output.creator = o;
+            try self.recordOp(o);
+        }
+
+        return output;
+    }
+
     // 维度转置算子前向传播：交换 dim0 和 dim1
     pub fn transposeND(self: *Graph, A: *Tensor, dim0: usize, dim1: usize) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.transpose(dim0, dim1, allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Transpose,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{
-                    .Transpose = .{
-                        .dim0 = dim0,
-                        .dim1 = dim1,
-                    },
-                },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Transpose,
+            .{ .Transpose = .{ .dim0 = dim0, .dim1 = dim1 } },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     // 沿指定维度拼接张量数组 (Concat)
@@ -386,36 +421,13 @@ pub const Graph = struct {
                 }
             }
         }
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inps_copy = try allocator.alloc(*Tensor, inputs.len);
-            @memcpy(inps_copy, inputs);
-            const outs_copy = try allocator.alloc(*Tensor, 1);
-            outs_copy[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Concat,
-                .inputs = inps_copy,
-                .outputs = outs_copy,
-                .context = .{
-                    .Concat = .{
-                        .dim = dim,
-                    },
-                },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            inputs,
+            .Concat,
+            .{ .Concat = .{ .dim = dim } },
+            req_grad,
+        );
     }
 
     // 沿指定维度将张量均等切分为 num_splits 份 (Split)
@@ -425,6 +437,7 @@ pub const Graph = struct {
 
         const req_grad = self.enable_grad and input.requires_grad;
         for (outputs) |out| {
+            out.scope = self.currentScope();
             out.requires_grad = req_grad;
             if (req_grad) {
                 out.grad = try allocator.alloc(f32, out.data.len);
@@ -466,84 +479,27 @@ pub const Graph = struct {
         if (groups == 1) return X;
 
         const allocator = self.arena.allocator();
-        const B = X.shape.dims[0];
-        const n_kv = X.shape.dims[1];
-        const T = X.shape.dims[2];
-        const hs = X.shape.dims[3];
-        const nh = n_kv * groups;
-
-        const req_grad = self.enable_grad and X.requires_grad;
-        const Y = try self.tensorND(&.{ B, nh, T, hs }, req_grad);
-
-        const head_bytes = T * hs;
-        for (0..B) |b| {
-            for (0..n_kv) |kv_h| {
-                const src = X.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
-                for (0..groups) |g| {
-                    const h = kv_h * groups + g;
-                    const dest = Y.data[((b * nh + h) * head_bytes) .. ((b * nh + h + 1) * head_bytes)];
-                    @memcpy(dest, src);
-                }
-            }
-        }
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = X;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = Y;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .RepeatKV,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{
-                    .RepeatKV = .{
-                        .groups = groups,
-                    },
-                },
-            };
-            Y.creator = o;
-            try self.recordOp(o);
-        }
-
-        return Y;
+        const Y = try X.repeatKV(groups, allocator, null);
+        return self.registerSingleOutputOp(
+            Y,
+            &.{X},
+            .RepeatKV,
+            .{ .RepeatKV = .{ .groups = groups } },
+            self.enable_grad and X.requires_grad,
+        );
     }
 
     // 矩阵乘法算子前向传播：C = A * B
     pub fn matmul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.matmul(B, allocator, null);
-
-        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = A;
-            inputs[1] = B;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .MatMul,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .MatMul = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{ A, B },
+            .MatMul,
+            .{ .MatMul = {} },
+            self.enable_grad and (A.requires_grad or B.requires_grad),
+        );
     }
 
     // 偏置相加算子前向传播：C = A + bias (直接路由到通用广播加法)
@@ -555,200 +511,74 @@ pub const Graph = struct {
     pub fn relu(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.relu(allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Relu,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Relu = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Relu,
+            .{ .Relu = {} },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     pub fn gelu(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.gelu(allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Gelu,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Gelu = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Gelu,
+            .{ .Gelu = {} },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     pub fn sigmoid(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.sigmoid(allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Sigmoid,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Sigmoid = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Sigmoid,
+            .{ .Sigmoid = {} },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     pub fn tanh(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.tanh(allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Tanh,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Tanh = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Tanh,
+            .{ .Tanh = {} },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     pub fn leakyRelu(self: *Graph, A: *Tensor, alpha: f32) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.leakyRelu(alpha, allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .LeakyRelu,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .LeakyRelu = .{ .alpha = alpha } },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .LeakyRelu,
+            .{ .LeakyRelu = .{ .alpha = alpha } },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     // 激活函数 SiLU (Swish) 前向传播：C = A * sigmoid(A)
     pub fn silu(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.silu(allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Silu,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Silu = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Silu,
+            .{ .Silu = {} },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     // 损失函数 Softmax + Cross Entropy 结合前向传播
@@ -769,84 +599,23 @@ pub const Graph = struct {
         const req_grad = self.enable_grad and logits.requires_grad;
         const loss = try self.tensor(1, 1, req_grad);
 
-        var loss_sum: f32 = 0.0;
-        if (req_grad) {
-            const probs = try allocator.alloc(f32, B * N);
+        var empty_probs: [0]f32 = .{};
+        const probs: []f32 = if (req_grad) try allocator.alloc(f32, B * N) else &empty_probs;
 
-            // 1. 对每一行计算 Softmax 概率（数值稳定的减去 max 技巧）
-            for (0..B) |i| {
-                const logits_row = logits.data[i * N .. (i + 1) * N];
-                const probs_row = probs[i * N .. (i + 1) * N];
-
-                // 寻找当前行的最大值，避免 @exp() 产生数值上溢（NaN）
-                var max_val = logits_row[0];
-                for (logits_row[1..]) |val| {
-                    if (val > max_val) max_val = val;
-                }
-
-                var sum: f32 = 0.0;
-                for (logits_row, probs_row) |val, *p| {
-                    const exp_val = @exp(val - max_val);
-                    p.* = exp_val;
-                    sum += exp_val;
-                }
-
-                // 归一化为概率分布
-                for (probs_row) |*p| {
-                    p.* /= sum;
-                }
-            }
-
-            // 2. 计算平均交叉熵损失值：L = -1/B * sum(log(prob_target))
-            for (0..B) |i| {
-                const label = targets_copy[i];
-                const prob = probs[i * N + label];
-                const clipped = @max(prob, 1e-15); // 微小值剪裁，避免 log(0) 产生 -inf
-                loss_sum += -@log(clipped);
-            }
-            loss.data[0] = loss_sum / @as(f32, @floatFromInt(B));
-
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = logits;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = loss;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .SoftmaxCrossEntropy,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{
-                    .SoftmaxCrossEntropy = .{
-                        .probs = probs,
-                        .targets = targets_copy,
-                        .mask = null,
-                        .total_weight = @as(f32, @floatFromInt(B)),
-                    },
+        return self.runAndRecordPreallocatedOp(
+            loss,
+            &.{logits},
+            .SoftmaxCrossEntropy,
+            .{
+                .SoftmaxCrossEntropy = .{
+                    .probs = probs,
+                    .targets = targets_copy,
+                    .mask = null,
+                    .total_weight = @as(f32, @floatFromInt(B)),
                 },
-            };
-            loss.creator = o;
-            try self.recordOp(o);
-        } else {
-            for (0..B) |i| {
-                const logits_row = logits.data[i * N .. (i + 1) * N];
-                var max_val = logits_row[0];
-                for (logits_row[1..]) |val| {
-                    if (val > max_val) max_val = val;
-                }
-                var sum: f32 = 0.0;
-                for (logits_row) |val| {
-                    sum += @exp(val - max_val);
-                }
-                const label = targets_copy[i];
-                const prob = @exp(logits_row[label] - max_val) / sum;
-                const clipped = @max(prob, 1e-15);
-                loss_sum += -@log(clipped);
-            }
-            loss.data[0] = loss_sum / @as(f32, @floatFromInt(B));
-        }
-
-        return loss;
+            },
+            req_grad,
+        );
     }
 
     // 监督微调 (SFT) 掩码交叉熵损失：仅对 mask[i] > 0 的位置计算交叉熵并支持 Autograd 反向传播
@@ -872,69 +641,20 @@ pub const Graph = struct {
         const probs: []f32 = if (req_grad) try allocator.alloc(f32, B * N) else &empty_probs;
         if (req_grad) @memset(probs, 0.0);
 
-        var total_loss: f32 = 0.0;
-        var total_weight: f32 = 0.0;
-
-        for (0..B) |i| {
-            const w = mask_copy[i];
-            if (w <= 0.0) continue;
-
-            const logits_row = logits.data[i * N .. (i + 1) * N];
-            var max_val = logits_row[0];
-            for (logits_row[1..]) |val| {
-                if (val > max_val) max_val = val;
-            }
-
-            var sum_exp: f32 = 0.0;
-            if (req_grad) {
-                const probs_row = probs[i * N .. (i + 1) * N];
-                for (logits_row, probs_row) |val, *p| {
-                    const e = @exp(val - max_val);
-                    p.* = e;
-                    sum_exp += e;
-                }
-                for (probs_row) |*p| {
-                    p.* /= sum_exp;
-                }
-            } else {
-                for (logits_row) |val| {
-                    sum_exp += @exp(val - max_val);
-                }
-            }
-
-            const log_sum_exp = max_val + @log(sum_exp);
-            const loss_i = log_sum_exp - logits_row[targets_copy[i]];
-            total_loss += loss_i * w;
-            total_weight += w;
-        }
-
-        loss.data[0] = if (total_weight > 0.0) total_loss / total_weight else 0.0;
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = logits;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = loss;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .SoftmaxCrossEntropy,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{
-                    .SoftmaxCrossEntropy = .{
-                        .probs = probs,
-                        .targets = targets_copy,
-                        .mask = mask_copy,
-                        .total_weight = total_weight,
-                    },
+        return self.runAndRecordPreallocatedOp(
+            loss,
+            &.{logits},
+            .SoftmaxCrossEntropy,
+            .{
+                .SoftmaxCrossEntropy = .{
+                    .probs = probs,
+                    .targets = targets_copy,
+                    .mask = mask_copy,
+                    .total_weight = 0.0,
                 },
-            };
-            loss.creator = o;
-            try self.recordOp(o);
-        }
-
-        return loss;
+            },
+            req_grad,
+        );
     }
 
     // 直接偏好优化 (DPO) 损失函数：支持对策略模型对数概率 pi_chosen_logps / pi_rejected_logps 的计算图反向传播
@@ -960,44 +680,19 @@ pub const Graph = struct {
         const req_grad = self.enable_grad and (pi_chosen_logps.requires_grad or pi_rejected_logps.requires_grad);
         const loss = try self.tensor(1, 1, req_grad);
 
-        var total_loss: f32 = 0.0;
-        for (0..N) |i| {
-            const log_ratio_chosen = pi_chosen_logps.data[i] - ref_c_copy[i];
-            const log_ratio_rejected = pi_rejected_logps.data[i] - ref_r_copy[i];
-            const z = beta * (log_ratio_chosen - log_ratio_rejected);
-            const loss_i = if (z > 0.0)
-                @log(1.0 + @exp(-z))
-            else
-                -z + @log(1.0 + @exp(z));
-            total_loss += loss_i;
-        }
-        loss.data[0] = if (N > 0) total_loss / @as(f32, @floatFromInt(N)) else 0.0;
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = pi_chosen_logps;
-            inputs[1] = pi_rejected_logps;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = loss;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .DpoLoss,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{
-                    .DpoLoss = .{
-                        .ref_chosen = ref_c_copy,
-                        .ref_rejected = ref_r_copy,
-                        .beta = beta,
-                    },
+        return self.runAndRecordPreallocatedOp(
+            loss,
+            &.{ pi_chosen_logps, pi_rejected_logps },
+            .DpoLoss,
+            .{
+                .DpoLoss = .{
+                    .ref_chosen = ref_c_copy,
+                    .ref_rejected = ref_r_copy,
+                    .beta = beta,
                 },
-            };
-            loss.creator = o;
-            try self.recordOp(o);
-        }
-
-        return loss;
+            },
+            req_grad,
+        );
     }
 
     // 组相对策略优化 (GRPO) 损失函数：支持在计算图中对 new_logps 自动微分求导
@@ -1030,128 +725,45 @@ pub const Graph = struct {
         const req_grad = self.enable_grad and new_logps.requires_grad;
         const loss = try self.tensor(1, 1, req_grad);
 
-        var total_obj: f32 = 0.0;
-        for (0..N) |i| {
-            const ratio = @exp(new_logps.data[i] - old_logps.data[i]);
-            const adv = adv_copy[i];
-            const s1 = ratio * adv;
-            const clipped_ratio = std.math.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps);
-            const s2 = clipped_ratio * adv;
-            const surrogate = @min(s1, s2);
-
-            var kl: f32 = 0.0;
-            if (beta > 0.0) {
-                const ref = if (ref_copy) |refs| refs[i] else old_logps.data[i];
-                const u = ref - new_logps.data[i];
-                kl = @exp(u) - u - 1.0;
-            }
-            total_obj += (surrogate - beta * kl);
-        }
-        loss.data[0] = if (N > 0) -(total_obj / @as(f32, @floatFromInt(N))) else 0.0;
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = old_logps;
-            inputs[1] = new_logps;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = loss;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .GrpoLoss,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{
-                    .GrpoLoss = .{
-                        .advantages = adv_copy,
-                        .ref_logps = ref_copy,
-                        .beta = beta,
-                        .clip_eps = clip_eps,
-                    },
+        return self.runAndRecordPreallocatedOp(
+            loss,
+            &.{ old_logps, new_logps },
+            .GrpoLoss,
+            .{
+                .GrpoLoss = .{
+                    .advantages = adv_copy,
+                    .ref_logps = ref_copy,
+                    .beta = beta,
+                    .clip_eps = clip_eps,
                 },
-            };
-            loss.creator = o;
-            try self.recordOp(o);
-        }
-
-        return loss;
+            },
+            req_grad,
+        );
     }
 
     // 均方误差 (MSE) 损失函数：C = 1/N * sum((y_pred - y_true)^2)
     pub fn mseLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor) !*Tensor {
-        const allocator = self.arena.allocator();
         const req_grad = self.enable_grad and (y_pred.requires_grad or y_true.requires_grad);
         const loss = try self.tensor(1, 1, req_grad);
-
-        const N = y_pred.data.len;
-        std.debug.assert(N == y_true.data.len);
-
-        var loss_sum: f32 = 0.0;
-        for (0..N) |i| {
-            const diff = y_pred.data[i] - y_true.data[i];
-            loss_sum += diff * diff;
-        }
-        loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = y_pred;
-            inputs[1] = y_true;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = loss;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .MseLoss,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .MseLoss = {} },
-            };
-            loss.creator = o;
-            try self.recordOp(o);
-        }
-
-        return loss;
+        return self.runAndRecordPreallocatedOp(
+            loss,
+            &.{ y_pred, y_true },
+            .MseLoss,
+            .{ .MseLoss = {} },
+            req_grad,
+        );
     }
 
     pub fn bceWithLogitsLoss(self: *Graph, logits: *Tensor, targets: *Tensor) !*Tensor {
-        const allocator = self.arena.allocator();
         const req_grad = self.enable_grad and (logits.requires_grad or targets.requires_grad);
         const loss = try self.tensor(1, 1, req_grad);
-
-        const N = logits.data.len;
-        std.debug.assert(N == targets.data.len);
-
-        var loss_sum: f32 = 0.0;
-        for (0..N) |i| {
-            const x = logits.data[i];
-            const y = targets.data[i];
-            const max_x = @max(x, 0.0);
-            const abs_x = @abs(x);
-            const l = max_x - x * y + @log(1.0 + @exp(-abs_x));
-            loss_sum += l;
-        }
-        loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = logits;
-            inputs[1] = targets;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = loss;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .BceWithLogitsLoss,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .BceWithLogitsLoss = {} },
-            };
-            loss.creator = o;
-            try self.recordOp(o);
-        }
-
-        return loss;
+        return self.runAndRecordPreallocatedOp(
+            loss,
+            &.{ logits, targets },
+            .BceWithLogitsLoss,
+            .{ .BceWithLogitsLoss = {} },
+            req_grad,
+        );
     }
 
     pub fn sigmoidCrossEntropy(self: *Graph, logits: *Tensor, targets: *Tensor) !*Tensor {
@@ -1159,43 +771,15 @@ pub const Graph = struct {
     }
 
     pub fn bceLoss(self: *Graph, probs: *Tensor, targets: *Tensor, eps: f32) !*Tensor {
-        const allocator = self.arena.allocator();
         const req_grad = self.enable_grad and (probs.requires_grad or targets.requires_grad);
         const loss = try self.tensor(1, 1, req_grad);
-
-        const N = probs.data.len;
-        std.debug.assert(N == targets.data.len);
-
-        var loss_sum: f32 = 0.0;
-        for (0..N) |i| {
-            const p = probs.data[i];
-            const y = targets.data[i];
-            const p_clip = @max(p, eps);
-            const one_minus_p_clip = @max(1.0 - p, eps);
-            const l = -(y * @log(p_clip) + (1.0 - y) * @log(one_minus_p_clip));
-            loss_sum += l;
-        }
-        loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = probs;
-            inputs[1] = targets;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = loss;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .BceLoss,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .BceLoss = .{ .eps = eps } },
-            };
-            loss.creator = o;
-            try self.recordOp(o);
-        }
-
-        return loss;
+        return self.runAndRecordPreallocatedOp(
+            loss,
+            &.{ probs, targets },
+            .BceLoss,
+            .{ .BceLoss = .{ .eps = eps } },
+            req_grad,
+        );
     }
 
     pub fn randomNormal(self: *Graph, shape_slice: []const usize, random: std.Random, mean: f32, stddev: f32, requires_grad: bool) !*Tensor {
@@ -1212,34 +796,15 @@ pub const Graph = struct {
 
     // L2 正则化损失函数：C = 0.5 * lambda * sum(weight_i^2)
     pub fn l2Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
-        const allocator = self.arena.allocator();
         const req_grad = self.enable_grad and weight.requires_grad;
         const loss = try self.tensor(1, 1, req_grad);
-
-        var sum_sq: f32 = 0.0;
-        for (weight.data) |v| {
-            sum_sq += v * v;
-        }
-        loss.data[0] = 0.5 * lambda * sum_sq;
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = weight;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = loss;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .L2Loss,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .L2Loss = .{ .lambda = lambda } },
-            };
-            loss.creator = o;
-            try self.recordOp(o);
-        }
-
-        return loss;
+        return self.runAndRecordPreallocatedOp(
+            loss,
+            &.{weight},
+            .L2Loss,
+            .{ .L2Loss = .{ .lambda = lambda } },
+            req_grad,
+        );
     }
 
     // 岭回归 (Ridge) 组合损失函数：Loss = MSE(y_pred, y_true) + 0.5 * lambda * sum(weight_i^2)
@@ -1252,34 +817,15 @@ pub const Graph = struct {
 
     // L1 正则化损失：Loss = lambda * sum(|weight_i|)
     pub fn l1Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
-        const allocator = self.arena.allocator();
         const req_grad = self.enable_grad and weight.requires_grad;
         const loss = try self.tensor(1, 1, req_grad);
-
-        var sum_abs: f32 = 0.0;
-        for (weight.data) |v| {
-            sum_abs += @abs(v);
-        }
-        loss.data[0] = lambda * sum_abs;
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = weight;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = loss;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .L1Loss,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .L1Loss = .{ .lambda = lambda } },
-            };
-            loss.creator = o;
-            try self.recordOp(o);
-        }
-
-        return loss;
+        return self.runAndRecordPreallocatedOp(
+            loss,
+            &.{weight},
+            .L1Loss,
+            .{ .L1Loss = .{ .lambda = lambda } },
+            req_grad,
+        );
     }
 
     // Lasso 组合损失函数：Loss = MSE(y_pred, y_true) + lambda * sum(|weight_i|)
@@ -1310,314 +856,115 @@ pub const Graph = struct {
     pub fn mulScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.mulScalar(val, allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .MulScalar,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .MulScalar = .{ .val = val } },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .MulScalar,
+            .{ .MulScalar = .{ .val = val } },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     // 标量加法：C = A + val
     pub fn addScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.addScalar(val, allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .AddScalar,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .AddScalar = .{ .val = val } },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .AddScalar,
+            .{ .AddScalar = .{ .val = val } },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     // 标量减法：C = A - val
     pub fn subScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.subScalar(val, allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .SubScalar,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .SubScalar = .{ .val = val } },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .SubScalar,
+            .{ .SubScalar = .{ .val = val } },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     // 标量除法：C = A / val
     pub fn divScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.divScalar(val, allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .DivScalar,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .DivScalar = .{ .val = val } },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .DivScalar,
+            .{ .DivScalar = .{ .val = val } },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     // 逐元素张量加法：C = A + B (支持多维广播)
     pub fn add(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.add(B, allocator, null);
-
-        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = A;
-            inputs[1] = B;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Add,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Add = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{ A, B },
+            .Add,
+            .{ .Add = {} },
+            self.enable_grad and (A.requires_grad or B.requires_grad),
+        );
     }
 
     // 逐元素张量减法：C = A - B (支持多维广播)
     pub fn sub(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.sub(B, allocator, null);
-
-        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = A;
-            inputs[1] = B;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Sub,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Sub = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{ A, B },
+            .Sub,
+            .{ .Sub = {} },
+            self.enable_grad and (A.requires_grad or B.requires_grad),
+        );
     }
 
     // 逐元素张量乘法 (Hadamard 积)：C = A * B (支持多维广播)
     pub fn mul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.mul(B, allocator, null);
-
-        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = A;
-            inputs[1] = B;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Mul,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Mul = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{ A, B },
+            .Mul,
+            .{ .Mul = {} },
+            self.enable_grad and (A.requires_grad or B.requires_grad),
+        );
     }
 
     // 逐元素张量除法：C = A / B (支持多维广播)
     pub fn div(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.div(B, allocator, null);
-
-        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = A;
-            inputs[1] = B;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Div,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Div = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{ A, B },
+            .Div,
+            .{ .Div = {} },
+            self.enable_grad and (A.requires_grad or B.requires_grad),
+        );
     }
 
     pub fn conv2d(self: *Graph, A: *Tensor, weight: *Tensor, bias: ?*Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.conv2d(weight, bias, allocator, null);
-
         const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
+        if (bias) |b| {
+            return self.registerSingleOutputOp(C, &.{ A, weight, b }, .Conv2D, .{ .Conv2D = {} }, req_grad);
+        } else {
+            return self.registerSingleOutputOp(C, &.{ A, weight }, .Conv2D, .{ .Conv2D = {} }, req_grad);
         }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const num_inputs: usize = if (bias != null) 3 else 2;
-            const inputs = try allocator.alloc(*Tensor, num_inputs);
-            inputs[0] = A;
-            inputs[1] = weight;
-            if (bias) |b| {
-                inputs[2] = b;
-            }
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Conv2D,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Conv2D = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
     }
 
     pub fn convTranspose2D(
@@ -1630,209 +977,73 @@ pub const Graph = struct {
     ) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.convTranspose2d(weight, bias, stride, padding, allocator, null);
-
         const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
+        const ctx: OpContext = .{ .ConvTranspose2D = .{ .stride = stride, .padding = padding } };
+        if (bias) |b| {
+            return self.registerSingleOutputOp(C, &.{ A, weight, b }, .ConvTranspose2D, ctx, req_grad);
+        } else {
+            return self.registerSingleOutputOp(C, &.{ A, weight }, .ConvTranspose2D, ctx, req_grad);
         }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const num_inputs: usize = if (bias != null) 3 else 2;
-            const inputs = try allocator.alloc(*Tensor, num_inputs);
-            inputs[0] = A;
-            inputs[1] = weight;
-            if (bias) |b| {
-                inputs[2] = b;
-            }
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .ConvTranspose2D,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .ConvTranspose2D = .{ .stride = stride, .padding = padding } },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
     }
 
     pub fn maxpool2d(self: *Graph, A: *Tensor, pool_size: usize, stride: usize) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.maxpool2d(pool_size, stride, allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .MaxPool2D,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .MaxPool2D = .{ .pool_size = pool_size, .stride = stride } },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .MaxPool2D,
+            .{ .MaxPool2D = .{ .pool_size = pool_size, .stride = stride } },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     pub fn avgpool2d(self: *Graph, A: *Tensor, kernel_size: usize, stride: usize) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.avgpool2d(kernel_size, stride, allocator, null);
-        C.scope = self.currentScope();
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .AvgPool2D,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .AvgPool2D = .{ .kernel_size = kernel_size, .stride = stride } },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .AvgPool2D,
+            .{ .AvgPool2D = .{ .kernel_size = kernel_size, .stride = stride } },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     pub fn softmax(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.softmax(allocator, null);
-
-        const req_grad = self.enable_grad and A.requires_grad;
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = A;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Softmax,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Softmax = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Softmax,
+            .{ .Softmax = {} },
+            self.enable_grad and A.requires_grad,
+        );
     }
 
     pub fn rmsNorm(self: *Graph, X: *Tensor, G: *Tensor, eps: f32) !*Tensor {
         const allocator = self.arena.allocator();
         const Y = try X.rmsNorm(G, eps, allocator, null);
-
-        const req_grad = self.enable_grad and (X.requires_grad or G.requires_grad);
-        Y.requires_grad = req_grad;
-        if (req_grad) {
-            Y.grad = try allocator.alloc(f32, Y.data.len);
-            @memset(Y.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, Y);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = X;
-            inputs[1] = G;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = Y;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .RmsNorm,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .RmsNorm = .{ .eps = eps } },
-            };
-            Y.creator = o;
-            try self.recordOp(o);
-        }
-
-        return Y;
+        return self.registerSingleOutputOp(
+            Y,
+            &.{ X, G },
+            .RmsNorm,
+            .{ .RmsNorm = .{ .eps = eps } },
+            self.enable_grad and (X.requires_grad or G.requires_grad),
+        );
     }
 
     pub fn layerNorm(self: *Graph, X: *Tensor, G: *Tensor, B: *Tensor, eps: f32) !*Tensor {
         const allocator = self.arena.allocator();
         const Y = try X.layerNorm(G, B, eps, allocator, null);
-        Y.scope = self.currentScope();
-
-        const req_grad = self.enable_grad and (X.requires_grad or G.requires_grad or B.requires_grad);
-        Y.requires_grad = req_grad;
-        if (req_grad) {
-            Y.grad = try allocator.alloc(f32, Y.data.len);
-            @memset(Y.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, Y);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 3);
-            inputs[0] = X;
-            inputs[1] = G;
-            inputs[2] = B;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = Y;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .LayerNorm,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .LayerNorm = .{ .eps = eps } },
-            };
-            Y.creator = o;
-            try self.recordOp(o);
-        }
-
-        return Y;
+        return self.registerSingleOutputOp(
+            Y,
+            &.{ X, G, B },
+            .LayerNorm,
+            .{ .LayerNorm = .{ .eps = eps } },
+            self.enable_grad and (X.requires_grad or G.requires_grad or B.requires_grad),
+        );
     }
 
     pub fn batchNorm2d(
@@ -1982,103 +1193,37 @@ pub const Graph = struct {
     pub fn ropeOffset(self: *Graph, X: *Tensor, start_pos: usize, rotary_offset: usize) !*Tensor {
         const allocator = self.arena.allocator();
         const Y = try X.ropeOffset(start_pos, rotary_offset, allocator, null);
-        Y.scope = self.currentScope();
-
-        const req_grad = self.enable_grad and X.requires_grad;
-        Y.requires_grad = req_grad;
-        if (req_grad) {
-            Y.grad = try allocator.alloc(f32, Y.data.len);
-            @memset(Y.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, Y);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = X;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = Y;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .RoPE,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = rotary_offset } },
-            };
-            Y.creator = o;
-            try self.recordOp(o);
-        }
-
-        return Y;
+        return self.registerSingleOutputOp(
+            Y,
+            &.{X},
+            .RoPE,
+            .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = rotary_offset } },
+            self.enable_grad and X.requires_grad,
+        );
     }
 
     pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.batchMatMul(B, allocator, null);
-
-        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
-        C.requires_grad = req_grad;
-        if (req_grad) {
-            C.grad = try allocator.alloc(f32, C.data.len);
-            @memset(C.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, C);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = A;
-            inputs[1] = B;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = C;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .BatchMatMul,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .BatchMatMul = {} },
-            };
-            C.creator = o;
-            try self.recordOp(o);
-        }
-
-        return C;
+        return self.registerSingleOutputOp(
+            C,
+            &.{ A, B },
+            .BatchMatMul,
+            .{ .BatchMatMul = {} },
+            self.enable_grad and (A.requires_grad or B.requires_grad),
+        );
     }
 
     pub fn embedding(self: *Graph, W: *Tensor, X: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const Y = try W.embedding(X, allocator, null);
-
-        const req_grad = self.enable_grad and W.requires_grad;
-        Y.requires_grad = req_grad;
-        if (req_grad) {
-            Y.grad = try allocator.alloc(f32, Y.data.len);
-            @memset(Y.grad, 0.0);
-        }
-
-        try self.tensors.append(self.backing_allocator, Y);
-
-        if (req_grad) {
-            const inputs = try allocator.alloc(*Tensor, 2);
-            inputs[0] = W;
-            inputs[1] = X;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = Y;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Embedding,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Embedding = {} },
-            };
-            Y.creator = o;
-            try self.recordOp(o);
-        }
-
-        return Y;
+        return self.registerSingleOutputOp(
+            Y,
+            &.{ W, X },
+            .Embedding,
+            .{ .Embedding = {} },
+            self.enable_grad and W.requires_grad,
+        );
     }
 
     // 执行计算图的反向传播
