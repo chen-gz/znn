@@ -636,6 +636,14 @@ pub const MoELayer = struct {
         defer allocator.free(mask_data);
         @memset(mask_data, -1e9);
 
+        const keep_mask = try allocator.alloc(f32, N * E);
+        defer allocator.free(keep_mask);
+        @memset(keep_mask, 0.0);
+
+        const expert_active = try allocator.alloc(bool, E);
+        defer allocator.free(expert_active);
+        @memset(expert_active, false);
+
         // 对每一行寻找 Top-K 个最大的索引
         for (0..N) |row| {
             const row_logits = gate_logits.data[row * E .. (row + 1) * E];
@@ -680,7 +688,10 @@ pub const MoELayer = struct {
             }
 
             for (0..K) |k| {
-                mask_data[row * E + top_indices[k]] = 0.0;
+                const e_idx = top_indices[k];
+                mask_data[row * E + e_idx] = 0.0;
+                keep_mask[row * E + e_idx] = 1.0;
+                expert_active[e_idx] = true;
             }
         }
 
@@ -688,12 +699,17 @@ pub const MoELayer = struct {
 
         if (graph) |g| {
             const mask_node = try g.tensorNDWithData(&.{ N, E }, mask_data, false);
+            mask_node.is_buffer = true;
+            const keep_node = try g.tensorNDWithData(&.{ N, E }, keep_mask, false);
+            keep_node.is_buffer = true;
             const masked_logits = try g.add(gate_logits, mask_node);
-            const probs = try g.softmax(masked_logits); // [N, E]
+            const raw_probs = try g.softmax(masked_logits); // [N, E]
+            const probs = try g.mul(raw_probs, keep_node); // 严格置零非 Top-K 概率
             const prob_cols = try g.split(probs, E, 1); // E 个 [N, 1]
 
             var acc: ?*Tensor = null;
             for (self.routed_experts, 0..) |exp, e| {
+                if (!expert_active[e]) continue; // 跳过整批均未被选中的专家
                 const exp_out = try exp.forward(allocator, graph, x_2d); // [N, D]
                 const weighted = try g.mul(exp_out, prob_cols[e]); // [N, D] * [N, 1] -> [N, D]
                 if (acc) |a| {
@@ -704,26 +720,58 @@ pub const MoELayer = struct {
             }
             total_routed = acc.?;
         } else {
-            // Eager 模式
+            // Eager 模式：稀疏激活，仅对选中的专家收集对应的活跃 Token 子集执行前向传播
             const mask_t = try tensor.array(allocator, &.{ N, E }, mask_data);
             defer tensor.free(allocator, mask_t);
             const masked_logits = try gate_logits.add(mask_t, allocator, null);
             defer tensor.free(allocator, masked_logits);
             const probs = try masked_logits.softmax(allocator, null);
             defer tensor.free(allocator, probs);
+            for (probs.data, keep_mask) |*p, km| {
+                p.* *= km;
+            }
 
             const out_accum = try tensor.zeros(allocator, &.{ N, self.dim });
             errdefer tensor.free(allocator, out_accum);
 
-            for (self.routed_experts, 0..) |exp, e| {
-                const exp_out = try exp.forward(allocator, null, x_2d);
-                defer tensor.free(allocator, exp_out);
+            const active_rows = try allocator.alloc(usize, N);
+            defer allocator.free(active_rows);
 
+            for (self.routed_experts, 0..) |exp, e| {
+                if (!expert_active[e]) continue;
+                var m_e: usize = 0;
                 for (0..N) |row| {
-                    const p = probs.data[row * E + e];
-                    if (p > 0.0) {
+                    if (keep_mask[row * E + e] > 0.0) {
+                        active_rows[m_e] = row;
+                        m_e += 1;
+                    }
+                }
+                if (m_e == 0) continue;
+
+                if (m_e == N) {
+                    const exp_out = try exp.forward(allocator, null, x_2d);
+                    defer tensor.free(allocator, exp_out);
+                    for (0..N) |row| {
+                        const p = probs.data[row * E + e];
                         for (0..self.dim) |d| {
                             out_accum.data[row * self.dim + d] += p * exp_out.data[row * self.dim + d];
+                        }
+                    }
+                } else {
+                    const x_sub = try tensor.zeros(allocator, &.{ m_e, self.dim });
+                    defer tensor.free(allocator, x_sub);
+                    for (active_rows[0..m_e], 0..) |row, sub_i| {
+                        @memcpy(
+                            x_sub.data[sub_i * self.dim .. (sub_i + 1) * self.dim],
+                            x_2d.data[row * self.dim .. (row + 1) * self.dim],
+                        );
+                    }
+                    const exp_out = try exp.forward(allocator, null, x_sub);
+                    defer tensor.free(allocator, exp_out);
+                    for (active_rows[0..m_e], 0..) |row, sub_i| {
+                        const p = probs.data[row * E + e];
+                        for (0..self.dim) |d| {
+                            out_accum.data[row * self.dim + d] += p * exp_out.data[sub_i * self.dim + d];
                         }
                     }
                 }
@@ -1059,31 +1107,16 @@ pub const CausalSelfAttention = struct {
         }
         defer if (graph == null) tensor.free(allocator, att_scaled);
 
-        // 8. 构造因果掩码 (Causal Mask) 矩阵
+        // 8. 构造因果掩码 (Causal Mask) 矩阵 [1, 1, T, T] (通过多维广播作用于 [B, nh, T, T])
         // 该矩阵只包含 0 和 -1e9。上三角（未来位置 j > 当前位置 i）部分全部填充 -1e9。
-        const mask_data = try allocator.alloc(f32, B * nh * T * T);
+        const mask_data = try allocator.alloc(f32, T * T);
         defer allocator.free(mask_data);
         @memset(mask_data, 0.0);
-        for (0..B) |b| {
-            for (0..nh) |h| {
-                for (0..T) |i| {
-                    for (0..T) |j| {
-                        if (j > i) {
-                            mask_data[((b * nh + h) * T + i) * T + j] = -1e9;
-                        }
-                    }
+        for (0..T) |i| {
+            for (0..T) |j| {
+                if (j > i) {
+                    mask_data[i * T + j] = -1e9;
                 }
-            }
-        }
-        const mask = try tensor.array(allocator, &.{ B, nh, T, T }, mask_data);
-        defer tensor.free(allocator, mask);
-
-        var mask_node = mask;
-        if (graph) |g| {
-            mask_node = try g.tensorNDWithData(&.{ B, nh, T, T }, mask_data, false);
-            mask_node.is_buffer = true;
-            if (self.name) |mod_name| {
-                mask_node.setNameFormatted("{s}.causal_mask", .{mod_name});
             }
         }
 
@@ -1091,8 +1124,15 @@ pub const CausalSelfAttention = struct {
         // 未来时刻对应的得分将变为极小值 (-1e9)，进而在 Softmax 后权重归零。
         var att_masked = att_scaled;
         if (graph) |g| {
+            const mask_node = try g.tensorNDWithData(&.{ 1, 1, T, T }, mask_data, false);
+            mask_node.is_buffer = true;
+            if (self.name) |mod_name| {
+                mask_node.setNameFormatted("{s}.causal_mask", .{mod_name});
+            }
             att_masked = try g.add(att_scaled, mask_node);
         } else {
+            const mask = try tensor.array(allocator, &.{ 1, 1, T, T }, mask_data);
+            defer tensor.free(allocator, mask);
             att_masked = try att_scaled.add(mask, allocator, null);
         }
         defer if (graph == null) tensor.free(allocator, att_masked);

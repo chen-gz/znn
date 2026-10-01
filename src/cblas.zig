@@ -84,6 +84,32 @@ fn cblas_sgemm_fallback(
     const Vec8 = @Vector(8, f32);
     const vec_len = 8;
 
+    if (!ta and tb) {
+        // NoTrans x Trans: A[i, p] 与 B[j, p] 均沿内积维度 p 连续排列，直接执行 8 路 SIMD 向量化点积
+        for (0..m) |i| {
+            const a_row = A + i * lda_u;
+            const c_row = C + i * ldc_u;
+            for (0..n) |j| {
+                const b_row = B + j * ldb_u;
+                var acc_vec: Vec8 = @splat(0.0);
+                var p: usize = 0;
+                while (p + vec_len <= k) : (p += vec_len) {
+                    const a_ptr: *const [vec_len]f32 = @ptrCast(a_row + p);
+                    const b_ptr: *const [vec_len]f32 = @ptrCast(b_row + p);
+                    const a_v: Vec8 = a_ptr.*;
+                    const b_v: Vec8 = b_ptr.*;
+                    acc_vec += a_v * b_v;
+                }
+                var dot: f32 = @reduce(.Add, acc_vec);
+                while (p < k) : (p += 1) {
+                    dot += a_row[p] * b_row[p];
+                }
+                c_row[j] += alpha * dot;
+            }
+        }
+        return;
+    }
+
     for (0..m) |i| {
         const c_row = C + i * ldc_u;
         for (0..k) |p| {
@@ -143,5 +169,34 @@ test "cblas_sgemm_fallback matrix multiplication" {
     try std.testing.expectApproxEqAbs(@as(f32, 2.8), C[1], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 4.9), C[2], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 6.4), C[3], 1e-5);
+
+    // Test NoTrans x Trans with K = 10 (covers 8-wide SIMD + scalar remainder)
+    var A10: [20]f32 = undefined;
+    var B10: [20]f32 = undefined;
+    for (0..20) |idx| {
+        A10[idx] = @as(f32, @floatFromInt(idx + 1)) * 0.1;
+        B10[idx] = @as(f32, @floatFromInt(idx + 1)) * 0.2;
+    }
+    var C_nt = [_]f32{0.0} ** 4;
+    cblas_sgemm_fallback(
+        CblasRowMajor,
+        CblasNoTrans,
+        CblasTrans,
+        2, 2, 10,
+        1.0,
+        &A10, 10,
+        &B10, 10,
+        0.0,
+        &C_nt, 2,
+    );
+    var expected00: f32 = 0.0;
+    var expected01: f32 = 0.0;
+    for (0..10) |p| {
+        expected00 += A10[p] * B10[p];
+        expected01 += A10[p] * B10[10 + p];
+    }
+    try std.testing.expectApproxEqAbs(expected00, C_nt[0], 1e-5);
+    try std.testing.expectApproxEqAbs(expected01, C_nt[1], 1e-5);
 }
+
 

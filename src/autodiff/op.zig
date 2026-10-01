@@ -211,7 +211,8 @@ pub const Op = struct {
             },
             .Conv2D => {
                 const bias = if (self.inputs.len > 2) self.inputs[2] else null;
-                copyFromEager(self.outputs[0], try self.inputs[0].conv2d(self.inputs[1], bias, allocator, null), allocator);
+                const ctx = self.context.Conv2D;
+                copyFromEager(self.outputs[0], try self.inputs[0].conv2dWithConfig(self.inputs[1], bias, ctx.stride, ctx.padding, allocator, null), allocator);
             },
             .ConvTranspose2D => {
                 const bias = if (self.inputs.len > 2) self.inputs[2] else null;
@@ -1186,8 +1187,13 @@ pub const Op = struct {
                 const A = self.inputs[0];
                 const W = self.inputs[1];
                 const C = self.outputs[0];
+                const stride = self.context.Conv2D.stride;
+                const padding = self.context.Conv2D.padding;
+
                 const N = A.shape.dims[0];
                 const C_in = A.shape.dims[1];
+                const H = A.shape.dims[2];
+                const W_in = A.shape.dims[3];
                 const C_out = W.shape.dims[0];
                 const KH = W.shape.dims[2];
                 const KW = W.shape.dims[3];
@@ -1209,37 +1215,163 @@ pub const Op = struct {
                 const o_h = C.strides.dims[2];
                 const o_w = C.strides.dims[3];
 
-                for (0..N) |n| {
-                    for (0..C_out) |co| {
-                        for (0..H_out) |h| {
-                            for (0..W_out) |w| {
-                                const grad_val = C.grad[n * o_n + co * o_c + h * o_h + w * o_w];
-                                if (grad_val == 0.0) continue;
-
-                                // Bias gradient
-                                if (self.inputs.len > 2) {
-                                    const bias = self.inputs[2];
-                                    if (bias.requires_grad) {
-                                        bias.grad[co] += grad_val;
+                // Bias gradient: db[co] += sum_{n, h_out, w_out} dC[n, co, h_out, w_out]
+                if (self.inputs.len > 2) {
+                    const bias = self.inputs[2];
+                    if (bias.requires_grad) {
+                        const b_stride = bias.strides.dims[0];
+                        for (0..N) |n| {
+                            for (0..C_out) |co| {
+                                var acc: f32 = 0.0;
+                                for (0..H_out) |h_out| {
+                                    for (0..W_out) |w_out| {
+                                        acc += C.grad[n * o_n + co * o_c + h_out * o_h + w_out * o_w];
                                     }
                                 }
+                                bias.grad[co * b_stride] += acc;
+                            }
+                        }
+                    }
+                }
 
+                const K_col = C_in * KH * KW;
+                const L_out = H_out * W_out;
+                var used_sgemm = false;
+
+                if ((A.requires_grad or W.requires_grad) and A.isContiguous() and W.isContiguous() and C.isContiguous() and K_col > 0 and L_out > 0 and C_out > 0) {
+                    var stack_buf: [4096]f32 = undefined;
+                    const need_len = K_col * L_out;
+                    const heap_buf: ?[]f32 = if (need_len > stack_buf.len)
+                        (std.heap.c_allocator.alloc(f32, need_len) catch null)
+                    else
+                        null;
+                    defer if (heap_buf) |hb| std.heap.c_allocator.free(hb);
+
+                    const col_opt: ?[]f32 = if (need_len <= stack_buf.len) stack_buf[0..need_len] else heap_buf;
+                    if (col_opt) |col_buf| {
+                        used_sgemm = true;
+                        for (0..N) |n| {
+                            const dC_n = C.grad[n * C_out * L_out .. (n + 1) * C_out * L_out];
+
+                            if (W.requires_grad) {
+                                // im2col(A_n) -> col_buf [K_col, L_out]
                                 for (0..C_in) |ci| {
                                     for (0..KH) |kh| {
                                         for (0..KW) |kw| {
-                                            const ih = h + kh;
-                                            const iw = w + kw;
-
-                                            // Weight gradient: dW += dC * A
-                                            if (W.requires_grad) {
-                                                const input_val = A.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
-                                                W.grad[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw] += grad_val * input_val;
+                                            const k_row = (ci * KH + kh) * KW + kw;
+                                            const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
+                                            for (0..H_out) |h_out| {
+                                                const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
+                                                if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) {
+                                                    @memset(col_row[h_out * W_out .. (h_out + 1) * W_out], 0.0);
+                                                    continue;
+                                                }
+                                                const ih: usize = @intCast(ih_signed);
+                                                for (0..W_out) |w_out| {
+                                                    const iw_s: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
+                                                    if (iw_s >= 0 and iw_s < @as(isize, @intCast(W_in))) {
+                                                        const iw: usize = @intCast(iw_s);
+                                                        col_row[h_out * W_out + w_out] = A.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
+                                                    } else {
+                                                        col_row[h_out * W_out + w_out] = 0.0;
+                                                    }
+                                                }
                                             }
+                                        }
+                                    }
+                                }
 
-                                            // Input gradient: dA += dC * W
-                                            if (A.requires_grad) {
-                                                const weight_val = W.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
-                                                A.grad[n * s_n + ci * s_c + ih * s_h + iw * s_w] += grad_val * weight_val;
+                                // dW += dC_n * col_buf^T
+                                c.cblas_sgemm(
+                                    c.CblasRowMajor,
+                                    c.CblasNoTrans,
+                                    c.CblasTrans,
+                                    @intCast(C_out),
+                                    @intCast(K_col),
+                                    @intCast(L_out),
+                                    1.0,
+                                    dC_n.ptr,
+                                    @intCast(L_out),
+                                    col_buf.ptr,
+                                    @intCast(L_out),
+                                    1.0,
+                                    W.grad.ptr,
+                                    @intCast(K_col),
+                                );
+                            }
+
+                            if (A.requires_grad) {
+                                // col_buf = W^T * dC_n -> [K_col, L_out]
+                                c.cblas_sgemm(
+                                    c.CblasRowMajor,
+                                    c.CblasTrans,
+                                    c.CblasNoTrans,
+                                    @intCast(K_col),
+                                    @intCast(L_out),
+                                    @intCast(C_out),
+                                    1.0,
+                                    W.data.ptr,
+                                    @intCast(K_col),
+                                    dC_n.ptr,
+                                    @intCast(L_out),
+                                    0.0,
+                                    col_buf.ptr,
+                                    @intCast(L_out),
+                                );
+
+                                // col2im(col_buf) -> A.grad[n]
+                                for (0..C_in) |ci| {
+                                    for (0..KH) |kh| {
+                                        for (0..KW) |kw| {
+                                            const k_row = (ci * KH + kh) * KW + kw;
+                                            const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
+                                            for (0..H_out) |h_out| {
+                                                const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
+                                                if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
+                                                const ih: usize = @intCast(ih_signed);
+                                                for (0..W_out) |w_out| {
+                                                    const iw_s: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
+                                                    if (iw_s >= 0 and iw_s < @as(isize, @intCast(W_in))) {
+                                                        const iw: usize = @intCast(iw_s);
+                                                        A.grad[n * s_n + ci * s_c + ih * s_h + iw * s_w] += col_row[h_out * W_out + w_out];
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!used_sgemm and (A.requires_grad or W.requires_grad)) {
+                    for (0..N) |n| {
+                        for (0..C_out) |co| {
+                            for (0..H_out) |h_out| {
+                                for (0..W_out) |w_out| {
+                                    const grad_val = C.grad[n * o_n + co * o_c + h_out * o_h + w_out * o_w];
+                                    if (grad_val == 0.0) continue;
+
+                                    for (0..C_in) |ci| {
+                                        for (0..KH) |kh| {
+                                            const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
+                                            if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
+                                            const ih: usize = @intCast(ih_signed);
+                                            for (0..KW) |kw| {
+                                                const iw_signed: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
+                                                if (iw_signed < 0 or iw_signed >= @as(isize, @intCast(W_in))) continue;
+                                                const iw: usize = @intCast(iw_signed);
+
+                                                if (W.requires_grad) {
+                                                    const input_val = A.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
+                                                    W.grad[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw] += grad_val * input_val;
+                                                }
+
+                                                if (A.requires_grad) {
+                                                    const weight_val = W.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
+                                                    A.grad[n * s_n + ci * s_c + ih * s_h + iw * s_w] += grad_val * weight_val;
+                                                }
                                             }
                                         }
                                     }

@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **可视化 JSON Schema (`src/nn/model_graph.schema.json`)**: 以 JSON Schema (draft 2020-12) 逐字段描述 schema 2.0 导出格式 (所有对象 `additionalProperties: false`，字段均带 `description`)，通过 `visualization.SCHEMA_JSON` 嵌入；新增一致性测试，用 GPT 与单个 `Linear` 的导出结果校验 schema，并验证未声明字段与错误版本会被拒绝。
 - `examples/export_model_report.zig` 额外导出单个 `Linear` 层的最小参考 JSON `examples/minimal_model_graph.json` (可视化器 JSON 格式指南中的模板)。
 
+- **Autograd 算子扩展与 LLM 后训练 Loss 求导 (`src/autodiff/`, `src/tensor/core.zig`, `src/nn/`)**:
+  - 新增 `LayerNorm`、`BatchNorm2d`、`Dropout`、`AvgPool2D`、`RoPE`、`MaskedCrossEntropyLoss`、`DpoLoss`、`GrpoLoss`、`Sqrt`、`Exp`、`Log`、`Abs`、`Sum`、`Mean`、`Variance`、`Where`、`MaskedFill`、`Squeeze`、`Unsqueeze`、`Slice` 等算子的计算图前向/反向传播与可视化数学公式。
+  - `softmaxCrossEntropy` 与 `maskedCrossEntropyLoss` 支持 `anytype` 整型分类标签切片（`u8`、`u32`、`usize` 等），突破 256 类词表限制。
+  - `Conv2D` 与 `Tensor.conv2dWithConfig` / `Graph.conv2dWithConfig` 新增可配置 `stride` 与 `padding` 支持，并采用 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向传播。
+- **张量双轨互操作 (`src/tensor/types.zig`, `src/tensor/core.zig`, `src/nn/core.zig`)**:
+  - `GenericTensor(T)` 新增 `fromSlice`、`zeros`、`ones`、`full`、`reshape`、`transpose`、`add`/`sub`/`mul`、`sum`/`mean`、`eq`/`ne`/`gt`/`lt`、`any`/`all` 及与 `Tensor` 双向转换接口。
+  - `Embedding.forward` 支持直接传入 `GenericTensor(u32)` / `GenericTensor(usize)` / `GenericTensor(i32)` 或整型切片；`Tensor.where` 与 `Tensor.maskedFill` 支持直接接收 `BoolTensor`。
+- **全模块命名与可视化作用域覆盖 (`src/nn/recurrent.zig`, `src/nn/transformer.zig`)**:
+  - 为 `RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`MoELayer`、`MLALayer`、`LoRALinear` 补齐 `setName` / `setNameFormatted` / `getName` / `formula` / `registerFormula` 与 `Graph.enterModule` 作用域追踪。
+
 ### Changed
 - **节点分类强类型枚举 (`src/nn/visualization.zig`, `src/nn.zig`)**: 将 `NodeData.kind` 从弱类型字符串切片 (`[]const u8`) 重构为强类型枚举 `NodeKind` (`.Param`, `.Input`, `.Buffer`, `.Activation`)，消除 `std.mem.eql` 字符串比较并利用 `switch` 提供编译期完备性检查；序列化与反序列化通过 `asString()` 与 `fromString()` 保持 JSON Schema 2.0 规格完全一致。
 - **其余取值字段同样改为枚举 (`src/nn/visualization.zig`, `src/nn.zig`)**: `NodeData.status` → `NodeStatus` (`CUSTOM_INIT` / `AUTO_GRAPH` / `INPUT` / `BUFFER` / `OP_OUTPUT`)，`FlowNode.kind` → `FlowNodeKind` (`port_in` / `port_out` / `module` / `op` / `buffer`)，`EdgeData.kind` → `EdgeKind` (`data` / `buffer`)；`summary` 的初始化计数改为穷举 `switch`；删除恒为 `"module"` 的 `ModuleNode.kind` 字段 (序列化仍固定输出 `"kind": "module"`)。新增测试断言这些枚举的标签与 `model_graph.schema.json` 中对应的 `enum` 列表逐一一致；导出的 JSON 逐字节不变。
@@ -28,9 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TransformerBlock` 第二个残差加法节点由 `output` 更名为 `residual_mlp`；MLP 激活输出命名为 `gelu`。
 - `GPT` 的位置索引张量改为 `{gpt}.pos_indices` 静态缓冲区 (`is_buffer = true`)，不再作为模型输入出现。
 - `TransformerBlock.formula` 改用 `aligned` 环境分两行排版 (注意力残差与 MLP 残差各占一行)，不再以 `\quad` 拼接在同一行。
+- **算子前向去重与构建/测试模块化 (`src/autodiff/op.zig`, `src/tests.zig`, `src/nn/tests.zig`, `build.zig`)**:
+  - `Op.forward` 复用 `Tensor` 的 Eager 算子实现，消除 `Tensor`、`Graph` 与 `Op.forward` 三处重复的前向计算逻辑。
+  - 将 `src/root.zig` 与 `src/nn.zig` 中的内联测试拆分为独立测试文件 `src/tests.zig` 与 `src/nn/tests.zig`；`build.zig` 中 16 个示例构建与运行步骤统一收敛为表驱动循环。
+- **算子性能优化 (`src/nn/transformer.zig`, `src/cblas.zig`)**:
+  - `MoELayer.forward` 实现 Top-K 稀疏门控掩码与活跃专家筛选，跳过未命中专家的前向计算。
+  - `CausalSelfAttention.forward` 将因果掩码从每次分配两份 `[B, nh, T, T]` 优化为单份 `[1, 1, T, T]` 广播张量。
+  - `cblas_sgemm_fallback` 的 `NoTrans × Trans` 分支新增 8 路 `@Vector(8, f32)` SIMD 向量化内积快路径。
 
 ### Fixed
 - 修复算子依据输入推断归属导致的模块错配、`.core` 伪节点合成、端口名与真实节点冲突、残差判定依赖边顺序、根作用域边与顶层 `edges` 层级错位等问题 (详见 chen-gz.github.io `doc/visualization-model-edge-design.md`)。
+- **非连续视图内存安全 (`src/tensor/shape.zig`, `src/autodiff/op.zig`, `src/autodiff/graph.zig`)**: 修复 `broadcastBinaryOpRaw`、`Op.backward` 与 `Graph.reshape` 在处理非连续步长视图 (`!isContiguous()`) 或带 `offset` 子视图时的越界与错读问题。
+- **训练路径与反射/序列化完整性 (`src/nn/transformer.zig`, `src/nn/core.zig`, `src/nn/serialization.zig`)**:
+  - 修复 `MLALayer.forward` 未使用 `q_all`、`w_kr` 及因果注意力的占位实现，补全完整潜在多头注意力训练与求导路径。
+  - 修复 `collectParameters`、`deinitModel`、`zeroGradModel` 及 Safetensors 序列化对动态切片字段 (`[]T`) 与可选张量 (`?*Tensor`) 的遗漏，支持无序偏移量的 Safetensors 文件加载，并默认冻结 `LoRALinear` 基础权重梯度。
 
 ## [0.2.7] - 2026-09-27
 

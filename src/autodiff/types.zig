@@ -194,7 +194,10 @@ pub const OpContext = union(enum) {
     Softmax: void,
 
     // --- 神经网络层与结构运算 ---
-    Conv2D: void,
+    Conv2D: struct {
+        stride: usize = 1,
+        padding: usize = 0,
+    },
     ConvTranspose2D: struct {
         stride: usize,
         padding: usize,

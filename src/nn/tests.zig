@@ -2219,4 +2219,94 @@ test "Recurrent and Transformer modules naming and Graph scope registration" {
     try std.testing.expectEqualStrings(LoRALinear.formula, graph.inferModuleFormula("proj_lora"));
 }
 
+test "Conv2D with stride and padding forward and backward (im2col + sgemm)" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(2026);
+    const random = prng.random();
+
+    var conv = try Conv2D.initWithConfig(allocator, 1, 2, 3, 2, 1, random);
+    defer conv.deinit(allocator);
+    @memset(conv.weight.data[0..9], 1.0);
+    @memset(conv.weight.data[9..18], 2.0);
+    conv.bias.data[0] = 0.5;
+    conv.bias.data[1] = -0.5;
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    // Input [1, 1, 4, 4] with kernel=3, stride=2, padding=1 -> Output [1, 2, 2, 2]
+    const x = try graph.tensor(1, 16, true);
+    x.shape = Shape.init(&.{ 1, 1, 4, 4 });
+    x.strides = tensor.computeContiguousStrides(x.shape);
+    for (x.data, 0..) |*v, idx| {
+        v.* = @as(f32, @floatFromInt(idx + 1));
+    }
+
+    const out = try conv.forward(allocator, &graph, x);
+    try std.testing.expectEqual(@as(usize, 4), out.shape.len);
+    try std.testing.expectEqual(@as(usize, 1), out.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), out.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 2), out.shape.dims[2]);
+    try std.testing.expectEqual(@as(usize, 2), out.shape.dims[3]);
+
+    // Top-left window (h_out=0, w_out=0) with padding=1 samples x[0..2, 0..2] = {1, 2, 5, 6}, sum = 14
+    try std.testing.expectApproxEqAbs(@as(f32, 14.5), out.data[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 27.5), out.data[4], 1e-4);
+
+    const loss = try graph.sum(out, null, false);
+    try graph.backward(loss);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), conv.bias.grad[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), conv.bias.grad[1], 1e-4);
+    // x[0, 0] is covered only by window (0, 0) at (kh=1, kw=1), so dL/dx[0,0] = w[0,0,1,1] + w[1,0,1,1] = 1 + 2 = 3
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), x.grad[0], 1e-4);
+}
+
+test "MoELayer sparse top-k expert execution skips inactive experts" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(77);
+    const random = prng.random();
+
+    // 3 routed experts, 0 shared experts, top_k = 1
+    var moe = try MoELayer.init(allocator, 4, 8, 3, 0, 1, random);
+    defer moe.deinit(allocator);
+
+    // Force gate weights so expert 0 always wins for positive inputs
+    @memset(moe.gate.weight.data, 0.0);
+    @memset(moe.gate.bias.data, 0.0);
+    moe.gate.bias.data[0] = 10.0;
+    moe.gate.bias.data[1] = -10.0;
+    moe.gate.bias.data[2] = -10.0;
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const x = try graph.tensor(2, 4, true);
+    @memset(x.data, 1.0);
+
+    // Graph mode forward + backward
+    const out_g = try moe.forward(allocator, &graph, x);
+    const loss = try graph.sum(out_g, null, false);
+    try graph.backward(loss);
+
+    // Expert 0 was selected -> non-zero weight gradients; Experts 1 & 2 were skipped -> strictly zero gradients
+    var exp0_grad_norm: f32 = 0.0;
+    for (moe.routed_experts[0].c_proj.weight.grad) |g| exp0_grad_norm += @abs(g);
+    try std.testing.expect(exp0_grad_norm > 0.0);
+
+    for (moe.routed_experts[1].c_proj.weight.grad) |g| {
+        try std.testing.expectEqual(@as(f32, 0.0), g);
+    }
+    for (moe.routed_experts[2].c_proj.weight.grad) |g| {
+        try std.testing.expectEqual(@as(f32, 0.0), g);
+    }
+
+    // Eager mode forward should match Graph mode output
+    const out_e = try moe.forward(allocator, null, x);
+    defer out_e.deinit(allocator);
+    for (out_g.data, out_e.data) |vg, ve| {
+        try std.testing.expectApproxEqAbs(vg, ve, 1e-4);
+    }
+}
+
 
