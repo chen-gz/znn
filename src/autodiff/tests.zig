@@ -1,4 +1,6 @@
 const std = @import("std");
+const tensor = @import("../tensor.zig");
+const Tensor = tensor.Tensor;
 const graph_mod = @import("graph.zig");
 const Graph = graph_mod.Graph;
 
@@ -183,3 +185,81 @@ test "autodiff Graph.forward re-evaluates recorded ops consistently with initial
 
     try std.testing.expectApproxEqAbs(total2.data[0], reevaluated_total, 1e-6);
 }
+
+test "Autograd reductions, elementary math, where/maskedFill, and squeeze/unsqueeze/slice" {
+    const allocator = std.testing.allocator;
+
+    // 1. Elementary math (sqrt, exp, log, abs) + sum/mean backward
+    {
+        var graph = Graph.init(allocator);
+        defer graph.deinit();
+
+        const x = try graph.array(&.{2}, &.{ 4.0, -9.0 }, true);
+        // abs(x) = [4.0, 9.0], sqrt(abs(x)) = [2.0, 3.0]
+        const ax = try x.abs(allocator, &graph);
+        const sx = try ax.sqrt(allocator, &graph);
+        // log(exp(sx)) = sx = [2.0, 3.0]
+        const ex = try sx.exp(allocator, &graph);
+        const lx = try ex.log(allocator, &graph);
+        // mean(lx) = 2.5
+        const loss = try lx.mean(null, false, allocator, &graph);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.5), loss.data[0], 1e-5);
+
+        try graph.backward(loss);
+        // d(mean)/dx_i = 0.5 * 1.0 * sign(x_i) / (2 * sqrt(|x_i|))
+        // x_0 = 4.0 -> 0.5 * 1 / (2 * 2) = 0.125
+        // x_1 = -9.0 -> 0.5 * (-1) / (2 * 3) = -1/12 = -0.0833333
+        try std.testing.expectApproxEqAbs(@as(f32, 0.125), x.grad[0], 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, -1.0 / 12.0), x.grad[1], 1e-5);
+    }
+
+    // 2. Axis sum, variance, squeeze, unsqueeze, slice, where, and maskedFill backward
+    {
+        var graph = Graph.init(allocator);
+        defer graph.deinit();
+
+        // A: [2, 3] = [[1, 2, 3], [4, 5, 6]]
+        const A = try graph.array(&.{ 2, 3 }, &.{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 }, true);
+        // Slice cols 1..3 -> [[2, 3], [5, 6]] (shape [2, 2])
+        const S = try A.slice(&.{ .{ .start = 0, .end = 2 }, .{ .start = 1, .end = 3 } }, allocator, &graph);
+        try std.testing.expectEqualSlices(f32, &.{ 2.0, 3.0, 5.0, 6.0 }, S.data);
+
+        // Unsqueeze & squeeze roundtrip
+        const U = try S.unsqueeze(1, allocator, &graph);
+        try std.testing.expectEqual(@as(usize, 3), U.shape.len);
+        const Sq = try U.squeeze(1, allocator, &graph);
+        try std.testing.expectEqual(@as(usize, 2), Sq.shape.len);
+
+        // BoolTensor mask on Sq: mask out first element [true, false; false, true]
+        const mask = try tensor.BoolTensor.fromSlice(allocator, &.{ 2, 2 }, &.{ true, false, false, true });
+        defer mask.deinit(allocator);
+
+        // maskedFill(Sq, mask, 0.0) -> [[0, 3], [5, 0]]
+        const MF = try Sq.maskedFill(mask, 0.0, allocator, &graph);
+        try std.testing.expectEqualSlices(f32, &.{ 0.0, 3.0, 5.0, 0.0 }, MF.data);
+
+        // where(mask, Sq, MF): where mask is true take Sq (2, 6), else take MF (3, 5) -> [[2, 3], [5, 6]]
+        const W = try Tensor.where(mask, Sq, MF, allocator, &graph);
+        try std.testing.expectEqualSlices(f32, &.{ 2.0, 3.0, 5.0, 6.0 }, W.data);
+
+        // variance along axis 1 (ddof=0):
+        // row 0: [2, 3], mean=2.5, var = ((2-2.5)^2 + (3-2.5)^2)/2 = 0.25
+        // row 1: [5, 6], mean=5.5, var = 0.25
+        const V = try W.variance(1, false, 0, allocator, &graph);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.25), V.data[0], 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.25), V.data[1], 1e-5);
+
+        const total = try V.sum(null, false, allocator, &graph);
+        try graph.backward(total);
+
+        // d(var)/dw_j = 2*(w_j - mean)/2 = w_j - mean
+        // row 0: w_0=2 -> -0.5, w_1=3 -> +0.5
+        // row 1: w_0=5 -> -0.5, w_1=6 -> +0.5
+        // And since col 0 of A was sliced out, its gradient is 0.0!
+        try std.testing.expectEqualSlices(f32, &.{
+            0.0, -0.5, 0.5,
+            0.0, -0.5, 0.5,
+        }, A.grad);
+    }
+}
+

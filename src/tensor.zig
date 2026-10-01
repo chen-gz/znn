@@ -19,6 +19,7 @@ pub const DType = types.DType;
 pub const bf16 = types.bf16;
 pub const SliceRange = types.SliceRange;
 pub const convertScalar = types.convertScalar;
+pub const isTruthyScalar = types.isTruthyScalar;
 pub const GenericTensor = types.GenericTensor;
 pub const FloatTensor = types.FloatTensor;
 pub const DoubleTensor = types.DoubleTensor;
