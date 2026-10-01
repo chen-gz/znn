@@ -65,25 +65,31 @@ fn exportModel(
     std.debug.print("  [✓] Exported {s} -> {s}\n", .{ name, file_path });
 }
 
-pub fn main() !void {
+/// Usage: `zig build run-book-models [-- <output_dir>...]`
+/// Without arguments the graphs are written to `examples/models`.
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var prng = std.Random.DefaultPrng.init(42);
-    const random = prng.random();
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
+    _ = args.next(); // executable path
+
+    var target_dirs: std.ArrayList([]const u8) = .empty;
+    defer target_dirs.deinit(allocator);
+    while (args.next()) |arg| try target_dirs.append(allocator, arg);
+    if (target_dirs.items.len == 0) try target_dirs.append(allocator, "examples/models");
 
     std.debug.print("\n============================================================\n", .{});
     std.debug.print("       ZNN - Exporting All Book Models to JSON Graphs        \n", .{});
     std.debug.print("============================================================\n\n", .{});
 
-    const target_dirs = [_][]const u8{
-        "examples/models",
-        "/Users/guangzong/Documents/chen-gz.github.io/public/tools/visualizer/models",
-    };
-
-    for (target_dirs) |dir| {
+    for (target_dirs.items) |dir| {
         std.debug.print("Writing graphs to target directory: {s}\n", .{dir});
+
+        var prng = std.Random.DefaultPrng.init(42);
+        const random = prng.random();
 
         // 1. linear
         try exportModel(allocator, "linear", struct {
@@ -392,6 +398,5 @@ pub fn main() !void {
         std.debug.print("\n", .{});
     }
 
-    // Also update sample_model_graph.json and minimal_model_graph.json copies
     std.debug.print("All 18 canonical models exported successfully!\n", .{});
 }
