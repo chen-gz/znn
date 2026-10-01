@@ -115,8 +115,8 @@ pub const Embedding = struct {
     }
 
     /// 查找映射前向传播
-    /// 输入 x 为包含 Token ID 的任意维度 Tensor，输出形状为 x.shape + [embedding_dim]
-    pub fn forward(self: Embedding, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+    /// 输入 x 为包含 Token ID 的任意维度 Tensor、`GenericTensor(IntT)` 或整数切片，输出形状为 x.shape + [embedding_dim]
+    pub fn forward(self: Embedding, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: anytype) !*Tensor {
         const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
         defer module_scope.exit();
         if (graph) |g| {
@@ -2029,9 +2029,9 @@ pub fn GPT(comptime config: GPTConfig) type {
         }
 
         /// 前向推理传播流程
-        /// 输入 x 为包含 Token ID 的 2D 整数 Tensor，形状为 [B, T]
+        /// 输入 x 为包含 Token ID 的 2D 张量（支持 `*Tensor` 或 `*GenericTensor(IntT)`），形状为 [B, T]
         /// 输出为未归一化的预测对数 (Logits)，形状为 3D: [B, T, vocab_size]
-        pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
+        pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: anytype) !*Tensor {
             const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
             defer module_scope.exit();
             if (graph) |g| {

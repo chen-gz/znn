@@ -113,8 +113,8 @@
 - [x] **1.5.7 消除 `Tensor`、`Graph` 与 `Op.forward` 的算子前向三重重复 (`tensor/core.zig`, `autodiff/graph.zig`, `autodiff/op.zig`)**
   - [x] 复用统一的前向计算实现，消除 [`Op.forward`](../src/autodiff/op.zig) 与 [`Graph`](../src/autodiff/graph.zig) 中重复手写的数百行前向算子代码。
 
-- [ ] **1.5.8 收敛 `Tensor` 与 `GenericTensor(T)` 双轨割裂 (`tensor/types.zig`, `tensor/core.zig`, `nn/core.zig`)**
-  - [ ] 打通 `Tensor` 与 `GenericTensor(T)` 的互操作接口：支持 [`Embedding`](../src/nn/core.zig) 直接接收整型索引切片/张量（无需先转为 `f32`），支持 [`Tensor.where`](../src/tensor/core.zig) / [`Tensor.maskedFill`](../src/tensor/core.zig) 接收 `BoolTensor`，并为 `GenericTensor(T)` 补齐核心逐元素与归约方法。
+- [x] **1.5.8 收敛 `Tensor` 与 `GenericTensor(T)` 双轨割裂 (`tensor/types.zig`, `tensor/core.zig`, `nn/core.zig`)**
+  - [x] 打通 `Tensor` 与 `GenericTensor(T)` 的互操作接口：支持 [`Embedding`](../src/nn/core.zig) 直接接收整型索引切片/张量（无需先转为 `f32`），支持 [`Tensor.where`](../src/tensor/core.zig) / [`Tensor.maskedFill`](../src/tensor/core.zig) 接收 `BoolTensor`，并为 `GenericTensor(T)` 补齐核心逐元素与归约方法。
 
 - [ ] **1.5.9 补全归约、数学初等函数、索引与视图算子的 Autograd 支持 (`tensor/core.zig`, `autodiff/`)**
   - [ ] 为按轴归约 `sum`、`mean`、`variance`、初等函数 `sqrt`、`exp`、`log`、`abs`、条件选择 `where`、`maskedFill` 以及视图算子 `squeeze`、`unsqueeze`、`slice` 接入 `graph: ?*autodiff.Graph` 与反向传播。

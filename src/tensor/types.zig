@@ -3,6 +3,9 @@ const shape_mod = @import("shape.zig");
 pub const Shape = shape_mod.Shape;
 pub const computeContiguousStrides = shape_mod.computeContiguousStrides;
 pub const isContiguousStrides = shape_mod.isContiguousStrides;
+pub const transposeShape = shape_mod.transposeShape;
+pub const broadcastShapes = shape_mod.broadcastShapes;
+pub const computeBroadcastStrides = shape_mod.computeBroadcastStrides;
 
 // ============================================================================
 // 2. 数据类型系统与泛型张量 (DType System & Generic Tensor)
@@ -96,6 +99,16 @@ pub fn convertScalar(comptime DestT: type, comptime SrcT: type, val: SrcT) DestT
     @compileError("Unsupported type conversion between " ++ @typeName(SrcT) ++ " and " ++ @typeName(DestT));
 }
 
+/// 判断任意标量是否为非零/真值（支持 bool, bf16, 整数与浮点数）
+pub inline fn isTruthyScalar(val: anytype) bool {
+    const V = @TypeOf(val);
+    if (V == bool) return val;
+    if (V == bf16) return val.toF32() != 0.0;
+    if (@typeInfo(V) == .float) return val != 0.0;
+    if (@typeInfo(V) == .int) return val != 0;
+    @compileError("Unsupported condition/mask scalar type: " ++ @typeName(V));
+}
+
 /// 泛型张量结构体 (Generic Tensor)
 pub fn GenericTensor(comptime T: type) type {
     return struct {
@@ -129,6 +142,14 @@ pub fn GenericTensor(comptime T: type) type {
             return self;
         }
 
+        pub fn zeros(allocator: std.mem.Allocator, shape_slice: []const usize) !*Self {
+            return Self.init(allocator, shape_slice, convertScalar(T, usize, 0));
+        }
+
+        pub fn ones(allocator: std.mem.Allocator, shape_slice: []const usize) !*Self {
+            return Self.init(allocator, shape_slice, convertScalar(T, usize, 1));
+        }
+
         pub fn fromSlice(allocator: std.mem.Allocator, shape_slice: []const usize, slice_data: []const T) !*Self {
             const shape = try Shape.fromSlice(shape_slice);
             const strides = computeContiguousStrides(shape);
@@ -155,6 +176,14 @@ pub fn GenericTensor(comptime T: type) type {
                 allocator.free(self.data);
             }
             allocator.destroy(self);
+        }
+
+        pub fn numel(self: Self) usize {
+            return self.shape.numel();
+        }
+
+        pub fn fill(self: *Self, val: T) void {
+            @memset(self.data, val);
         }
 
         pub fn isContiguous(self: Self) bool {
@@ -226,6 +255,41 @@ pub fn GenericTensor(comptime T: type) type {
             return self.clone(allocator);
         }
 
+        pub fn reshape(self: *Self, new_shape_slice: []const usize, allocator: std.mem.Allocator) !*Self {
+            const new_shape = try Shape.fromSlice(new_shape_slice);
+            const total = new_shape.numel();
+            if (self.shape.numel() != total) return error.ShapeMismatch;
+
+            if (self.isContiguous() and self.data.len >= total) {
+                const out = try allocator.create(Self);
+                out.* = Self{
+                    .data = self.data[0..total],
+                    .shape = new_shape,
+                    .strides = computeContiguousStrides(new_shape),
+                    .is_view = true,
+                };
+                return out;
+            } else {
+                const out = try self.clone(allocator);
+                out.shape = new_shape;
+                out.strides = computeContiguousStrides(new_shape);
+                return out;
+            }
+        }
+
+        pub fn transposeView(self: *Self, dim0: usize, dim1: usize, allocator: std.mem.Allocator) !*Self {
+            const new_shape = try transposeShape(self.shape, dim0, dim1);
+            const new_strides = try transposeShape(self.strides, dim0, dim1);
+            const out = try allocator.create(Self);
+            out.* = Self{
+                .data = self.data,
+                .shape = new_shape,
+                .strides = new_strides,
+                .is_view = true,
+            };
+            return out;
+        }
+
         pub fn slice(self: *Self, ranges: []const SliceRange, allocator: std.mem.Allocator) !*Self {
             if (ranges.len > self.shape.len) return error.DimensionOutOfBounds;
 
@@ -259,6 +323,301 @@ pub fn GenericTensor(comptime T: type) type {
                 .is_view = true,
             };
             return out;
+        }
+
+        fn binaryBroadcastOp(
+            self: *const Self,
+            other: *const Self,
+            allocator: std.mem.Allocator,
+            comptime OutT: type,
+            comptime op_fn: fn (T, T) OutT,
+        ) !*GenericTensor(OutT) {
+            const target_shape = try broadcastShapes(self.shape, other.shape);
+            const out = try GenericTensor(OutT).init(allocator, target_shape.dims[0..target_shape.len], null);
+            errdefer out.deinit(allocator);
+
+            if (self.shape.eq(other.shape) and self.isContiguous() and other.isContiguous() and
+                self.data.len >= out.data.len and other.data.len >= out.data.len)
+            {
+                for (out.data, self.data[0..out.data.len], other.data[0..out.data.len]) |*c_val, a_val, b_val| {
+                    c_val.* = op_fn(a_val, b_val);
+                }
+                return out;
+            }
+
+            const a_strides = computeBroadcastStrides(self.shape, self.strides, target_shape);
+            const b_strides = computeBroadcastStrides(other.shape, other.strides, target_shape);
+            const rank = target_shape.len;
+            var indices = [_]usize{0} ** 8;
+
+            for (0..out.data.len) |c_flat| {
+                var a_flat: usize = 0;
+                var b_flat: usize = 0;
+                for (0..rank) |d| {
+                    a_flat += indices[d] * a_strides.dims[d];
+                    b_flat += indices[d] * b_strides.dims[d];
+                }
+                out.data[c_flat] = op_fn(self.data[a_flat], other.data[b_flat]);
+
+                var d: usize = rank;
+                while (d > 0) {
+                    d -= 1;
+                    indices[d] += 1;
+                    if (indices[d] < target_shape.dims[d]) break;
+                    indices[d] = 0;
+                }
+            }
+            return out;
+        }
+
+        pub fn add(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            return self.binaryBroadcastOp(other, allocator, T, struct {
+                fn apply(a: T, b: T) T {
+                    if (T == bool) return a or b;
+                    if (T == bf16) return bf16.fromF32(a.toF32() + b.toF32());
+                    return a + b;
+                }
+            }.apply);
+        }
+
+        pub fn sub(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            return self.binaryBroadcastOp(other, allocator, T, struct {
+                fn apply(a: T, b: T) T {
+                    if (T == bool) return a and !b;
+                    if (T == bf16) return bf16.fromF32(a.toF32() - b.toF32());
+                    return a - b;
+                }
+            }.apply);
+        }
+
+        pub fn mul(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            return self.binaryBroadcastOp(other, allocator, T, struct {
+                fn apply(a: T, b: T) T {
+                    if (T == bool) return a and b;
+                    if (T == bf16) return bf16.fromF32(a.toF32() * b.toF32());
+                    return a * b;
+                }
+            }.apply);
+        }
+
+        pub fn div(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*Self {
+            return self.binaryBroadcastOp(other, allocator, T, struct {
+                fn apply(a: T, b: T) T {
+                    if (T == bool) return a and b;
+                    if (T == bf16) return bf16.fromF32(a.toF32() / b.toF32());
+                    if (@typeInfo(T) == .int) return @divTrunc(a, b);
+                    return a / b;
+                }
+            }.apply);
+        }
+
+        pub fn eq(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+            return self.binaryBroadcastOp(other, allocator, bool, struct {
+                fn apply(a: T, b: T) bool {
+                    if (T == bf16) return a.toF32() == b.toF32();
+                    return a == b;
+                }
+            }.apply);
+        }
+
+        pub fn ne(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+            return self.binaryBroadcastOp(other, allocator, bool, struct {
+                fn apply(a: T, b: T) bool {
+                    if (T == bf16) return a.toF32() != b.toF32();
+                    return a != b;
+                }
+            }.apply);
+        }
+
+        pub fn gt(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+            return self.binaryBroadcastOp(other, allocator, bool, struct {
+                fn apply(a: T, b: T) bool {
+                    if (T == bool) return a and !b;
+                    if (T == bf16) return a.toF32() > b.toF32();
+                    return a > b;
+                }
+            }.apply);
+        }
+
+        pub fn ge(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+            return self.binaryBroadcastOp(other, allocator, bool, struct {
+                fn apply(a: T, b: T) bool {
+                    if (T == bool) return a or !b;
+                    if (T == bf16) return a.toF32() >= b.toF32();
+                    return a >= b;
+                }
+            }.apply);
+        }
+
+        pub fn lt(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+            return self.binaryBroadcastOp(other, allocator, bool, struct {
+                fn apply(a: T, b: T) bool {
+                    if (T == bool) return !a and b;
+                    if (T == bf16) return a.toF32() < b.toF32();
+                    return a < b;
+                }
+            }.apply);
+        }
+
+        pub fn le(self: *const Self, other: *const Self, allocator: std.mem.Allocator) !*GenericTensor(bool) {
+            return self.binaryBroadcastOp(other, allocator, bool, struct {
+                fn apply(a: T, b: T) bool {
+                    if (T == bool) return !a or b;
+                    if (T == bf16) return a.toF32() <= b.toF32();
+                    return a <= b;
+                }
+            }.apply);
+        }
+
+        pub fn any(self: *const Self) bool {
+            const elem_count = self.shape.numel();
+            if (self.isContiguous() and self.data.len >= elem_count) {
+                for (self.data[0..elem_count]) |v| {
+                    if (isTruthyScalar(v)) return true;
+                }
+                return false;
+            }
+            var coord = [_]usize{0} ** 8;
+            const len = self.shape.len;
+            for (0..elem_count) |_| {
+                var src_idx: usize = 0;
+                for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
+                if (isTruthyScalar(self.data[src_idx])) return true;
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < self.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
+            }
+            return false;
+        }
+
+        pub fn all(self: *const Self) bool {
+            const elem_count = self.shape.numel();
+            if (self.isContiguous() and self.data.len >= elem_count) {
+                for (self.data[0..elem_count]) |v| {
+                    if (!isTruthyScalar(v)) return false;
+                }
+                return true;
+            }
+            var coord = [_]usize{0} ** 8;
+            const len = self.shape.len;
+            for (0..elem_count) |_| {
+                var src_idx: usize = 0;
+                for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
+                if (!isTruthyScalar(self.data[src_idx])) return false;
+                var d = len;
+                while (d > 0) {
+                    d -= 1;
+                    coord[d] += 1;
+                    if (coord[d] < self.shape.dims[d]) break;
+                    coord[d] = 0;
+                }
+            }
+            return true;
+        }
+
+        pub fn sum(self: *const Self, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Self {
+            if (axis) |ax| {
+                if (ax >= self.shape.len) return error.DimensionOutOfBounds;
+                const reduce_size = self.shape.dims[ax];
+
+                var out_shape_dims = [_]usize{0} ** 8;
+                var out_rank: usize = 0;
+                if (keepdims) {
+                    out_rank = self.shape.len;
+                    for (0..self.shape.len) |d| {
+                        out_shape_dims[d] = if (d == ax) 1 else self.shape.dims[d];
+                    }
+                } else if (self.shape.len == 1) {
+                    out_rank = 1;
+                    out_shape_dims[0] = 1;
+                } else {
+                    out_rank = self.shape.len - 1;
+                    var dest_d: usize = 0;
+                    for (0..self.shape.len) |d| {
+                        if (d != ax) {
+                            out_shape_dims[dest_d] = self.shape.dims[d];
+                            dest_d += 1;
+                        }
+                    }
+                }
+
+                const out = try Self.zeros(allocator, out_shape_dims[0..out_rank]);
+                errdefer out.deinit(allocator);
+
+                var out_indices = [_]usize{0} ** 8;
+                for (0..out.data.len) |out_idx| {
+                    var tmp = out_idx;
+                    var d: usize = out_rank;
+                    while (d > 0) {
+                        d -= 1;
+                        out_indices[d] = tmp % out.shape.dims[d];
+                        tmp /= out.shape.dims[d];
+                    }
+
+                    var src_indices = [_]usize{0} ** 8;
+                    if (keepdims) {
+                        for (0..self.shape.len) |idx_d| src_indices[idx_d] = out_indices[idx_d];
+                    } else {
+                        var src_d: usize = 0;
+                        for (0..self.shape.len) |idx_d| {
+                            if (idx_d == ax) continue;
+                            src_indices[idx_d] = out_indices[src_d];
+                            src_d += 1;
+                        }
+                    }
+
+                    var acc: f64 = 0.0;
+                    for (0..reduce_size) |k| {
+                        src_indices[ax] = k;
+                        const v = self.data[self.getFlatIndex(src_indices[0..self.shape.len])];
+                        acc += convertScalar(f64, T, v);
+                    }
+                    out.data[out_idx] = convertScalar(T, f64, acc);
+                }
+                return out;
+            } else {
+                var acc: f64 = 0.0;
+                const elem_count = self.shape.numel();
+                if (self.isContiguous() and self.data.len >= elem_count) {
+                    for (self.data[0..elem_count]) |v| acc += convertScalar(f64, T, v);
+                } else {
+                    var coord = [_]usize{0} ** 8;
+                    const len = self.shape.len;
+                    for (0..elem_count) |_| {
+                        var src_idx: usize = 0;
+                        for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
+                        acc += convertScalar(f64, T, self.data[src_idx]);
+                        var d = len;
+                        while (d > 0) {
+                            d -= 1;
+                            coord[d] += 1;
+                            if (coord[d] < self.shape.dims[d]) break;
+                            coord[d] = 0;
+                        }
+                    }
+                }
+                if (keepdims) {
+                    const out_shape_dims = [_]usize{1} ** 8;
+                    return Self.init(allocator, out_shape_dims[0..self.shape.len], convertScalar(T, f64, acc));
+                } else {
+                    return Self.init(allocator, &.{1}, convertScalar(T, f64, acc));
+                }
+            }
+        }
+
+        pub fn mean(self: *const Self, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*GenericTensor(f32) {
+            const f32_t = try self.to(f32, allocator);
+            defer f32_t.deinit(allocator);
+            const sum_t = try f32_t.sum(axis, keepdims, allocator);
+            const count = if (axis) |ax| @as(f32, @floatFromInt(self.shape.dims[ax])) else @as(f32, @floatFromInt(self.shape.numel()));
+            for (sum_t.data) |*val| {
+                val.* /= count;
+            }
+            return sum_t;
         }
 
         pub fn to(self: Self, comptime DestT: type, allocator: std.mem.Allocator) !*GenericTensor(DestT) {

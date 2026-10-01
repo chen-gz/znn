@@ -1214,12 +1214,53 @@ pub const Graph = struct {
         );
     }
 
-    pub fn embedding(self: *Graph, W: *Tensor, X: *Tensor) !*Tensor {
+    pub fn embedding(self: *Graph, W: *Tensor, X: anytype) !*Tensor {
         const allocator = self.arena.allocator();
-        const Y = try W.embedding(X, allocator, null);
+        const XT = @TypeOf(X);
+        const x_tensor: *Tensor = if (XT == *Tensor or XT == *const Tensor)
+            @constCast(X)
+        else blk: {
+            const ptr_info = @typeInfo(XT);
+            if (ptr_info == .pointer and ptr_info.pointer.size == .one and
+                @typeInfo(ptr_info.pointer.child) == .@"struct" and
+                @hasField(ptr_info.pointer.child, "shape"))
+            {
+                const t = try self.tensorND(X.shape.dims[0..X.shape.len], false);
+                const num_elem = X.shape.numel();
+                if (X.isContiguous() and X.data.len >= num_elem) {
+                    for (0..num_elem) |i| {
+                        t.data[i] = tensor_mod.convertScalar(f32, @TypeOf(X.data[0]), X.data[i]);
+                    }
+                } else {
+                    var coord = [_]usize{0} ** 8;
+                    const rank = X.shape.len;
+                    for (0..num_elem) |i| {
+                        var flat: usize = 0;
+                        for (0..rank) |d| flat += coord[d] * X.strides.dims[d];
+                        t.data[i] = tensor_mod.convertScalar(f32, @TypeOf(X.data[0]), X.data[flat]);
+                        var d = rank;
+                        while (d > 0) {
+                            d -= 1;
+                            coord[d] += 1;
+                            if (coord[d] < X.shape.dims[d]) break;
+                            coord[d] = 0;
+                        }
+                    }
+                }
+                break :blk t;
+            } else {
+                const t = try self.tensorND(&.{X.len}, false);
+                for (0..X.len) |i| {
+                    t.data[i] = tensor_mod.convertScalar(f32, @TypeOf(X[0]), X[i]);
+                }
+                break :blk t;
+            }
+        };
+
+        const Y = try W.embedding(x_tensor, allocator, null);
         return self.registerSingleOutputOp(
             Y,
-            &.{ W, X },
+            &.{ W, x_tensor },
             .Embedding,
             .{ .Embedding = {} },
             self.enable_grad and W.requires_grad,

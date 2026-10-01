@@ -7,6 +7,7 @@ const DType = tensor.DType;
 const bf16 = tensor.bf16;
 const convertScalar = tensor.convertScalar;
 const GenericTensor = tensor.GenericTensor;
+const IntTensor = tensor.IntTensor;
 const BoolTensor = tensor.BoolTensor;
 const BFloat16Tensor = tensor.BFloat16Tensor;
 const Tensor = tensor.Tensor;
@@ -949,6 +950,89 @@ test "Strided non-contiguous views in binary ops, reshape, and autograd backward
     }
 }
 
+test "GenericTensor core ops, BoolTensor where/maskedFill, and integer Embedding interoperability" {
+    const allocator = std.testing.allocator;
 
+    // 1. GenericTensor(i32) arithmetic, comparison, reshape, transposeView, sum, mean
+    const a_int = try IntTensor.fromSlice(allocator, &.{ 2, 2 }, &[_]i32{ 1, 2, 3, 4 });
+    defer a_int.deinit(allocator);
+    const b_int = try IntTensor.fromSlice(allocator, &.{ 1, 2 }, &[_]i32{ 10, 20 });
+    defer b_int.deinit(allocator);
 
+    const sum_int = try a_int.add(b_int, allocator);
+    defer sum_int.deinit(allocator);
+    try std.testing.expectEqualSlices(i32, &[_]i32{ 11, 22, 13, 24 }, sum_int.data);
+
+    const gt_mask = try a_int.gt(b_int, allocator);
+    defer gt_mask.deinit(allocator);
+    try std.testing.expect(!gt_mask.any());
+
+    const lt_mask = try a_int.lt(b_int, allocator);
+    defer lt_mask.deinit(allocator);
+    try std.testing.expect(lt_mask.all());
+
+    const red_sum = try a_int.sum(0, false, allocator);
+    defer red_sum.deinit(allocator);
+    try std.testing.expectEqualSlices(i32, &[_]i32{ 4, 6 }, red_sum.data);
+
+    const red_mean = try a_int.mean(null, false, allocator);
+    defer red_mean.deinit(allocator);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.5), red_mean.data[0], 1e-5);
+
+    // 2. Tensor.where and Tensor.maskedFill with BoolTensor
+    const x_t = try array(allocator, &.{ 2, 2 }, &[_]f32{ -2.0, 3.0, -1.0, 5.0 });
+    defer free(allocator, x_t);
+    const y_t = try zeros(allocator, &.{ 2, 2 });
+    defer free(allocator, y_t);
+
+    const pos_mask = try x_t.gtScalar(0.0, allocator);
+    defer pos_mask.deinit(allocator);
+    try std.testing.expectEqualSlices(bool, &[_]bool{ false, true, false, true }, pos_mask.data);
+
+    const w_out = try Tensor.where(pos_mask, x_t, y_t, allocator);
+    defer free(allocator, w_out);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 0.0, 3.0, 0.0, 5.0 }, w_out.data);
+
+    const neg_mask = try x_t.ltScalar(0.0, allocator);
+    defer neg_mask.deinit(allocator);
+    const mf_out = try x_t.maskedFill(neg_mask, -99.0, allocator);
+    defer free(allocator, mf_out);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ -99.0, 3.0, -99.0, 5.0 }, mf_out.data);
+
+    // 3. Embedding with IntTensor and integer slice in both eager and autograd modes
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const w_emb = try graph.array(&.{ 4, 2 }, &[_]f32{
+        1.0, 2.0,
+        3.0, 4.0,
+        5.0, 6.0,
+        7.0, 8.0,
+    }, true);
+
+    const idx_int = try IntTensor.fromSlice(allocator, &.{ 1, 3 }, &[_]i32{ 3, 0, 3 });
+    defer idx_int.deinit(allocator);
+
+    const emb_out = try graph.embedding(w_emb, idx_int);
+    try std.testing.expectEqual(@as(usize, 3), emb_out.shape.len);
+    try std.testing.expectEqual(@as(usize, 1), emb_out.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), emb_out.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 2), emb_out.shape.dims[2]);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 7.0, 8.0, 1.0, 2.0, 7.0, 8.0 }, emb_out.data);
+
+    @memset(emb_out.grad, 1.0);
+    try graph.backwardWithGrad(emb_out);
+    // Token 3 was looked up twice -> grad is 2.0; Token 0 once -> grad is 1.0
+    try std.testing.expectEqualSlices(f32, &[_]f32{
+        1.0, 1.0,
+        0.0, 0.0,
+        0.0, 0.0,
+        2.0, 2.0,
+    }, w_emb.grad);
+
+    // Direct 1D integer slice lookup
+    const slice_out = try w_emb.embedding(&[_]usize{ 2, 1 }, allocator, null);
+    defer free(allocator, slice_out);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 5.0, 6.0, 3.0, 4.0 }, slice_out.data);
+}
 
