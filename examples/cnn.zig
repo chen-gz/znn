@@ -28,30 +28,29 @@ pub const CNN = struct {
         };
     }
 
-    // 【内存管理说明】：前向计算产生的中间张量生命周期由外部调用方统一管理：
-    // - 训练模式（graph != null）：中间节点挂载在计算图上，由外部在批次结束调用 graph.deinit() 统一一键释放；
-    // - 纯推理模式（graph == null）：由外部调用方传入的 ArenaAllocator 在当前作用域结束时统一批量释放。
-    pub fn forward(self: *const CNN, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+    // 【内存管理说明】：前向计算产生的中间张量全部挂载在传入的计算图上，由调用方在批次结束调用 graph.deinit() 统一释放。
+    // 训练时使用 `Graph.init` 记录反向传播所需的算子；推理时使用 `Graph.initNoGrad`，只执行前向计算，不分配梯度缓冲区。
+    pub fn forward(self: *const CNN, graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
         const batch_size = x.shape.dims[0];
-        const x_reshaped = try x.reshape(&.{ batch_size, 1, 28, 28 }, allocator, graph);
+        const x_reshaped = try graph.reshape(x, &.{ batch_size, 1, 28, 28 });
 
         // Layer 1: Conv -> ReLU -> MaxPool
-        const x1 = try self.conv1.forward(allocator, graph, x_reshaped);
-        const a1 = try x1.relu(allocator, graph);
-        const p1 = try a1.maxpool2d(2, 2, allocator, graph);
+        const x1 = try self.conv1.forward(graph, x_reshaped);
+        const a1 = try graph.relu(x1);
+        const p1 = try graph.maxpool2d(a1, 2, 2);
 
         // Layer 2: Conv -> ReLU -> MaxPool
-        const x2 = try self.conv2.forward(allocator, graph, p1);
-        const a2 = try x2.relu(allocator, graph);
-        const p2 = try a2.maxpool2d(2, 2, allocator, graph);
+        const x2 = try self.conv2.forward(graph, p1);
+        const a2 = try graph.relu(x2);
+        const p2 = try graph.maxpool2d(a2, 2, 2);
 
         // Layer 3: Conv -> ReLU
-        const x3 = try self.conv3.forward(allocator, graph, p2);
-        const a3 = try x3.relu(allocator, graph);
+        const x3 = try self.conv3.forward(graph, p2);
+        const a3 = try graph.relu(x3);
 
         // Flatten -> Linear
-        const flat = try a3.reshape(&.{ batch_size, 144 }, allocator, graph);
-        return try self.fc1.forward(allocator, graph, flat);
+        const flat = try graph.reshape(a3, &.{ batch_size, 144 });
+        return try self.fc1.forward(graph, flat);
     }
 };
 
@@ -217,7 +216,7 @@ fn printPredictions(
         const x_tensor = try graph.tensor(1, input_dim, false);
         @memcpy(x_tensor.data, img_slice);
 
-        const logits = try model.forward(arena, &graph, x_tensor);
+        const logits = try model.forward(&graph, x_tensor);
         const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
         const preds = try logits.argmax(1, arena);
         const pred = @as(usize, @intFromFloat(preds.data[0]));
@@ -236,7 +235,7 @@ fn printPredictions(
     }
 }
 
-test "CNN model initialization and forward passes (Eager & Graph)" {
+test "CNN model initialization and forward passes (no-grad & gradient graphs)" {
     const allocator = std.testing.allocator;
 
     var model = NeuralNetwork.init(allocator, try CNN.init(allocator, 42));
@@ -246,19 +245,21 @@ test "CNN model initialization and forward passes (Eager & Graph)" {
     defer allocator.free(x_data);
     @memset(x_data, 0.1);
 
-    // Test Eager Mode (graph == null)
+    // Inference mode (no-grad graph)
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const arena_allocator = arena.allocator();
 
         const x_tensor = try tensor.array(arena_allocator, &.{ 2, 784 }, x_data);
-        const logits = try model.forward(arena_allocator, null, x_tensor);
+        var logits_graph = autodiff.Graph.initNoGrad(arena_allocator);
+        defer logits_graph.deinit();
+        const logits = try model.forward(&logits_graph, x_tensor);
 
         try std.testing.expectEqualSlices(usize, &.{ 2, 10 }, logits.shape.dims[0..logits.shape.len]);
     }
 
-    // Test Graph Mode (graph != null)
+    // Training mode (gradient-recording graph)
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
@@ -270,7 +271,7 @@ test "CNN model initialization and forward passes (Eager & Graph)" {
         const x_tensor = try graph.tensor(2, 784, false);
         @memcpy(x_tensor.data, x_data);
 
-        const logits = try model.forward(arena_allocator, &graph, x_tensor);
+        const logits = try model.forward(&graph, x_tensor);
 
         try std.testing.expectEqualSlices(usize, &.{ 2, 10 }, logits.shape.dims[0..logits.shape.len]);
     }

@@ -36,6 +36,19 @@ pub const Graph = struct {
         };
     }
 
+    /// 初始化一个不记录梯度的计算图 (推理 / 评估模式)：
+    /// 算子仍在图的 Arena 中分配并执行前向计算，但不分配梯度缓冲区，也不记录 Op 节点
+    pub fn initNoGrad(backing_allocator: std.mem.Allocator) Graph {
+        var g = Graph.init(backing_allocator);
+        g.enable_grad = false;
+        return g;
+    }
+
+    /// 计算图 Arena 分配器：其上分配的张量在 `deinit` 时随计算图一并释放
+    pub fn arenaAllocator(self: *Graph) std.mem.Allocator {
+        return self.arena.allocator();
+    }
+
     /// 模块作用域守卫：由 `enterModule` / `enterChildScope` 返回，`exit()` 时弹出对应作用域
     pub const ScopeGuard = struct {
         graph: ?*Graph = null,
@@ -64,24 +77,22 @@ pub const Graph = struct {
     }
 
     /// 在模块 forward 入口处进入该模块的作用域。
-    /// 未构建计算图 (graph == null) 或模块未命名时返回空守卫。
-    /// 用法: `const scope = try Graph.enterModule(graph, self.name, self.module_type); defer scope.exit();`
-    pub fn enterModule(graph: ?*Graph, name: ?[]const u8, module_type: []const u8) !ScopeGuard {
-        const g = graph orelse return .{};
+    /// 模块未命名时返回空守卫。
+    /// 用法: `const scope = try g.enterModule(self.name, self.module_type); defer scope.exit();`
+    pub fn enterModule(self: *Graph, name: ?[]const u8, module_type: []const u8) !ScopeGuard {
         const n = name orelse return .{};
-        try g.pushScope(n, module_type);
-        return .{ .graph = g };
+        try self.pushScope(n, module_type);
+        return .{ .graph = self };
     }
 
     /// 在当前模块内部开启一个命名子作用域 (如注意力模块内部的 "core")。
     /// 当前处于根作用域 (所属模块未命名) 时返回空守卫。
-    pub fn enterChildScope(graph: ?*Graph, local_name: []const u8, module_type: []const u8) !ScopeGuard {
-        const g = graph orelse return .{};
-        const parent = g.currentScope();
+    pub fn enterChildScope(self: *Graph, local_name: []const u8, module_type: []const u8) !ScopeGuard {
+        const parent = self.currentScope();
         if (parent.len == 0) return .{};
-        const path = try std.fmt.allocPrint(g.arena.allocator(), "{s}.{s}", .{ parent, local_name });
-        try g.pushScope(path, module_type);
-        return .{ .graph = g };
+        const path = try std.fmt.allocPrint(self.arena.allocator(), "{s}.{s}", .{ parent, local_name });
+        try self.pushScope(path, module_type);
+        return .{ .graph = self };
     }
 
     /// 记录一个新创建的算子，并标记其所属的当前模块作用域
@@ -407,7 +418,7 @@ pub const Graph = struct {
     // 维度转置算子前向传播：交换 dim0 和 dim1
     pub fn transposeND(self: *Graph, A: *Tensor, dim0: usize, dim1: usize) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.transpose(dim0, dim1, allocator, null);
+        const C = try A.transpose(dim0, dim1, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -420,7 +431,7 @@ pub const Graph = struct {
     // 沿指定维度拼接张量数组 (Concat)
     pub fn concat(self: *Graph, inputs: []const *Tensor, dim: usize) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try tensor_mod.concat(allocator, inputs, dim, null);
+        const C = try tensor_mod.concat(allocator, inputs, dim);
 
         var req_grad = false;
         if (self.enable_grad) {
@@ -443,7 +454,7 @@ pub const Graph = struct {
     // 沿指定维度将张量均等切分为 num_splits 份 (Split)
     pub fn split(self: *Graph, input: *Tensor, num_splits: usize, dim: usize) ![]*Tensor {
         const allocator = self.arena.allocator();
-        const outputs = try tensor_mod.split(allocator, input, num_splits, dim, null);
+        const outputs = try tensor_mod.split(allocator, input, num_splits, dim);
 
         const req_grad = self.enable_grad and input.requires_grad;
         for (outputs) |out| {
@@ -489,7 +500,7 @@ pub const Graph = struct {
         if (groups == 1) return X;
 
         const allocator = self.arena.allocator();
-        const Y = try X.repeatKV(groups, allocator, null);
+        const Y = try X.repeatKV(groups, allocator);
         return self.registerSingleOutputOp(
             Y,
             &.{X},
@@ -502,7 +513,7 @@ pub const Graph = struct {
     // 矩阵乘法算子前向传播：C = A * B
     pub fn matmul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.matmul(B, allocator, null);
+        const C = try A.matmul(B, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{ A, B },
@@ -520,7 +531,7 @@ pub const Graph = struct {
     // 激活函数 ReLU 前向传播：C = max(0, A)
     pub fn relu(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.relu(allocator, null);
+        const C = try A.relu(allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -532,7 +543,7 @@ pub const Graph = struct {
 
     pub fn gelu(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.gelu(allocator, null);
+        const C = try A.gelu(allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -544,7 +555,7 @@ pub const Graph = struct {
 
     pub fn sigmoid(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.sigmoid(allocator, null);
+        const C = try A.sigmoid(allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -556,7 +567,7 @@ pub const Graph = struct {
 
     pub fn tanh(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.tanh(allocator, null);
+        const C = try A.tanh(allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -568,7 +579,7 @@ pub const Graph = struct {
 
     pub fn leakyRelu(self: *Graph, A: *Tensor, alpha: f32) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.leakyRelu(alpha, allocator, null);
+        const C = try A.leakyRelu(alpha, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -581,7 +592,7 @@ pub const Graph = struct {
     // 激活函数 SiLU (Swish) 前向传播：C = A * sigmoid(A)
     pub fn silu(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.silu(allocator, null);
+        const C = try A.silu(allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -865,7 +876,7 @@ pub const Graph = struct {
     // 标量乘法（缩放）：C = val * A
     pub fn mulScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.mulScalar(val, allocator, null);
+        const C = try A.mulScalar(val, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -878,7 +889,7 @@ pub const Graph = struct {
     // 标量加法：C = A + val
     pub fn addScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.addScalar(val, allocator, null);
+        const C = try A.addScalar(val, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -891,7 +902,7 @@ pub const Graph = struct {
     // 标量减法：C = A - val
     pub fn subScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.subScalar(val, allocator, null);
+        const C = try A.subScalar(val, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -904,7 +915,7 @@ pub const Graph = struct {
     // 标量除法：C = A / val
     pub fn divScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.divScalar(val, allocator, null);
+        const C = try A.divScalar(val, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -917,7 +928,7 @@ pub const Graph = struct {
     // 逐元素张量加法：C = A + B (支持多维广播)
     pub fn add(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.add(B, allocator, null);
+        const C = try A.add(B, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{ A, B },
@@ -930,7 +941,7 @@ pub const Graph = struct {
     // 逐元素张量减法：C = A - B (支持多维广播)
     pub fn sub(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.sub(B, allocator, null);
+        const C = try A.sub(B, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{ A, B },
@@ -943,7 +954,7 @@ pub const Graph = struct {
     // 逐元素张量乘法 (Hadamard 积)：C = A * B (支持多维广播)
     pub fn mul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.mul(B, allocator, null);
+        const C = try A.mul(B, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{ A, B },
@@ -956,7 +967,7 @@ pub const Graph = struct {
     // 逐元素张量除法：C = A / B (支持多维广播)
     pub fn div(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.div(B, allocator, null);
+        const C = try A.div(B, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{ A, B },
@@ -979,7 +990,7 @@ pub const Graph = struct {
         padding: usize,
     ) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.conv2dWithConfig(weight, bias, stride, padding, allocator, null);
+        const C = try A.conv2dWithConfig(weight, bias, stride, padding, allocator);
         const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
         const ctx: OpContext = .{ .Conv2D = .{ .stride = stride, .padding = padding } };
         if (bias) |b| {
@@ -998,7 +1009,7 @@ pub const Graph = struct {
         padding: usize,
     ) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.convTranspose2d(weight, bias, stride, padding, allocator, null);
+        const C = try A.convTranspose2d(weight, bias, stride, padding, allocator);
         const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
         const ctx: OpContext = .{ .ConvTranspose2D = .{ .stride = stride, .padding = padding } };
         if (bias) |b| {
@@ -1010,7 +1021,7 @@ pub const Graph = struct {
 
     pub fn maxpool2d(self: *Graph, A: *Tensor, pool_size: usize, stride: usize) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.maxpool2d(pool_size, stride, allocator, null);
+        const C = try A.maxpool2d(pool_size, stride, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -1022,7 +1033,7 @@ pub const Graph = struct {
 
     pub fn avgpool2d(self: *Graph, A: *Tensor, kernel_size: usize, stride: usize) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.avgpool2d(kernel_size, stride, allocator, null);
+        const C = try A.avgpool2d(kernel_size, stride, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -1034,7 +1045,7 @@ pub const Graph = struct {
 
     pub fn softmax(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.softmax(allocator, null);
+        const C = try A.softmax(allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -1046,7 +1057,7 @@ pub const Graph = struct {
 
     pub fn rmsNorm(self: *Graph, X: *Tensor, G: *Tensor, eps: f32) !*Tensor {
         const allocator = self.arena.allocator();
-        const Y = try X.rmsNorm(G, eps, allocator, null);
+        const Y = try X.rmsNorm(G, eps, allocator);
         return self.registerSingleOutputOp(
             Y,
             &.{ X, G },
@@ -1058,7 +1069,7 @@ pub const Graph = struct {
 
     pub fn layerNorm(self: *Graph, X: *Tensor, G: *Tensor, B: *Tensor, eps: f32) !*Tensor {
         const allocator = self.arena.allocator();
-        const Y = try X.layerNorm(G, B, eps, allocator, null);
+        const Y = try X.layerNorm(G, B, eps, allocator);
         return self.registerSingleOutputOp(
             Y,
             &.{ X, G, B },
@@ -1214,7 +1225,7 @@ pub const Graph = struct {
 
     pub fn ropeOffset(self: *Graph, X: *Tensor, start_pos: usize, rotary_offset: usize) !*Tensor {
         const allocator = self.arena.allocator();
-        const Y = try X.ropeOffset(start_pos, rotary_offset, allocator, null);
+        const Y = try X.ropeOffset(start_pos, rotary_offset, allocator);
         return self.registerSingleOutputOp(
             Y,
             &.{X},
@@ -1226,7 +1237,7 @@ pub const Graph = struct {
 
     pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.batchMatMul(B, allocator, null);
+        const C = try A.batchMatMul(B, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{ A, B },
@@ -1279,7 +1290,7 @@ pub const Graph = struct {
             }
         };
 
-        const Y = try W.embedding(x_tensor, allocator, null);
+        const Y = try W.embedding(x_tensor, allocator);
         return self.registerSingleOutputOp(
             Y,
             &.{ W, x_tensor },
@@ -1291,7 +1302,7 @@ pub const Graph = struct {
 
     pub fn sqrt(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.sqrt(allocator, null);
+        const C = try A.sqrt(allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -1303,7 +1314,7 @@ pub const Graph = struct {
 
     pub fn exp(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.exp(allocator, null);
+        const C = try A.exp(allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -1315,7 +1326,7 @@ pub const Graph = struct {
 
     pub fn log(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.log(allocator, null);
+        const C = try A.log(allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -1327,7 +1338,7 @@ pub const Graph = struct {
 
     pub fn abs(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.abs(allocator, null);
+        const C = try A.abs(allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -1339,7 +1350,7 @@ pub const Graph = struct {
 
     pub fn sum(self: *Graph, A: *Tensor, axis: ?usize, keepdims: bool) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.sum(axis, keepdims, allocator, null);
+        const C = try A.sum(axis, keepdims, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -1351,7 +1362,7 @@ pub const Graph = struct {
 
     pub fn mean(self: *Graph, A: *Tensor, axis: ?usize, keepdims: bool) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.mean(axis, keepdims, allocator, null);
+        const C = try A.mean(axis, keepdims, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -1382,7 +1393,7 @@ pub const Graph = struct {
 
     pub fn where(self: *Graph, cond: anytype, X: *Tensor, Y: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try Tensor.where(cond, X, Y, allocator, null);
+        const C = try Tensor.where(cond, X, Y, allocator);
         const mask_buf = try allocator.alloc(bool, C.data.len);
         const cond_strides = tensor_mod.computeBroadcastStrides(cond.shape, cond.strides, C.shape);
         const rank = C.shape.len;
@@ -1410,7 +1421,7 @@ pub const Graph = struct {
 
     pub fn maskedFill(self: *Graph, X: *Tensor, mask: anytype, value: f32) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try X.maskedFill(mask, value, allocator, null);
+        const C = try X.maskedFill(mask, value, allocator);
         const mask_buf = try allocator.alloc(bool, C.data.len);
         if (mask.isContiguous() and mask.data.len >= C.data.len) {
             for (mask_buf, mask.data[0..C.data.len]) |*mb, mv| {
@@ -1442,11 +1453,13 @@ pub const Graph = struct {
     }
 
     pub fn squeeze(self: *Graph, A: *Tensor, axis: ?usize) !*Tensor {
-        return A.squeeze(axis, self.arena.allocator(), self);
+        const target = try A.squeezedShape(axis);
+        return self.reshape(A, target.dims[0..target.len]);
     }
 
     pub fn unsqueeze(self: *Graph, A: *Tensor, dim: usize) !*Tensor {
-        return A.unsqueeze(dim, self.arena.allocator(), self);
+        const target = try A.unsqueezedShape(dim);
+        return self.reshape(A, target.dims[0..target.len]);
     }
 
     pub fn slice(self: *Graph, A: *Tensor, ranges: []const tensor_mod.SliceRange) !*Tensor {

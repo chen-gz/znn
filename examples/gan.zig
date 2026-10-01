@@ -39,16 +39,12 @@ pub const Generator = struct {
         self.l3.zeroGrad();
     }
 
-    pub fn forward(self: *Generator, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, z: *Tensor) !*Tensor {
-        const h1 = try self.l1.forward(allocator, graph, z);
-        defer if (graph == null) tensor.free(allocator, h1);
-        const a1 = try self.act1.forward(allocator, graph, h1);
-        defer if (graph == null) tensor.free(allocator, a1);
-        const h2 = try self.l2.forward(allocator, graph, a1);
-        defer if (graph == null) tensor.free(allocator, h2);
-        const a2 = try self.act2.forward(allocator, graph, h2);
-        defer if (graph == null) tensor.free(allocator, a2);
-        return try self.l3.forward(allocator, graph, a2);
+    pub fn forward(self: *Generator, graph: *autodiff.Graph, z: *Tensor) !*Tensor {
+        const h1 = try self.l1.forward(graph, z);
+        const a1 = try self.act1.forward(graph, h1);
+        const h2 = try self.l2.forward(graph, a1);
+        const a2 = try self.act2.forward(graph, h2);
+        return try self.l3.forward(graph, a2);
     }
 };
 
@@ -85,16 +81,12 @@ pub const Discriminator = struct {
         self.l3.zeroGrad();
     }
 
-    pub fn forward(self: *Discriminator, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const h1 = try self.l1.forward(allocator, graph, x);
-        defer if (graph == null) tensor.free(allocator, h1);
-        const a1 = try self.act1.forward(allocator, graph, h1);
-        defer if (graph == null) tensor.free(allocator, a1);
-        const h2 = try self.l2.forward(allocator, graph, a1);
-        defer if (graph == null) tensor.free(allocator, h2);
-        const a2 = try self.act2.forward(allocator, graph, h2);
-        defer if (graph == null) tensor.free(allocator, a2);
-        return try self.l3.forward(allocator, graph, a2);
+    pub fn forward(self: *Discriminator, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const h1 = try self.l1.forward(graph, x);
+        const a1 = try self.act1.forward(graph, h1);
+        const h2 = try self.l2.forward(graph, a1);
+        const a2 = try self.act2.forward(graph, h2);
+        return try self.l3.forward(graph, a2);
     }
 };
 
@@ -163,15 +155,16 @@ pub fn main() !void {
 
         // 生成器伪造样本 (Label = 0)
         const noise_d = try graph_d.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);
-        const fake_data_eager = try net_g.forward(allocator, null, noise_d);
-        defer tensor.free(allocator, fake_data_eager);
+        var fake_data_eager_graph = autodiff.Graph.initNoGrad(allocator);
+        defer fake_data_eager_graph.deinit();
+        const fake_data_eager = try net_g.forward(&fake_data_eager_graph, noise_d);
 
         const fake_data = try graph_d.array(&.{ batch_size, 2 }, fake_data_eager.data, false);
         const fake_targets = try graph_d.zeros(&.{ batch_size, 1 }, false);
 
         // 前向传播计算 D(real) 和 D(fake)
-        const real_logits = try net_d.forward(allocator, &graph_d, real_data);
-        const fake_logits = try net_d.forward(allocator, &graph_d, fake_data);
+        const real_logits = try net_d.forward(&graph_d, real_data);
+        const fake_logits = try net_d.forward(&graph_d, fake_data);
 
         // 计算 BCEWithLogitsLoss
         const loss_d_real = try graph_d.bceWithLogitsLoss(real_logits, real_targets);
@@ -192,11 +185,11 @@ pub fn main() !void {
         var graph_g = autodiff.Graph.init(allocator);
 
         const noise_g = try graph_g.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);
-        const g_generated = try net_g.forward(allocator, &graph_g, noise_g);
+        const g_generated = try net_g.forward(&graph_g, noise_g);
 
         // 目标是欺骗 D，使其认为生成样本为 1.0 (Real)
         const g_targets = try graph_g.ones(&.{ batch_size, 1 }, false);
-        const g_logits = try net_d.forward(allocator, &graph_g, g_generated);
+        const g_logits = try net_d.forward(&graph_g, g_generated);
         const loss_g = try graph_g.bceWithLogitsLoss(g_logits, g_targets);
 
         net_g.zeroGrad();
@@ -216,7 +209,7 @@ pub fn main() !void {
             defer eval_graph.deinit();
 
             const eval_noise = try eval_graph.randomNormal(&.{ 500, 2 }, random, 0.0, 1.0, false);
-            const generated = try net_g.forward(allocator, &eval_graph, eval_noise);
+            const generated = try net_g.forward(&eval_graph, eval_noise);
 
             var mean_x: f32 = 0.0;
             var mean_y: f32 = 0.0;

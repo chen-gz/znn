@@ -89,9 +89,25 @@ flowchart TD
 
 ### 3.3 模块作用域跟踪 (Module Scoping in Graph)
 为了支持深层神经网络的层次化拓扑推导与可视化导出，`Graph` 维护了一个当前正在执行 forward 的作用域栈：
-* **`Graph.enterModule(graph, name, module_type)`**：模块在 forward 开始前压栈，通过 `defer scope.exit()` 保证在退出作用域时自动弹栈；
-* **`Graph.enterChildScope(graph, local_name, module_type)`**：用于模块内部复杂子逻辑（如注意力机制内部的 "core" 运算）的命名空间隔离；
+* **`graph.enterModule(name, module_type)`**：模块在 forward 开始前压栈，通过 `defer scope.exit()` 保证在退出作用域时自动弹栈；模块未命名时返回空守卫；
+* **`graph.enterChildScope(local_name, module_type)`**：用于模块内部复杂子逻辑（如注意力机制内部的 "core" 运算）的命名空间隔离；
 * 运算过程中创建的所有算子与激活张量均自动打上当前作用域标签 (`Op.scope` / `Tensor.scope`)。
+
+### 3.4 分层依赖：Tensor ← Graph ← nn (Layered Dependencies)
+三层之间是严格的单向调用关系：
+* **`tensor` 层 (`src/tensor/`)**：纯数值张量库。所有 `Tensor` 方法与 `tensor.concat` / `tensor.split` 只接收 `allocator`，执行纯计算并返回新张量 (或零拷贝视图)，从不调用 `Graph`。`Tensor` 仅以数据字段 (`grad`、`requires_grad`、`creator: ?*Op`、`scope`) 承载自动微分元数据，供上层写入与读取。
+* **`autodiff` 层 (`src/autodiff/`)**：`Graph` 的每个算子 (`graph.matmul`、`graph.add`、`graph.softmax` …) 先在自身 Arena 上调用对应的纯 `Tensor` 内核完成前向计算，再按 `enable_grad` 决定是否分配梯度缓冲区并记录 `Op` 节点。
+  * `Graph.init(allocator)`：训练模式，记录反向传播所需的算子；
+  * `Graph.initNoGrad(allocator)`：推理 / 评估模式，只执行前向计算，不分配梯度、不记录 `Op`，中间张量仍在 Arena 中随 `deinit` 一并释放；
+  * `graph.arenaAllocator()`：获取计算图 Arena 分配器，用于与计算图同生命周期的临时缓冲区 (如 `RNN.forward` 返回的输出切片)。
+* **`nn` 层 (`src/nn/`)**：所有模块的前向统一为 `forward(self, graph: *Graph, x, ...)`，只通过计算图执行算子，没有 Eager / Graph 双分支，也不需要手动释放中间张量。推理时调用方传入 `Graph.initNoGrad` 构建的计算图即可。
+* **KV-Cache 单步推理** (`CausalSelfAttention.forwardInference` / `MLALayer.forwardInference`)：在函数内部创建局部无梯度计算图承载中间张量，最终输出拷贝到调用方分配器上返回。
+
+```mermaid
+flowchart LR
+    NN["nn 模块\nforward(self, graph, x)"] --> Graph["autodiff.Graph\ngraph.op(...)\nInit / InitNoGrad"]
+    Graph --> Tensor["tensor.Tensor\nTensor.op(..., allocator)\n纯数值内核"]
+```
 
 ---
 
@@ -192,7 +208,7 @@ flowchart TD
 
 ```mermaid
 flowchart LR
-    Model["模型执行 Forward\n(Graph.enterModule 记录作用域)"] --> Export["nn/visualization.zig\n(局部图构建 & 端口解析)"]
+    Model["模型执行 Forward\n(graph.enterModule 记录作用域)"] --> Export["nn/visualization.zig\n(局部图构建 & 端口解析)"]
     Export --> JsonFile["model_graph.json\n(Schema 2.0 规范)"]
     JsonFile --> WebVisualizer["Web 端模型图谱浏览器\n(chen-gz.github.io/visualizer)"]
 ```

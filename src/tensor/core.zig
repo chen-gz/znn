@@ -1,6 +1,5 @@
 const std = @import("std");
-const autodiff = @import("../autodiff.zig");
-const Op = autodiff.Op;
+const Op = @import("../autodiff/op.zig").Op;
 const c = @import("../cblas.zig");
 const shape_mod = @import("shape.zig");
 pub const Shape = shape_mod.Shape;
@@ -168,12 +167,9 @@ pub const Tensor = struct {
     }
 
     // ============================================================================
-    // Direct tensor operations (eager or graph-backed)
+    // Eager tensor operations (pure numerical kernels, no graph recording)
     // ============================================================================
-    pub fn matmul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.matmul(self, other);
-        }
+    pub fn matmul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         if (self.shape.len != 2 or other.shape.len != 2) {
             return error.IncompatibleDimensions;
         }
@@ -204,14 +200,11 @@ pub const Tensor = struct {
     }
 
     // 偏置相加算子：直接复用多维广播加法
-    pub fn addBias(self: *Tensor, bias: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        return self.add(bias, allocator, graph);
+    pub fn addBias(self: *Tensor, bias: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+        return self.add(bias, allocator);
     }
 
-    pub fn mulScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.mulScalar(self, val);
-        }
+    pub fn mulScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
         for (C.data, self.data) |*c_val, s_val| {
             c_val.* = s_val * val;
@@ -219,10 +212,7 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn addScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.addScalar(self, val);
-        }
+    pub fn addScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
         for (C.data, self.data) |*c_val, s_val| {
             c_val.* = s_val + val;
@@ -230,10 +220,7 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn subScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.subScalar(self, val);
-        }
+    pub fn subScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
         for (C.data, self.data) |*c_val, s_val| {
             c_val.* = s_val - val;
@@ -241,10 +228,7 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn divScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.divScalar(self, val);
-        }
+    pub fn divScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
         for (C.data, self.data) |*c_val, s_val| {
             c_val.* = s_val / val;
@@ -258,10 +242,7 @@ pub const Tensor = struct {
     fn divOp(a: f32, b: f32) f32 { return a / b; }
 
     /// 通用多维广播加法：C = self + other
-    pub fn add(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.add(self, other);
-        }
+    pub fn add(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const out_shape = try broadcastShapes(self.shape, other.shape);
         const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
         broadcastBinaryOpRaw(C.data, C.shape, self.data, self.shape, self.strides, other.data, other.shape, other.strides, addOp);
@@ -269,10 +250,7 @@ pub const Tensor = struct {
     }
 
     /// 通用多维广播减法：C = self - other
-    pub fn sub(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.sub(self, other);
-        }
+    pub fn sub(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const out_shape = try broadcastShapes(self.shape, other.shape);
         const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
         broadcastBinaryOpRaw(C.data, C.shape, self.data, self.shape, self.strides, other.data, other.shape, other.strides, subOp);
@@ -280,10 +258,7 @@ pub const Tensor = struct {
     }
 
     /// 通用多维广播乘法 (Hadamard 积)：C = self * other
-    pub fn mul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.mul(self, other);
-        }
+    pub fn mul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const out_shape = try broadcastShapes(self.shape, other.shape);
         const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
         broadcastBinaryOpRaw(C.data, C.shape, self.data, self.shape, self.strides, other.data, other.shape, other.strides, mulOp);
@@ -291,20 +266,14 @@ pub const Tensor = struct {
     }
 
     /// 通用多维广播除法：C = self / other
-    pub fn div(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.div(self, other);
-        }
+    pub fn div(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const out_shape = try broadcastShapes(self.shape, other.shape);
         const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
         broadcastBinaryOpRaw(C.data, C.shape, self.data, self.shape, self.strides, other.data, other.shape, other.strides, divOp);
         return C;
     }
 
-    pub fn silu(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.silu(self);
-        }
+    pub fn silu(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
         for (C.data, self.data) |*c_val, a_val| {
             const sig = if (a_val >= 0.0) 1.0 / (1.0 + @exp(-a_val)) else @exp(a_val) / (1.0 + @exp(a_val));
@@ -313,10 +282,7 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn relu(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.relu(self);
-        }
+    pub fn relu(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
         const total = self.data.len;
         for (0..total) |i| {
@@ -325,10 +291,7 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn gelu(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.gelu(self);
-        }
+    pub fn gelu(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
         const total = self.data.len;
         const sqrt_2: f32 = @sqrt(@as(f32, 2.0));
@@ -340,10 +303,7 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn sigmoid(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.sigmoid(self);
-        }
+    pub fn sigmoid(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
         for (C.data, self.data) |*c_val, a_val| {
             if (a_val >= 0.0) {
@@ -356,10 +316,7 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn tanh(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.tanh(self);
-        }
+    pub fn tanh(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
         for (C.data, self.data) |*c_val, a_val| {
             c_val.* = std.math.tanh(a_val);
@@ -367,10 +324,7 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn leakyRelu(self: *Tensor, alpha: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.leakyRelu(self, alpha);
-        }
+    pub fn leakyRelu(self: *Tensor, alpha: f32, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
         for (C.data, self.data) |*c_val, a_val| {
             c_val.* = if (a_val > 0.0) a_val else alpha * a_val;
@@ -404,10 +358,7 @@ pub const Tensor = struct {
     }
 
     /// 逐元素开平方 (np.sqrt)
-    pub fn sqrt(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.sqrt(self);
-        }
+    pub fn sqrt(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         return self.unaryMathEager(allocator, struct {
             fn op(x: f32) f32 {
                 return @sqrt(x);
@@ -416,10 +367,7 @@ pub const Tensor = struct {
     }
 
     /// 逐元素自然指数 (np.exp)
-    pub fn exp(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.exp(self);
-        }
+    pub fn exp(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         return self.unaryMathEager(allocator, struct {
             fn op(x: f32) f32 {
                 return @exp(x);
@@ -428,10 +376,7 @@ pub const Tensor = struct {
     }
 
     /// 逐元素自然对数 (np.log)
-    pub fn log(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.log(self);
-        }
+    pub fn log(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         return self.unaryMathEager(allocator, struct {
             fn op(x: f32) f32 {
                 return @log(x);
@@ -440,10 +385,7 @@ pub const Tensor = struct {
     }
 
     /// 逐元素绝对值 (np.abs)
-    pub fn abs(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.abs(self);
-        }
+    pub fn abs(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         return self.unaryMathEager(allocator, struct {
             fn op(x: f32) f32 {
                 return @abs(x);
@@ -451,10 +393,7 @@ pub const Tensor = struct {
         }.op);
     }
 
-    pub fn bceWithLogitsLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.bceWithLogitsLoss(self, targets);
-        }
+    pub fn bceWithLogitsLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const loss = try zeros(allocator, &.{ 1, 1 });
         const N = self.data.len;
         if (N != targets.data.len) return error.ShapeMismatch;
@@ -470,10 +409,7 @@ pub const Tensor = struct {
         return loss;
     }
 
-    pub fn bceLoss(self: *Tensor, targets: *Tensor, eps: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.bceLoss(self, targets, eps);
-        }
+    pub fn bceLoss(self: *Tensor, targets: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
         const loss = try zeros(allocator, &.{ 1, 1 });
         const N = self.data.len;
         if (N != targets.data.len) return error.ShapeMismatch;
@@ -516,10 +452,7 @@ pub const Tensor = struct {
         }
     }
 
-    pub fn softmaxCrossEntropy(self: *Tensor, targets: []const u8, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.softmaxCrossEntropy(self, targets);
-        }
+    pub fn softmaxCrossEntropy(self: *Tensor, targets: []const u8, allocator: std.mem.Allocator) !*Tensor {
         if (self.shape.len != 2) return error.IncompatibleDimensions;
         const loss = try zeros(allocator, &.{1, 1});
         const B = self.shape.dims[0];
@@ -549,14 +482,11 @@ pub const Tensor = struct {
         return loss;
     }
 
-    pub fn sigmoidCrossEntropy(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        return self.bceWithLogitsLoss(targets, allocator, graph);
+    pub fn sigmoidCrossEntropy(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+        return self.bceWithLogitsLoss(targets, allocator);
     }
 
-    pub fn mseLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.mseLoss(self, targets);
-        }
+    pub fn mseLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const N = self.data.len;
         if (N != targets.data.len) return error.ShapeMismatch;
         const loss = try zeros(allocator, &.{ 1, 1 });
@@ -569,10 +499,7 @@ pub const Tensor = struct {
         return loss;
     }
 
-    pub fn l2Loss(self: *Tensor, lambda: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.l2Loss(self, lambda);
-        }
+    pub fn l2Loss(self: *Tensor, lambda: f32, allocator: std.mem.Allocator) !*Tensor {
         const loss = try zeros(allocator, &.{1, 1});
         var sum_sq: f32 = 0.0;
         for (self.data) |v| {
@@ -582,10 +509,7 @@ pub const Tensor = struct {
         return loss;
     }
 
-    pub fn l1Loss(self: *Tensor, lambda: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.l1Loss(self, lambda);
-        }
+    pub fn l1Loss(self: *Tensor, lambda: f32, allocator: std.mem.Allocator) !*Tensor {
         const loss = try zeros(allocator, &.{ 1, 1 });
         var sum_abs: f32 = 0.0;
         for (self.data) |v| {
@@ -595,10 +519,7 @@ pub const Tensor = struct {
         return loss;
     }
 
-    pub fn reshape(self: *Tensor, new_shape_slice: []const usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.reshape(self, new_shape_slice);
-        }
+    pub fn reshape(self: *Tensor, new_shape_slice: []const usize, allocator: std.mem.Allocator) !*Tensor {
         const shape = try Shape.fromSlice(new_shape_slice);
         const strides = computeContiguousStrides(shape);
         const old_total = self.shape.numel();
@@ -638,8 +559,8 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn split(self: *Tensor, num_splits: usize, dim: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror![]*Tensor {
-        return tensorSplit(allocator, self, num_splits, dim, graph);
+    pub fn split(self: *Tensor, num_splits: usize, dim: usize, allocator: std.mem.Allocator) ![]*Tensor {
+        return tensorSplit(allocator, self, num_splits, dim);
     }
 
     /// 零拷贝维度转置视图（仅交换 shape 与 strides，共享底层 data 与 grad 缓冲区）
@@ -660,10 +581,7 @@ pub const Tensor = struct {
         return view;
     }
 
-    pub fn transpose(self: *Tensor, dim0: usize, dim1: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.transposeND(self, dim0, dim1);
-        }
+    pub fn transpose(self: *Tensor, dim0: usize, dim1: usize, allocator: std.mem.Allocator) !*Tensor {
         if (dim0 >= self.shape.len or dim1 >= self.shape.len) {
             return error.DimensionOutOfBounds;
         }
@@ -812,8 +730,8 @@ pub const Tensor = struct {
         return out;
     }
 
-    pub fn conv2d(self: *Tensor, weight: *Tensor, bias: ?*Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        return self.conv2dWithConfig(weight, bias, 1, 0, allocator, graph);
+    pub fn conv2d(self: *Tensor, weight: *Tensor, bias: ?*Tensor, allocator: std.mem.Allocator) !*Tensor {
+        return self.conv2dWithConfig(weight, bias, 1, 0, allocator);
     }
 
     pub fn conv2dWithConfig(
@@ -823,11 +741,7 @@ pub const Tensor = struct {
         stride: usize,
         padding: usize,
         allocator: std.mem.Allocator,
-        graph: ?*autodiff.Graph,
-    ) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.conv2dWithConfig(self, weight, bias, stride, padding);
-        }
+    ) !*Tensor {
         if (self.shape.len != 4 or weight.shape.len != 4) {
             return error.IncompatibleDimensions;
         }
@@ -972,11 +886,7 @@ pub const Tensor = struct {
         stride: usize,
         padding: usize,
         allocator: std.mem.Allocator,
-        graph: ?*autodiff.Graph,
-    ) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.convTranspose2D(self, weight, bias, stride, padding);
-        }
+    ) !*Tensor {
         if (self.shape.len != 4 or weight.shape.len != 4) {
             return error.IncompatibleDimensions;
         }
@@ -1043,10 +953,7 @@ pub const Tensor = struct {
         return out;
     }
 
-    pub fn maxpool2d(self: *Tensor, pool_size: usize, stride: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.maxpool2d(self, pool_size, stride);
-        }
+    pub fn maxpool2d(self: *Tensor, pool_size: usize, stride: usize, allocator: std.mem.Allocator) !*Tensor {
         if (self.shape.len != 4) return error.IncompatibleDimensions;
         if (stride == 0 or pool_size == 0) return error.InvalidStride;
         const N = self.shape.dims[0];
@@ -1094,10 +1001,7 @@ pub const Tensor = struct {
         return out;
     }
 
-    pub fn avgpool2d(self: *Tensor, kernel_size: usize, stride: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.avgpool2d(self, kernel_size, stride);
-        }
+    pub fn avgpool2d(self: *Tensor, kernel_size: usize, stride: usize, allocator: std.mem.Allocator) !*Tensor {
         if (self.shape.len != 4) return error.IncompatibleDimensions;
         if (stride == 0 or kernel_size == 0) return error.InvalidStride;
         const N = self.shape.dims[0];
@@ -1144,10 +1048,7 @@ pub const Tensor = struct {
         return out;
     }
 
-    pub fn softmax(self: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.softmax(self);
-        }
+    pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const D = self.shape.dims[self.shape.len - 1];
         const M = self.data.len / D;
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
@@ -1175,10 +1076,7 @@ pub const Tensor = struct {
         return C;
     }
 
-    pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.rmsNorm(self, G, eps);
-        }
+    pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
         const D = self.shape.dims[self.shape.len - 1];
         const M = self.data.len / D;
         const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
@@ -1200,10 +1098,7 @@ pub const Tensor = struct {
         return Y;
     }
 
-    pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.layerNorm(self, G, B, eps);
-        }
+    pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
         const D = self.shape.dims[self.shape.len - 1];
         if (G.data.len != D or B.data.len != D) return error.ShapeMismatch;
         const M = self.data.len / D;
@@ -1232,14 +1127,11 @@ pub const Tensor = struct {
         return Y;
     }
 
-    pub fn rope(self: *Tensor, start_pos: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        return self.ropeOffset(start_pos, 0, allocator, graph);
+    pub fn rope(self: *Tensor, start_pos: usize, allocator: std.mem.Allocator) !*Tensor {
+        return self.ropeOffset(start_pos, 0, allocator);
     }
 
-    pub fn ropeOffset(self: *Tensor, start_pos: usize, rotary_offset: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.ropeOffset(self, start_pos, rotary_offset);
-        }
+    pub fn ropeOffset(self: *Tensor, start_pos: usize, rotary_offset: usize, allocator: std.mem.Allocator) !*Tensor {
         const D = self.shape.dims[self.shape.len - 1];
         if (rotary_offset > D) return error.DimensionOutOfBounds;
         const T = if (self.shape.len >= 2) self.shape.dims[self.shape.len - 2] else 1;
@@ -1275,10 +1167,7 @@ pub const Tensor = struct {
         return Y;
     }
 
-    pub fn repeatKV(self: *Tensor, groups: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.repeatKV(self, groups);
-        }
+    pub fn repeatKV(self: *Tensor, groups: usize, allocator: std.mem.Allocator) !*Tensor {
         if (self.shape.len != 4) return error.IncompatibleDimensions;
         const B = self.shape.dims[0];
         const n_kv = self.shape.dims[1];
@@ -1301,10 +1190,7 @@ pub const Tensor = struct {
         return Y;
     }
 
-    pub fn batchMatMul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.batchMatMul(self, other);
-        }
+    pub fn batchMatMul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         if (self.shape.len != 4 or other.shape.len != 4) {
             return error.IncompatibleDimensions;
         }
@@ -1372,10 +1258,7 @@ pub const Tensor = struct {
         }
     }
 
-    pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.embedding(self, indices);
-        }
+    pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator) !*Tensor {
         if (self.shape.len != 2) return error.IncompatibleDimensions;
         const VocabSize = self.shape.dims[0];
         const D = self.shape.dims[1];
@@ -1567,10 +1450,7 @@ pub const Tensor = struct {
     }
 
     /// 通用多维张量沿指定轴或全局求和归约 (Sum Reduction)
-    pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.sum(self, axis, keepdims);
-        }
+    pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
         if (axis) |ax| {
             if (ax >= self.shape.len) return error.DimensionOutOfBounds;
             const reduce_size = self.shape.dims[ax];
@@ -1699,11 +1579,8 @@ pub const Tensor = struct {
     }
 
     /// 通用多维张量沿指定轴或全局均值归约 (Mean Reduction)
-    pub fn mean(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.mean(self, axis, keepdims);
-        }
-        const C = try self.sum(axis, keepdims, allocator, null);
+    pub fn mean(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
+        const C = try self.sum(axis, keepdims, allocator);
         const count = if (axis) |ax| @as(f32, @floatFromInt(self.shape.dims[ax])) else @as(f32, @floatFromInt(self.shape.numel()));
         for (C.data) |*val| {
             val.* /= count;
@@ -1712,25 +1589,22 @@ pub const Tensor = struct {
     }
 
     /// 通用多维张量沿指定轴或全局方差 (Variance Reduction)
-    pub fn variance(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.variance(self, axis, keepdims, ddof);
-        }
+    pub fn variance(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
         if (axis) |ax| {
             if (ax >= self.shape.len) return error.DimensionOutOfBounds;
         }
         const count = if (axis) |ax| self.shape.dims[ax] else self.shape.numel();
         if (count <= ddof) return error.InvalidDDOF;
 
-        const mean_t = try self.mean(axis, true, allocator, null);
+        const mean_t = try self.mean(axis, true, allocator);
         defer free(allocator, mean_t);
 
-        const diff = try self.sub(mean_t, allocator, null);
+        const diff = try self.sub(mean_t, allocator);
         defer free(allocator, diff);
-        const sq = try diff.mul(diff, allocator, null);
+        const sq = try diff.mul(diff, allocator);
         defer free(allocator, sq);
 
-        const sum_sq = try sq.sum(axis, keepdims, allocator, null);
+        const sum_sq = try sq.sum(axis, keepdims, allocator);
         const denom = @as(f32, @floatFromInt(count - ddof));
         for (sum_sq.data) |*val| {
             val.* /= denom;
@@ -1739,11 +1613,8 @@ pub const Tensor = struct {
     }
 
     /// 通用多维张量沿指定轴或全局标准差 (Standard Deviation Reduction)
-    pub fn stdDev(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.stdDev(self, axis, keepdims, ddof);
-        }
-        const var_t = try self.variance(axis, keepdims, ddof, allocator, null);
+    pub fn stdDev(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
+        const var_t = try self.variance(axis, keepdims, ddof, allocator);
         for (var_t.data) |*val| {
             val.* = @sqrt(@max(val.*, 0.0));
         }
@@ -1751,10 +1622,7 @@ pub const Tensor = struct {
     }
 
     /// 依据布尔/条件张量 (支持 `*Tensor` 或 `*BoolTensor` / `*GenericTensor(T)`) 在两个候选张量间进行逐元素选择 (NumPy np.where)
-    pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.where(cond, x, y);
-        }
+    pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const s_xy = try broadcastShapes(x.shape, y.shape);
         const target_shape = try broadcastShapes(cond.shape, s_xy);
         const C = try zeros(allocator, target_shape.dims[0..target_shape.len]);
@@ -1799,10 +1667,7 @@ pub const Tensor = struct {
     }
 
     /// 根据 mask (支持 `*Tensor` 或 `*BoolTensor` / `*GenericTensor(T)`) 将满足真值条件的元素赋值为指定标量值（返回新分配副本）
-    pub fn maskedFill(self: *Tensor, mask: anytype, value: f32, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.maskedFill(self, mask, value);
-        }
+    pub fn maskedFill(self: *Tensor, mask: anytype, value: f32, allocator: std.mem.Allocator) !*Tensor {
         if (!self.shape.eq(mask.shape)) return error.ShapeMismatch;
         const C = try self.contiguous(allocator);
         if (mask.isContiguous() and mask.data.len >= C.data.len) {
@@ -1945,65 +1810,66 @@ pub const Tensor = struct {
         }.cmp);
     }
 
-    /// 压缩单维度 (Squeeze): 移除所有为 1 的维度，或移除指定为 1 的维度
-    pub fn squeeze(self: *Tensor, axis: ?usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+    /// 计算 Squeeze 之后的目标形状: 移除所有为 1 的维度，或移除指定为 1 的维度
+    pub fn squeezedShape(self: *const Tensor, axis: ?usize) !Shape {
+        var out = Shape{ .dims = [_]usize{0} ** 8, .len = 0 };
         if (axis) |ax| {
             if (ax >= self.shape.len) return error.DimensionOutOfBounds;
             if (self.shape.dims[ax] != 1) return error.CannotSqueezeDimension;
-            if (self.shape.len == 1) {
-                return self.reshape(&.{1}, allocator, graph);
-            }
-            var new_dims = [_]usize{0} ** 8;
-            var dest_d: usize = 0;
             for (0..self.shape.len) |d| {
                 if (d != ax) {
-                    new_dims[dest_d] = self.shape.dims[d];
-                    dest_d += 1;
+                    out.dims[out.len] = self.shape.dims[d];
+                    out.len += 1;
                 }
             }
-            return self.reshape(new_dims[0..dest_d], allocator, graph);
         } else {
-            var new_dims = [_]usize{0} ** 8;
-            var dest_d: usize = 0;
             for (0..self.shape.len) |d| {
                 if (self.shape.dims[d] != 1) {
-                    new_dims[dest_d] = self.shape.dims[d];
-                    dest_d += 1;
+                    out.dims[out.len] = self.shape.dims[d];
+                    out.len += 1;
                 }
             }
-            if (dest_d == 0) {
-                new_dims[0] = 1;
-                dest_d = 1;
-            }
-            return self.reshape(new_dims[0..dest_d], allocator, graph);
         }
+        if (out.len == 0) {
+            out.dims[0] = 1;
+            out.len = 1;
+        }
+        return out;
     }
 
-    /// 扩充单维度 (Unsqueeze / expand_dims): 在指定位置插入一个大小为 1 的新维度
-    pub fn unsqueeze(self: *Tensor, dim: usize, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
+    /// 计算 Unsqueeze 之后的目标形状: 在指定位置插入一个大小为 1 的新维度
+    pub fn unsqueezedShape(self: *const Tensor, dim: usize) !Shape {
         if (dim > self.shape.len) return error.DimensionOutOfBounds;
         if (self.shape.len >= 8) return error.MaxDimensionsExceeded;
-
-        var new_dims = [_]usize{0} ** 8;
+        var out = Shape{ .dims = [_]usize{0} ** 8, .len = self.shape.len + 1 };
         var src_d: usize = 0;
-        for (0..(self.shape.len + 1)) |d| {
+        for (0..out.len) |d| {
             if (d == dim) {
-                new_dims[d] = 1;
+                out.dims[d] = 1;
             } else {
-                new_dims[d] = self.shape.dims[src_d];
+                out.dims[d] = self.shape.dims[src_d];
                 src_d += 1;
             }
         }
-        return self.reshape(new_dims[0..(self.shape.len + 1)], allocator, graph);
+        return out;
+    }
+
+    /// 压缩单维度 (Squeeze): 移除所有为 1 的维度，或移除指定为 1 的维度
+    pub fn squeeze(self: *Tensor, axis: ?usize, allocator: std.mem.Allocator) !*Tensor {
+        const target = try self.squeezedShape(axis);
+        return self.reshape(target.dims[0..target.len], allocator);
+    }
+
+    /// 扩充单维度 (Unsqueeze / expand_dims): 在指定位置插入一个大小为 1 的新维度
+    pub fn unsqueeze(self: *Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+        const target = try self.unsqueezedShape(dim);
+        return self.reshape(target.dims[0..target.len], allocator);
     }
 
     /// 跨步零拷贝切片 (Strided View Slicing)
-    /// 当 graph == null 时返回一个共享底层内存缓冲区的零拷贝视图张量 (is_view = true)；
-    /// 当 graph != null 时在计算图中注册可微的 Slice 算子
-    pub fn slice(self: *Tensor, ranges: []const SliceRange, allocator: std.mem.Allocator, graph: ?*autodiff.Graph) anyerror!*Tensor {
-        if (graph) |g| {
-            return try g.slice(self, ranges);
-        }
+    /// 返回一个共享底层内存缓冲区的零拷贝视图张量 (is_view = true)；
+    /// 需要可微的 Slice 算子时使用 `Graph.slice`
+    pub fn slice(self: *Tensor, ranges: []const SliceRange, allocator: std.mem.Allocator) !*Tensor {
         if (ranges.len > self.shape.len) return error.DimensionOutOfBounds;
 
         var new_dims = [_]usize{0} ** 8;

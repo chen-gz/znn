@@ -30,8 +30,8 @@ pub fn solveGradientDescent(
         const b_node = try graph.tensorNDWithData(&.{1}, &b_data, true);
 
         // Forward: y_pred = x * w + b
-        const x_w = try x_node.matmul(w_node, allocator, &graph);
-        const y_pred = try x_w.addBias(b_node, allocator, &graph);
+        const x_w = try graph.matmul(x_node, w_node);
+        const y_pred = try graph.addBias(x_w, b_node);
 
         // Compute loss: MSE
         const loss_node = try graph.mseLoss(y_pred, y_node);

@@ -70,7 +70,7 @@ pub fn main() !void {
         const x = try graph.tensorND(&.{ batch_size, seq_len, dim }, true);
         @memset(x.data, 0.25);
 
-        const out = try swiglu.forward(allocator, &graph, x);
+        const out = try swiglu.forward(&graph, x);
 
         // 模拟损失 (MSE / L2 目标)
         swiglu.zeroGrad();
@@ -117,7 +117,7 @@ pub fn main() !void {
     const lora_in = try lora_graph.tensor(2, 16, false);
     @memset(lora_in.data, 1.0);
 
-    const lora_out = try lora_layer.forward(allocator, &lora_graph, lora_in);
+    const lora_out = try lora_layer.forward(&lora_graph, lora_in);
     std.debug.print("  LoRA Forward output computed. Shape: {any}\n", .{lora_out.shape.dims[0..lora_out.shape.len]});
 
     // 权重融合验证

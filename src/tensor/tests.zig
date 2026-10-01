@@ -100,7 +100,7 @@ test "tensor eager broadcasting operations (add, sub, mul, div)" {
     defer free(allocator, c_vec);
 
     // 1. A + B -> 2x3
-    const a_add_b = try a.add(b, allocator, null);
+    const a_add_b = try a.add(b, allocator);
     defer free(allocator, a_add_b);
     try std.testing.expect(a_add_b.shape.eq(Shape.init(&.{ 2, 3 })));
     try std.testing.expectApproxEqAbs(@as(f32, 11.0), a_add_b.data[0], 1e-5);
@@ -111,7 +111,7 @@ test "tensor eager broadcasting operations (add, sub, mul, div)" {
     try std.testing.expectApproxEqAbs(@as(f32, 36.0), a_add_b.data[5], 1e-5);
 
     // 2. A * C -> 2x3
-    const a_mul_c = try a.mul(c_vec, allocator, null);
+    const a_mul_c = try a.mul(c_vec, allocator);
     defer free(allocator, a_mul_c);
     try std.testing.expect(a_mul_c.shape.eq(Shape.init(&.{ 2, 3 })));
     try std.testing.expectApproxEqAbs(@as(f32, 100.0), a_mul_c.data[0], 1e-5);
@@ -122,14 +122,14 @@ test "tensor eager broadcasting operations (add, sub, mul, div)" {
     try std.testing.expectApproxEqAbs(@as(f32, 1200.0), a_mul_c.data[5], 1e-5);
 
     // 3. B - A -> 2x3
-    const b_sub_a = try b.sub(a, allocator, null);
+    const b_sub_a = try b.sub(a, allocator);
     defer free(allocator, b_sub_a);
     try std.testing.expectApproxEqAbs(@as(f32, 9.0), b_sub_a.data[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 18.0), b_sub_a.data[1], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 27.0), b_sub_a.data[2], 1e-5);
 
     // 4. B / A -> 2x3
-    const b_div_a = try b.div(a, allocator, null);
+    const b_div_a = try b.div(a, allocator);
     defer free(allocator, b_div_a);
     try std.testing.expectApproxEqAbs(@as(f32, 10.0), b_div_a.data[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 10.0), b_div_a.data[1], 1e-5);
@@ -144,7 +144,7 @@ test "tensor eager broadcasting operations (add, sub, mul, div)" {
     });
     defer free(allocator, t4d_2);
 
-    const t4d_out = try t4d_1.add(t4d_2, allocator, null);
+    const t4d_out = try t4d_1.add(t4d_2, allocator);
     defer free(allocator, t4d_out);
     try std.testing.expect(t4d_out.shape.eq(Shape.init(&.{ 2, 2, 3, 4 })));
     try std.testing.expectEqual(@as(usize, 48), t4d_out.data.len);
@@ -154,12 +154,12 @@ test "tensor eager broadcasting operations (add, sub, mul, div)" {
     try std.testing.expectApproxEqAbs(@as(f32, 6.0), t4d_out.data[12], 1e-5);
 
     // 6. subScalar and divScalar
-    const s_sub = try a.subScalar(1.0, allocator, null);
+    const s_sub = try a.subScalar(1.0, allocator);
     defer free(allocator, s_sub);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), s_sub.data[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 5.0), s_sub.data[5], 1e-5);
 
-    const s_div = try a.divScalar(2.0, allocator, null);
+    const s_div = try a.divScalar(2.0, allocator);
     defer free(allocator, s_div);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), s_div.data[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 3.0), s_div.data[5], 1e-5);
@@ -255,43 +255,43 @@ test "tensor typed error handling and boundary validation" {
     const t4x2 = try zeros(allocator, &.{ 4, 2 });
     defer free(allocator, t4x2);
     // Non-2D inputs
-    try std.testing.expectError(error.IncompatibleDimensions, t2x2.matmul(t1d, allocator, null));
+    try std.testing.expectError(error.IncompatibleDimensions, t2x2.matmul(t1d, allocator));
     // Inner dimension mismatch (2x3 cannot multiply 4x2)
-    try std.testing.expectError(error.ShapeMismatch, t2x3.matmul(t4x2, allocator, null));
+    try std.testing.expectError(error.ShapeMismatch, t2x3.matmul(t4x2, allocator));
 
     // 5. batchMatMul error conditions
     var t4d_a = try zeros(allocator, &.{ 1, 2, 3, 4 });
     defer free(allocator, t4d_a);
     const t4d_b_bad = try zeros(allocator, &.{ 1, 2, 5, 6 }); // K mismatch (4 != 5)
     defer free(allocator, t4d_b_bad);
-    try std.testing.expectError(error.IncompatibleDimensions, t4d_a.batchMatMul(t2x2, allocator, null));
-    try std.testing.expectError(error.ShapeMismatch, t4d_a.batchMatMul(t4d_b_bad, allocator, null));
+    try std.testing.expectError(error.IncompatibleDimensions, t4d_a.batchMatMul(t2x2, allocator));
+    try std.testing.expectError(error.ShapeMismatch, t4d_a.batchMatMul(t4d_b_bad, allocator));
 
     // 6. reshape element count mismatch
-    try std.testing.expectError(error.ShapeMismatch, t2x2.reshape(&.{ 3, 3 }, allocator, null));
+    try std.testing.expectError(error.ShapeMismatch, t2x2.reshape(&.{ 3, 3 }, allocator));
 
     // 7. transpose dimension out of bounds
-    try std.testing.expectError(error.DimensionOutOfBounds, t2x2.transpose(0, 3, allocator, null));
+    try std.testing.expectError(error.DimensionOutOfBounds, t2x2.transpose(0, 3, allocator));
 
     // 8. conv2d error conditions
     const w_bad_c = try zeros(allocator, &.{ 2, 3, 2, 2 }); // C_in mismatch with t4d_a (C_in is 2, weight has 3)
     defer free(allocator, w_bad_c);
-    try std.testing.expectError(error.ShapeMismatch, t4d_a.conv2d(w_bad_c, null, allocator, null));
+    try std.testing.expectError(error.ShapeMismatch, t4d_a.conv2d(w_bad_c, null, allocator));
     const w_too_big = try zeros(allocator, &.{ 2, 2, 5, 5 }); // KH/KW > H/W (5 > 3 or 4)
     defer free(allocator, w_too_big);
-    try std.testing.expectError(error.KernelBiggerThanInput, t4d_a.conv2d(w_too_big, null, allocator, null));
+    try std.testing.expectError(error.KernelBiggerThanInput, t4d_a.conv2d(w_too_big, null, allocator));
 
     // 9. concat error conditions
-    try std.testing.expectError(error.EmptyInputs, concat(allocator, &.{}, 0, null));
+    try std.testing.expectError(error.EmptyInputs, concat(allocator, &.{}, 0));
     const inputs_dim_out = [_]*Tensor{t2x2};
-    try std.testing.expectError(error.DimensionOutOfBounds, concat(allocator, &inputs_dim_out, 3, null));
+    try std.testing.expectError(error.DimensionOutOfBounds, concat(allocator, &inputs_dim_out, 3));
     const inputs_mismatch = [_]*Tensor{ t2x2, t2x3 };
-    try std.testing.expectError(error.ShapeMismatch, concat(allocator, &inputs_mismatch, 0, null));
+    try std.testing.expectError(error.ShapeMismatch, concat(allocator, &inputs_mismatch, 0));
 
     // 10. split error conditions
-    try std.testing.expectError(error.InvalidSplitCount, split(allocator, t2x2, 0, 0, null));
-    try std.testing.expectError(error.DimensionOutOfBounds, split(allocator, t2x2, 2, 5, null));
-    try std.testing.expectError(error.UnevenSplit, split(allocator, t2x3, 2, 1, null)); // dim 1 has size 3, not divisible by 2
+    try std.testing.expectError(error.InvalidSplitCount, split(allocator, t2x2, 0, 0));
+    try std.testing.expectError(error.DimensionOutOfBounds, split(allocator, t2x2, 2, 5));
+    try std.testing.expectError(error.UnevenSplit, split(allocator, t2x3, 2, 1)); // dim 1 has size 3, not divisible by 2
 
     // 11. solveLinearSystem slice length mismatch
     const bad_A = [_]f32{ 1.0, 2.0 };
@@ -309,13 +309,13 @@ test "Tensor multi-axis reductions (sum, mean, variance, stdDev)" {
 
     // 1. sum over all elements (axis = null)
     {
-        const s_all = try t.sum(null, false, allocator, null);
+        const s_all = try t.sum(null, false, allocator);
         defer free(allocator, s_all);
         try std.testing.expectEqual(@as(usize, 1), s_all.shape.len);
         try std.testing.expectEqual(@as(usize, 1), s_all.shape.dims[0]);
         try std.testing.expectEqual(@as(f32, 21.0), s_all.data[0]);
 
-        const s_all_kd = try t.sum(null, true, allocator, null);
+        const s_all_kd = try t.sum(null, true, allocator);
         defer free(allocator, s_all_kd);
         try std.testing.expectEqual(@as(usize, 2), s_all_kd.shape.len);
         try std.testing.expectEqual(@as(usize, 1), s_all_kd.shape.dims[0]);
@@ -370,7 +370,7 @@ test "Tensor multi-axis reductions (sum, mean, variance, stdDev)" {
             .creator = null,
         };
         try std.testing.expect(!t_strided.isContiguous());
-        const s_strided = try t_strided.sum(0, false, allocator, null);
+        const s_strided = try t_strided.sum(0, false, allocator);
         defer free(allocator, s_strided);
         // r=0: [1, 4], r=1: [2, 5], r=2: [3, 6]
         // sum along axis 0 gives [1+2+3, 4+5+6] = [6, 15]
@@ -422,10 +422,10 @@ test "Tensor multi-axis reductions (sum, mean, variance, stdDev)" {
     }
 
     // 7. Error handling
-    try std.testing.expectError(error.DimensionOutOfBounds, t.sum(5, false, allocator, null));
-    try std.testing.expectError(error.DimensionOutOfBounds, t.mean(2, false, allocator, null));
-    try std.testing.expectError(error.InvalidDDOF, t.variance(null, false, 6, allocator, null));
-    try std.testing.expectError(error.InvalidDDOF, t.stdDev(null, false, 10, allocator, null));
+    try std.testing.expectError(error.DimensionOutOfBounds, t.sum(5, false, allocator));
+    try std.testing.expectError(error.DimensionOutOfBounds, t.mean(2, false, allocator));
+    try std.testing.expectError(error.InvalidDDOF, t.variance(null, false, 6, allocator));
+    try std.testing.expectError(error.InvalidDDOF, t.stdDev(null, false, 10, allocator));
 }
 
 test "Tensor where condition and masking operations" {
@@ -461,7 +461,7 @@ test "Tensor where condition and masking operations" {
     // 3. maskedFill (out of place)
     const mask = try array(allocator, &.{ 2, 2 }, &[_]f32{ 1.0, 0.0, 1.0, 0.0 });
     defer free(allocator, mask);
-    const filled = try x.maskedFill(mask, -999.0, allocator, null);
+    const filled = try x.maskedFill(mask, -999.0, allocator);
     defer free(allocator, filled);
     try std.testing.expectEqual(@as(f32, -999.0), filled.data[0]);
     try std.testing.expectEqual(@as(f32, 20.0), filled.data[1]);
@@ -486,7 +486,7 @@ test "Tensor where condition and masking operations" {
     // Shape mismatch
     const bad_mask = try zeros(allocator, &.{3});
     defer free(allocator, bad_mask);
-    try std.testing.expectError(error.ShapeMismatch, x.maskedFill(bad_mask, 0.0, allocator, null));
+    try std.testing.expectError(error.ShapeMismatch, x.maskedFill(bad_mask, 0.0, allocator));
 }
 
 test "Tensor squeeze and unsqueeze" {
@@ -520,13 +520,13 @@ test "Tensor squeeze and unsqueeze" {
     try std.testing.expectEqual(@as(usize, 3), t_sq_2.shape.dims[2]);
 
     // Cannot squeeze non-unit dimension
-    try std.testing.expectError(error.CannotSqueezeDimension, t_4d.squeeze(1, allocator, null));
-    try std.testing.expectError(error.DimensionOutOfBounds, t_4d.squeeze(5, allocator, null));
+    try std.testing.expectError(error.CannotSqueezeDimension, t_4d.squeeze(1, allocator));
+    try std.testing.expectError(error.DimensionOutOfBounds, t_4d.squeeze(5, allocator));
 
     // Squeeze on tensor where all dimensions are 1
     const t_1x1 = try zeros(allocator, &.{ 1, 1 });
     defer free(allocator, t_1x1);
-    const t_sq_scalar = try t_1x1.squeeze(null, allocator, null);
+    const t_sq_scalar = try t_1x1.squeeze(null, allocator);
     defer free(allocator, t_sq_scalar);
     try std.testing.expectEqual(@as(usize, 1), t_sq_scalar.shape.len);
     try std.testing.expectEqual(@as(usize, 1), t_sq_scalar.shape.dims[0]);
@@ -562,7 +562,7 @@ test "Tensor squeeze and unsqueeze" {
     try std.testing.expectEqual(@as(usize, 1), u_dim2.shape.dims[2]);
 
     // Out of bounds
-    try std.testing.expectError(error.DimensionOutOfBounds, t_2d.unsqueeze(4, allocator, null));
+    try std.testing.expectError(error.DimensionOutOfBounds, t_2d.unsqueeze(4, allocator));
 }
 
 test "DType, bf16, and scalar type conversion" {
@@ -678,10 +678,10 @@ test "Tensor strided view slicing, contiguous, clip, sort, argsort, nonzero" {
     try std.testing.expectEqual(@as(f32, 6.0), c_contig.data[3]);
 
     // Slice error conditions
-    try std.testing.expectError(error.DimensionOutOfBounds, t.slice(&.{ .{}, .{}, .{} }, allocator, null));
-    try std.testing.expectError(error.IndexOutOfBounds, t.slice(&.{ .{ .start = 10 } }, allocator, null));
-    try std.testing.expectError(error.InvalidSliceRange, t.slice(&.{ .{ .start = 2, .end = 1 } }, allocator, null));
-    try std.testing.expectError(error.InvalidStep, t.slice(&.{ .{ .step = 0 } }, allocator, null));
+    try std.testing.expectError(error.DimensionOutOfBounds, t.slice(&.{ .{}, .{}, .{} }, allocator));
+    try std.testing.expectError(error.IndexOutOfBounds, t.slice(&.{ .{ .start = 10 } }, allocator));
+    try std.testing.expectError(error.InvalidSliceRange, t.slice(&.{ .{ .start = 2, .end = 1 } }, allocator));
+    try std.testing.expectError(error.InvalidStep, t.slice(&.{ .{ .step = 0 } }, allocator));
 
     // 2. clip and clip_
     var t_clip = try array(allocator, &.{4}, &[_]f32{ -5.0, 0.5, 3.0, 10.0 });
@@ -899,7 +899,7 @@ test "Strided non-contiguous views in binary ops, reshape, and autograd backward
         try std.testing.expect(!mat_t.isContiguous());
 
         // sum_mat = mat + mat_t => [[2, 5], [5, 8]]
-        const sum_mat = try mat.add(mat_t, allocator, null);
+        const sum_mat = try mat.add(mat_t, allocator);
         defer free(allocator, sum_mat);
         try std.testing.expectApproxEqAbs(@as(f32, 2.0), sum_mat.get(&.{ 0, 0 }), 1e-5);
         try std.testing.expectApproxEqAbs(@as(f32, 5.0), sum_mat.get(&.{ 0, 1 }), 1e-5);
@@ -907,7 +907,7 @@ test "Strided non-contiguous views in binary ops, reshape, and autograd backward
         try std.testing.expectApproxEqAbs(@as(f32, 8.0), sum_mat.get(&.{ 1, 1 }), 1e-5);
 
         // Reshape on non-contiguous mat_t to [4] => [1, 3, 2, 4]
-        const flat_t = try mat_t.reshape(&.{4}, allocator, null);
+        const flat_t = try mat_t.reshape(&.{4}, allocator);
         defer free(allocator, flat_t);
         try std.testing.expectEqualSlices(f32, &[_]f32{ 1.0, 3.0, 2.0, 4.0 }, flat_t.data);
     }
@@ -989,13 +989,13 @@ test "GenericTensor core ops, BoolTensor where/maskedFill, and integer Embedding
     defer pos_mask.deinit(allocator);
     try std.testing.expectEqualSlices(bool, &[_]bool{ false, true, false, true }, pos_mask.data);
 
-    const w_out = try Tensor.where(pos_mask, x_t, y_t, allocator, null);
+    const w_out = try Tensor.where(pos_mask, x_t, y_t, allocator);
     defer free(allocator, w_out);
     try std.testing.expectEqualSlices(f32, &[_]f32{ 0.0, 3.0, 0.0, 5.0 }, w_out.data);
 
     const neg_mask = try x_t.ltScalar(0.0, allocator);
     defer neg_mask.deinit(allocator);
-    const mf_out = try x_t.maskedFill(neg_mask, -99.0, allocator, null);
+    const mf_out = try x_t.maskedFill(neg_mask, -99.0, allocator);
     defer free(allocator, mf_out);
     try std.testing.expectEqualSlices(f32, &[_]f32{ -99.0, 3.0, -99.0, 5.0 }, mf_out.data);
 
@@ -1031,7 +1031,7 @@ test "GenericTensor core ops, BoolTensor where/maskedFill, and integer Embedding
     }, w_emb.grad);
 
     // Direct 1D integer slice lookup
-    const slice_out = try w_emb.embedding(&[_]usize{ 2, 1 }, allocator, null);
+    const slice_out = try w_emb.embedding(&[_]usize{ 2, 1 }, allocator);
     defer free(allocator, slice_out);
     try std.testing.expectEqualSlices(f32, &[_]f32{ 5.0, 6.0, 3.0, 4.0 }, slice_out.data);
 }

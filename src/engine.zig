@@ -57,7 +57,7 @@ pub fn trainClassificationStepWithClip(
     const x_tensor = try graph.tensor(batch_size, input_dim, false);
     @memcpy(x_tensor.data, x_data);
 
-    const logits = try model.forward(allocator, &graph, x_tensor);
+    const logits = try model.forward(&graph, x_tensor);
     const loss = try graph.softmaxCrossEntropy(logits, targets);
 
     const batch_loss = loss.data[0];
@@ -91,7 +91,7 @@ pub fn trainClassificationStep(
 }
 
 /// 通用分类评估单步 (Classification Eval Step)
-/// 纯 Eager 前向推理模式：使用 ArenaAllocator 一次性管理评估内存，传入 graph = null，零梯度开销
+/// 前向推理模式：使用无梯度计算图 (`Graph.initNoGrad`) 一次性管理评估内存，不分配梯度缓冲区、不记录算子
 pub fn evalClassificationStep(
     allocator: std.mem.Allocator,
     model: anytype,
@@ -103,17 +103,15 @@ pub fn evalClassificationStep(
     std.debug.assert(x_data.len % batch_size == 0);
     const input_dim = x_data.len / batch_size;
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const arena_allocator = arena.allocator();
+    var graph = autodiff.Graph.initNoGrad(allocator);
+    defer graph.deinit();
 
-    const x_tensor = try tensor.array(arena_allocator, &.{ batch_size, input_dim }, x_data);
-
-    const logits = try model.forward(arena_allocator, null, x_tensor);
-    const loss = try logits.softmaxCrossEntropy(targets, arena_allocator, null);
+    const x_tensor = try graph.array(&.{ batch_size, input_dim }, x_data, false);
+    const logits = try model.forward(&graph, x_tensor);
+    const loss = try graph.softmaxCrossEntropy(logits, targets);
 
     const batch_loss = loss.data[0];
-    const batch_acc = try computeAccuracy(logits, targets, arena_allocator);
+    const batch_acc = try computeAccuracy(logits, targets, graph.arenaAllocator());
 
     return ClassificationStepResult{
         .loss = batch_loss,
@@ -241,8 +239,8 @@ test "engine trainClassificationStep and evalClassificationStep" {
             };
         }
 
-        pub fn forward(self: *const @This(), alloc: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
-            return try self.fc.forward(alloc, graph, x);
+        pub fn forward(self: *const @This(), graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+            return try self.fc.forward(graph, x);
         }
     };
 
@@ -308,8 +306,8 @@ test "engine trainClassificationEpoch and evaluateClassification with DataLoader
         pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
             return .{ .fc = try nn.Linear.init(alloc, 4, 2, rnd) };
         }
-        pub fn forward(self: *const @This(), alloc: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
-            return try self.fc.forward(alloc, graph, x);
+        pub fn forward(self: *const @This(), graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+            return try self.fc.forward(graph, x);
         }
     };
 

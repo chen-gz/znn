@@ -29,16 +29,15 @@ pub const MLP = struct {
     }
 
 
-    // 用户只需专注定义前向数据流逻辑（无论是 Graph 模式还是 Eager 模式，直接透传 graph 即可）。
-    // 【内存管理说明】：前向计算产生的中间张量（x1, a1, x2, a2）生命周期由外部调用方统一管理：
-    // - 训练/反向传播模式（graph != null）：中间节点挂载在计算图上，由外部在批次结束调用 graph.deinit() 统一一键释放；
-    // - 纯推理/Eager模式（graph == null）：由外部调用方传入的 ArenaAllocator 在当前作用域结束时统一批量释放。
-    pub fn forward(self: *const MLP, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
-        const x1 = try self.fc1.forward(allocator, graph, x);
-        const a1 = try x1.relu(allocator, graph);
-        const x2 = try self.fc2.forward(allocator, graph, a1);
-        const a2 = try x2.relu(allocator, graph);
-        return try self.fc3.forward(allocator, graph, a2);
+    // 用户只需专注定义前向数据流逻辑，所有算子都通过传入的计算图执行。
+    // 【内存管理说明】：前向计算产生的中间张量（x1, a1, x2, a2）全部挂载在计算图上，由调用方在批次结束调用 graph.deinit() 统一释放。
+    // 训练时使用 `Graph.init` 记录反向传播所需的算子；推理时使用 `Graph.initNoGrad`，只执行前向计算，不分配梯度缓冲区。
+    pub fn forward(self: *const MLP, graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+        const x1 = try self.fc1.forward(graph, x);
+        const a1 = try graph.relu(x1);
+        const x2 = try self.fc2.forward(graph, a1);
+        const a2 = try graph.relu(x2);
+        return try self.fc3.forward(graph, a2);
     }
 
 
@@ -213,7 +212,7 @@ fn printPredictions(
         const x_tensor = try graph.tensor(1, input_dim, false);
         @memcpy(x_tensor.data, img_slice);
 
-        const logits = try model.forward(arena, &graph, x_tensor);
+        const logits = try model.forward(&graph, x_tensor);
 
         const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
         const preds = try logits.argmax(1, arena);
@@ -233,7 +232,7 @@ fn printPredictions(
     }
 }
 
-test "MLP model initialization and forward passes (Eager & Graph)" {
+test "MLP model initialization and forward passes (no-grad & gradient graphs)" {
     const allocator = std.testing.allocator;
 
     var model = NeuralNetwork.init(allocator, try MLP.init(allocator, 42));
@@ -243,20 +242,22 @@ test "MLP model initialization and forward passes (Eager & Graph)" {
     defer allocator.free(x_data);
     @memset(x_data, 0.1);
 
-    // Test Eager Mode (graph == null)
+    // Inference mode (no-grad graph)
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const arena_allocator = arena.allocator();
 
         const x_tensor = try tensor.array(arena_allocator, &.{ 2, 784 }, x_data);
-        const logits = try model.forward(arena_allocator, null, x_tensor);
+        var logits_graph = autodiff.Graph.initNoGrad(arena_allocator);
+        defer logits_graph.deinit();
+        const logits = try model.forward(&logits_graph, x_tensor);
 
         try std.testing.expectEqualSlices(usize, &.{ 2, 10 }, logits.shape.dims[0..logits.shape.len]);
     }
 
 
-    // Test Graph Mode (graph != null)
+    // Training mode (gradient-recording graph)
     {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
@@ -268,7 +269,7 @@ test "MLP model initialization and forward passes (Eager & Graph)" {
         const x_tensor = try graph.tensor(2, 784, false);
         @memcpy(x_tensor.data, x_data);
 
-        const logits = try model.forward(arena_allocator, &graph, x_tensor);
+        const logits = try model.forward(&graph, x_tensor);
 
         try std.testing.expectEqualSlices(usize, &.{ 2, 10 }, logits.shape.dims[0..logits.shape.len]);
     }

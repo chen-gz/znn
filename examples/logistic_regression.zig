@@ -33,11 +33,11 @@ pub fn solveGradientDescent(
         const b_node = try graph.tensorNDWithData(&.{1}, &b_data, true);
 
         // Forward: logits = x * w + b
-        const x_w = try x_node.matmul(w_node, allocator, &graph);
-        const logits = try x_w.addBias(b_node, allocator, &graph);
+        const x_w = try graph.matmul(x_node, w_node);
+        const logits = try graph.addBias(x_w, b_node);
 
         // Compute loss: SigmoidCrossEntropy (BCE with logits)
-        const loss_node = try logits.sigmoidCrossEntropy(y_node, allocator, &graph);
+        const loss_node = try graph.sigmoidCrossEntropy(logits, y_node);
         const loss = loss_node.data[0];
 
         // Backward

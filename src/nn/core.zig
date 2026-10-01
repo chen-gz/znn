@@ -148,21 +148,12 @@ pub const Linear = struct {
         }
     }
 
-    pub fn forward(self: Linear, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-        }
-        const z = try x.matmul(self.weight, allocator, graph);
-        if (graph == null) {
-            defer tensor.free(allocator, z);
-            return try z.addBias(self.bias, allocator, null);
-        }
-        return try z.addBias(self.bias, allocator, graph);
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
+        const z = try graph.matmul(x, self.weight);
+        return try graph.addBias(z, self.bias);
     }
 };
 
@@ -313,17 +304,11 @@ pub const Conv2D = struct {
         }
     }
 
-    pub fn forward(self: Conv2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: Conv2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.setModuleFormula(n, formula) catch {};
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-            return try g.conv2dWithConfig(x, self.weight, self.bias, self.stride, self.padding);
-        }
-        return try x.conv2dWithConfig(self.weight, self.bias, self.stride, self.padding, allocator, null);
+        if (self.name) |n| try graph.setModuleFormula(n, formula);
+        return try graph.conv2dWithConfig(x, self.weight, self.bias, self.stride, self.padding);
     }
 };
 
@@ -463,16 +448,10 @@ pub const ConvTranspose2D = struct {
         if (self.bias) |b| b.zeroGrad();
     }
 
-    pub fn forward(self: ConvTranspose2D, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try autodiff.Graph.enterModule(graph, self.name, self.module_type);
+    pub fn forward(self: ConvTranspose2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
-        if (graph) |g| {
-            if (self.name) |n| {
-                _ = g.registerModuleType(n, self.module_type) catch {};
-            }
-            return try g.convTranspose2D(x, self.weight, self.bias, self.stride, self.padding);
-        }
-        return try x.convTranspose2d(self.weight, self.bias, self.stride, self.padding, allocator, null);
+        return try graph.convTranspose2D(x, self.weight, self.bias, self.stride, self.padding);
     }
 };
 
@@ -656,8 +635,8 @@ pub fn Module(comptime T: type) type {
             try serialization.loadModel(&self.inner, io, file_path, self.allocator);
         }
 
-        pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, x: *Tensor) !*Tensor {
-            return try self.inner.forward(allocator, graph, x);
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+            return try self.inner.forward(graph, x);
         }
     };
 }
@@ -703,16 +682,11 @@ pub fn Sequential(comptime LayersTuple: type) type {
             }
         }
 
-        pub fn forward(self: *const Self, allocator: std.mem.Allocator, graph: ?*autodiff.Graph, input: *Tensor) !*Tensor {
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, input: *Tensor) !*Tensor {
             var current = input;
-
             inline for (@typeInfo(LayersTuple).@"struct".fields) |field| {
                 const layer = @field(self.layers, field.name);
-                const next = try layer.forward(allocator, graph, current);
-                if (graph == null and current != input) {
-                    tensor.free(allocator, current);
-                }
-                current = next;
+                current = try layer.forward(graph, current);
             }
             return current;
         }

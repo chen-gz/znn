@@ -55,7 +55,7 @@ pub fn main() !void {
     input_tokens.setName("inputs.token_ids");
 
     // 前向传播
-    const logits = try gpt.forward(allocator, &graph, input_tokens);
+    const logits = try gpt.forward(&graph, input_tokens);
     logits.setName("outputs.logits");
 
 
@@ -81,7 +81,7 @@ pub fn main() !void {
     for (&x_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i)) * 0.1;
     const x = try min_graph.tensorNDWithData(&.{ 2, 8 }, &x_data, false);
     x.setName("inputs.x");
-    const y = try linear.forward(allocator, &min_graph, x);
+    const y = try linear.forward(&min_graph, x);
     y.setName("outputs.y");
 
     const minimal_path = "examples/minimal_model_graph.json";
