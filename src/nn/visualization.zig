@@ -8,10 +8,10 @@ const Shape = tensor.Shape;
 const Graph = autodiff.Graph;
 const Op = autodiff.Op;
 
-/// 导出 JSON 的 schema 版本
+/// 导出 JavaScript 对象表示法 (JavaScript Object Notation, JSON) 的模式 (Schema) 版本
 pub const SCHEMA_VERSION = "2.0";
 
-/// 导出 JSON 的 JSON Schema (draft 2020-12)，逐字段描述 serializeJson 的输出
+/// 导出 JavaScript 对象表示法 (JavaScript Object Notation, JSON) 的模式规范 (JSON Schema draft 2020-12)，逐字段描述 serializeJson 的输出
 pub const SCHEMA_JSON = @embedFile("model_graph.schema.json");
 
 /// 张量节点分类枚举 (Tensor Node Kind)
@@ -583,7 +583,7 @@ pub const ModuleNode = struct {
     }
 
     /// 根模块、复合模块与无参数的多算子叶子模块 (如注意力核心) 导出局部图；
-    /// 带参数的叶子层 (Linear、RMSNorm、Embedding 等) 视为原子节点。
+    /// 带参数的叶子层 (Linear、均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)、Embedding 等) 视为原子节点。
     pub fn wantsLocalGraph(self: *const ModuleNode) bool {
         if (self.path.len == 0) return true;
         if (self.children.items.len > 0) return true;
@@ -913,10 +913,10 @@ pub const LocalGraphBuilder = struct {
 };
 
 // ============================================================================
-// 4. 模型层级中间结构 (Model Hierarchy IR)
+// 4. 模型层级中间表示结构 (Model Hierarchy Intermediate Representation, IR)
 // ============================================================================
 
-/// 模型全局摘要统计指标 (KPI Summary)
+/// 模型全局关键绩效指标摘要统计 (Key Performance Indicator, KPI Summary)
 pub const Summary = struct {
     total_params: usize = 0,
     total_bytes: usize = 0,

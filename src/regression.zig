@@ -183,7 +183,7 @@ pub fn solveRidge(
     };
 }
 
-/// Solves Ordinary Least Squares (alpha = 0)
+/// Solves Ordinary Least Squares (OLS) (alpha = 0)
 pub fn solveOLS(
     allocator: std.mem.Allocator,
     x: []const f32,
@@ -194,7 +194,7 @@ pub fn solveOLS(
     return solveRidge(allocator, x, y, n_samples, n_features, 0.0);
 }
 
-/// Solves Lasso Regression using Coordinate Descent:
+/// Solves Least Absolute Shrinkage and Selection Operator (LASSO) Regression using Coordinate Descent:
 /// min (1/2N) * ||Xw + b - y||_2^2 + alpha * ||w||_1
 pub fn solveLasso(
     allocator: std.mem.Allocator,

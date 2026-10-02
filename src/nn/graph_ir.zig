@@ -15,9 +15,9 @@ const Summary = vis.Summary;
 const ModelHierarchyGraph = vis.ModelHierarchyGraph;
 
 // ============================================================================
-// 模型计算图与模块层级提取器 (Graph / Model Hierarchy Extractor)
+// 模型计算图与模块层级中间表示提取器 (Graph / Model Hierarchy Intermediate Representation, IR Extractor)
 // - 输入: *autodiff.Graph
-// - 输出: 约定的中间数据结构 ModelHierarchyGraph 或 递归 JSON 字符串
+// - 输出: 约定的中间数据结构 ModelHierarchyGraph 或 递归 JavaScript 对象表示法 (JavaScript Object Notation, JSON) 字符串
 // ============================================================================
 pub const graph_ir = struct {
     fn aggregateMetrics(node: *ModuleNode) void {

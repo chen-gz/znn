@@ -204,13 +204,13 @@ pub fn printInitReport(self: *Graph) void {
     std.debug.print("{s}", .{report});
 }
 
-/// 将计算图与模块层级结构序列化为递归的 JSON 数据字符串 (供前端直接解析并构建完整模型拓扑)
+/// 将计算图与模块层级结构序列化为递归的 JavaScript 对象表示法 (JavaScript Object Notation, JSON) 数据字符串 (供前端直接解析并构建完整模型拓扑)
 pub fn formatJson(self: *Graph, allocator: std.mem.Allocator) ![]const u8 {
     const vis = @import("../nn/visualization.zig");
     return vis.graph_ir.generateJson(self, allocator);
 }
 
-/// 将计算图与模块层级结构直接导出保存为独立的 JSON 文件 (如 "model_graph.json")
+/// 将计算图与模块层级结构直接导出保存为独立的 JavaScript 对象表示法 (JavaScript Object Notation, JSON) 文件 (如 "model_graph.json")
 pub fn exportJson(self: *Graph, file_path: []const u8) !void {
     const vis = @import("../nn/visualization.zig");
     try vis.graph_ir.exportJson(self, file_path, self.backing_allocator);
@@ -319,7 +319,7 @@ pub fn appendSingleTensorReport(
 pub fn detectConsumerActivation(self: *Graph, target: *Tensor) @import("../nn/init.zig").Nonlinearity {
     var current: *Tensor = target;
 
-    // BFS / DFS 往后搜寻直到遇到激活函数或多层终点
+    // 广度优先搜索 (Breadth-First Search, BFS) / 深度优先搜索 (Depth-First Search, DFS) 往后搜寻直到遇到激活函数或多层终点
     while (true) {
         var found_consumer = false;
         for (self.ops.items) |op| {

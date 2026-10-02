@@ -2,24 +2,24 @@ const std = @import("std");
 
 /// 激活函数类型 (Nonlinearity / Activation Type)
 pub const Nonlinearity = union(enum) {
-    /// 线性 / 恒等变换 (无激活函数，如最后的 Logits 输出层)
+    /// 线性 / 恒等变换 (无激活函数，如最终的对数几率 (Logits) 输出层)
     linear,
-    /// 线性整流单元 ReLU
+    /// 线性整流单元 (Rectified Linear Unit, ReLU)
     relu,
-    /// 带泄露的 ReLU (携带斜率负半轴负斜率 alpha，默认为 0.2)
+    /// 带泄露线性整流单元 (Leaky Rectified Linear Unit, LeakyReLU，携带负半轴斜率 alpha，默认为 0.2)
     leaky_relu: f32,
-    /// 双曲正切激活 Tanh
+    /// 双曲正切激活函数 (Hyperbolic Tangent, Tanh)
     tanh,
-    /// S 型激活 Sigmoid
+    /// S 型激活函数 (Sigmoid)
     sigmoid,
-    /// 高斯误差线性单元 GELU
+    /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU)
     gelu,
-    /// Sigmoid 线性单元 SiLU / Swish
+    /// Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU / Swish)
     silu,
-    /// 缩放指数线性单元 SELU
+    /// 缩放指数线性单元 (Scaled Exponential Linear Unit, SELU)
     selu,
 
-    /// 默认激活函数为 ReLU
+    /// 默认激活函数为线性整流单元 (Rectified Linear Unit, ReLU)
     pub const default: Nonlinearity = .relu;
     pub fn defaultNonlinearity() Nonlinearity {
         return .relu;
@@ -46,13 +46,13 @@ pub fn calculateGain(nonlinearity: Nonlinearity) f32 {
 pub const InitMethod = union(enum) {
     /// 全零初始化 (通常仅适用于偏置，不适用于权重)
     zeros,
-    /// 全一初始化 (适用于特定缩放因子如 RMSNorm/LayerNorm gamma)
+    /// 全一初始化 (适用于特定缩放因子如均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) / 层归一化 (Layer Normalization, LayerNorm) 的 gamma)
     ones,
     /// 常数初始化
     constant: f32,
-    /// 普通正态分布：mean, std
+    /// 普通正态分布：均值 (mean) 与标准差 (std)
     normal: struct { mean: f32 = 0.0, std: f32 = 0.01 },
-    /// 普通均匀分布：min, max
+    /// 普通均匀分布：下界 (min) 与上界 (max)
     uniform: struct { min: f32 = -0.01, max: f32 = 0.01 },
     /// Xavier / Glorot 正态分布：std = gain * sqrt(2 / (fan_in + fan_out))
     xavier_normal: struct { gain: f32 = 1.0 },
@@ -62,7 +62,7 @@ pub const InitMethod = union(enum) {
     he_normal: struct { gain: f32 = 1.41421356 },
     /// He / Kaiming 均匀分布：limit = gain * sqrt(3 / fan_in) (当 gain=sqrt(2) 时退化为 limit=sqrt(6/fan_in))
     he_uniform: struct { gain: f32 = 1.41421356 },
-    /// LeCun 正态分布：std = sqrt(1 / fan_in) (SELU / 线性首选)
+    /// LeCun 正态分布：std = sqrt(1 / fan_in) (缩放指数线性单元 (Scaled Exponential Linear Unit, SELU) / 线性首选)
     lecun_normal,
     /// LeCun 均匀分布：limit = sqrt(3 / fan_in)
     lecun_uniform,

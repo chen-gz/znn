@@ -7,10 +7,10 @@ const Shape = tensor.Shape;
 const createPersistentTensor = core.createPersistentTensor;
 const freePersistentTensor = core.freePersistentTensor;
 
-/// 均方根层归一化 (Root Mean Square Normalization / RMSNorm)
+/// 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)
 pub const RMSNorm = struct {
-    weight: *Tensor,        // 可学习的缩放因子 gamma (Shape: [dim])
-    eps: f32,               // 均方根分母防止除以 0 的极小常数 (epsilon)
+    weight: *Tensor, // 可学习的缩放因子 gamma (Shape: [dim])
+    eps: f32, // 均方根分母防止除以 0 的极小常数 (epsilon, eps)
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "RMSNorm",
@@ -76,10 +76,10 @@ pub const RMSNorm = struct {
     }
 };
 
-/// 标准层归一化 (Layer Normalization)
+/// 标准层归一化 (Layer Normalization, LayerNorm)
 pub const LayerNorm = struct {
-    weight: *Tensor,        // 可学习的缩放因子 gamma [dim]
-    bias: *Tensor,          // 可学习的平移偏置 beta [dim]
+    weight: *Tensor, // 可学习的缩放因子 gamma [dim]
+    bias: *Tensor, // 可学习的平移偏置 beta [dim]
     eps: f32,
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
@@ -155,7 +155,7 @@ pub const LayerNorm = struct {
     }
 };
 
-/// 二维批量归一化 (Batch Normalization 2D)
+/// 二维批量归一化 (2-Dimensional Batch Normalization, BatchNorm2d)
 pub const BatchNorm2d = struct {
     num_features: usize,
     eps: f32,
@@ -269,10 +269,10 @@ pub const BatchNorm2d = struct {
     }
 };
 
-/// Dropout 随机丢弃正则化层
+/// 随机失活正则化层 (Dropout Regularization, Dropout)
 pub const Dropout = struct {
-    p: f32 = 0.5,           // 丢弃概率 (0.0 <= p < 1.0)
-    training: bool = true,  // 是否处于训练模式
+    p: f32 = 0.5, // 丢弃概率 (0.0 <= p < 1.0)
+    training: bool = true, // 是否处于训练模式
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Dropout",
@@ -331,7 +331,7 @@ pub const Dropout = struct {
     }
 };
 
-/// 二维平均池化 (Average Pooling 2D)
+/// 二维平均池化 (2-Dimensional Average Pooling, AvgPool2D)
 pub const AvgPool2D = struct {
     kernel_size: usize,
     stride: usize,

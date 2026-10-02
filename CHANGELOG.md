@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **独立可调用的缩放点积注意力模块 (`src/nn/attention.zig`, `src/nn.zig`, `src/root.zig`, `src/nn/tests.zig`)**:
+  - 将此前仅承载可视化元数据的空壳结构体 `ScaledDotProductAttention` 升级为完整的功能模块：内置 `causal: bool = true`、`Options` (`defaultOptions()`)、`init()`、`initDefault()`、`setName()` / `setNameFormatted()` / `setMaskPrefix()` / `getName()`、`registerFormula()`、`forward()`（独立进入模块作用域）与 `forwardCore()`（在父模块子作用域内执行 $[B, H, T, D_q] \times [B, H, T_{kv}, D_q] \times [B, H, T_{kv}, D_v] \to [B, H, T, D_v]$ 核心计算，兼容 $D_q \neq D_v$）。
+  - `CausalSelfAttention` 与 `MLALayer` 均内嵌 `core: ScaledDotProductAttention = .{}` 并复用其核心前向实现，消除两处重复的注意力矩阵乘法、缩放、因果掩码与 Softmax 逻辑，同时保持 Schema 2.0 计算图导出逐字节一致。
+- **全库注释术语全称与缩写规范 (`src/`, `AGENTS.md`)**:
+  - 在 `AGENTS.md` 新增第 5 节《注释缩写规范》，并统一梳理 `src/` 下所有源码注释：凡在注释中使用专业缩写（如 SDPA、MHA、GQA、MQA、MLA、MoE、LoRA、RoPE、KVCache、RMSNorm、BN、MLP、GELU、ReLU、SiLU、RNN、LSTM、GRU、SGD、AdamW、BCE、MSE、DPO、GRPO、OLS、PCA、t-SNE、BLAS、JSON、IR 等），均先写出完整名称再接括号缩写。
 - **全库架构深度评审报告 (`doc/framework-review.md`, `doc/README.md`)**:
   - 新增涵盖模块与目录组织、核心抽象与解耦、训练/推理/优化流水线、文档/路线图/测试与基准四大维度的深度技术评审报告，记录全量配置结构体审计表、子模块拆分矩阵与演进路线图。
 - **编译期静态形状张量提升入库 (`src/tensor/static.zig`, `src/tensor.zig`, `src/root.zig`, `build.zig`)**:

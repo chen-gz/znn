@@ -54,6 +54,7 @@ fn readF32(reader: anytype) !f32 {
     return @bitCast(bits);
 }
 
+/// 随机梯度下降 (Stochastic Gradient Descent, SGD) 优化器配置
 pub const SGDConfig = struct {
     lr: f32 = 0.01,
     momentum: f32 = 0.0,
@@ -64,6 +65,7 @@ pub const SGDConfig = struct {
     }
 };
 
+/// 随机梯度下降优化器 (Stochastic Gradient Descent Optimizer, SGDOptimizer)
 pub const SGDOptimizer = struct {
     allocator: std.mem.Allocator,
     params: []*Tensor,
@@ -225,6 +227,7 @@ pub const SGDOptimizer = struct {
     }
 };
 
+/// 自适应矩估计 (Adaptive Moment Estimation, Adam) 优化器配置
 pub const AdamConfig = struct {
     lr: f32 = 0.001,
     beta1: f32 = 0.9,
@@ -237,6 +240,7 @@ pub const AdamConfig = struct {
     }
 };
 
+/// 自适应矩估计优化器 (Adaptive Moment Estimation Optimizer, AdamOptimizer)
 pub const AdamOptimizer = struct {
     allocator: std.mem.Allocator,
     params: []*Tensor,
@@ -390,6 +394,7 @@ pub const AdamOptimizer = struct {
     }
 };
 
+/// 解耦权重衰减自适应矩估计 (Adam with Decoupled Weight Decay, AdamW) 配置
 pub const AdamWConfig = struct {
     lr: f32 = 1e-3,
     beta1: f32 = 0.9,
@@ -403,7 +408,7 @@ pub const AdamWConfig = struct {
     }
 };
 
-/// 具备解耦权重衰减 (Decoupled Weight Decay) 的 AdamW 优化器
+/// 具备解耦权重衰减的自适应矩估计优化器 (Adam with Decoupled Weight Decay, AdamW)
 pub const AdamWOptimizer = struct {
     allocator: std.mem.Allocator,
     params: []*Tensor,
@@ -566,7 +571,7 @@ pub const AdamWOptimizer = struct {
 };
 
 // =========================================================================
-// 学习率调度器 (Learning Rate Schedulers)
+// 学习率调度器 (Learning Rate, LR Schedulers)
 // =========================================================================
 
 /// 带有线性预热 (Linear Warmup) 的余弦退火学习率调度器
@@ -612,7 +617,7 @@ pub const CosineScheduler = struct {
     }
 };
 
-/// 固定步长阶梯衰减学习率调度器 (StepLR)
+/// 固定步长阶梯衰减学习率调度器 (Step Learning Rate, StepLR)
 pub const StepLRScheduler = struct {
     base_lr: f32 = 1e-3,
     step_size: u64 = 100,
@@ -675,7 +680,7 @@ pub const LinearWarmupScheduler = struct {
     }
 };
 
-/// 指数衰减学习率调度器 (ExponentialLR)
+/// 指数衰减学习率调度器 (Exponential Learning Rate, ExponentialLR)
 pub const ExponentialLRScheduler = struct {
     base_lr: f32 = 1e-3,
     gamma: f32 = 0.95,
@@ -701,7 +706,7 @@ pub const ExponentialLRScheduler = struct {
     }
 };
 
-/// 统一的多态学习率调度器包装
+/// 统一的多态学习率调度器 (Learning Rate Scheduler, LRScheduler) 包装
 pub const LRScheduler = union(enum) {
     cosine: CosineScheduler,
     step_lr: StepLRScheduler,
@@ -738,7 +743,7 @@ pub const LRScheduler = union(enum) {
 // 梯度裁剪 (Gradient Clipping)
 // =========================================================================
 
-/// 全局梯度 L2 范数裁剪 (Gradient Norm Clipping)
+/// 全局梯度欧几里得二范数 (L2 Norm) 裁剪 (Gradient Norm Clipping)
 pub fn clipGradNorm(params: []*Tensor, max_norm: f32) f32 {
     var total_norm_sq: f32 = 0.0;
     for (params) |param| {

@@ -310,12 +310,13 @@ test "DataLoader basic functionality" {
 }
 
 // ============================================================================
-// 2. Byte-level BPE 分词器与内存映射数据集 (Byte-level BPE & Mmap Dataset)
+// 2. 字节级字节对编码分词器与内存映射数据集 (Byte-level Byte Pair Encoding, BPE & Memory-Mapped, MMap Dataset)
 // ============================================================================
 
 pub const TokenId = u32;
 pub const MergePair = struct { a: TokenId, b: TokenId };
 
+/// 字节级字节对编码分词器 (Byte Pair Encoding Tokenizer, BPETokenizer)
 pub const BPETokenizer = struct {
     allocator: std.mem.Allocator,
     vocab: std.StringHashMap(TokenId),
@@ -455,7 +456,7 @@ pub const BPETokenizer = struct {
         return buf.toOwnedSlice(allocator);
     }
 
-    /// 从语料库无监督自动统计最高频 Pair 并训练 BPE Merges，直到达到目标词表大小 target_vocab_size
+    /// 从语料库无监督自动统计最高频 Pair 并训练字节对编码 (Byte Pair Encoding, BPE) 合并规则，直到达到目标词表大小 target_vocab_size
     pub fn train(self: *BPETokenizer, allocator: std.mem.Allocator, corpus: []const u8, target_vocab_size: usize) !void {
         if (target_vocab_size <= self.inv_vocab.items.len) return;
 
@@ -519,7 +520,7 @@ pub const BPETokenizer = struct {
     }
 };
 
-/// 零拷贝内存映射二进制数据集 (MMap Binary DataLoader)
+/// 零拷贝内存映射二进制数据集 (Memory-Mapped, MMap Binary DataLoader)
 pub const BinaryMmapDataset = struct {
     tokens: []const u32,
     seq_len: usize,

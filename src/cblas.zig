@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-// CBLAS 布局与转置常量的 C 语言接口包装
+// C 语言基础线性代数子程序 (C Basic Linear Algebra Subprograms, CBLAS) 布局与转置常量的 C 语言接口包装
 pub const CblasRowMajor = 101;
 pub const CblasColMajor = 102;
 pub const CblasNoTrans = 111;
@@ -13,7 +13,7 @@ pub const cblas_sgemm = if (builtin.os.tag == .macos or builtin.os.tag == .ios o
 else
     cblas_sgemm_fallback;
 
-// macOS Accelerate 框架动态导入的 cblas_sgemm 接口原型
+// macOS Accelerate 框架动态导入的单精度通用矩阵乘法 (Single-Precision General Matrix Multiply, SGEMM) `cblas_sgemm` 接口原型
 const cblas_sgemm_accelerate = @extern(*const fn (
     order: c_int,
     TransA: c_int,
@@ -33,7 +33,7 @@ const cblas_sgemm_accelerate = @extern(*const fn (
     .name = "cblas_sgemm",
 });
 
-// 纯 Zig 编写的通用矩阵乘法 (GEMM) 后备实现，确保在 Linux / Windows / WebAssembly 上均能编译且结果正确
+// 纯 Zig 编写的通用矩阵乘法 (General Matrix Multiply, GEMM) 后备实现，确保在 Linux / Windows / WebAssembly 上均能编译且结果正确
 fn cblas_sgemm_fallback(
     order: c_int,
     TransA: c_int,
@@ -80,12 +80,12 @@ fn cblas_sgemm_fallback(
     const ldb_u = @as(usize, @intCast(ldb));
     const ldc_u = @as(usize, @intCast(ldc));
 
-    // 2. SIMD 向量化矩阵乘法计算: C = alpha * A * B + C
+    // 2. 单指令多数据流 (Single Instruction, Multiple Data, SIMD) 向量化矩阵乘法计算: C = alpha * A * B + C
     const Vec8 = @Vector(8, f32);
     const vec_len = 8;
 
     if (!ta and tb) {
-        // NoTrans x Trans: A[i, p] 与 B[j, p] 均沿内积维度 p 连续排列，直接执行 8 路 SIMD 向量化点积
+        // NoTrans x Trans: A[i, p] 与 B[j, p] 均沿内积维度 p 连续排列，直接执行 8 路单指令多数据流 (Single Instruction, Multiple Data, SIMD) 向量化点积
         for (0..m) |i| {
             const a_row = A + i * lda_u;
             const c_row = C + i * ldc_u;

@@ -9,9 +9,10 @@ const freePersistentTensor = core.freePersistentTensor;
 const initWeights = core.initWeights;
 
 // ============================================================================
-// 1. LoRA (Low-Rank Adaptation) 参数高效微调模块
+// 1. 低秩自适应 (Low-Rank Adaptation, LoRA) 参数高效微调模块
 // ============================================================================
 
+/// 低秩自适应线性层 (Low-Rank Adaptation Linear Layer, LoRALinear)
 pub const LoRALinear = struct {
     weight: *Tensor, // 冻结的基础权重 (Base Weight, requires_grad = false)
     bias: ?*Tensor, // 可选偏置向量
@@ -120,7 +121,7 @@ pub const LoRALinear = struct {
         initWeights(random, lora_a.data, in_features, r, .{ .he_normal = .{} });
         lora_a.is_custom_initialized = true;
 
-        // 可微调低秩旁路 B：全 0 初始化以保证初始状态等价于 Base 模型
+        // 可微调低秩旁路 B：全 0 初始化以保证初始状态等价于基座 (Base) 模型
         const lora_b = try createPersistentTensor(allocator, r, out_features, true);
         errdefer freePersistentTensor(allocator, lora_b);
         @memset(lora_b.data, 0.0);
@@ -160,7 +161,7 @@ pub const LoRALinear = struct {
         // 1. 冻结主干前向：x * W_0
         const base_out = try graph.matmul(x, self.weight);
 
-        // 2. LoRA 旁路计算：x * A -> [..., r]
+        // 2. 低秩自适应 (Low-Rank Adaptation, LoRA) 旁路计算：x * A -> [..., r]
         const lora_xa = try graph.matmul(x, self.lora_a);
 
         // (x * A) * B -> [..., out_features]
@@ -175,7 +176,7 @@ pub const LoRALinear = struct {
         return out;
     }
 
-    /// 零推理延迟融合：将 LoRA 旁路权重融合至主干 W_0 = W_0 + scaling * (A * B)
+    /// 零推理延迟融合：将低秩自适应 (Low-Rank Adaptation, LoRA) 旁路权重融合至主干 W_0 = W_0 + scaling * (A * B)
     pub fn fuse(self: *LoRALinear) void {
         const in_f = self.in_features;
         const r_dim = self.r;
@@ -195,10 +196,11 @@ pub const LoRALinear = struct {
 };
 
 // ============================================================================
-// 2. SFT 掩码损失与强化学习对齐损失 (DPO, GRPO)
+// 2. 监督微调 (Supervised Fine-Tuning, SFT) 掩码损失与强化学习对齐损失：
+//    直接偏好优化 (Direct Preference Optimization, DPO) 与组相对策略优化 (Group Relative Policy Optimization, GRPO)
 // ============================================================================
 
-/// 监督微调 (SFT) 掩码交叉熵损失：仅对 Assistant 回答部分 (mask > 0) 计算损失
+/// 监督微调 (Supervised Fine-Tuning, SFT) 掩码交叉熵损失：仅对助手 (Assistant) 回答部分 (mask > 0) 计算损失
 pub fn maskedCrossEntropyLoss(
     logits: *Tensor,
     targets: []const u32,
@@ -261,7 +263,7 @@ pub fn maskedCrossEntropyLoss(
     return 0.0;
 }
 
-/// 监督微调 (SFT) 掩码交叉熵损失 (Autograd 计算图节点版本)
+/// 监督微调 (Supervised Fine-Tuning, SFT) 掩码交叉熵损失 (自动微分 (Automatic Differentiation, Autograd) 计算图节点版本)
 pub fn maskedCrossEntropyLossGraph(
     graph: *autodiff.Graph,
     logits: *Tensor,
@@ -271,7 +273,7 @@ pub fn maskedCrossEntropyLossGraph(
     return graph.maskedCrossEntropyLoss(logits, targets, mask);
 }
 
-/// 直接偏好优化 (DPO) 损失函数：
+/// 直接偏好优化 (Direct Preference Optimization, DPO) 损失函数：
 /// L_DPO = - E [ log( sigmoid( beta * ( (log pi(y_w) - log ref(y_w)) - (log pi(y_l) - log ref(y_l)) ) ) ) ]
 pub fn dpoLoss(
     pi_chosen_logps: []const f32,
@@ -304,7 +306,7 @@ pub fn dpoLoss(
     return total_loss / @as(f32, @floatFromInt(N));
 }
 
-/// 直接偏好优化 (DPO) 损失函数 (Autograd 计算图节点版本)
+/// 直接偏好优化 (Direct Preference Optimization, DPO) 损失函数 (自动微分 (Automatic Differentiation, Autograd) 计算图节点版本)
 pub fn dpoLossGraph(
     graph: *autodiff.Graph,
     pi_chosen_logps: *Tensor,
@@ -316,9 +318,9 @@ pub fn dpoLossGraph(
     return graph.dpoLoss(pi_chosen_logps, pi_rejected_logps, ref_chosen_logps, ref_rejected_logps, beta);
 }
 
-/// 组相对策略优化 (GRPO, Group Relative Policy Optimization) 优势计算
+/// 组相对策略优化 (Group Relative Policy Optimization, GRPO) 优势计算
 /// 对应 DeepSeek-R1 强化学习论文与博客第 8.5 节公式 (1)：
-/// 对每个 Prompt 并行采样的 G 个候选回复按组计算奖励的均值与标准差，并归一化输出优势值：
+/// 对每个提示词 (Prompt) 并行采样的 G 个候选回复按组计算奖励的均值与标准差，并归一化输出优势值：
 /// A_i = (r_i - mean({r_1..r_G})) / (std({r_1..r_G}) + eps)
 pub fn computeGroupAdvantages(
     allocator: std.mem.Allocator,
@@ -355,10 +357,10 @@ pub fn computeGroupAdvantages(
     return advantages;
 }
 
-/// 组相对策略优化 (GRPO) 纯数值损失函数评估：
+/// 组相对策略优化 (Group Relative Policy Optimization, GRPO) 纯数值损失函数评估：
 /// 对应 DeepSeek-R1 强化学习论文与博客第 8.5 节公式 (2) & (3)：
 /// L_GRPO = - 1/N \sum [ min(r_t * A_i, clip(r_t, 1-eps, 1+eps) * A_i) - \beta * D_KL ]
-/// 其中 D_KL(\pi_\theta || \pi_ref) = exp(ref_logp - new_logp) - (ref_logp - new_logp) - 1
+/// 其中库尔贝克-莱布勒散度 (Kullback-Leibler Divergence, KL Divergence) D_KL(\pi_\theta || \pi_ref) = exp(ref_logp - new_logp) - (ref_logp - new_logp) - 1
 pub fn computeGRPOLoss(
     old_logps: []const f32,
     new_logps: []const f32,
@@ -396,7 +398,7 @@ pub fn computeGRPOLoss(
     return -(total_obj / @as(f32, @floatFromInt(N)));
 }
 
-/// GRPO 损失函数，支持对 new_logps 的自动微分梯度回传 (若 new_logps.requires_grad 为 true)
+/// 组相对策略优化 (Group Relative Policy Optimization, GRPO) 损失函数，支持对 new_logps 的自动微分 (Automatic Differentiation, Autograd) 梯度回传 (若 new_logps.requires_grad 为 true)
 pub fn grpoLoss(
     old_logps: *Tensor,
     new_logps: *Tensor,
@@ -445,7 +447,7 @@ pub fn grpoLoss(
                 }
             }
 
-            // 计算 KL 散度项梯度 d(kl) / d(new_logp)
+            // 计算库尔贝克-莱布勒散度 (Kullback-Leibler Divergence, KL Divergence) 项梯度 d(kl) / d(new_logp)
             var d_kl: f32 = 0.0;
             if (beta > 0.0) {
                 d_kl = 1.0 - @exp(ref - new_logps.data[i]);
@@ -460,7 +462,7 @@ pub fn grpoLoss(
     return -(total_obj * inv_n);
 }
 
-/// GRPO 损失函数 (Autograd 计算图节点版本)
+/// 组相对策略优化 (Group Relative Policy Optimization, GRPO) 损失函数 (自动微分 (Automatic Differentiation, Autograd) 计算图节点版本)
 pub fn grpoLossGraph(
     graph: *autodiff.Graph,
     old_logps: *Tensor,
@@ -477,7 +479,7 @@ pub fn grpoLossGraph(
 // 3. 采样与生成策略 (Sampling Strategies)
 // ============================================================================
 
-/// Top-P (Nucleus) 核采样 (带 Temperature)
+/// 核采样 / 累积概率阈值采样 (Nucleus Sampling, Top-P，带温度系数 Temperature)
 pub fn sampleTopP(
     logits: []const f32,
     vocab_size: usize,

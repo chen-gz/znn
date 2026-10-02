@@ -23,7 +23,7 @@ pub const applyRope1D = attention.applyRope1D;
 pub const MLACache = attention.MLACache;
 pub const MLALayer = attention.MLALayer;
 
-// LLM 微调、对齐损失与采样子模块符号导出
+// 大语言模型 (Large Language Model, LLM) 微调、对齐损失与采样子模块符号导出
 pub const LoRALinear = llm.LoRALinear;
 pub const maskedCrossEntropyLoss = llm.maskedCrossEntropyLoss;
 pub const maskedCrossEntropyLossGraph = llm.maskedCrossEntropyLossGraph;
@@ -41,8 +41,8 @@ pub const sampleTopK = llm.sampleTopK;
 // ============================================================================
 
 /// 嵌入层 (Embedding Layer)
-/// 用于将离散的 Token ID（例如整数索引）映射为连续的低维稠密向量。
-/// 在数学上，这等价于使用 One-hot 编码与权重矩阵相乘，而在实现上通过高效的查找表 (Lookup Table) 实现。
+/// 用于将离散的词元标识符 (Token Identifier, Token ID)（例如整数索引）映射为连续的低维稠密向量。
+/// 在数学上，这等价于使用独热编码 (One-Hot Encoding) 与权重矩阵相乘，而在实现上通过高效的查找表 (Lookup Table) 实现。
 ///
 /// 权重形状：[vocab_size, embedding_dim]
 pub const Embedding = struct {
@@ -117,7 +117,7 @@ pub const Embedding = struct {
         return self.name;
     }
 
-    /// 释放层内所有关联的 Tensor 内存资源
+    /// 释放层内所有关联的张量 (Tensor) 内存资源
     pub fn deinit(self: Embedding, allocator: std.mem.Allocator) void {
         freePersistentTensor(allocator, self.weight);
     }
@@ -137,7 +137,7 @@ pub const Embedding = struct {
     }
 
     /// 查找映射前向传播
-    /// 输入 x 为包含 Token ID 的任意维度 Tensor、`GenericTensor(IntT)` 或整数切片，输出形状为 x.shape + [embedding_dim]
+    /// 输入 x 为包含词元标识符 (Token Identifier, Token ID) 的任意维度张量 (Tensor)、`GenericTensor(IntT)` 或整数切片，输出形状为 x.shape + [embedding_dim]
     pub fn forward(self: Embedding, graph: *autodiff.Graph, x: anytype) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
@@ -147,26 +147,26 @@ pub const Embedding = struct {
 };
 
 // ============================================================================
-// 2. 前馈网络模块 (MLP & SwiGLU)
+// 2. 前馈网络模块：多层感知机 (Multi-Layer Perceptron, MLP) 与 Swish 门控线性单元 (Swish-Gated Linear Unit, SwiGLU)
 // ============================================================================
 
-/// 多层感知机 (MLP) / 前馈网络 (Feed-forward Network) 模块
-/// Transformer 架构中的重要组件，紧跟在 Self-Attention 之后，
-/// 用于在每个 Token 位置上独立地进行非线性特征投影与融合。
+/// 多层感知机 (Multi-Layer Perceptron, MLP) / 前馈神经网络 (Feed-Forward Network, FFN) 模块
+/// 变换器 (Transformer) 架构中的重要组件，紧跟在自注意力 (Self-Attention) 之后，
+/// 用于在每个词元 (Token) 位置上独立地进行非线性特征投影与融合。
 ///
 /// 数学公式：
 /// \text{MLP}(x) = \text{GELU}(x W_1 + b_1) W_2 + b_2
 /// 结构：
-/// Linear(dim -> hidden_dim) -> GELU 激活函数 -> Linear(hidden_dim -> dim)
+/// Linear(dim -> hidden_dim) -> 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数 -> Linear(hidden_dim -> dim)
 /// 其中 hidden_dim 通常设置为 4 * dim。
 pub const MLP = struct {
-    c_fc: Linear, // 升维投影层 (dim -> hidden_dim)
-    c_proj: Linear, // 降维投影层 (hidden_dim -> dim)
+    c_fc: Linear, // 升维全连接投影层 (Fully Connected Layer, c_fc: dim -> hidden_dim)
+    c_proj: Linear, // 降维投影层 (Output Projection, c_proj: hidden_dim -> dim)
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "MLP",
 
-    /// 初始化 MLP 模块
+    /// 初始化多层感知机 (Multi-Layer Perceptron, MLP) 模块
     /// dim: 输入与输出隐藏维度
     /// hidden_dim: 中间隐藏维度 (一般为 4 * dim)
     pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize, random: std.Random) !MLP {
@@ -181,7 +181,7 @@ pub const MLP = struct {
         };
     }
 
-    /// 为 MLP 模块及子层统一设置人类可读的名称 (自动设置 "{name}.c_fc" 与 "{name}.c_proj")
+    /// 为多层感知机 (Multi-Layer Perceptron, MLP) 模块及子层统一设置人类可读的名称 (自动设置 "{name}.c_fc" 与 "{name}.c_proj")
     pub fn setName(self: *MLP, name: []const u8) void {
         if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
             self.name = s;
@@ -227,7 +227,7 @@ pub const MLP = struct {
     }
 
     /// 前向传播逻辑
-    /// 支持输入 2D Tensor [B*T, D] 或 3D Tensor [B, T, D]
+    /// 支持输入二维张量 (2-Dimensional Tensor, 2D) [B*T, D] 或三维张量 (3-Dimensional Tensor, 3D) [B, T, D]
     pub fn forward(self: MLP, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
@@ -236,7 +236,7 @@ pub const MLP = struct {
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
 
-        // 1. 如果输入是 3D [B, T, D]，则将其打平为 2D [B*T, D] 以满足 Linear 矩阵乘法的输入规范
+        // 1. 如果输入是三维 (3-Dimensional, 3D) [B, T, D]，则将其打平为二维 (2-Dimensional, 2D) [B*T, D] 以满足线性层 (Linear) 矩阵乘法的输入规范
         if (is_3d) {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
@@ -247,14 +247,14 @@ pub const MLP = struct {
         // 2. 升维映射: [B*T, D] -> [B*T, hidden_dim]
         const h1 = try self.c_fc.forward(graph, x_2d);
 
-        // 3. GELU 激活函数引入非线性
+        // 3. 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数引入非线性
         const a1 = try graph.gelu(h1);
         if (self.name) |mod_name| a1.setNameFormatted("{s}.gelu", .{mod_name});
 
         // 4. 降维投射回原始特征维度: [B*T, hidden_dim] -> [B*T, D]
         const h2 = try self.c_proj.forward(graph, a1);
 
-        // 5. 如果输入原本是 3D，需要将输出再重新恢复成 3D 形状: [B, T, D]
+        // 5. 如果输入原本是三维 (3-Dimensional, 3D)，需要将输出再重新恢复成三维形状: [B, T, D]
         if (is_3d) {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
@@ -265,8 +265,8 @@ pub const MLP = struct {
     }
 };
 
-/// 现代 Transformer 门控前馈网络 (SwiGLU / LLaMA-style MLP)
-/// 结构：(SiLU(x * W_gate) * (x * W_up)) * W_down
+/// 现代变换器 (Transformer) 门控前馈网络：Swish 门控线性单元 (Swish-Gated Linear Unit, SwiGLU / LLaMA-style Multi-Layer Perceptron, MLP)
+/// 结构：(Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU)(x * W_gate) * (x * W_up)) * W_down
 /// 其中 hidden_dim 通常设置为 8/3 * dim
 pub const SwiGLU = struct {
     w_gate: Linear, // 门控投影层 (dim -> hidden_dim)
@@ -291,7 +291,7 @@ pub const SwiGLU = struct {
         };
     }
 
-    /// 为 SwiGLU 模块及子层统一设置人类可读的名称 (自动设置 "{name}.w_gate", "{name}.w_up", "{name}.w_down")
+    /// 为 Swish 门控线性单元 (Swish-Gated Linear Unit, SwiGLU) 模块及子层统一设置人类可读的名称 (自动设置 "{name}.w_gate", "{name}.w_up", "{name}.w_down")
     pub fn setName(self: *SwiGLU, name: []const u8) void {
         if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
             self.name = s;
@@ -337,7 +337,7 @@ pub const SwiGLU = struct {
         }
     }
 
-    /// 前向传播逻辑：支持 2D [B*T, D] 或 3D [B, T, D]
+    /// 前向传播逻辑：支持二维 (2-Dimensional, 2D) [B*T, D] 或三维 (3-Dimensional, 3D) [B, T, D]
     pub fn forward(self: SwiGLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
@@ -353,13 +353,13 @@ pub const SwiGLU = struct {
             x_2d = try graph.reshape(x, &.{ B * T, D });
         }
 
-        // 1. 计算 gate 投影: [B*T, D] -> [B*T, hidden_dim]
+        // 1. 计算门控 (Gate) 投影: [B*T, D] -> [B*T, hidden_dim]
         const gate = try self.w_gate.forward(graph, x_2d);
 
-        // 2. 计算 up 投影: [B*T, D] -> [B*T, hidden_dim]
+        // 2. 计算升维 (Up) 投影: [B*T, D] -> [B*T, hidden_dim]
         const up = try self.w_up.forward(graph, x_2d);
 
-        // 3. 计算 SiLU(gate) 激活
+        // 3. 计算 Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU) 激活: SiLU(gate)
         const silu_gate = try graph.silu(gate);
 
         // 4. 逐元素乘法: SiLU(gate) * up
@@ -531,7 +531,7 @@ pub const MoELayer = struct {
         // 1. 门控打分: [N, D] -> [N, E]
         const gate_logits = try self.gate.forward(graph, x_2d);
 
-        // 2. 构造 Top-K 掩码并执行 Softmax 归一化
+        // 2. 构造前 K 项 (Top-K) 掩码并执行归一化指数函数 (Softmax) 归一化
         const mask_node = try graph.tensorND(&.{ N, E }, false);
         mask_node.is_buffer = true;
         const mask_data = mask_node.data;
@@ -545,7 +545,7 @@ pub const MoELayer = struct {
         const expert_active = try graph.arenaAllocator().alloc(bool, E);
         @memset(expert_active, false);
 
-        // 对每一行寻找 Top-K 个最大的索引
+        // 对每一行寻找前 K 项 (Top-K) 个最大的索引
         for (0..N) |row| {
             const row_logits = gate_logits.data[row * E .. (row + 1) * E];
 
@@ -600,7 +600,7 @@ pub const MoELayer = struct {
 
         const masked_logits = try graph.add(gate_logits, mask_node);
         const raw_probs = try graph.softmax(masked_logits); // [N, E]
-        const probs = try graph.mul(raw_probs, keep_node); // 严格置零非 Top-K 概率
+        const probs = try graph.mul(raw_probs, keep_node); // 严格置零非前 K 项 (Top-K) 概率
         const prob_cols = try graph.split(probs, E, 1); // E 个 [N, 1]
 
         var acc: ?*Tensor = null;
@@ -627,7 +627,7 @@ pub const MoELayer = struct {
             }
         }
 
-        // 4. 合并 Routed 与 Shared 专家
+        // 4. 合并路由专家 (Routed Experts) 与共享专家 (Shared Experts)
         var final_2d = total_routed;
         if (total_shared) |s| {
             final_2d = try graph.add(total_routed, s);
@@ -645,28 +645,28 @@ pub const MoELayer = struct {
 };
 
 // ============================================================================
-// 4. Transformer Block 与 Decoder
+// 4. 变换器块 (Transformer Block) 与变换器解码器 (Transformer Decoder)
 // ============================================================================
 
-/// Transformer 编码器/解码器 Block 模块 (Transformer Block)
-/// 采用 Pre-LN (Layer Normalization Pre-activation) 架构进行组装：
-/// 1. x_norm1 = RMSNorm(x)
-/// 2. x_attn = SelfAttention(x_norm1)
+/// 变换器编码器/解码器块模块 (Transformer Block)
+/// 采用前置层归一化 (Pre-Layer Normalization, Pre-LN) 架构进行组装：
+/// 1. x_norm1 = 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)(x)
+/// 2. x_attn = 自注意力 (Self-Attention)(x_norm1)
 /// 3. x1 = x + x_attn  (第一层残差连接)
-/// 4. x_norm2 = RMSNorm(x1)
-/// 5. x_mlp = MLP(x_norm2)
+/// 4. x_norm2 = 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)(x1)
+/// 5. x_mlp = 多层感知机 (Multi-Layer Perceptron, MLP)(x_norm2)
 /// 6. out = x1 + x_mlp (第二层残差连接)
 pub const TransformerBlock = struct {
-    ln_1: RMSNorm, // 第一层归一化层，在 Attention 计算前执行
-    attn: CausalSelfAttention, // 因果自注意力机制层
-    ln_2: RMSNorm, // 第二层归一化层，在 MLP 计算前执行
-    mlp: MLP, // 前馈多层感知机层
+    ln_1: RMSNorm, // 第一层均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)，在注意力 (Attention) 计算前执行
+    attn: CausalSelfAttention, // 因果自注意力机制 (Causal Self-Attention) 层
+    ln_2: RMSNorm, // 第二层均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)，在多层感知机 (Multi-Layer Perceptron, MLP) 计算前执行
+    mlp: MLP, // 前馈多层感知机 (Multi-Layer Perceptron, MLP) 层
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "TransformerBlock",
 
-    /// 初始化 Transformer 块
-    /// n_embd: 隐藏特征特征维度
+    /// 初始化变换器块 (Transformer Block)
+    /// n_embd: 隐藏特征嵌入维度
     /// n_head: 注意力头数
     pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !TransformerBlock {
         const ln_1 = try RMSNorm.init(allocator, n_embd, 1e-5);
@@ -686,7 +686,7 @@ pub const TransformerBlock = struct {
         };
     }
 
-    /// 为 Transformer Block 及内部各子层统一设置分层名称 (自动递归设置 ln_1, attn, ln_2, mlp)
+    /// 为变换器块 (Transformer Block) 及内部各子层统一设置分层名称 (自动递归设置 ln_1, attn, ln_2, mlp)
     pub fn setName(self: *TransformerBlock, name: []const u8) void {
         if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
             self.name = s;
@@ -747,7 +747,7 @@ pub const TransformerBlock = struct {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
-        // 1. 第一条支路: RMSNorm -> Attention
+        // 1. 第一条支路: 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) -> 注意力 (Attention)
         const x_norm1 = try self.ln_1.forward(graph, x);
 
         const x_attn = try self.attn.forward(graph, x_norm1);
@@ -759,7 +759,7 @@ pub const TransformerBlock = struct {
             try graph.setModuleFormula(x1.name.?, "x_1 = x_l + \\text{Attention}(\\text{RMSNorm}(x_l))");
         }
 
-        // 3. 第二条支路: RMSNorm -> MLP
+        // 3. 第二条支路: 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) -> 多层感知机 (Multi-Layer Perceptron, MLP)
         const x_norm2 = try self.ln_2.forward(graph, x1);
 
         const x_mlp = try self.mlp.forward(graph, x_norm2);
@@ -774,19 +774,19 @@ pub const TransformerBlock = struct {
     }
 };
 
-/// 堆叠多层 Transformer 块的解码器主干网络 (Transformer Decoder)
+/// 堆叠多层变换器块 (Transformer Block) 的解码器主干网络 (Transformer Decoder)
 pub fn TransformerDecoder(comptime n_layer: usize) type {
     return struct {
         const Self = @This();
 
-        h: [n_layer]TransformerBlock, // 堆叠的 Blocks 数组
-        ln_f: RMSNorm, // 骨架最末端用于规范化的归一化层
+        h: [n_layer]TransformerBlock, // 堆叠的变换器块 (Transformer Block) 数组
+        ln_f: RMSNorm, // 骨架最末端用于规范化的均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) 层
 
         name: ?[]const u8 = null,
         name_buf: [64]u8 = undefined,
         module_type: []const u8 = "TransformerDecoder",
 
-        /// 为整个 Decoder 骨架及其包含的每层 Block 统一设置分层名称
+        /// 为整个解码器 (Decoder) 骨架及其包含的每层变换器块 (Transformer Block) 统一设置分层名称
         pub fn setName(self: *Self, name: []const u8) void {
             if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
                 self.name = s;
@@ -821,12 +821,12 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
                     h[j].deinit(allocator);
                 }
             }
-            // 循环初始化每一层 TransformerBlock
+            // 循环初始化每一层变换器块 (TransformerBlock)
             while (i < n_layer) : (i += 1) {
                 h[i] = try TransformerBlock.init(allocator, n_embd, n_head, random);
             }
 
-            // 初始化最后的层归一化层
+            // 初始化最后的均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) 层
             const ln_f = try RMSNorm.init(allocator, n_embd, 1e-5);
             errdefer {
                 for (0..n_layer) |j| {
@@ -841,7 +841,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             };
         }
 
-        /// 释放整个骨架层及各 Block 的内存
+        /// 释放整个骨架层及各变换器块 (Transformer Block) 的内存
         pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
             for (self.h) |layer| {
                 layer.deinit(allocator);
@@ -849,7 +849,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             self.ln_f.deinit(allocator);
         }
 
-        /// 将所有 Block 和最末端 Norm 层的梯度全部清零
+        /// 将所有变换器块 (Transformer Block) 和最末端均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) 层的梯度全部清零
         pub fn zeroGrad(self: Self) void {
             for (self.h) |layer| {
                 layer.zeroGrad();
@@ -877,28 +877,28 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             defer module_scope.exit();
             if (self.name) |n| try graph.setModuleFormula(n, formula);
             var current_x = x;
-            // 依次贯穿每一层 Block
+            // 依次贯穿每一层变换器块 (Transformer Block)
             for (self.h) |layer| {
                 current_x = try layer.forward(graph, current_x);
             }
 
-            // 执行最后一层 RMSNorm 映射输出
+            // 执行最后一层均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) 映射输出
             return try self.ln_f.forward(graph, current_x);
         }
     };
 }
 
 // ============================================================================
-// 5. GPT 模型定义
+// 5. 生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型定义
 // ============================================================================
 
-/// GPT 模型配置结构体
+/// 生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型配置结构体
 pub const GPTConfig = struct {
-    vocab_size: usize = 50257, // 词表大小 (Vocab Size)，决定输入和输出层的映射维度
+    vocab_size: usize = 50257, // 词表大小 (Vocabulary Size, vocab_size)，决定输入和输出层的映射维度
     block_size: usize = 1024, // 最大上下文长度/时间步长度 (Context Length / Block Size)
-    n_embd: usize = 768, // 隐藏特征嵌入维度 (Embedding Dimension)
-    n_head: usize = 12, // 多头注意力头数 (Attention Heads)
-    n_layer: usize = 12, // Transformer 块堆叠的层数 (Number of Decoder Layers)
+    n_embd: usize = 768, // 隐藏特征嵌入维度 (Embedding Dimension, n_embd)
+    n_head: usize = 12, // 多头注意力头数 (Multi-Head Attention Heads, n_head)
+    n_layer: usize = 12, // 变换器块 (Transformer Block) 堆叠的层数 (Number of Decoder Layers, n_layer)
 
     pub const default: GPTConfig = .{};
     pub fn defaultConfig() GPTConfig {
@@ -906,20 +906,20 @@ pub const GPTConfig = struct {
     }
 };
 
-/// 泛型 GPT 模型定义函数
+/// 泛型生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型定义函数
 pub fn GPT(comptime config: GPTConfig) type {
     return struct {
-        token_embedding: Embedding, // Token 嵌入层
-        position_embedding: Embedding, // 位置嵌入层
-        decoder: TransformerDecoder(config.n_layer), // 堆叠的解码器层与最终归一化层
-        lm_head: Linear, // 最终输出概率的线性分类投影头
+        token_embedding: Embedding, // 词元嵌入层 (Token Embedding, wte)
+        position_embedding: Embedding, // 位置嵌入层 (Position Embedding, wpe)
+        decoder: TransformerDecoder(config.n_layer), // 堆叠的变换器解码器 (Transformer Decoder) 层与最终归一化层
+        lm_head: Linear, // 最终输出概率的语言模型线性分类投影头 (Language Model Head, lm_head)
         name: ?[]const u8 = null,
         name_buf: [64]u8 = undefined,
         module_type: []const u8 = "GPT",
 
         const Self = @This();
 
-        /// 为 GPT 顶层及其包含的 embedding、decoder、lm_head 统一设置分层命名
+        /// 为生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 顶层及其包含的词元嵌入 (wte)、位置嵌入 (wpe)、解码器 (decoder)、语言模型头 (lm_head) 统一设置分层命名
         pub fn setName(self: *Self, name: []const u8) void {
             if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
                 self.name = s;
@@ -945,7 +945,7 @@ pub fn GPT(comptime config: GPTConfig) type {
             return self.name;
         }
 
-        /// 释放 GPT 模型所有子模块的内存资源
+        /// 释放生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型所有子模块的内存资源
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.token_embedding.deinit(allocator);
             self.position_embedding.deinit(allocator);
@@ -961,22 +961,22 @@ pub fn GPT(comptime config: GPTConfig) type {
             self.lm_head.zeroGrad();
         }
 
-        /// 初始化默认配置的 GPT 模型实例
+        /// 初始化默认配置的生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型实例
         pub fn initDefault(allocator: std.mem.Allocator, random: std.Random) !Self {
             return init(allocator, random);
         }
 
-        /// 初始化 GPT 模型中的所有网络层权重
+        /// 初始化生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型中的所有网络层权重
         pub fn init(allocator: std.mem.Allocator, random: std.Random) !Self {
-            // 初始化 Token 嵌入矩阵 [vocab_size, n_embd]
+            // 初始化词元 (Token) 嵌入矩阵 [vocab_size, n_embd]
             const token_embedding = try Embedding.init(allocator, config.vocab_size, config.n_embd, random);
             errdefer token_embedding.deinit(allocator);
 
-            // 初始化位置嵌入矩阵 [block_size, n_embd]
+            // 初始化位置 (Position) 嵌入矩阵 [block_size, n_embd]
             const position_embedding = try Embedding.init(allocator, config.block_size, config.n_embd, random);
             errdefer position_embedding.deinit(allocator);
 
-            // 初始化 Decoder 主干网络
+            // 初始化变换器解码器 (Transformer Decoder) 主干网络
             const decoder = try TransformerDecoder(config.n_layer).init(allocator, config.n_embd, config.n_head, random);
             errdefer {
                 token_embedding.deinit(allocator);
@@ -984,7 +984,7 @@ pub fn GPT(comptime config: GPTConfig) type {
                 decoder.deinit(allocator);
             }
 
-            // 初始化输出映射分类头 [n_embd, vocab_size]
+            // 初始化输出映射语言模型分类头 (Language Model Head, lm_head) [n_embd, vocab_size]
             const lm_head = try Linear.init(allocator, config.n_embd, config.vocab_size, random);
             errdefer {
                 token_embedding.deinit(allocator);
@@ -1016,8 +1016,8 @@ pub fn GPT(comptime config: GPTConfig) type {
         }
 
         /// 前向推理传播流程
-        /// 输入 x 为包含 Token ID 的 2D 张量（支持 `*Tensor` 或 `*GenericTensor(IntT)`），形状为 [B, T]
-        /// 输出为未归一化的预测对数 (Logits)，形状为 3D: [B, T, vocab_size]
+        /// 输入 x 为包含词元标识符 (Token Identifier, Token ID) 的二维张量 (2-Dimensional Tensor, 2D，支持 `*Tensor` 或 `*GenericTensor(IntT)`)，形状为 [B, T]
+        /// 输出为未归一化的预测对数几率 (Logits)，形状为三维 (3-Dimensional, 3D): [B, T, vocab_size]
         pub fn forward(self: *const Self, graph: *autodiff.Graph, x: anytype) !*Tensor {
             const module_scope = try graph.enterModule(self.name, self.module_type);
             defer module_scope.exit();
@@ -1025,46 +1025,46 @@ pub fn GPT(comptime config: GPTConfig) type {
             const B = x.shape.dims[0];
             const T = x.shape.dims[1];
 
-            // 1. 获取 Token 嵌入向量: [B, T] -> [B, T, n_embd]
+            // 1. 获取词元 (Token) 嵌入向量: [B, T] -> [B, T, n_embd]
             const tok_emb = try self.token_embedding.forward(graph, x);
 
-            // 2. 生成对应的时间/位置索引 [0, 1, 2, ... T-1]，并将其转换为 2D 位置 Tensor [B, T]
+            // 2. 生成对应的时间/位置索引 [0, 1, 2, ... T-1]，并将其转换为二维 (2-Dimensional, 2D) 位置张量 (Tensor) [B, T]
             const pos_node = try graph.tensorND(&.{ B, T }, false);
             for (0..B) |b| {
                 for (0..T) |t| {
                     pos_node.data[b * T + t] = @as(f32, @floatFromInt(t));
                 }
             }
-            // 位置索引由输入形状在模型内部生成，属于 GPT 自身的常量缓冲区，而非模型输入
+            // 位置索引由输入形状在模型内部生成，属于生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 自身的常量缓冲区，而非模型输入
             pos_node.is_buffer = true;
             if (self.name) |mod_name| {
                 pos_node.setNameFormatted("{s}.pos_indices", .{mod_name});
             }
 
-            // 3. 获取对应的 Learned 位置嵌入向量: [B, T] -> [B, T, n_embd]
+            // 3. 获取对应的可学习 (Learned) 位置嵌入向量: [B, T] -> [B, T, n_embd]
             const pos_emb = try self.position_embedding.forward(graph, pos_node);
 
-            // 4. 将 Token 嵌入和位置嵌入进行求和融合，作为初始隐藏输入: h = tok_emb + pos_emb
+            // 4. 将词元 (Token) 嵌入和位置嵌入进行求和融合，作为初始隐藏输入: h = tok_emb + pos_emb
             const h_x = try graph.add(tok_emb, pos_emb);
             if (self.name) |mod_name| {
                 h_x.setNameFormatted("{s}.embeddings_sum", .{mod_name});
             }
 
-            // 5. 将混合后的输入送进层叠的 Decoder 主干网络中依次计算
+            // 5. 将混合后的输入送进层叠的变换器解码器 (Transformer Decoder) 主干网络中依次计算
             // 输出形状保持为: [B, T, n_embd]
             const decoder_out = try self.decoder.forward(graph, h_x);
 
-            // 6. 将输出展平为 2D，以便进行最终分类头的全连接投影计算: [B, T, n_embd] -> [B*T, n_embd]
+            // 6. 将输出展平为二维 (2-Dimensional, 2D)，以便进行最终分类头的全连接投影计算: [B, T, n_embd] -> [B*T, n_embd]
             const ln_x_2d = try graph.reshape(decoder_out, &.{ B * T, config.n_embd });
 
-            // 7. 进行投影以获得词表空间未归一化的分类 Logits: [B*T, n_embd] -> [B*T, vocab_size]
+            // 7. 进行投影以获得词表空间未归一化的分类对数几率 (Logits): [B*T, n_embd] -> [B*T, vocab_size]
             const logits_2d = try self.lm_head.forward(graph, ln_x_2d);
 
-            // 8. 将形状重塑还原成 3D 形式返回: [B, T, vocab_size]
+            // 8. 将形状重塑还原成三维 (3-Dimensional, 3D) 形式返回: [B, T, vocab_size]
             return try graph.reshape(logits_2d, &.{ B, T, config.vocab_size });
         }
     };
 }
 
-/// 采用默认 GPTConfig 的标准 GPT 模型类型别名
+/// 采用默认生成式预训练变换器配置 (GPTConfig) 的标准生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型类型别名
 pub const DefaultGPT = GPT(GPTConfig.default);

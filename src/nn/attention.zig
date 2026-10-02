@@ -10,15 +10,15 @@ const createPersistentTensor = core.createPersistentTensor;
 const freePersistentTensor = core.freePersistentTensor;
 
 // ============================================================================
-// 1. 键值缓存 (Key-Value Cache)
+// 1. 键值缓存 (Key-Value Cache, KVCache)
 // ============================================================================
 
-/// 键值缓存 (Key-Value Cache) 用于大模型自回归增量推理 (O(T) 生成复杂度)
+/// 键值缓存 (Key-Value Cache, KVCache)，用于大语言模型 (Large Language Model, LLM) 自回归增量推理 (O(T) 生成复杂度)
 pub const KVCache = struct {
-    k: *Tensor, // 缓存的 Key 张量 [batch_size, n_head, max_seq_len, head_dim]
-    v: *Tensor, // 缓存的 Value 张量 [batch_size, n_head, max_seq_len, head_dim]
-    curr_len: usize = 0, // 当前已缓存的 Token 步长
-    max_len: usize, // 最大支持上下文长度
+    k: *Tensor, // 缓存的键 (Key, K) 张量 [batch_size, n_head, max_seq_len, head_dim]
+    v: *Tensor, // 缓存的值 (Value, V) 张量 [batch_size, n_head, max_seq_len, head_dim]
+    curr_len: usize = 0, // 当前已缓存的词元 (Token) 步长
+    max_len: usize, // 最大支持上下文序列长度
 
     pub fn init(allocator: std.mem.Allocator, batch_size: usize, n_head: usize, max_len: usize, head_dim: usize) !KVCache {
         const k = try createPersistentTensor(allocator, 1, batch_size * n_head * max_len * head_dim, false);
@@ -50,18 +50,133 @@ pub const KVCache = struct {
 };
 
 // ============================================================================
-// 2. 注意力机制 (ScaledDotProductAttention, CausalSelfAttention & MLA)
+// 2. 注意力机制：缩放点积注意力 (Scaled Dot-Product Attention, SDPA)、
+//    因果自注意力 (Causal Self-Attention) 与多头潜在注意力 (Multi-Head Latent Attention, MLA)
 // ============================================================================
 
-/// 缩放点积注意力核心模块 (Scaled Dot-Product Attention)
+/// 缩放点积注意力核心模块 (Scaled Dot-Product Attention, SDPA)
+/// 负责对四维 (4-Dimensional, 4D) 多头张量 Q, K \in [B, H, T, d_k] 与 V \in [B, H, T, d_v] 执行核心注意力运算：
+/// \text{AttentionCore}(Q, K, V) = \text{softmax}\left(\frac{Q K^T}{\sqrt{d_k}} + M\right) V
+/// 当 causal = true 时，自动构造并叠加下三角因果掩码 (Causal Mask, M \in [1, 1, T, T])。
+/// 该模块既可作为独立无参数层直接调用，也作为 `CausalSelfAttention` 与 `MLALayer` 的内置计算核心复用。
 pub const ScaledDotProductAttention = struct {
+    causal: bool = true, // 是否应用自回归因果掩码 (Causal Mask)
+    name: ?[]const u8 = null,
+    name_buf: [64]u8 = undefined,
+    mask_prefix: ?[]const u8 = null,
+    mask_prefix_buf: [64]u8 = undefined,
     module_type: []const u8 = "ScaledDotProductAttention",
 
+    /// 缩放点积注意力配置选项 (Scaled Dot-Product Attention Options)
+    pub const Options = struct {
+        causal: bool = true,
+
+        pub const default: Options = .{};
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
     pub const formula = "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V";
+
+    pub fn init(options: Options) ScaledDotProductAttention {
+        return .{ .causal = options.causal };
+    }
+
+    pub fn initDefault() ScaledDotProductAttention {
+        return init(Options.default);
+    }
+
+    pub fn setName(self: *ScaledDotProductAttention, name: []const u8) void {
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+    }
+
+    pub fn setNameFormatted(self: *ScaledDotProductAttention, comptime fmt: []const u8, args: anytype) void {
+        var buf: [64]u8 = undefined;
+        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
+            self.setName(s);
+        } else |_| {
+            self.setName("core");
+        }
+    }
+
+    /// 设置因果掩码缓冲区节点 (Causal Mask Buffer) 的命名前缀 (如父级注意力模块名 "{attn}")
+    pub fn setMaskPrefix(self: *ScaledDotProductAttention, prefix: []const u8) void {
+        if (std.fmt.bufPrint(&self.mask_prefix_buf, "{s}", .{prefix})) |s| {
+            self.mask_prefix = s;
+        } else |_| {
+            self.mask_prefix = prefix;
+        }
+    }
+
+    pub fn getName(self: *const ScaledDotProductAttention) ?[]const u8 {
+        return self.name;
+    }
+
+    pub fn registerFormula(self: *const ScaledDotProductAttention, graph: *autodiff.Graph) !void {
+        if (self.name) |n| {
+            try graph.setModuleFormula(n, formula);
+            try graph.registerModuleType(n, self.module_type);
+        }
+    }
+
+    /// 开启注意力核心子作用域 ("core" 或显式模块名) 并执行缩放点积注意力前向传播
+    pub fn forward(self: ScaledDotProductAttention, graph: *autodiff.Graph, q: *Tensor, k: *Tensor, v: *Tensor) !*Tensor {
+        const core_scope = if (self.name) |n|
+            try graph.enterModule(n, self.module_type)
+        else
+            try graph.enterChildScope("core", self.module_type);
+        defer core_scope.exit();
+        try self.registerFormula(graph);
+        return self.forwardCore(graph, q, k, v);
+    }
+
+    /// 在当前计算图作用域内直接执行四维 (4-Dimensional, 4D) 缩放点积注意力计算：
+    /// K^T -> Q * K^T -> 1/sqrt(d_k) 缩放 -> 可选因果掩码 (Causal Mask) -> 归一化指数函数 (Softmax) -> 乘 V
+    pub fn forwardCore(self: ScaledDotProductAttention, graph: *autodiff.Graph, q: *Tensor, k: *Tensor, v: *Tensor) !*Tensor {
+        const T = q.shape.dims[2];
+        const d_k = q.shape.dims[3];
+
+        // 1. 转置键张量 (Key, K) 用于计算点积注意力: [B, H, T, d_k] -> [B, H, d_k, T]
+        const k_t = try graph.transposeND(k, 2, 3);
+
+        // 2. 计算注意力原始点积得分: Q * K^T -> [B, H, T, T]
+        const att = try graph.batchMatMul(q, k_t);
+
+        // 3. 缩放得分，除以 sqrt(d_k) 避免点积方差随维度增大导致梯度消失: score = (Q * K^T) / sqrt(d_k)
+        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_k)));
+        var scores = try graph.mulScalar(att, scale);
+
+        // 4. 构造因果掩码 (Causal Mask) 矩阵 [1, 1, T, T] (通过多维广播作用于 [B, H, T, T])
+        // 上三角（未来位置 j > 当前位置 i）填充 -1e9，使归一化指数函数 (Softmax) 后未来权重归零。
+        if (self.causal) {
+            const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
+            mask_node.is_buffer = true;
+            for (0..T) |i| {
+                for (i + 1..T) |j| {
+                    mask_node.data[i * T + j] = -1e9;
+                }
+            }
+            if (self.mask_prefix orelse self.name) |prefix| {
+                mask_node.setNameFormatted("{s}.causal_mask", .{prefix});
+            }
+            scores = try graph.add(scores, mask_node);
+        }
+
+        // 5. 归一化指数函数 (Softmax)，得到注意力概率分布图: [B, H, T, T]
+        const att_sm = try graph.softmax(scores);
+
+        // 6. 用注意力权重与值张量 (Value, V) 相乘: [B, H, T, T] * [B, H, T, d_v] -> [B, H, T, d_v]
+        return try graph.batchMatMul(att_sm, v);
+    }
 };
 
-/// 因果自注意力机制 (Causal Self-Attention / Masked Multi-Head Attention)
-/// Transformer 的核心机制，负责建模序列中不同位置的依赖关系。
+/// 因果自注意力机制 (Causal Self-Attention / 掩码多头注意力 Masked Multi-Head Attention, MHA)
+/// 变换器 (Transformer) 的核心机制，负责建模序列中不同位置的依赖关系。
 ///
 /// 数学公式：
 /// Q = X W_q, \quad K = X W_k, \quad V = X W_v
@@ -70,24 +185,25 @@ pub const ScaledDotProductAttention = struct {
 /// 其中 M 是因果掩码矩阵，上三角（未来位置）元素为 -\infty，其余为 0。
 ///
 /// 包含以下关键设计：
-/// 1. 多头注意力 (Multi-Head)：将特征通道划分为 nh 个头，让模型在多个不同的投影子空间内并行关注信息。
+/// 1. 多头注意力 (Multi-Head Attention, MHA)：将特征通道划分为 nh 个头，让模型在多个不同的投影子空间内并行关注信息。
 /// 2. 因果掩码 (Causal Mask)：通过加上上三角矩阵（值为 -inf），阻止当前位置关注未来的位置，确保自回归生成时的因果律。
 pub const CausalSelfAttention = struct {
-    q_attn: Linear, // Query 线性投影层
-    k_attn: Linear, // Key 线性投影层
-    v_attn: Linear, // Value 线性投影层
-    c_proj: Linear, // 最终的多头输出融合与投影层 (c_proj)
-    n_head: usize, // 注意力头数 (Query heads)
-    n_embd: usize, // 嵌入维度 (n_embd)
-    num_kv_heads: usize, // Key / Value 头数 (1 = MQA, < n_head = GQA, == n_head = MHA)
+    q_attn: Linear, // 查询 (Query, Q) 线性投影层
+    k_attn: Linear, // 键 (Key, K) 线性投影层
+    v_attn: Linear, // 值 (Value, V) 线性投影层
+    core: ScaledDotProductAttention = .{}, // 缩放点积注意力核心子模块 (Scaled Dot-Product Attention, SDPA)
+    c_proj: Linear, // 最终的多头输出融合与投影层 (Output Projection, c_proj)
+    n_head: usize, // 查询注意力头数 (Query Heads, n_head)
+    n_embd: usize, // 隐藏特征嵌入维度 (Embedding Dimension, n_embd)
+    num_kv_heads: usize, // 键值头数 (Key-Value Heads)：1 为多查询注意力 (Multi-Query Attention, MQA)，< n_head 为分组查询注意力 (Grouped-Query Attention, GQA)，== n_head 为多头注意力 (Multi-Head Attention, MHA)
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "CausalSelfAttention",
 
-    /// 初始化支持分组查询注意力 (GQA / MQA / MHA) 的自注意力层
-    /// n_embd: 隐藏嵌入维度，必须能被 n_head 整除
-    /// n_head: Query 注意力头数
-    /// num_kv_heads: Key/Value 头数，必须能整除 n_head
+    /// 初始化支持分组查询注意力 (Grouped-Query Attention, GQA)、多查询注意力 (Multi-Query Attention, MQA) 与多头注意力 (Multi-Head Attention, MHA) 的自注意力层
+    /// n_embd: 隐藏特征嵌入维度，必须能被 n_head 整除
+    /// n_head: 查询 (Query) 注意力头数
+    /// num_kv_heads: 键值 (Key-Value) 头数，必须能整除 n_head
     pub fn initGQA(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, num_kv_heads: usize, random: std.Random) !CausalSelfAttention {
         std.debug.assert(n_embd % n_head == 0);
         std.debug.assert(n_head % num_kv_heads == 0);
@@ -114,12 +230,12 @@ pub const CausalSelfAttention = struct {
         };
     }
 
-    /// 初始化传统多头自注意力层 (MHA: num_kv_heads == n_head)
+    /// 初始化标准多头自注意力层 (Multi-Head Attention, MHA: num_kv_heads == n_head)
     pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !CausalSelfAttention {
         return initGQA(allocator, n_embd, n_head, n_head, random);
     }
 
-    /// 为注意力层及 4 个线性投影子层统一设置人类可读的名称 (如 "{name}.q_attn", "{name}.c_proj")
+    /// 为注意力层、缩放点积注意力核心及 4 个线性投影子层统一设置人类可读的名称 (如 "{name}.q_attn", "{name}.core", "{name}.c_proj")
     pub fn setName(self: *CausalSelfAttention, name: []const u8) void {
         if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
             self.name = s;
@@ -129,6 +245,8 @@ pub const CausalSelfAttention = struct {
         self.q_attn.setNameFormatted("{s}.q_attn", .{self.name.?});
         self.k_attn.setNameFormatted("{s}.k_attn", .{self.name.?});
         self.v_attn.setNameFormatted("{s}.v_attn", .{self.name.?});
+        self.core.setNameFormatted("{s}.core", .{self.name.?});
+        self.core.setMaskPrefix(self.name.?);
         self.c_proj.setNameFormatted("{s}.c_proj", .{self.name.?});
     }
 
@@ -169,17 +287,21 @@ pub const CausalSelfAttention = struct {
         if (self.name) |n| {
             try graph.setModuleFormula(n, formula);
             try graph.registerModuleType(n, self.module_type);
-            var buf: [128]u8 = undefined;
-            if (std.fmt.bufPrint(&buf, "{s}.core", .{n})) |core_name| {
-                try graph.setModuleFormula(core_name, core_formula);
-                try graph.registerModuleType(core_name, "ScaledDotProductAttention");
-            } else |_| {}
+            if (self.core.name != null) {
+                try self.core.registerFormula(graph);
+            } else {
+                var buf: [128]u8 = undefined;
+                if (std.fmt.bufPrint(&buf, "{s}.core", .{n})) |core_name| {
+                    try graph.setModuleFormula(core_name, core_formula);
+                    try graph.registerModuleType(core_name, self.core.module_type);
+                } else |_| {}
+            }
         }
     }
 
     /// 前向注意力计算流程
-    /// 输入 x 的形状必须为 3D: [B, T, C]
-    /// 其中 B 为批次大小 (Batch Size)，T 为时间步长度 (Sequence Length)，C 为通道特征维数 (n_embd)
+    /// 输入 x 的形状必须为三维张量 (3-Dimensional Tensor, 3D): [B, T, C]
+    /// 其中 B 为批次大小 (Batch Size, B)，T 为时间步序列长度 (Sequence Length, T)，C 为通道特征维数 (Embedding Dimension, C / n_embd)
     pub fn forward(self: CausalSelfAttention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
@@ -190,32 +312,32 @@ pub const CausalSelfAttention = struct {
         const C = x.shape.dims[2];
         const nh = self.n_head;
         const n_kv = self.num_kv_heads;
-        const hs = C / nh; // 每个注意力头的维度大小 (head size)
+        const hs = C / nh; // 每个注意力头的维度大小 (Head Size, hs)
         const groups = nh / n_kv;
 
-        // 1. 将 3D 输入 [B, T, C] 展平为 2D [B*T, C] 便于做常规的线性矩阵映射
+        // 1. 将三维 (3-Dimensional, 3D) 输入 [B, T, C] 展平为二维 (2-Dimensional, 2D) [B*T, C] 便于做常规的线性矩阵映射
         const x_2d = try graph.reshape(x, &.{ B * T, C });
 
-        // 2. 投影计算 Query, Key, Value
+        // 2. 投影计算查询 (Query, Q)、键 (Key, K) 与值 (Value, V)
         const q_2d = try self.q_attn.forward(graph, x_2d);
         const k_2d = try self.k_attn.forward(graph, x_2d);
         const v_2d = try self.v_attn.forward(graph, x_2d);
 
-        // 3. 将投影后的数据重新塑形为 4D 多头结构:
+        // 3. 将投影后的数据重新塑形为四维 (4-Dimensional, 4D) 多头结构:
         // q: [B*T, C] -> [B, T, nh, hs]
         // k, v: [B*T, n_kv*hs] -> [B, T, n_kv, hs]
         const q_4d = try graph.reshape(q_2d, &.{ B, T, nh, hs });
         const k_4d = try graph.reshape(k_2d, &.{ B, T, n_kv, hs });
         const v_4d = try graph.reshape(v_2d, &.{ B, T, n_kv, hs });
 
-        // 4. 转置特征轴，使得 Head 维度排在前部以进行 Batch 矩阵乘法
+        // 4. 转置特征轴，使得注意力头 (Head) 维度排在前部以进行批量矩阵乘法 (Batch Matrix Multiplication, BMM)
         // q: [B, T, nh, hs] -> [B, nh, T, hs]
         // k, v: [B, T, n_kv, hs] -> [B, n_kv, T, hs]
         const q = try graph.transposeND(q_4d, 1, 2);
         const k_raw = try graph.transposeND(k_4d, 1, 2);
         const v_raw = try graph.transposeND(v_4d, 1, 2);
 
-        // 4.5 GQA 广播扩展: 如果 n_kv < nh，沿 Head 轴复制 groups 次匹配 Query
+        // 4.5 分组查询注意力 (Grouped-Query Attention, GQA) 广播扩展: 如果 n_kv < nh，沿头 (Head) 轴复制 groups 次以匹配查询 (Query)
         var k = k_raw;
         var v = v_raw;
         if (groups > 1) {
@@ -223,69 +345,33 @@ pub const CausalSelfAttention = struct {
             v = try graph.repeatKV(v_raw, groups);
         }
 
-        // 注意力核心 (ScaledDotProductAttention) 子作用域: K^T -> QK^T -> 缩放 -> 掩码 -> softmax -> ·V
-        // head 切分与合并属于 CausalSelfAttention 本身，不计入核心子作用域
-        const core_scope = try graph.enterChildScope("core", "ScaledDotProductAttention");
-        var core_scope_open = true;
-        defer if (core_scope_open) core_scope.exit();
-
-        // 5. 转置 Key 用于计算点积注意力: [B, nh, T, hs] -> [B, nh, hs, T]
-        const k_t = try graph.transposeND(k, 2, 3);
-
-        // 6. 计算注意力原始得分: Q * K^T
-        // 输出矩阵形状: [B, nh, T, hs] * [B, nh, hs, T] -> [B, nh, T, T]
-        const att = try graph.batchMatMul(q, k_t);
-
-        // 7. 缩放得分，除以 sqrt(head_size) 避免梯度消失/爆炸: score = (Q * K^T) / sqrt(hs)
-        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hs)));
-        const att_scaled = try graph.mulScalar(att, scale);
-
-        // 8. 构造因果掩码 (Causal Mask) 矩阵 [1, 1, T, T] (通过多维广播作用于 [B, nh, T, T])
-        // 该矩阵只包含 0 和 -1e9。上三角（未来位置 j > 当前位置 i）部分全部填充 -1e9。
-        const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
-        mask_node.is_buffer = true;
-        for (0..T) |i| {
-            for (i + 1..T) |j| {
-                mask_node.data[i * T + j] = -1e9;
-            }
+        // 5. 委托给缩放点积注意力核心子模块 (ScaledDotProductAttention) 执行 K^T -> QK^T -> 缩放 -> 因果掩码 -> Softmax -> ·V
+        // 若 CausalSelfAttention 仅设置了 self.name 而未通过 setName 同步 core.mask_prefix，则在此补齐前缀
+        var core_mod = self.core;
+        if (core_mod.mask_prefix == null) {
+            if (self.name) |mod_name| core_mod.setMaskPrefix(mod_name);
         }
+        const y_4d = try core_mod.forward(graph, q, k, v);
 
-        // 9. 将掩码加上注意力得分: score + mask
-        // 未来时刻对应的得分将变为极小值 (-1e9)，进而在 Softmax 后权重归零。
-        if (self.name) |mod_name| {
-            mask_node.setNameFormatted("{s}.causal_mask", .{mod_name});
-        }
-        const att_masked = try graph.add(att_scaled, mask_node);
-
-        // 10. Softmax 归一化，得到归一化的注意力概率分布图: [B, nh, T, T]
-        const att_sm = try graph.softmax(att_masked);
-
-        // 11. 用注意力权重与 Value 相乘: weight * V
-        // 形状变化: [B, nh, T, T] * [B, nh, T, hs] -> [B, nh, T, hs]
-        const y_4d = try graph.batchMatMul(att_sm, v);
-
-        core_scope.exit();
-        core_scope_open = false;
-
-        // 12. 将多头的输出转置回去，重新展平拼接成单头向量表示
+        // 6. 将多头的输出转置回去，重新展平拼接成单头向量表示
         // 转置: [B, nh, T, hs] -> [B, T, nh, hs]
         const y_trans = try graph.transposeND(y_4d, 1, 2);
 
-        // 整合形状为 3D: [B, T, nh * hs] = [B, T, C]
+        // 整合形状为三维 (3-Dimensional, 3D): [B, T, nh * hs] = [B, T, C]
         const y_3d = try graph.reshape(y_trans, &.{ B, T, C });
 
-        // 13. 将输出展平为 2D，以便穿过最后的输出投影线性层 (c_proj)
+        // 7. 将输出展平为二维 (2-Dimensional, 2D)，以便穿过最后的输出投影线性层 (Output Projection, c_proj)
         // 重塑: [B, T, C] -> [B*T, C]
         const y_2d = try graph.reshape(y_3d, &.{ B * T, C });
 
         // 投影输出映射: [B*T, C] -> [B*T, C]
         const out_2d = try self.c_proj.forward(graph, y_2d);
 
-        // 14. 恢复并输出最终的 3D 表示: [B, T, C]
+        // 8. 恢复并输出最终的三维 (3-Dimensional, 3D) 表示: [B, T, C]
         return try graph.reshape(out_2d, &.{ B, T, C });
     }
 
-    /// 基于 KVCache 的单步增量自回归推理 (O(1) 增量 Key/Value 计算，O(T) 点积注意力)
+    /// 基于键值缓存 (Key-Value Cache, KVCache) 的单步增量自回归推理 (O(1) 增量键值计算，O(T) 点积注意力)
     /// 输入 x 的形状为 [B, 1, C] 或 [B, C]
     pub fn forwardInference(self: CausalSelfAttention, allocator: std.mem.Allocator, x: *Tensor, cache: *KVCache) !*Tensor {
         const B = x.shape.dims[0];
@@ -300,15 +386,15 @@ pub const CausalSelfAttention = struct {
         var step_g = autodiff.Graph.initNoGrad(allocator);
         defer step_g.deinit();
 
-        // 1. 获取 2D 输入 [B, C]
+        // 1. 获取二维 (2-Dimensional, 2D) 输入 [B, C]
         const x_2d = if (x.shape.len != 2) try step_g.reshape(x, &.{ B, C }) else x;
 
-        // 2. 投影当前 Token 的 Q, K, V
+        // 2. 投影当前词元 (Token) 的查询 (Query, Q)、键 (Key, K) 与值 (Value, V)
         const q_2d = try self.q_attn.forward(&step_g, x_2d);
         const k_step = try self.k_attn.forward(&step_g, x_2d);
         const v_step = try self.v_attn.forward(&step_g, x_2d);
 
-        // 3. 写入 KVCache
+        // 3. 写入键值缓存 (Key-Value Cache, KVCache)
         const t = cache.curr_len;
         std.debug.assert(t < cache.max_len);
         for (0..B) |b| {
@@ -324,7 +410,7 @@ pub const CausalSelfAttention = struct {
         cache.curr_len += 1;
         const curr_len = cache.curr_len;
 
-        // 4. 注意力计算：对当前 1 个 Query 与缓存中 [0..curr_len] 个 Key 计算点积
+        // 4. 注意力计算：对当前 1 个查询 (Query, Q) 与缓存中 [0..curr_len] 个键 (Key, K) 计算点积
         const y_2d = try step_g.zeros(&.{ B, C }, false);
 
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hs)));
@@ -377,7 +463,7 @@ pub const CausalSelfAttention = struct {
     }
 };
 
-/// 旋转位置编码 (RoPE) 1D 原地旋转变换
+/// 旋转位置编码 (Rotary Position Embedding, RoPE) 一维 (1-Dimensional, 1D) 原地旋转变换
 pub fn applyRope1D(vec: []f32, pos: usize) void {
     const half = vec.len / 2;
     const pos_f = @as(f32, @floatFromInt(pos));
@@ -393,13 +479,13 @@ pub fn applyRope1D(vec: []f32, pos: usize) void {
     }
 }
 
-/// 多头潜在注意力缓存 (MLA Cache)
+/// 多头潜在注意力缓存 (Multi-Head Latent Attention Cache, MLACache)
 /// 对应 DeepSeek-V2 / V3 论文：
-/// 仅存储低维联合压缩潜在向量 c_t^{KV} 与解耦 RoPE 键 k_t^R，
-/// 相比传统 MHA 降低高达 93.3% 显存开销。
+/// 仅存储低维联合压缩潜在键值向量 (Latent Key-Value Vector, c_t^{KV}) 与解耦旋转位置编码键 (Decoupled Rotary Position Embedding Key, k_t^R)，
+/// 相比传统多头注意力 (Multi-Head Attention, MHA) 降低高达 93.3% 显存开销。
 pub const MLACache = struct {
-    c_kv: *Tensor, // 潜在键值缓存 [batch_size, max_len, d_c]
-    k_r: *Tensor, // 解耦 RoPE 键缓存 [batch_size, max_len, d_r]
+    c_kv: *Tensor, // 潜在键值缓存 (Latent Key-Value Cache) [batch_size, max_len, d_c]
+    k_r: *Tensor, // 解耦旋转位置编码键缓存 (Decoupled Rotary Position Embedding Key Cache) [batch_size, max_len, d_r]
     curr_len: usize = 0,
     max_len: usize,
     d_c: usize,
@@ -436,21 +522,22 @@ pub const MLACache = struct {
     }
 };
 
-/// 多头潜在注意力机制 (Multi-Head Latent Attention, MLALayer)
+/// 多头潜在注意力机制 (Multi-Head Latent Attention, MLA / MLALayer)
 /// 对应 DeepSeek-V2 / V3 核心注意力架构：
-/// 采用 KV 低秩联合压缩、解耦 RoPE 以及推理期矩阵吸收 (Matrix Absorption)。
+/// 采用键值 (Key-Value, KV) 低秩联合压缩、解耦旋转位置编码 (Rotary Position Embedding, RoPE) 以及推理期权重矩阵吸收 (Weight Matrix Absorption)。
 pub const MLALayer = struct {
     dim: usize,
     n_head: usize,
     head_dim: usize,
-    d_c: usize, // KV 潜在压缩维度 (如 512)
-    d_r: usize, // 解耦 RoPE 维度 (如 64)
-    q_proj: Linear, // Query 投影: dim -> n_head * (head_dim + d_r)
-    w_dkv: Linear, // KV 下投影: dim -> d_c
-    w_kr: Linear, // RoPE Key 投影: dim -> d_r
-    w_uk: Linear, // Content Key 上投影: d_c -> n_head * head_dim
-    w_uv: Linear, // Content Value 上投影: d_c -> n_head * head_dim
-    o_proj: Linear, // 输出投影: n_head * head_dim -> dim
+    d_c: usize, // 键值 (Key-Value, KV) 潜在压缩维度 (如 512)
+    d_r: usize, // 解耦旋转位置编码 (Rotary Position Embedding, RoPE) 维度 (如 64)
+    q_proj: Linear, // 查询 (Query) 投影: dim -> n_head * (head_dim + d_r)
+    w_dkv: Linear, // 键值 (Key-Value, KV) 下投影 (Down-Projection): dim -> d_c
+    w_kr: Linear, // 旋转位置编码键 (Rotary Position Embedding Key) 投影: dim -> d_r
+    w_uk: Linear, // 内容键 (Content Key) 上投影 (Up-Projection): d_c -> n_head * head_dim
+    w_uv: Linear, // 内容值 (Content Value) 上投影 (Up-Projection): d_c -> n_head * head_dim
+    core: ScaledDotProductAttention = .{}, // 缩放点积注意力核心子模块 (Scaled Dot-Product Attention, SDPA)
+    o_proj: Linear, // 输出投影 (Output Projection): n_head * head_dim -> dim
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "MLALayer",
@@ -560,7 +647,7 @@ pub const MLALayer = struct {
         self.o_proj.zeroGrad();
     }
 
-    /// 全序列前向传播 (经由计算图执行，支持 Autograd 梯度回传)
+    /// 全序列前向传播 (经由计算图执行，支持自动微分 (Automatic Differentiation, Autograd) 梯度回传)
     pub fn forward(self: MLALayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
@@ -580,19 +667,19 @@ pub const MLALayer = struct {
             x_2d = try graph.reshape(x, &.{ B * T, C });
         }
 
-        // 1. 投影 Q, 潜在 c_kv, 解耦 RoPE Key k_r
+        // 1. 投影查询 (Query, Q)、潜在键值向量 (Latent Key-Value, c_kv) 与解耦旋转位置编码键 (Decoupled Rotary Position Embedding Key, k_r)
         const q_all = try self.q_proj.forward(graph, x_2d); // [B*T, nh * (hd + dr)]
 
         const c_kv = try self.w_dkv.forward(graph, x_2d); // [B*T, d_c]
 
         const k_r_2d = try self.w_kr.forward(graph, x_2d); // [B*T, d_r]
 
-        // 2. 上投影还原内容键 Kc 与内容值 Vc
+        // 2. 上投影还原内容键 (Content Key, Kc) 与内容值 (Content Value, Vc)
         const k_c_2d = try self.w_uk.forward(graph, c_kv); // [B*T, nh * hd]
 
         const v_c_2d = try self.w_uv.forward(graph, c_kv); // [B*T, nh * hd]
 
-        // 3. 重塑并转置为 4D 多头结构，对 Query 的 RoPE 子空间与共享 k_r 施加旋转位置编码
+        // 3. 重塑并转置为四维 (4-Dimensional, 4D) 多头结构，对查询 (Query) 的旋转位置编码 (Rotary Position Embedding, RoPE) 子空间与共享 k_r 施加旋转位置编码
         const q_4d = try graph.reshape(q_all, &.{ B, T, nh, q_head_dim });
         const q_trans = try graph.transposeND(q_4d, 1, 2);
         const q_rot = try graph.ropeOffset(q_trans, 0, hd);
@@ -610,28 +697,10 @@ pub const MLALayer = struct {
         const v_4d = try graph.reshape(v_c_2d, &.{ B, T, nh, hd });
         const v = try graph.transposeND(v_4d, 1, 2);
 
-        // 4. 缩放点积因果注意力: Softmax((Q * K^T) / sqrt(hd + dr) + M) * V
-        const k_t = try graph.transposeND(k_full, 2, 3);
+        // 4. 委托给缩放点积注意力核心 (Scaled Dot-Product Attention, SDPA): Softmax((Q * K^T) / sqrt(hd + dr) + M) * V
+        const y_4d = try self.core.forwardCore(graph, q_rot, k_full, v);
 
-        const att = try graph.batchMatMul(q_rot, k_t);
-
-        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(q_head_dim)));
-        const att_scaled = try graph.mulScalar(att, scale);
-
-        const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
-        mask_node.is_buffer = true;
-        for (0..T) |i| {
-            for (i + 1..T) |j| {
-                mask_node.data[i * T + j] = -1e9;
-            }
-        }
-        const att_masked = try graph.add(att_scaled, mask_node);
-
-        const att_sm = try graph.softmax(att_masked);
-
-        const y_4d = try graph.batchMatMul(att_sm, v);
-
-        // 5. 合并多头并经输出投影 o_proj 输出特征
+        // 5. 合并多头并经输出投影 (Output Projection, o_proj) 输出特征
         const y_trans = try graph.transposeND(y_4d, 1, 2);
 
         const y_2d = try graph.reshape(y_trans, &.{ B * T, nh * hd });
@@ -645,8 +714,8 @@ pub const MLALayer = struct {
         return out_2d;
     }
 
-    /// MLA 推理期矩阵吸收 (Weight Absorption) 单步自回归生成
-    /// 完全在低维潜在空间进行注意力计算与累加，绝不展开高维 KV 张量
+    /// 多头潜在注意力 (Multi-Head Latent Attention, MLA) 推理期权重矩阵吸收 (Weight Matrix Absorption) 单步自回归生成
+    /// 完全在低维潜在空间进行注意力计算与累加，绝不展开高维键值 (Key-Value, KV) 张量
     pub fn forwardInference(self: MLALayer, allocator: std.mem.Allocator, x: *Tensor, cache: *MLACache) !*Tensor {
         const B = if (x.shape.len == 3) x.shape.dims[0] else 1;
         const C = self.dim;
@@ -662,12 +731,12 @@ pub const MLALayer = struct {
 
         const x_2d = if (x.shape.len != 2) try step_g.reshape(x, &.{ B, C }) else x;
 
-        // 1. 投影当前 Token 的 Q, c_kv 与 k_r
+        // 1. 投影当前词元 (Token) 的查询 (Query, Q)、潜在键值 (Latent Key-Value, c_kv) 与解耦旋转键 (Rotary Key, k_r)
         const q_all = try self.q_proj.forward(&step_g, x_2d);
         const c_kv_step = try self.w_dkv.forward(&step_g, x_2d);
         const k_r_step = try self.w_kr.forward(&step_g, x_2d);
 
-        // 2. 施加 RoPE 并写入 MLACache
+        // 2. 施加旋转位置编码 (Rotary Position Embedding, RoPE) 并写入多头潜在注意力缓存 (Multi-Head Latent Attention Cache, MLACache)
         const t = cache.curr_len;
         std.debug.assert(t < cache.max_len);
 
@@ -683,7 +752,7 @@ pub const MLALayer = struct {
         cache.curr_len += 1;
         const curr_len = cache.curr_len;
 
-        // 3. 矩阵吸收计算注意力
+        // 3. 权重矩阵吸收 (Weight Matrix Absorption) 计算注意力
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hd + dr)));
         const y_tensor = try step_g.zeros(&.{ B, nh * hd }, false);
         const y_concat = y_tensor.data;
@@ -728,7 +797,7 @@ pub const MLALayer = struct {
                     if (s > max_score) max_score = s;
                 }
 
-                // Softmax
+                // 归一化指数函数 (Softmax)
                 var exp_sum: f32 = 0.0;
                 for (scores) |*s| {
                     const e = @exp(s.* - max_score);
@@ -762,7 +831,7 @@ pub const MLALayer = struct {
             }
         }
 
-        // 4. 投影输出 o_proj，并拷贝到调用方分配器上 (局部计算图随函数返回释放)
+        // 4. 投影输出 (Output Projection, o_proj)，并拷贝到调用方分配器上 (局部计算图随函数返回释放)
         const out_proj = try self.o_proj.forward(&step_g, y_tensor);
         const out_shape: []const usize = if (x.shape.len == 3) &.{ B, 1, C } else &.{ B, C };
         return try tensor.array(allocator, out_shape, out_proj.data);

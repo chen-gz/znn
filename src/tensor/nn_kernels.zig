@@ -61,7 +61,7 @@ pub fn conv2dWithConfig(
         defer allocator.free(col_buf);
 
         for (0..N) |n| {
-            // im2col: 展平当前样本的所有感受野窗口为 [K_col, L_out] 矩阵
+            // 图像转列 (Image to Column, im2col): 展平当前样本的所有感受野窗口为 [K_col, L_out] 矩阵
             for (0..C_in) |ci| {
                 for (0..KH) |kh| {
                     for (0..KW) |kw| {

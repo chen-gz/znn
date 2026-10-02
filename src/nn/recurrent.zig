@@ -6,7 +6,7 @@ const Tensor = tensor.Tensor;
 const Linear = core.Linear;
 
 // ============================================================================
-// 循环神经网络模块 (Recurrent Neural Network Modules)
+// 循环神经网络模块 (Recurrent Neural Network, RNN Modules)
 // ============================================================================
 
 /// 未传入初始状态时创建的全零状态 `[batch, hidden]`。
@@ -26,7 +26,7 @@ fn zeroState(
     return state;
 }
 
-/// 单步经典 Elman RNN 单元 (RNNCell)
+/// 单步经典 Elman 循环神经网络单元 (Recurrent Neural Network Cell, RNNCell)
 /// 隐状态更新公式：h_t = tanh(W_ih * x_t + W_hh * h_{t-1} + b)
 pub const RNNCell = struct {
     input_dim: usize,
@@ -116,13 +116,13 @@ pub const RNNCell = struct {
     }
 };
 
-/// Elman RNN 序列前向传播返回结果
+/// Elman 循环神经网络 (Recurrent Neural Network, RNN) 序列前向传播返回结果
 pub const RNNResult = struct {
     outputs: []*Tensor,
     h_n: *Tensor,
 };
 
-/// 沿时间展开的 Elman RNN 序列容器
+/// 沿时间展开的 Elman 循环神经网络 (Recurrent Neural Network, RNN) 序列容器
 pub const RNN = struct {
     cell: RNNCell,
     input_dim: usize,
@@ -218,13 +218,13 @@ pub const RNN = struct {
     }
 };
 
-/// LSTM 单元内部状态对 (h_t, c_t)
+/// 长短期记忆网络 (Long Short-Term Memory, LSTM) 单元内部状态对 (h_t, c_t)
 pub const LSTMState = struct {
     h: *Tensor,
     c: *Tensor,
 };
 
-/// 单步长短期记忆网络单元 (LSTMCell)
+/// 单步长短期记忆网络单元 (Long Short-Term Memory Cell, LSTMCell)
 /// 包含遗忘门 (f)、输入门 (i)、候选状态 (c_cand)、输出门 (o)
 pub const LSTMCell = struct {
     input_dim: usize,
@@ -407,14 +407,14 @@ pub const LSTMCell = struct {
     }
 };
 
-/// 单层 LSTM 序列前向传播返回结果
+/// 单层长短期记忆网络 (Long Short-Term Memory, LSTM) 序列前向传播返回结果
 pub const LSTMResult = struct {
     outputs: []*Tensor,
     h_n: *Tensor,
     c_n: *Tensor,
 };
 
-/// 沿时间展开的单层 LSTM 序列容器
+/// 沿时间展开的单层长短期记忆网络 (Long Short-Term Memory, LSTM) 序列容器
 pub const LSTM = struct {
     cell: LSTMCell,
     input_dim: usize,
@@ -518,14 +518,14 @@ pub const LSTM = struct {
     }
 };
 
-/// 多层堆叠 LSTM 序列前向传播返回结果
+/// 多层堆叠长短期记忆网络 (Stacked Long Short-Term Memory, StackedLSTM) 序列前向传播返回结果
 pub const StackedLSTMResult = struct {
     outputs: []*Tensor,
     h_n: []*Tensor,
     c_n: []*Tensor,
 };
 
-/// 多层堆叠 LSTM (Stacked / Deep LSTM) 引擎
+/// 多层堆叠长短期记忆网络 (Stacked Long Short-Term Memory, StackedLSTM) 引擎
 pub const StackedLSTM = struct {
     num_layers: usize,
     input_dim: usize,
@@ -687,7 +687,7 @@ pub const StackedLSTM = struct {
     }
 };
 
-/// 门控循环单元 (GRUCell)
+/// 门控循环单元 (Gated Recurrent Unit Cell, GRUCell)
 pub const GRUCell = struct {
     input_dim: usize,
     hidden_dim: usize,
@@ -832,13 +832,13 @@ pub const GRUCell = struct {
     }
 };
 
-/// 单层 GRU 序列前向传播返回结果
+/// 单层门控循环单元 (Gated Recurrent Unit, GRU) 序列前向传播返回结果
 pub const GRUResult = struct {
     outputs: []*Tensor,
     h_n: *Tensor,
 };
 
-/// 沿时间展开的单层 GRU 序列容器
+/// 沿时间展开的单层门控循环单元 (Gated Recurrent Unit, GRU) 序列容器
 pub const GRU = struct {
     cell: GRUCell,
     input_dim: usize,
