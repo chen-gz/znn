@@ -44,7 +44,7 @@ pub fn freePersistentTensor(allocator: std.mem.Allocator, t: *Tensor) void {
 }
 
 // ============================================================================
-// 线性层 (Linear) 与卷积模块 (Conv2D, ConvTranspose2D)
+// 线性层 (Linear) 与二维卷积模块 (2D Convolution, Conv2D / 2D Transposed Convolution, ConvTranspose2D)
 // ============================================================================
 
 pub const Linear = struct {

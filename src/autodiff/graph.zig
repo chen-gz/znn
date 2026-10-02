@@ -427,7 +427,7 @@ pub const Graph = struct {
         return outputs;
     }
 
-    // GQA 注意力中沿 Head 维度复制广播 Key / Value 张量 (RepeatKV)
+    // 分组查询注意力 (Grouped-Query Attention, GQA) 中沿注意力头维度复制广播键/值 (Key/Value, KV) 张量 (RepeatKV)
     // 输入 X: [B, num_kv_heads, T, hs]
     // 输出 Y: [B, num_kv_heads * groups, T, hs]
     pub fn repeatKV(self: *Graph, X: *Tensor, groups: usize) !*Tensor {
@@ -462,7 +462,7 @@ pub const Graph = struct {
         return self.add(A, bias);
     }
 
-    // 激活函数 ReLU 前向传播：C = max(0, A)
+    // 修正线性单元 (Rectified Linear Unit, ReLU) 激活函数前向传播：C = max(0, A)
     pub fn relu(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.relu(allocator);
@@ -523,7 +523,7 @@ pub const Graph = struct {
         );
     }
 
-    // 激活函数 SiLU (Swish) 前向传播：C = A * sigmoid(A)
+    // Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU / Swish) 激活函数前向传播：C = A * sigmoid(A)
     pub fn silu(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
         const C = try A.silu(allocator);

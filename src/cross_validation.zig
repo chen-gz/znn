@@ -135,7 +135,7 @@ pub const StandardScaler = struct {
     }
 };
 
-/// Cross-Validation Result for a specific hyperparameter configuration
+/// Cross-Validation (CV) Result for a specific hyperparameter configuration
 pub const CVResult = struct {
     alpha: f32,
     l1_ratio: f32 = 1.0,
@@ -149,7 +149,7 @@ pub const CVResult = struct {
     }
 };
 
-/// Configuration options for K-Fold Cross-Validation
+/// Configuration options for K-Fold Cross-Validation (CV)
 pub const CrossValidationOptions = struct {
     k_splits: usize = 5,
     random_seed: u64 = 42,
@@ -161,7 +161,7 @@ pub const CrossValidationOptions = struct {
     }
 };
 
-/// 5-Fold Grid Search Engine for Lasso and Elastic Net Hyperparameter Tuning
+/// 5-Fold Grid Search Engine for Least Absolute Shrinkage and Selection Operator (LASSO) and Elastic Net Hyperparameter Tuning
 pub const CrossValidationGridSearch = struct {
     allocator: std.mem.Allocator,
     k_splits: usize = 5,
@@ -194,7 +194,7 @@ pub const CrossValidationGridSearch = struct {
         self.results.deinit(self.allocator);
     }
 
-    /// Evaluates Lasso across a list of candidate alpha values
+    /// Evaluates Least Absolute Shrinkage and Selection Operator (LASSO) across a list of candidate alpha values
     pub fn searchLasso(
         self: *CrossValidationGridSearch,
         X: []const f32,
@@ -262,11 +262,11 @@ pub const CrossValidationGridSearch = struct {
                 defer self.allocator.free(X_va_scaled);
                 scaler.transform(X_va, N_va, n_features, X_va_scaled);
 
-                // Fit Lasso
+                // Fit Least Absolute Shrinkage and Selection Operator (LASSO)
                 var model = try regression.solveLasso(self.allocator, X_tr_scaled, y_tr, N_tr, n_features, alpha, 1000, 1e-4);
                 defer model.deinit();
 
-                // Compute validation MSE
+                // Compute validation Mean Squared Error (MSE)
                 fold_mses[k] = model.computeMSE(X_va_scaled, y_va, N_va, n_features);
             }
 
@@ -298,7 +298,7 @@ pub const CrossValidationGridSearch = struct {
             }
         }
 
-        // Determine 1-SE Rule
+        // Determine One-Standard-Error (1-SE) Rule
         const threshold_1se = self.results.items[self.best_min_index].mean_mse + self.results.items[self.best_min_index].se_mse;
         self.best_1se_index = self.best_min_index;
         for (self.results.items, 0..) |res, idx| {

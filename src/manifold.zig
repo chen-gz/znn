@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// Configuration options for t-SNE algorithm
+/// Configuration options for t-Distributed Stochastic Neighbor Embedding (t-SNE) algorithm
 pub const TSNEOptions = struct {
     n_components: usize = 2,
     perplexity: f32 = 30.0,
@@ -11,7 +11,7 @@ pub const TSNEOptions = struct {
     min_gain: f32 = 0.01,
     seed: u64 = 42,
 
-    /// Default configuration for t-SNE (2D embedding, perplexity 30, lr 200, 1000 iterations)
+    /// Default configuration for t-Distributed Stochastic Neighbor Embedding (t-SNE) (2D embedding, perplexity 30, lr 200, 1000 iterations)
     pub const default: TSNEOptions = .{};
 
     /// Callable function to obtain default TSNEOptions

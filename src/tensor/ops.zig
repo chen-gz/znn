@@ -534,7 +534,7 @@ pub fn solveRidgeAnalytical(
     out_b.* = mean_y - dot_w_mean_x;
 }
 
-/// 旋转位置编码应用算子 (RoPE)
+/// 旋转位置编码 (Rotary Position Embedding, RoPE) 应用算子
 /// x: 输入张量切片，形状 [seq_len, n_head, head_dim]
 /// head_dim 必须为偶数
 pub fn applyRoPE(
@@ -570,7 +570,7 @@ pub fn applyRoPE(
     }
 }
 
-/// 对 3D [T, n_head, head_dim] 或 4D [B, n_head, T, head_dim] 张量执行 RoPE 旋转
+/// 对三维 [T, n_head, head_dim] 或四维 [B, n_head, T, head_dim] 张量执行旋转位置编码 (Rotary Position Embedding, RoPE) 旋转
 pub fn applyRoPETensor(t: *Tensor, base_freq: f32) void {
     if (t.shape.len == 3) {
         const seq_len = t.shape.dims[0];

@@ -41,3 +41,14 @@
 ## 4. Configuration Structs (配置结构体默认值)
 - Every options / config / hyperparameter struct (e.g. `TSNEOptions`, `InitOptions`, `DataLoaderOptions`, `AdamWConfig`) gives each field a sensible default so that `.{}` is a valid configuration, and exposes `pub fn defaultOptions() Self` (or `defaultConfig()`) returning `.{}`.
 - Models, optimizers and pipelines that take such a struct offer a convenient entry point that uses the defaults (e.g. `initDefault()`), so callers need no boilerplate.
+
+## 5. Comment & Terminology Conventions (注释缩写规范)
+- **Full Name Before Abbreviation (注释中使用缩写时先写全称再接缩写)**: Whenever an abbreviation or acronym is used in source code comments (`//` or `///`), always write out its full name first, followed by the abbreviation in parentheses — for example:
+  - `缩放点积注意力 (Scaled Dot-Product Attention, SDPA)`
+  - `多头潜在注意力 (Multi-head Latent Attention, MLA)`
+  - `低秩自适应 (Low-Rank Adaptation, LoRA)`
+  - `旋转位置编码 (Rotary Position Embedding, RoPE)`
+  - `键值缓存 (Key-Value Cache, KVCache)`
+  - `均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)`
+  - `直接偏好优化 (Direct Preference Optimization, DPO)` / `群组相对策略优化 (Group Relative Policy Optimization, GRPO)`
+

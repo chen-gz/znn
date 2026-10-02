@@ -8,10 +8,10 @@ pub const broadcastShapes = shape_mod.broadcastShapes;
 pub const computeBroadcastStrides = shape_mod.computeBroadcastStrides;
 
 // ============================================================================
-// 2. 数据类型系统与泛型张量 (DType System & Generic Tensor)
+// 2. 数据类型系统与泛型张量 (Data Type, DType System & Generic Tensor)
 // ============================================================================
 
-/// 统一标量数据类型枚举 (DType)
+/// 统一标量数据类型枚举 (Data Type, DType)
 pub const DType = enum {
     f32,
     f64,
@@ -32,8 +32,8 @@ pub const DType = enum {
     }
 };
 
-/// Brain Floating Point 16-bit 格式 (bfloat16)
-/// 符号位 1 位，指数位 8 位，尾数位 7 位（与 IEEE 754 f32 动态范围完全相同）
+/// 脑浮点数 16 位格式 (Brain Floating Point 16-bit, bfloat16 / bf16)
+/// 符号位 1 位，指数位 8 位，尾数位 7 位（与电气与电子工程师协会 (Institute of Electrical and Electronics Engineers, IEEE) 754 标准的 32 位单精度浮点数 f32 动态范围完全相同）
 pub const bf16 = packed struct {
     bits: u16,
 

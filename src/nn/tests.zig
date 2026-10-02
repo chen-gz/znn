@@ -1329,3 +1329,32 @@ test "Recurrent zero initial states are named module buffers" {
         }
     }
 }
+
+test "ScaledDotProductAttention standalone causal and non-causal forward and backward" {
+    const allocator = std.testing.allocator;
+    var g = autodiff.Graph.init(allocator);
+    defer g.deinit();
+
+    const q = try g.tensorNDWithData(&.{ 1, 1, 2, 2 }, &.{ 1.0, 0.0, 0.0, 1.0 }, true);
+    const k = try g.tensorNDWithData(&.{ 1, 1, 2, 2 }, &.{ 1.0, 0.0, 0.0, 1.0 }, true);
+    const v = try g.tensorNDWithData(&.{ 1, 1, 2, 2 }, &.{ 2.0, 4.0, 6.0, 8.0 }, true);
+
+    var sdpa_causal = transformer.ScaledDotProductAttention.initDefault();
+    sdpa_causal.setName("sdpa");
+    const out_causal = try sdpa_causal.forward(&g, q, k, v);
+    try std.testing.expectEqual(@as(usize, 4), out_causal.shape.len);
+    // Position 0 only attends to position 0 (causal mask blocks position 1): output[0] == v[0] = [2.0, 4.0]
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), out_causal.data[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), out_causal.data[1], 1e-4);
+
+    const sdpa_bidir = transformer.ScaledDotProductAttention.init(.{ .causal = false });
+    const out_bidir = try sdpa_bidir.forward(&g, q, k, v);
+    // Without causal mask, position 0 also attends to position 1 with non-zero weight, so output[0] > v[0]
+    try std.testing.expect(out_bidir.data[0] > 2.5);
+    try std.testing.expect(out_bidir.data[1] > 4.5);
+
+    const loss = try g.sum(out_causal, null, false);
+    try g.backward(loss);
+    try std.testing.expect(v.grad[0] > 0.0);
+}
+

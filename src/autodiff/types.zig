@@ -26,40 +26,40 @@ pub const OpType = enum {
     Transpose, // 维度转置
     Concat, // 张量沿指定维度拼接
     Split, // 张量沿指定维度切分
-    RepeatKV, // GQA 注意力中沿 Head 维度复制广播 Key/Value 张量
+    RepeatKV, // 分组查询注意力 (Grouped-Query Attention, GQA) 中沿注意力头维度复制广播键/值 (Key/Value, KV) 张量
     Slice, // 多维跨步切片
 
     // --- 激活函数与非线性变换 (Activation Functions) ---
-    Relu, // 激活函数 ReLU
-    LeakyRelu, // 激活函数 LeakyReLU
-    Gelu, // 激活函数 GELU
-    Silu, // 激活函数 SiLU / Swish
+    Relu, // 修正线性单元 (Rectified Linear Unit, ReLU) 激活函数
+    LeakyRelu, // 带泄露修正线性单元 (Leaky Rectified Linear Unit, LeakyReLU) 激活函数
+    Gelu, // 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数
+    Silu, // Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU / Swish) 激活函数
     Sigmoid, // 激活函数 Sigmoid
-    Tanh, // 激活函数 Tanh
-    Softmax, // 独立 Softmax (Standalone Softmax)
+    Tanh, // 双曲正切函数 (Hyperbolic Tangent, Tanh) 激活函数
+    Softmax, // 独立归一化指数函数 (Standalone Softmax)
 
     // --- 神经网络层与结构运算 (Neural Network Layers & Structural Ops) ---
-    Conv2D, // 二维卷积
-    ConvTranspose2D, // 二维转置卷积 / 反卷积
-    MaxPool2D, // 二维最大池化
-    AvgPool2D, // 二维平均池化
-    RmsNorm, // RMSNorm 归一化
-    LayerNorm, // LayerNorm 层归一化
-    BatchNorm2d, // 二维批量归一化
+    Conv2D, // 二维卷积 (2D Convolution, Conv2D)
+    ConvTranspose2D, // 二维转置卷积 / 反卷积 (2D Transposed Convolution, ConvTranspose2D)
+    MaxPool2D, // 二维最大池化 (2D Max Pooling, MaxPool2D)
+    AvgPool2D, // 二维平均池化 (2D Average Pooling, AvgPool2D)
+    RmsNorm, // 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)
+    LayerNorm, // 层归一化 (Layer Normalization, LayerNorm)
+    BatchNorm2d, // 二维批量归一化 (2D Batch Normalization, BatchNorm2d)
     Dropout, // 随机丢弃正则化
-    RoPE, // 旋转位置编码 (Rotary Position Embedding)
+    RoPE, // 旋转位置编码 (Rotary Position Embedding, RoPE)
     Embedding, // 嵌入查找 (Embedding Lookup)
 
     // --- 损失函数与正则化 (Loss Functions & Regularization) ---
-    MseLoss, // 均方误差损失函数 (MSE Loss)
-    BceLoss, // 二元交叉熵损失函数 (BCE Loss)
-    BceWithLogitsLoss, // 二元交叉熵带 Logits 损失函数
-    SigmoidCrossEntropy, // Sigmoid 交叉熵损失 (BCE with logits)
+    MseLoss, // 均方误差损失函数 (Mean Squared Error, MSE Loss)
+    BceLoss, // 二元交叉熵损失函数 (Binary Cross-Entropy, BCE Loss)
+    BceWithLogitsLoss, // 二元交叉熵带对数几率损失函数 (Binary Cross-Entropy with Logits, BCEWithLogitsLoss)
+    SigmoidCrossEntropy, // Sigmoid 二元交叉熵损失 (Binary Cross-Entropy, BCE with Logits)
     SoftmaxCrossEntropy, // 结合 Softmax 与交叉熵损失（数值稳定性更好）
-    DpoLoss, // 直接偏好优化损失 (Direct Preference Optimization Loss)
-    GrpoLoss, // 组相对策略优化损失 (Group Relative Policy Optimization Loss)
-    L1Loss, // L1 正则化 / Lasso Loss: lambda * sum(|w|)
-    L2Loss, // L2 正则化 / Ridge Loss: 0.5 * lambda * sum(w^2)
+    DpoLoss, // 直接偏好优化损失 (Direct Preference Optimization, DPO Loss)
+    GrpoLoss, // 群组相对策略优化损失 (Group Relative Policy Optimization, GRPO Loss)
+    L1Loss, // 一阶范数 (L1 Norm) 正则化 / 最小绝对收缩和选择算子 (Least Absolute Shrinkage and Selection Operator, LASSO) 损失: lambda * sum(|w|)
+    L2Loss, // 二阶范数 (L2 Norm) 正则化 / 岭回归 (Ridge) 损失: 0.5 * lambda * sum(w^2)
 
     /// 算子内置的标准 LaTeX 数学表达式
     pub fn getFormula(self: OpType) []const u8 {

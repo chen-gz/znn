@@ -45,7 +45,7 @@ pub fn softmaxCrossEntropy(self: *Graph, logits: *Tensor, targets: anytype) !*Te
     );
 }
 
-// 监督微调 (SFT) 掩码交叉熵损失：仅对 mask[i] > 0 的位置计算交叉熵并支持 Autograd 反向传播
+// 监督微调 (Supervised Fine-Tuning, SFT) 掩码交叉熵损失：仅对 mask[i] > 0 的位置计算交叉熵并支持自动微分 (Automatic Differentiation, Autograd) 反向传播
 pub fn maskedCrossEntropyLoss(self: *Graph, logits: *Tensor, targets: anytype, mask: []const f32) !*Tensor {
     const B = logits.shape.dims[0];
     const N = logits.shape.dims[1];
@@ -84,7 +84,7 @@ pub fn maskedCrossEntropyLoss(self: *Graph, logits: *Tensor, targets: anytype, m
     );
 }
 
-// 直接偏好优化 (DPO) 损失函数：支持对策略模型对数概率 pi_chosen_logps / pi_rejected_logps 的计算图反向传播
+// 直接偏好优化 (Direct Preference Optimization, DPO) 损失函数：支持对策略模型对数概率 pi_chosen_logps / pi_rejected_logps 的计算图反向传播
 pub fn dpoLoss(
     self: *Graph,
     pi_chosen_logps: *Tensor,
@@ -122,7 +122,7 @@ pub fn dpoLoss(
     );
 }
 
-// 组相对策略优化 (GRPO) 损失函数：支持在计算图中对 new_logps 自动微分求导
+// 群组相对策略优化 (Group Relative Policy Optimization, GRPO) 损失函数：支持在计算图中对 new_logps 自动微分求导
 pub fn grpoLoss(
     self: *Graph,
     old_logps: *Tensor,
@@ -168,7 +168,7 @@ pub fn grpoLoss(
     );
 }
 
-// 均方误差 (MSE) 损失函数：C = 1/N * sum((y_pred - y_true)^2)
+// 均方误差 (Mean Squared Error, MSE) 损失函数：C = 1/N * sum((y_pred - y_true)^2)
 pub fn mseLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor) !*Tensor {
     const req_grad = self.enable_grad and (y_pred.requires_grad or y_true.requires_grad);
     const loss = try self.tensor(1, 1, req_grad);
@@ -221,7 +221,7 @@ pub fn randomUniform(self: *Graph, shape_slice: []const usize, random: std.Rando
     return t;
 }
 
-// L2 正则化损失函数：C = 0.5 * lambda * sum(weight_i^2)
+// 二阶范数 (L2 Norm) 正则化损失函数：C = 0.5 * lambda * sum(weight_i^2)
 pub fn l2Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
     const req_grad = self.enable_grad and weight.requires_grad;
     const loss = try self.tensor(1, 1, req_grad);
@@ -242,7 +242,7 @@ pub fn ridgeLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor
     return try self.add(mse, l2);
 }
 
-// L1 正则化损失：Loss = lambda * sum(|weight_i|)
+// 一阶范数 (L1 Norm) 正则化损失：Loss = lambda * sum(|weight_i|)
 pub fn l1Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
     const req_grad = self.enable_grad and weight.requires_grad;
     const loss = try self.tensor(1, 1, req_grad);
@@ -255,7 +255,7 @@ pub fn l1Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
     );
 }
 
-// Lasso 组合损失函数：Loss = MSE(y_pred, y_true) + lambda * sum(|weight_i|)
+// 最小绝对收缩和选择算子 (Least Absolute Shrinkage and Selection Operator, LASSO) 组合损失函数：Loss = MSE(y_pred, y_true) + lambda * sum(|weight_i|)
 pub fn lassoLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor, lambda: f32) !*Tensor {
     const mse = try self.mseLoss(y_pred, y_true);
     if (lambda == 0.0) return mse;
@@ -263,7 +263,7 @@ pub fn lassoLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor
     return try self.add(mse, l1);
 }
 
-// Elastic Net 组合损失函数：Loss = MSE(y_pred, y_true) + lambda * rho * ||w||_1 + 0.5 * lambda * (1 - rho) * ||w||_2^2
+// 弹性网络 (Elastic Net) 组合损失函数：Loss = MSE(y_pred, y_true) + lambda * rho * ||w||_1 + 0.5 * lambda * (1 - rho) * ||w||_2^2
 pub fn elasticNetLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor, lambda: f32, l1_ratio: f32) !*Tensor {
     const mse = try self.mseLoss(y_pred, y_true);
     if (lambda == 0.0) return mse;

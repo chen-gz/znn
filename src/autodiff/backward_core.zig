@@ -61,7 +61,7 @@ pub fn backwardCore(self: *Op) !void {
             }
         },
         // ====================================================================
-        // 2. ReLU 激活函数反向传播 (ReLU Backward)
+        // 2. 修正线性单元 (Rectified Linear Unit, ReLU) 激活函数反向传播 (ReLU Backward)
         // ====================================================================
         .Relu => {
             const A = self.inputs[0];
@@ -75,7 +75,7 @@ pub fn backwardCore(self: *Op) !void {
             }
         },
         // ====================================================================
-        // 3.5. GELU 激活函数反向传播 (GELU Backward)
+        // 3.5. 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数反向传播 (GELU Backward)
         // ====================================================================
         .Gelu => {
             const A = self.inputs[0];

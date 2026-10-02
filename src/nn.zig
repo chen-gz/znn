@@ -74,7 +74,7 @@ pub const BatchNorm2d = normalization.BatchNorm2d;
 pub const Dropout = normalization.Dropout;
 pub const AvgPool2D = normalization.AvgPool2D;
 
-// 4. 循环神经网络 (Recurrent Neural Networks)
+// 4. 循环神经网络 (Recurrent Neural Networks, RNN)
 pub const RNNCell = recurrent.RNNCell;
 pub const RNN = recurrent.RNN;
 pub const RNNResult = recurrent.RNNResult;

@@ -76,7 +76,7 @@ pub fn backwardNN(self: *Op) !void {
                         const dC_n = C.grad[n * C_out * L_out .. (n + 1) * C_out * L_out];
 
                         if (W.requires_grad) {
-                            // im2col(A_n) -> col_buf [K_col, L_out]
+                            // 图像转列 (Image to Column, im2col) 展开 A_n -> col_buf [K_col, L_out]
                             for (0..C_in) |ci| {
                                 for (0..KH) |kh| {
                                     for (0..KW) |kw| {
@@ -141,7 +141,7 @@ pub fn backwardNN(self: *Op) !void {
                                 @intCast(L_out),
                             );
 
-                            // col2im(col_buf) -> A.grad[n]
+                            // 列转图像 (Column to Image, col2im) 累加 col_buf -> A.grad[n]
                             for (0..C_in) |ci| {
                                 for (0..KH) |kh| {
                                     for (0..KW) |kw| {
