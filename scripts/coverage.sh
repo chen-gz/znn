@@ -72,7 +72,7 @@ zig build test --summary none
 
 # Ensure test binaries exist
 BINARIES=()
-for b in "root_tests" "cnn_tests" "exe_tests"; do
+for b in "root_tests" "cnn_tests" "exe_tests" "bench_tests"; do
     if [ -f "zig-out/bin/${b}" ]; then
         BINARIES+=("zig-out/bin/${b}")
     fi

@@ -1034,5 +1034,56 @@ test "GenericTensor core ops, BoolTensor where/maskedFill, and integer Embedding
     const slice_out = try w_emb.embedding(&[_]usize{ 2, 1 }, allocator);
     defer free(allocator, slice_out);
     try std.testing.expectEqualSlices(f32, &[_]f32{ 5.0, 6.0, 3.0, 4.0 }, slice_out.data);
+
+    // 4. GenericTensor.transposeView verification and bounds check
+    const rect_int = try IntTensor.fromSlice(allocator, &.{ 2, 3 }, &[_]i32{ 1, 2, 3, 4, 5, 6 });
+    defer rect_int.deinit(allocator);
+    const trans_int = try rect_int.transposeView(0, 1, allocator);
+    defer trans_int.deinit(allocator);
+    try std.testing.expect(trans_int.is_view);
+    try std.testing.expectEqual(@as(usize, 3), trans_int.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), trans_int.shape.dims[1]);
+    try std.testing.expectEqual(@as(i32, 4), trans_int.get(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(i32, 3), trans_int.get(&.{ 2, 0 }));
+    try std.testing.expectError(error.InvalidDimension, rect_int.transposeView(0, 2, allocator));
+}
+
+test "StaticTensor compile-time shaped arithmetic, matmul, transpose, reshape, and dynamic conversion" {
+    const allocator = std.testing.allocator;
+    const StaticTensor = @import("static.zig").StaticTensor;
+
+    const A = StaticTensor(f32, &.{ 2, 3 }).fromSlice(&.{
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+    });
+    const B = StaticTensor(f32, &.{ 3, 2 }).fromSlice(&.{
+        7.0, 8.0,
+        9.0, 1.0,
+        2.0, 3.0,
+    });
+
+    const C = A.matmul(B);
+    try std.testing.expectEqual(@as(usize, 2), @TypeOf(C).shape[0]);
+    try std.testing.expectEqual(@as(usize, 2), @TypeOf(C).shape[1]);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 31.0, 19.0, 85.0, 55.0 }, &C.data);
+
+    const AT = A.transpose();
+    try std.testing.expectEqual(@as(usize, 3), @TypeOf(AT).shape[0]);
+    try std.testing.expectEqual(@as(usize, 2), @TypeOf(AT).shape[1]);
+    try std.testing.expectEqual(@as(f32, 4.0), AT.get(.{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 3.0), AT.get(.{ 2, 0 }));
+
+    const flat = A.reshape(.{6});
+    try std.testing.expectEqual(@as(usize, 6), @TypeOf(flat).numel());
+    try std.testing.expectEqual(@as(f32, 6.0), flat.get(.{5}));
+
+    const sum_ab = C.add(StaticTensor(f32, .{ 2, 2 }).ones());
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 32.0, 20.0, 86.0, 56.0 }, &sum_ab.data);
+
+    const dyn_t = try C.toDynamic(allocator);
+    defer free(allocator, dyn_t);
+    try std.testing.expectEqual(@as(usize, 2), dyn_t.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), dyn_t.shape.dims[1]);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 31.0, 19.0, 85.0, 55.0 }, dyn_t.data);
 }
 

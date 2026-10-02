@@ -21,11 +21,12 @@
 
 | 模块 | 文档名称 | 核心主题与内容概要 |
 | :--- | :--- | :--- |
-| **01. 系统全景架构** | [系统全景架构设计 (architecture.md)](architecture.md) | 系统分层模型、张量引擎与跨步内存、反向传播与动态计算图、参数反射、前沿 Transformer 与循环网络、解耦优化器与学习率调度器、Safetensors 与二进制 Checkpoint、内存生命周期与软硬件加速。 |
-| **02. 模型图导出** | [模型图导出 (model-graph-visualization.md)](model-graph-visualization.md) | 模块作用域（`enterModule` / `enterChildScope`）、作用域局部图与端口（`@in<k>` / `@out<k>`）、透明算子折叠、JSON Schema 与枚举字段、修改导出格式的步骤。 |
-| **03. 技术差距分析** | [现代 NumPy 2.x 差距诊断 (NUMPY_GAP_ANALYSIS.md)](../plan/NUMPY_GAP_ANALYSIS.md) | 9 大能力维度深度对比表（泛型 Dtype、零拷贝切片、多轴归约、线性代数等）、设计权衡与演进阶段规划。 |
-| **04. 研发任务清单** | [架构诊断与分阶段任务跟踪 (TODO.md)](../plan/TODO.md) | 6 大核心维度的成熟度诊断与演进状态跟踪、P0 至 P3 分阶段攻坚任务明细。 |
-| **05. 版本更新历史** | [版本发布与变更日志 (CHANGELOG.md)](../CHANGELOG.md) | 语义化版本记录、各版本特性增加（`Added`）、架构变更（`Changed`）与修复（`Fixed`）。 |
+| **01. 系统全景架构** | [系统全景架构设计 (architecture.md)](architecture.md) | 系统分层模型、模块化目录结构、张量引擎与跨步内存、反向传播与动态计算图、参数与训练状态反射、前沿 Transformer 与循环网络、解耦优化器与学习率调度器、Safetensors 与二进制 Checkpoint、内存生命周期与软硬件加速。 |
+| **02. 架构深度评审** | [代码库架构评审与重构报告 (framework-review.md)](framework-review.md) | 面向四大维度（目录模块化、核心抽象解耦、训练/推理/优化流水线、文档与测试基准）的深度审查、子模块拆分矩阵（单文件 `< 60 KB`）、配置结构体规范审计与演进路线图。 |
+| **03. 模型图导出** | [模型图导出 (model-graph-visualization.md)](model-graph-visualization.md) | 模块作用域（`enterModule` / `enterChildScope`）、作用域局部图与端口（`@in<k>` / `@out<k>`）、透明算子折叠、JSON Schema 与枚举字段、修改导出格式的步骤。 |
+| **04. 技术差距分析** | [现代 NumPy 2.x 差距诊断 (NUMPY_GAP_ANALYSIS.md)](../plan/NUMPY_GAP_ANALYSIS.md) | 9 大能力维度深度对比表（泛型 Dtype、编译期 StaticTensor、零拷贝切片、多轴归约、线性代数等）、设计权衡与演进阶段规划。 |
+| **05. 研发任务清单** | [架构诊断与分阶段任务跟踪 (TODO.md)](../plan/TODO.md) | 6 大核心维度的成熟度诊断与演进状态跟踪、P0 至 P3 分阶段攻坚任务明细。 |
+| **06. 版本更新历史** | [版本发布与变更日志 (CHANGELOG.md)](../CHANGELOG.md) | 语义化版本记录、各版本特性增加（`Added`）、架构变更（`Changed`）与修复（`Fixed`）。 |
 
 ---
 

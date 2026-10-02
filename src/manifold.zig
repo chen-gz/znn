@@ -20,15 +20,10 @@ pub const TSNEOptions = struct {
     }
 };
 
+const init_mod = @import("nn/init.zig");
+
 /// Normal random generator using Box-Muller transform
-pub fn normalRandom(random: std.Random) f32 {
-    var u_1: f32 = random.float(f32);
-    while (u_1 == 0.0) {
-        u_1 = random.float(f32);
-    }
-    const u_2: f32 = random.float(f32);
-    return @sqrt(-2.0 * @log(u_1)) * @cos(2.0 * std.math.pi * u_2);
-}
+pub const normalRandom = init_mod.normalRandom;
 
 /// Compute pairwise squared Euclidean distances: D_ij = ||x_i - x_j||^2
 /// Returns an N x N row-major slice allocated with `allocator`.

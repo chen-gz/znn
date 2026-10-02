@@ -5,18 +5,19 @@
 
 `znn` is a modular deep learning and LLM library written from scratch in pure **Zig 0.16.0**, with no runtime dependencies. The current version is recorded in [`build.zig.zon`](build.zig.zon); release notes are in [`CHANGELOG.md`](CHANGELOG.md).
 
-- **Tensors**: N-dimensional strided tensors, NumPy-style broadcasting, generic dtypes (`f32`, `f64`, `bf16`, `i32`, `i64`, `bool`), zero-copy slices, and a compile-time shaped `StaticTensor`.
-- **Autodiff**: dynamic reverse-mode graph with arena-allocated activations and gradients, and module scopes used by the model graph export.
-- **Layers**: `Linear`, `Conv2D`, `ConvTranspose2D`, normalization and pooling layers, RNN / LSTM / GRU, and Transformer components (causal attention with GQA / MQA, `KVCache`, MLA, SwiGLU, MoE, LoRA, GPT).
-- **Training**: SGD / Adam / AdamW, learning-rate schedulers, gradient clipping, Safetensors models and binary optimizer checkpoints, DPO / GRPO losses, BPE tokenizer.
-- **Classical ML**: OLS, Ridge, Lasso, ElasticNet, K-fold cross-validation, t-SNE.
-- **Performance**: macOS Accelerate (AMX) for GEMM, with a portable `@Vector` SIMD fallback.
+- **Tensors (`src/tensor/`)**: N-dimensional strided tensors, NumPy-style broadcasting, generic dtypes (`f32`, `f64`, `bf16`, `i32`, `i64`, `usize`, `bool`), zero-copy slices, and a compile-time shaped `StaticTensor` (`src/tensor/static.zig`).
+- **Autodiff (`src/autodiff/`)**: dynamic reverse-mode graph with arena-allocated activations and gradients, `initNoGrad` inference mode, and module scopes used by the model graph export.
+- **Layers (`src/nn/`)**: `Linear`, `Conv2D`, `ConvTranspose2D`, normalization and pooling layers, RNN / LSTM / StackedLSTM / GRU (`RNNResult`, `LSTMResult`, `StackedLSTMResult`, `GRUResult`), Transformer components (`CausalSelfAttention` with GQA / MQA, `KVCache`, `MLALayer`, `SwiGLU`, `MoELayer`, `LoRALinear`, `GPT`), and comptime model reflection (`collectParameters`, `deinitModel`, `zeroGradModel`, `setTrainingModel`, `trainModel`, `evalModel`).
+- **Training (`src/optim.zig`, `src/engine.zig`, `src/dataset.zig`)**: SGD / Adam / AdamW, learning-rate schedulers, gradient clipping, Safetensors models and binary optimizer checkpoints, SFT / DPO / GRPO losses, BPE tokenizer.
+- **Classical ML**: OLS, Ridge, Lasso, ElasticNet (`src/regression.zig`), K-fold cross-validation (`src/cross_validation.zig`), t-SNE (`src/manifold.zig`).
+- **Performance**: macOS Accelerate (AMX) for GEMM, with a portable `@Vector(8, f32)` SIMD fallback.
 
 ## Documentation
 
 | Topic | Location |
 | :--- | :--- |
 | Architecture: layers, tensor and autodiff internals, modules, optimizers, acceleration | [`doc/architecture.md`](doc/architecture.md) |
+| Architectural & codebase review report (4-dimension audit & refactoring blueprint) | [`doc/framework-review.md`](doc/framework-review.md) |
 | Model graph export (scopes, local graphs, JSON Schema) | [`doc/model-graph-visualization.md`](doc/model-graph-visualization.md) |
 | Documentation index | [`doc/README.md`](doc/README.md) |
 | Roadmap and task list | [`plan/TODO.md`](plan/TODO.md) |
@@ -59,6 +60,6 @@ zig build download-dataset -- tinyshakespeare  # also: wikitext2, tinystories, a
 | `zig build run-shakespeare` | [`train_shakespeare.zig`](examples/train_shakespeare.zig) | Mini-GPT on TinyShakespeare with text generation |
 | `zig build run-llm` | [`llm_training.zig`](examples/llm_training.zig) | BPE + SwiGLU + AdamW + SFT + LoRA + DPO pipeline |
 | `zig build run-report` | [`export_model_report.zig`](examples/export_model_report.zig) | Model graph JSON export (`sample_model_graph.json`, `minimal_model_graph.json`) |
+| `zig build run-book-models` | [`export_book_models.zig`](examples/export_book_models.zig) | Export Schema 2.0 JSON graphs for all 18 canonical book models (`examples/models/*.json`) |
+| `zig build run-static` | [`comptime_static_tensor.zig`](examples/comptime_static_tensor.zig) | Compile-time shape-checked `StaticTensor` demonstration |
 | `zig build run-bench` | [`benchmark.zig`](examples/benchmark.zig) | Benchmark CLI |
-
-[`comptime_static_tensor.zig`](examples/comptime_static_tensor.zig) demonstrates the compile-time shaped tensor.

@@ -20,7 +20,6 @@ const calculateGain = root.calculateGain;
 const InitMethod = root.InitMethod;
 const InitOptions = root.InitOptions;
 const initWeights = root.initWeights;
-const initializeWeights = root.initializeWeights;
 const autoSequential = root.autoSequential;
 const GenericTensor = root.GenericTensor;
 const TensorOf = root.TensorOf;
@@ -310,11 +309,6 @@ test "MaxPool2D autograd" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), A.grad[0], 1e-5);  // A[0,0]
 }
 
-test {
-    const std = @import("std");
-    std.testing.refAllDecls(@This());
-}
-
 test "Sigmoid and Tanh autograd" {
     const std = @import("std");
     const arena = std.testing.allocator;
@@ -595,15 +589,18 @@ test "SiLU and Mul autograd in Graph" {
 
 test "SwiGLU forward operator" {
     const std = @import("std");
-    var out: [2]f32 = undefined;
-    const gate = [_]f32{ 0.0, 2.0 };
-    const up = [_]f32{ 3.0, 4.0 };
+    const allocator = std.testing.allocator;
+    var graph = autodiff.Graph.initNoGrad(allocator);
+    defer graph.deinit();
 
-    nn.swigluForward(&out, &gate, &up);
+    const gate = try graph.tensorNDWithData(&.{ 1, 2 }, &[_]f32{ 0.0, 2.0 }, false);
+    const up = try graph.tensorNDWithData(&.{ 1, 2 }, &[_]f32{ 3.0, 4.0 }, false);
+    const act = try graph.silu(gate);
+    const out = try graph.mul(act, up);
     // out[0] = (0 * sig(0)) * 3 = 0
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), out.data[0], 1e-5);
     // out[1] = (2 * sig(2)) * 4 = 2 * (1 / (1 + e^-2)) * 4 = 8 * 0.880797 = 7.046376
-    try std.testing.expectApproxEqAbs(@as(f32, 7.046376), out[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 7.046376), out.data[1], 1e-4);
 }
 
 test "End-to-End LLM Pipeline integration demo" {
@@ -1279,12 +1276,148 @@ test "GAN adversarial training step" {
     }
 }
 
+test "setTrainingModel, trainModel, and evalModel recursive reflection" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
 
+    const CompositeModel = struct {
+        bn: nn.BatchNorm2d,
+        drop: nn.Dropout,
+        sub_bns: [2]nn.BatchNorm2d,
+    };
 
+    var m = CompositeModel{
+        .bn = try nn.BatchNorm2d.init(allocator, 4, 1e-5, 0.1),
+        .drop = nn.Dropout.initDefault(),
+        .sub_bns = .{
+            try nn.BatchNorm2d.init(allocator, 2, 1e-5, 0.1),
+            try nn.BatchNorm2d.init(allocator, 2, 1e-5, 0.1),
+        },
+    };
+    defer nn.deinitModel(&m, allocator);
 
+    try std.testing.expect(m.bn.training);
+    try std.testing.expect(m.drop.training);
+    try std.testing.expect(m.sub_bns[0].training);
+    try std.testing.expect(m.sub_bns[1].training);
 
+    root.evalModel(&m);
+    try std.testing.expect(!m.bn.training);
+    try std.testing.expect(!m.drop.training);
+    try std.testing.expect(!m.sub_bns[0].training);
+    try std.testing.expect(!m.sub_bns[1].training);
 
+    root.trainModel(&m);
+    try std.testing.expect(m.bn.training);
+    try std.testing.expect(m.drop.training);
+    try std.testing.expect(m.sub_bns[0].training);
+    try std.testing.expect(m.sub_bns[1].training);
+}
 
+test "Fixed array [N]*Tensor reflection and Safetensors serialization" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
 
+    const ArrayTensorModel = struct {
+        bank: [2]*tensor.Tensor,
+    };
 
+    var m1 = ArrayTensorModel{
+        .bank = .{
+            try nn.createPersistentTensor(allocator, 1, 3, true),
+            try nn.createPersistentTensor(allocator, 1, 2, true),
+        },
+    };
+    defer nn.deinitModel(&m1, allocator);
 
+    m1.bank[0].data[0] = 1.5;
+    m1.bank[0].data[1] = -2.5;
+    m1.bank[0].data[2] = 3.5;
+    m1.bank[1].data[0] = 4.25;
+    m1.bank[1].data[1] = -5.75;
+
+    const params = try nn.collectParameters(&m1, allocator);
+    defer allocator.free(params);
+    try std.testing.expectEqual(@as(usize, 2), params.len);
+
+    m1.bank[0].grad[0] = 9.0;
+    m1.bank[1].grad[1] = 8.0;
+    nn.zeroGradModel(&m1);
+    try std.testing.expectEqual(@as(f32, 0.0), m1.bank[0].grad[0]);
+    try std.testing.expectEqual(@as(f32, 0.0), m1.bank[1].grad[1]);
+
+    const tmp_path = "/tmp/znn_test_array_tensor_model.safetensors";
+    defer std.Io.Dir.cwd().deleteFile(io, tmp_path) catch {};
+
+    try nn.saveModel(&m1, io, tmp_path, allocator);
+
+    var m2 = ArrayTensorModel{
+        .bank = .{
+            try nn.createPersistentTensor(allocator, 1, 3, true),
+            try nn.createPersistentTensor(allocator, 1, 2, true),
+        },
+    };
+    defer nn.deinitModel(&m2, allocator);
+
+    try nn.loadModel(&m2, io, tmp_path, allocator);
+    try std.testing.expectEqualSlices(f32, m1.bank[0].data, m2.bank[0].data);
+    try std.testing.expectEqualSlices(f32, m1.bank[1].data, m2.bank[1].data);
+}
+
+test "Linear.setName copies stack buffer into internal storage" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    var lin = try nn.Linear.initClean(allocator, 4, 2);
+    defer lin.deinit(allocator);
+
+    {
+        var stack_buf: [16]u8 = undefined;
+        const dynamic_name = try std.fmt.bufPrint(&stack_buf, "layer_{d}", .{7});
+        lin.setName(dynamic_name);
+        @memset(&stack_buf, 'X');
+    }
+
+    try std.testing.expectEqualStrings("layer_7", lin.getName().?);
+    try std.testing.expectEqualStrings("layer_7.weight", lin.weight.getName().?);
+    try std.testing.expectEqualStrings("layer_7.bias", lin.bias.getName().?);
+}
+
+test "Config defaults and initDefault ergonomics across modules" {
+    const std = @import("std");
+    const allocator = std.testing.allocator;
+
+    var cv_default = cv.CrossValidationGridSearch.initDefault(allocator);
+    defer cv_default.deinit();
+    try std.testing.expectEqual(@as(usize, 5), cv_default.k_splits);
+    try std.testing.expectEqual(@as(usize, 5), root.CrossValidationOptions.defaultOptions().k_splits);
+
+    const drop = nn.Dropout.initDefault();
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), drop.p, 1e-6);
+    try std.testing.expect(nn.Dropout.defaultOptions().training);
+
+    const lrelu = nn.LeakyReLU.initDefault();
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), lrelu.alpha, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.2), nn.LeakyReLU.defaultOptions().alpha, 1e-6);
+
+    const cos = CosineScheduler.initDefault();
+    try std.testing.expect(cos.max_lr > cos.min_lr);
+    const step_s = StepLRScheduler.initDefault();
+    try std.testing.expect(step_s.step_size > 0);
+    const warm_s = LinearWarmupScheduler.initDefault();
+    try std.testing.expect(warm_s.warmup_steps > 0);
+    const exp_s = ExponentialLRScheduler.initDefault();
+    try std.testing.expect(exp_s.gamma > 0.0);
+    const lr_s = LRScheduler.defaultConfig();
+    try std.testing.expect(lr_s.getLR(0) >= 0.0);
+
+    try std.testing.expect(Nonlinearity.defaultOptions() == .relu);
+    try std.testing.expect(InitMethod.defaultOptions() == .he_normal);
+    try std.testing.expect(@TypeOf(root.DefaultGPT) == type);
+}
+
+test {
+    const std = @import("std");
+    std.testing.refAllDecls(@This());
+}

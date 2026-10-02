@@ -22,9 +22,18 @@ pub const calculateGain = nn.calculateGain;
 pub const InitMethod = nn.InitMethod;
 pub const InitOptions = nn.InitOptions;
 pub const initWeights = nn.initWeights;
-pub const initializeWeights = nn.initializeWeights;
 pub const autoSequential = nn.autoSequential;
+pub const setTrainingModel = nn.setTrainingModel;
+pub const trainModel = nn.trainModel;
+pub const evalModel = nn.evalModel;
+pub const ScaledDotProductAttention = nn.ScaledDotProductAttention;
+pub const DefaultGPT = nn.DefaultGPT;
+pub const RNNResult = nn.RNNResult;
+pub const LSTMResult = nn.LSTMResult;
+pub const StackedLSTMResult = nn.StackedLSTMResult;
+pub const GRUResult = nn.GRUResult;
 
+pub const StaticTensor = tensor.StaticTensor;
 pub const GenericTensor = tensor.GenericTensor;
 pub const TensorOf = tensor.TensorOf;
 pub const FloatTensor = tensor.FloatTensor;
@@ -36,6 +45,8 @@ pub const BFloat16Tensor = tensor.BFloat16Tensor;
 pub const bf16 = tensor.bf16;
 pub const DType = tensor.DType;
 pub const SliceRange = tensor.SliceRange;
+
+pub const CrossValidationOptions = cv.CrossValidationOptions;
 
 pub const SGDConfig = optim.SGDConfig;
 pub const AdamConfig = optim.AdamConfig;

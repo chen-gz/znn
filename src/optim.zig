@@ -581,6 +581,10 @@ pub const CosineScheduler = struct {
         return .{};
     }
 
+    pub fn initDefault() CosineScheduler {
+        return .{};
+    }
+
     pub fn init(max_lr: f32, min_lr: f32, warmup_steps: u64, max_steps: u64) CosineScheduler {
         return .{
             .max_lr = max_lr,
@@ -619,6 +623,10 @@ pub const StepLRScheduler = struct {
         return .{};
     }
 
+    pub fn initDefault() StepLRScheduler {
+        return .{};
+    }
+
     pub fn init(base_lr: f32, step_size: u64, gamma: f32) StepLRScheduler {
         std.debug.assert(step_size > 0);
         return .{
@@ -642,6 +650,10 @@ pub const LinearWarmupScheduler = struct {
 
     pub const default: LinearWarmupScheduler = .{};
     pub fn defaultOptions() LinearWarmupScheduler {
+        return .{};
+    }
+
+    pub fn initDefault() LinearWarmupScheduler {
         return .{};
     }
 
@@ -673,6 +685,10 @@ pub const ExponentialLRScheduler = struct {
         return .{};
     }
 
+    pub fn initDefault() ExponentialLRScheduler {
+        return .{};
+    }
+
     pub fn init(base_lr: f32, gamma: f32) ExponentialLRScheduler {
         return .{
             .base_lr = base_lr,
@@ -691,6 +707,16 @@ pub const LRScheduler = union(enum) {
     step_lr: StepLRScheduler,
     warmup: LinearWarmupScheduler,
     exponential: ExponentialLRScheduler,
+
+    pub const default: LRScheduler = .{ .cosine = .{} };
+
+    pub fn defaultConfig() LRScheduler {
+        return default;
+    }
+
+    pub fn defaultOptions() LRScheduler {
+        return default;
+    }
 
     pub fn getLR(self: LRScheduler, current_step: u64) f32 {
         return switch (self) {

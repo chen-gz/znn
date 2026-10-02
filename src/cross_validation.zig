@@ -149,13 +149,35 @@ pub const CVResult = struct {
     }
 };
 
+/// Configuration options for K-Fold Cross-Validation
+pub const CrossValidationOptions = struct {
+    k_splits: usize = 5,
+    random_seed: u64 = 42,
+
+    pub const default: CrossValidationOptions = .{};
+
+    pub fn defaultOptions() CrossValidationOptions {
+        return .{};
+    }
+};
+
 /// 5-Fold Grid Search Engine for Lasso and Elastic Net Hyperparameter Tuning
 pub const CrossValidationGridSearch = struct {
     allocator: std.mem.Allocator,
-    k_splits: usize,
+    k_splits: usize = 5,
     results: std.ArrayList(CVResult),
     best_min_index: usize = 0,
     best_1se_index: usize = 0,
+
+    pub const default: CrossValidationOptions = CrossValidationOptions.default;
+
+    pub fn defaultOptions() CrossValidationOptions {
+        return CrossValidationOptions.default;
+    }
+
+    pub fn initDefault(allocator: std.mem.Allocator) CrossValidationGridSearch {
+        return init(allocator, 5);
+    }
 
     pub fn init(allocator: std.mem.Allocator, k_splits: usize) CrossValidationGridSearch {
         return .{

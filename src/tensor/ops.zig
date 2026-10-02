@@ -362,6 +362,10 @@ pub fn slice(t: *Tensor, ranges: []const SliceRange, allocator: std.mem.Allocato
     return t.slice(ranges, allocator);
 }
 
+pub fn contiguous(t: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+    return t.contiguous(allocator);
+}
+
 pub fn clip(t: *Tensor, min_val: f32, max_val: f32, allocator: std.mem.Allocator) !*Tensor {
     return t.clip(min_val, max_val, allocator);
 }

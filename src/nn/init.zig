@@ -24,6 +24,9 @@ pub const Nonlinearity = union(enum) {
     pub fn defaultNonlinearity() Nonlinearity {
         return .relu;
     }
+    pub fn defaultOptions() Nonlinearity {
+        return .relu;
+    }
 };
 
 /// 根据激活函数计算理论最优方差增益因子 (Gain)
@@ -63,6 +66,14 @@ pub const InitMethod = union(enum) {
     lecun_normal,
     /// LeCun 均匀分布：limit = sqrt(3 / fan_in)
     lecun_uniform,
+
+    pub const default: InitMethod = .{ .he_normal = .{} };
+    pub fn defaultOptions() InitMethod {
+        return default;
+    }
+    pub fn defaultConfig() InitMethod {
+        return default;
+    }
 };
 
 /// 权重与偏置初始化配置选项 (Initialization Options)
@@ -180,9 +191,4 @@ pub fn initWeights(
             }
         },
     }
-}
-
-/// 兼容旧版本的初始化函数 (默认采用 He 正态分布，gain=sqrt(2))
-pub fn initializeWeights(random: std.Random, w: []f32, fan_in: usize) void {
-    initWeights(random, w, fan_in, fan_in, .{ .he_normal = .{} });
 }

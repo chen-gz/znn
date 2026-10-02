@@ -271,13 +271,23 @@ pub const BatchNorm2d = struct {
 
 /// Dropout 随机丢弃正则化层
 pub const Dropout = struct {
-    p: f32,                 // 丢弃概率 (0.0 <= p < 1.0)
+    p: f32 = 0.5,           // 丢弃概率 (0.0 <= p < 1.0)
     training: bool = true,  // 是否处于训练模式
     name: ?[]const u8 = null,
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Dropout",
 
     pub const formula = "y = \\frac{m \\odot x}{1 - p}";
+
+    pub const default: Dropout = .{};
+
+    pub fn defaultOptions() Dropout {
+        return .{};
+    }
+
+    pub fn initDefault() Dropout {
+        return .{};
+    }
 
     pub fn init(p: f32) Dropout {
         return .{ .p = p, .training = true };
