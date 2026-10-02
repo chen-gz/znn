@@ -3,7 +3,10 @@ const std = @import("std");
 pub const shape = @import("tensor/shape.zig");
 pub const types = @import("tensor/types.zig");
 pub const core = @import("tensor/core.zig");
+pub const nn_kernels = @import("tensor/nn_kernels.zig");
+pub const reductions = @import("tensor/reductions.zig");
 pub const ops = @import("tensor/ops.zig");
+pub const static = @import("tensor/static.zig");
 
 // --- Re-export shape and stride utilities ---
 pub const Shape = shape.Shape;
@@ -14,7 +17,7 @@ pub const broadcastShapes = shape.broadcastShapes;
 pub const computeBroadcastStrides = shape.computeBroadcastStrides;
 pub const broadcastBinaryOpRaw = shape.broadcastBinaryOpRaw;
 
-// --- Re-export data types and generic tensors ---
+// --- Re-export data types, generic tensors, and static tensors ---
 pub const DType = types.DType;
 pub const bf16 = types.bf16;
 pub const SliceRange = types.SliceRange;
@@ -29,6 +32,7 @@ pub const BoolTensor = types.BoolTensor;
 pub const BFloat16Tensor = types.BFloat16Tensor;
 pub const UsizeTensor = types.UsizeTensor;
 pub const TensorOf = types.TensorOf;
+pub const StaticTensor = static.StaticTensor;
 
 // --- Re-export core Tensor ---
 pub const Tensor = core.Tensor;
@@ -69,12 +73,10 @@ pub const log = ops.log;
 pub const abs = ops.abs;
 pub const solveLinearSystem = ops.solveLinearSystem;
 pub const solveRidgeAnalytical = ops.solveRidgeAnalytical;
-pub const svd = ops.svd;
-pub const qr = ops.qr;
-pub const eig = ops.eig;
 pub const applyRoPE = ops.applyRoPE;
 pub const applyRoPETensor = ops.applyRoPETensor;
 
 test {
+    std.testing.refAllDecls(@This());
     _ = @import("tensor/tests.zig");
 }

@@ -278,8 +278,9 @@ pub fn GenericTensor(comptime T: type) type {
         }
 
         pub fn transposeView(self: *Self, dim0: usize, dim1: usize, allocator: std.mem.Allocator) !*Self {
-            const new_shape = try transposeShape(self.shape, dim0, dim1);
-            const new_strides = try transposeShape(self.strides, dim0, dim1);
+            if (dim0 >= self.shape.len or dim1 >= self.shape.len) return error.InvalidDimension;
+            const new_shape = transposeShape(self.shape, dim0, dim1);
+            const new_strides = transposeShape(self.strides, dim0, dim1);
             const out = try allocator.create(Self);
             out.* = Self{
                 .data = self.data,

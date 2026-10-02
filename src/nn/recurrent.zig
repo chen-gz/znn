@@ -116,6 +116,12 @@ pub const RNNCell = struct {
     }
 };
 
+/// Elman RNN 序列前向传播返回结果
+pub const RNNResult = struct {
+    outputs: []*Tensor,
+    h_n: *Tensor,
+};
+
 /// 沿时间展开的 Elman RNN 序列容器
 pub const RNN = struct {
     cell: RNNCell,
@@ -182,7 +188,7 @@ pub const RNN = struct {
         graph: *autodiff.Graph,
         inputs: []const *Tensor,
         h_0: ?*Tensor,
-    ) !struct { outputs: []*Tensor, h_n: *Tensor } {
+    ) !RNNResult {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -401,6 +407,13 @@ pub const LSTMCell = struct {
     }
 };
 
+/// 单层 LSTM 序列前向传播返回结果
+pub const LSTMResult = struct {
+    outputs: []*Tensor,
+    h_n: *Tensor,
+    c_n: *Tensor,
+};
+
 /// 沿时间展开的单层 LSTM 序列容器
 pub const LSTM = struct {
     cell: LSTMCell,
@@ -465,7 +478,7 @@ pub const LSTM = struct {
         inputs: []const *Tensor,
         h_0: ?*Tensor,
         c_0: ?*Tensor,
-    ) !struct { outputs: []*Tensor, h_n: *Tensor, c_n: *Tensor } {
+    ) !LSTMResult {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -503,6 +516,13 @@ pub const LSTM = struct {
             .c_n = c_curr,
         };
     }
+};
+
+/// 多层堆叠 LSTM 序列前向传播返回结果
+pub const StackedLSTMResult = struct {
+    outputs: []*Tensor,
+    h_n: []*Tensor,
+    c_n: []*Tensor,
 };
 
 /// 多层堆叠 LSTM (Stacked / Deep LSTM) 引擎
@@ -620,11 +640,7 @@ pub const StackedLSTM = struct {
         inputs: []const *Tensor,
         h_0: ?[]const *Tensor,
         c_0: ?[]const *Tensor,
-    ) !struct {
-        outputs: []*Tensor,
-        h_n: []*Tensor,
-        c_n: []*Tensor,
-    } {
+    ) !StackedLSTMResult {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -816,6 +832,12 @@ pub const GRUCell = struct {
     }
 };
 
+/// 单层 GRU 序列前向传播返回结果
+pub const GRUResult = struct {
+    outputs: []*Tensor,
+    h_n: *Tensor,
+};
+
 /// 沿时间展开的单层 GRU 序列容器
 pub const GRU = struct {
     cell: GRUCell,
@@ -879,7 +901,7 @@ pub const GRU = struct {
         graph: *autodiff.Graph,
         inputs: []const *Tensor,
         h_0: ?*Tensor,
-    ) !struct { outputs: []*Tensor, h_n: *Tensor } {
+    ) !GRUResult {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);

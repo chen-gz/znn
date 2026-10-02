@@ -13,7 +13,7 @@ pub fn main() !void {
     const random = prng.random();
 
     std.debug.print("\n=================================================================\n", .{});
-    std.debug.print("  ZNN - Interactive Model Architecture & Graph HTML Export Demo  \n", .{});
+    std.debug.print("  ZNN - Model Architecture & Graph JSON Export Demo (Schema 2.0) \n", .{});
     std.debug.print("=================================================================\n\n", .{});
 
     // 1. 配置标准多层 GPT 模型结构 (2 层 Transformer Decoder)

@@ -3,24 +3,25 @@ const tensor_mod = @import("../tensor.zig");
 const Tensor = tensor_mod.Tensor;
 const Shape = tensor_mod.Shape;
 const computeContiguousStrides = tensor_mod.computeContiguousStrides;
-const transposeShape = tensor_mod.transposeShape;
 const types = @import("types.zig");
 pub const OpType = types.OpType;
 pub const OpContext = types.OpContext;
 const op_mod = @import("op.zig");
 pub const Op = op_mod.Op;
+const graph_nn = @import("graph_nn.zig");
+const graph_init = @import("graph_init.zig");
 
 // 计算图（Graph）结构体
 // 追踪所有的张量节点与算子节点，管理内存生命周期并负责反向传播调度
 pub const Graph = struct {
     backing_allocator: std.mem.Allocator,
-    arena: std.heap.ArenaAllocator,       // 使用 Arena 机制，使每次前向/反向生成的中间节点内存可在 batch 结束时一并释放，避免内存碎片和频繁分配
-    tensors: std.ArrayList(*Tensor),     // 追踪计算图中的所有张量指针
-    ops: std.ArrayList(*Op),             // 追踪计算图中的所有算子指针
-    enable_grad: bool,                   // 梯度使能开关（类似 torch.set_grad_enabled），为 false 时不分配梯度缓冲区亦不记录 Op 节点
+    arena: std.heap.ArenaAllocator, // 使用 Arena 机制，使每次前向/反向生成的中间节点内存可在 batch 结束时一并释放，避免内存碎片和频繁分配
+    tensors: std.ArrayList(*Tensor), // 追踪计算图中的所有张量指针
+    ops: std.ArrayList(*Op), // 追踪计算图中的所有算子指针
+    enable_grad: bool, // 梯度使能开关（类似 torch.set_grad_enabled），为 false 时不分配梯度缓冲区亦不记录 Op 节点
     module_formulas: std.StringHashMap([]const u8), // 存储模块在代码中声明的显式数学运算公式 (如 "y = x W^T + b")
-    module_types: std.StringHashMap([]const u8),    // 存储模块在代码中声明的显式模块类型 (如 "Linear", "RMSNorm", "GPT")
-    scope_stack: std.ArrayList([]const u8),         // 当前正在执行 forward 的模块作用域栈 (栈顶为最内层模块的完整路径)
+    module_types: std.StringHashMap([]const u8), // 存储模块在代码中声明的显式模块类型 (如 "Linear", "RMSNorm", "GPT")
+    scope_stack: std.ArrayList([]const u8), // 当前正在执行 forward 的模块作用域栈 (栈顶为最内层模块的完整路径)
 
     // 初始化计算图，传入底层通用内存分配器
     pub fn init(backing_allocator: std.mem.Allocator) Graph {
@@ -96,7 +97,7 @@ pub const Graph = struct {
     }
 
     /// 记录一个新创建的算子，并标记其所属的当前模块作用域
-    fn recordOp(self: *Graph, o: *Op) !void {
+    pub fn recordOp(self: *Graph, o: *Op) !void {
         o.scope = self.currentScope();
         try self.ops.append(self.backing_allocator, o);
     }
@@ -125,75 +126,7 @@ pub const Graph = struct {
         return self.module_types.get(module_path);
     }
 
-    /// 从计算图中自动推导指定模块或节点的数学公式
-    pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u8 {
-        // 1. 如果有显式指定的公式，直接返回
-        if (self.getModuleFormula(module_path)) |form| {
-            return form;
-        }
-
-        // 2. 检查计算图中的具体算子 (Ops) 是否有输出精确匹配该节点名称
-        // （必须先于模块前缀继承，避免像 gpt.layers.0.attn.act_Add_20 被继承为 Attention 的全局公式）
-        for (self.ops.items) |op| {
-            if (op.outputs.len > 0) {
-                if (op.outputs[0].name) |out_name| {
-                    if (std.mem.eql(u8, out_name, module_path)) {
-                        return op.op_type.getFormula();
-                    }
-                }
-            }
-        }
-
-        // 3. 匹配子路径的最长前缀 (例如 "gpt.layers.0.output" -> 优先继承更长的 "gpt.layers.0" 而非根路径 "gpt")
-        var best_prefix_match: ?[]const u8 = null;
-        var best_prefix_len: usize = 0;
-        var it = self.module_formulas.iterator();
-        while (it.next()) |entry| {
-            const k_len = entry.key_ptr.len;
-            if (module_path.len > k_len and
-                std.mem.startsWith(u8, module_path, entry.key_ptr.*) and
-                module_path[k_len] == '.')
-            {
-                if (k_len > best_prefix_len) {
-                    best_prefix_len = k_len;
-                    best_prefix_match = entry.value_ptr.*;
-                }
-            }
-        }
-        if (best_prefix_match) |form| {
-            return form;
-        }
-
-        // 4. 根据模块注册的原生类型推导标准公式 (避免脆弱的字符串模式推测)
-        if (self.getModuleType(module_path)) |m_type| {
-            if (std.mem.eql(u8, m_type, "Linear")) return "y = x W^T + b";
-            if (std.mem.eql(u8, m_type, "Conv2D")) return "y = \\text{Conv2D}(x; W, b)";
-            if (std.mem.eql(u8, m_type, "ConvTranspose2D")) return "y = \\text{ConvTranspose2D}(x; W, b)";
-            if (std.mem.eql(u8, m_type, "RMSNorm")) return "y = \\text{RMSNorm}(x; \\gamma, \\epsilon)";
-            if (std.mem.eql(u8, m_type, "LayerNorm")) return "y = \\text{LayerNorm}(x; \\gamma, \\beta)";
-            if (std.mem.eql(u8, m_type, "BatchNorm2d")) return "y = \\text{BatchNorm2d}(x; \\gamma, \\beta)";
-            if (std.mem.eql(u8, m_type, "Embedding")) return "y = \\text{Embedding}(x; W)";
-            if (std.mem.eql(u8, m_type, "MLP")) return "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}";
-            if (std.mem.eql(u8, m_type, "SwiGLU")) return "y = (\\text{SiLU}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
-            if (std.mem.eql(u8, m_type, "CausalSelfAttention")) return "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o";
-            if (std.mem.eql(u8, m_type, "ScaledDotProductAttention")) return "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V";
-            if (std.mem.eql(u8, m_type, "TransformerBlock")) return "h_l = x_l + \\text{Attention}(\\text{RMSNorm}(x_l)), \\quad x_{l+1} = \\text{TransformerBlock}(x_l) = h_l + \\text{MLP}(\\text{RMSNorm}(h_l))";
-            if (std.mem.eql(u8, m_type, "TransformerDecoder")) return "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)";
-            if (std.mem.eql(u8, m_type, "GPT")) return "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]";
-            if (std.mem.eql(u8, m_type, "RNNCell")) return "h_t = \\tanh(x_t W_{ih}^T + b_{ih} + h_{t-1} W_{hh}^T + b_{hh})";
-            if (std.mem.eql(u8, m_type, "RNN")) return "h_{1:T} = \\text{RNN}(x_{1:T}, h_0)";
-            if (std.mem.eql(u8, m_type, "LSTMCell")) return "c_t = f_t \\odot c_{t-1} + i_t \\odot \\tilde{c}_t, \\quad h_t = o_t \\odot \\tanh(c_t)";
-            if (std.mem.eql(u8, m_type, "LSTM")) return "(h_{1:T}, c_{1:T}) = \\text{LSTM}(x_{1:T}, h_0, c_0)";
-            if (std.mem.eql(u8, m_type, "StackedLSTM")) return "h^{(L)}_{1:T} = \\text{StackedLSTM}(x_{1:T})";
-            if (std.mem.eql(u8, m_type, "GRUCell")) return "h_t = (1 - z_t) \\odot h_{t-1} + z_t \\odot \\tanh(W_h x_t + U_h (r_t \\odot h_{t-1}))";
-            if (std.mem.eql(u8, m_type, "GRU")) return "h_{1:T} = \\text{GRU}(x_{1:T}, h_0)";
-            if (std.mem.eql(u8, m_type, "MoELayer")) return "y = \\sum_{i \\in \\text{TopK}(g(x))} p_i(x) E_i(x) + \\sum_{j} E^{\\text{shared}}_j(x)";
-            if (std.mem.eql(u8, m_type, "MLALayer")) return "c_t^{KV} = x_t W^{DKV}, \\quad y = \\text{MLA}(Q, c^{KV}, k^R) W^O";
-            if (std.mem.eql(u8, m_type, "LoRALinear")) return "y = x W_0 + \\frac{\\alpha}{r} (x A) B + b";
-        }
-
-        return "y = f(x; \\theta)";
-    }
+    pub const inferModuleFormula = graph_init.inferModuleFormula;
 
     // 设置梯度追踪开关
     pub fn setGradEnabled(self: *Graph, enabled: bool) void {
@@ -217,12 +150,12 @@ pub const Graph = struct {
 
     // 在计算图中创建并注册一个新的张量节点
     pub fn tensor(self: *Graph, rows: usize, cols: usize, requires_grad: bool) !*Tensor {
-        return self.tensorND(&.{rows, cols}, requires_grad);
+        return self.tensorND(&.{ rows, cols }, requires_grad);
     }
 
     // 创建并注册一个带初始数据的二维张量节点
     pub fn tensorWithData(self: *Graph, rows: usize, cols: usize, initial_data: []const f32, requires_grad: bool) !*Tensor {
-        return self.tensorNDWithData(&.{rows, cols}, initial_data, requires_grad);
+        return self.tensorNDWithData(&.{ rows, cols }, initial_data, requires_grad);
     }
 
     // 创建并注册一个带初始数据的多维张量节点
@@ -342,7 +275,7 @@ pub const Graph = struct {
     }
 
     /// 将单输出张量 `C` 注册到计算图中，并在满足梯度条件时构建与记录 `Op` 节点
-    fn registerSingleOutputOp(
+    pub fn registerSingleOutputOp(
         self: *Graph,
         C: *Tensor,
         inputs: []const *Tensor,
@@ -381,7 +314,7 @@ pub const Graph = struct {
     }
 
     /// 对已通过 `self.tensor*` 预分配并注册的输出张量执行 `Op.forward`，并在需要梯度时记录 `Op` 节点
-    fn runAndRecordPreallocatedOp(
+    pub fn runAndRecordPreallocatedOp(
         self: *Graph,
         output: *Tensor,
         inputs: []const *Tensor,
@@ -603,276 +536,22 @@ pub const Graph = struct {
         );
     }
 
-    // 损失函数 Softmax + Cross Entropy 结合前向传播
-    // 在 logits 的行维度计算 Softmax 概率分布，并与 targets 分类标签（支持 u8/u32/usize 等任意整型切片）计算交叉熵损失
-    pub fn softmaxCrossEntropy(self: *Graph, logits: *Tensor, targets: anytype) !*Tensor {
-        const B = logits.shape.dims[0];
-        const N = logits.shape.dims[1];
-        if (targets.len != B) return error.ShapeMismatch;
-
-        const allocator = self.arena.allocator();
-        const targets_copy = try allocator.alloc(usize, B);
-        for (0..B) |i| {
-            const label: usize = @intCast(targets[i]);
-            if (label >= N) return error.IndexOutOfBounds;
-            targets_copy[i] = label;
-        }
-
-        const req_grad = self.enable_grad and logits.requires_grad;
-        const loss = try self.tensor(1, 1, req_grad);
-
-        var empty_probs: [0]f32 = .{};
-        const probs: []f32 = if (req_grad) try allocator.alloc(f32, B * N) else &empty_probs;
-
-        return self.runAndRecordPreallocatedOp(
-            loss,
-            &.{logits},
-            .SoftmaxCrossEntropy,
-            .{
-                .SoftmaxCrossEntropy = .{
-                    .probs = probs,
-                    .targets = targets_copy,
-                    .mask = null,
-                    .total_weight = @as(f32, @floatFromInt(B)),
-                },
-            },
-            req_grad,
-        );
-    }
-
-    // 监督微调 (SFT) 掩码交叉熵损失：仅对 mask[i] > 0 的位置计算交叉熵并支持 Autograd 反向传播
-    pub fn maskedCrossEntropyLoss(self: *Graph, logits: *Tensor, targets: anytype, mask: []const f32) !*Tensor {
-        const B = logits.shape.dims[0];
-        const N = logits.shape.dims[1];
-        if (targets.len != B or mask.len != B) return error.ShapeMismatch;
-
-        const allocator = self.arena.allocator();
-        const targets_copy = try allocator.alloc(usize, B);
-        for (0..B) |i| {
-            const label: usize = @intCast(targets[i]);
-            if (label >= N) return error.IndexOutOfBounds;
-            targets_copy[i] = label;
-        }
-        const mask_copy = try allocator.alloc(f32, B);
-        @memcpy(mask_copy, mask);
-
-        const req_grad = self.enable_grad and logits.requires_grad;
-        const loss = try self.tensor(1, 1, req_grad);
-
-        var empty_probs: [0]f32 = .{};
-        const probs: []f32 = if (req_grad) try allocator.alloc(f32, B * N) else &empty_probs;
-        if (req_grad) @memset(probs, 0.0);
-
-        return self.runAndRecordPreallocatedOp(
-            loss,
-            &.{logits},
-            .SoftmaxCrossEntropy,
-            .{
-                .SoftmaxCrossEntropy = .{
-                    .probs = probs,
-                    .targets = targets_copy,
-                    .mask = mask_copy,
-                    .total_weight = 0.0,
-                },
-            },
-            req_grad,
-        );
-    }
-
-    // 直接偏好优化 (DPO) 损失函数：支持对策略模型对数概率 pi_chosen_logps / pi_rejected_logps 的计算图反向传播
-    pub fn dpoLoss(
-        self: *Graph,
-        pi_chosen_logps: *Tensor,
-        pi_rejected_logps: *Tensor,
-        ref_chosen_logps: []const f32,
-        ref_rejected_logps: []const f32,
-        beta: f32,
-    ) !*Tensor {
-        const N = pi_chosen_logps.data.len;
-        if (pi_rejected_logps.data.len != N or ref_chosen_logps.len != N or ref_rejected_logps.len != N) {
-            return error.ShapeMismatch;
-        }
-
-        const allocator = self.arena.allocator();
-        const ref_c_copy = try allocator.alloc(f32, N);
-        @memcpy(ref_c_copy, ref_chosen_logps);
-        const ref_r_copy = try allocator.alloc(f32, N);
-        @memcpy(ref_r_copy, ref_rejected_logps);
-
-        const req_grad = self.enable_grad and (pi_chosen_logps.requires_grad or pi_rejected_logps.requires_grad);
-        const loss = try self.tensor(1, 1, req_grad);
-
-        return self.runAndRecordPreallocatedOp(
-            loss,
-            &.{ pi_chosen_logps, pi_rejected_logps },
-            .DpoLoss,
-            .{
-                .DpoLoss = .{
-                    .ref_chosen = ref_c_copy,
-                    .ref_rejected = ref_r_copy,
-                    .beta = beta,
-                },
-            },
-            req_grad,
-        );
-    }
-
-    // 组相对策略优化 (GRPO) 损失函数：支持在计算图中对 new_logps 自动微分求导
-    pub fn grpoLoss(
-        self: *Graph,
-        old_logps: *Tensor,
-        new_logps: *Tensor,
-        advantages: []const f32,
-        ref_logps: ?[]const f32,
-        beta: f32,
-        clip_eps: f32,
-    ) !*Tensor {
-        const N = old_logps.data.len;
-        if (new_logps.data.len != N or advantages.len != N) return error.ShapeMismatch;
-        if (ref_logps) |refs| {
-            if (refs.len != N) return error.ShapeMismatch;
-        }
-
-        const allocator = self.arena.allocator();
-        const adv_copy = try allocator.alloc(f32, N);
-        @memcpy(adv_copy, advantages);
-
-        var ref_copy: ?[]const f32 = null;
-        if (ref_logps) |refs| {
-            const rc = try allocator.alloc(f32, N);
-            @memcpy(rc, refs);
-            ref_copy = rc;
-        }
-
-        const req_grad = self.enable_grad and new_logps.requires_grad;
-        const loss = try self.tensor(1, 1, req_grad);
-
-        return self.runAndRecordPreallocatedOp(
-            loss,
-            &.{ old_logps, new_logps },
-            .GrpoLoss,
-            .{
-                .GrpoLoss = .{
-                    .advantages = adv_copy,
-                    .ref_logps = ref_copy,
-                    .beta = beta,
-                    .clip_eps = clip_eps,
-                },
-            },
-            req_grad,
-        );
-    }
-
-    // 均方误差 (MSE) 损失函数：C = 1/N * sum((y_pred - y_true)^2)
-    pub fn mseLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor) !*Tensor {
-        const req_grad = self.enable_grad and (y_pred.requires_grad or y_true.requires_grad);
-        const loss = try self.tensor(1, 1, req_grad);
-        return self.runAndRecordPreallocatedOp(
-            loss,
-            &.{ y_pred, y_true },
-            .MseLoss,
-            .{ .MseLoss = {} },
-            req_grad,
-        );
-    }
-
-    pub fn bceWithLogitsLoss(self: *Graph, logits: *Tensor, targets: *Tensor) !*Tensor {
-        const req_grad = self.enable_grad and (logits.requires_grad or targets.requires_grad);
-        const loss = try self.tensor(1, 1, req_grad);
-        return self.runAndRecordPreallocatedOp(
-            loss,
-            &.{ logits, targets },
-            .BceWithLogitsLoss,
-            .{ .BceWithLogitsLoss = {} },
-            req_grad,
-        );
-    }
-
-    pub fn sigmoidCrossEntropy(self: *Graph, logits: *Tensor, targets: *Tensor) !*Tensor {
-        return self.bceWithLogitsLoss(logits, targets);
-    }
-
-    pub fn bceLoss(self: *Graph, probs: *Tensor, targets: *Tensor, eps: f32) !*Tensor {
-        const req_grad = self.enable_grad and (probs.requires_grad or targets.requires_grad);
-        const loss = try self.tensor(1, 1, req_grad);
-        return self.runAndRecordPreallocatedOp(
-            loss,
-            &.{ probs, targets },
-            .BceLoss,
-            .{ .BceLoss = .{ .eps = eps } },
-            req_grad,
-        );
-    }
-
-    pub fn randomNormal(self: *Graph, shape_slice: []const usize, random: std.Random, mean_val: f32, stddev: f32, requires_grad: bool) !*Tensor {
-        const t = try self.tensorND(shape_slice, requires_grad);
-        t.fillNormal(random, mean_val, stddev);
-        return t;
-    }
-
-    pub fn randomUniform(self: *Graph, shape_slice: []const usize, random: std.Random, min: f32, max: f32, requires_grad: bool) !*Tensor {
-        const t = try self.tensorND(shape_slice, requires_grad);
-        t.fillUniform(random, min, max);
-        return t;
-    }
-
-    // L2 正则化损失函数：C = 0.5 * lambda * sum(weight_i^2)
-    pub fn l2Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
-        const req_grad = self.enable_grad and weight.requires_grad;
-        const loss = try self.tensor(1, 1, req_grad);
-        return self.runAndRecordPreallocatedOp(
-            loss,
-            &.{weight},
-            .L2Loss,
-            .{ .L2Loss = .{ .lambda = lambda } },
-            req_grad,
-        );
-    }
-
-    // 岭回归 (Ridge) 组合损失函数：Loss = MSE(y_pred, y_true) + 0.5 * lambda * sum(weight_i^2)
-    pub fn ridgeLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor, lambda: f32) !*Tensor {
-        const mse = try self.mseLoss(y_pred, y_true);
-        if (lambda == 0.0) return mse;
-        const l2 = try self.l2Loss(weight, lambda);
-        return try self.add(mse, l2);
-    }
-
-    // L1 正则化损失：Loss = lambda * sum(|weight_i|)
-    pub fn l1Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
-        const req_grad = self.enable_grad and weight.requires_grad;
-        const loss = try self.tensor(1, 1, req_grad);
-        return self.runAndRecordPreallocatedOp(
-            loss,
-            &.{weight},
-            .L1Loss,
-            .{ .L1Loss = .{ .lambda = lambda } },
-            req_grad,
-        );
-    }
-
-    // Lasso 组合损失函数：Loss = MSE(y_pred, y_true) + lambda * sum(|weight_i|)
-    pub fn lassoLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor, lambda: f32) !*Tensor {
-        const mse = try self.mseLoss(y_pred, y_true);
-        if (lambda == 0.0) return mse;
-        const l1 = try self.l1Loss(weight, lambda);
-        return try self.add(mse, l1);
-    }
-
-    // Elastic Net 组合损失函数：Loss = MSE(y_pred, y_true) + lambda * rho * ||w||_1 + 0.5 * lambda * (1 - rho) * ||w||_2^2
-    pub fn elasticNetLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor, lambda: f32, l1_ratio: f32) !*Tensor {
-        const mse = try self.mseLoss(y_pred, y_true);
-        if (lambda == 0.0) return mse;
-        var total_loss = mse;
-        if (l1_ratio > 0.0) {
-            const l1 = try self.l1Loss(weight, lambda * l1_ratio);
-            total_loss = try self.add(total_loss, l1);
-        }
-        if (l1_ratio < 1.0) {
-            const l2 = try self.l2Loss(weight, lambda * (1.0 - l1_ratio));
-            total_loss = try self.add(total_loss, l2);
-        }
-        return total_loss;
-    }
+    // 损失函数与随机生成绑定 (来自 graph_nn.zig)
+    pub const softmaxCrossEntropy = graph_nn.softmaxCrossEntropy;
+    pub const maskedCrossEntropyLoss = graph_nn.maskedCrossEntropyLoss;
+    pub const dpoLoss = graph_nn.dpoLoss;
+    pub const grpoLoss = graph_nn.grpoLoss;
+    pub const mseLoss = graph_nn.mseLoss;
+    pub const bceWithLogitsLoss = graph_nn.bceWithLogitsLoss;
+    pub const sigmoidCrossEntropy = graph_nn.sigmoidCrossEntropy;
+    pub const bceLoss = graph_nn.bceLoss;
+    pub const randomNormal = graph_nn.randomNormal;
+    pub const randomUniform = graph_nn.randomUniform;
+    pub const l2Loss = graph_nn.l2Loss;
+    pub const ridgeLoss = graph_nn.ridgeLoss;
+    pub const l1Loss = graph_nn.l1Loss;
+    pub const lassoLoss = graph_nn.lassoLoss;
+    pub const elasticNetLoss = graph_nn.elasticNetLoss;
 
     // 标量乘法（缩放）：C = val * A
     pub fn mulScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
@@ -978,328 +657,21 @@ pub const Graph = struct {
         );
     }
 
-    pub fn conv2d(self: *Graph, A: *Tensor, weight: *Tensor, bias: ?*Tensor) !*Tensor {
-        return self.conv2dWithConfig(A, weight, bias, 1, 0);
-    }
-
-    pub fn conv2dWithConfig(
-        self: *Graph,
-        A: *Tensor,
-        weight: *Tensor,
-        bias: ?*Tensor,
-        stride: usize,
-        padding: usize,
-    ) !*Tensor {
-        const allocator = self.arena.allocator();
-        const C = try A.conv2dWithConfig(weight, bias, stride, padding, allocator);
-        const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
-        const ctx: OpContext = .{ .Conv2D = .{ .stride = stride, .padding = padding } };
-        if (bias) |b| {
-            return self.registerSingleOutputOp(C, &.{ A, weight, b }, .Conv2D, ctx, req_grad);
-        } else {
-            return self.registerSingleOutputOp(C, &.{ A, weight }, .Conv2D, ctx, req_grad);
-        }
-    }
-
-    pub fn convTranspose2D(
-        self: *Graph,
-        A: *Tensor,
-        weight: *Tensor,
-        bias: ?*Tensor,
-        stride: usize,
-        padding: usize,
-    ) !*Tensor {
-        const allocator = self.arena.allocator();
-        const C = try A.convTranspose2d(weight, bias, stride, padding, allocator);
-        const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
-        const ctx: OpContext = .{ .ConvTranspose2D = .{ .stride = stride, .padding = padding } };
-        if (bias) |b| {
-            return self.registerSingleOutputOp(C, &.{ A, weight, b }, .ConvTranspose2D, ctx, req_grad);
-        } else {
-            return self.registerSingleOutputOp(C, &.{ A, weight }, .ConvTranspose2D, ctx, req_grad);
-        }
-    }
-
-    pub fn maxpool2d(self: *Graph, A: *Tensor, pool_size: usize, stride: usize) !*Tensor {
-        const allocator = self.arena.allocator();
-        const C = try A.maxpool2d(pool_size, stride, allocator);
-        return self.registerSingleOutputOp(
-            C,
-            &.{A},
-            .MaxPool2D,
-            .{ .MaxPool2D = .{ .pool_size = pool_size, .stride = stride } },
-            self.enable_grad and A.requires_grad,
-        );
-    }
-
-    pub fn avgpool2d(self: *Graph, A: *Tensor, kernel_size: usize, stride: usize) !*Tensor {
-        const allocator = self.arena.allocator();
-        const C = try A.avgpool2d(kernel_size, stride, allocator);
-        return self.registerSingleOutputOp(
-            C,
-            &.{A},
-            .AvgPool2D,
-            .{ .AvgPool2D = .{ .kernel_size = kernel_size, .stride = stride } },
-            self.enable_grad and A.requires_grad,
-        );
-    }
-
-    pub fn softmax(self: *Graph, A: *Tensor) !*Tensor {
-        const allocator = self.arena.allocator();
-        const C = try A.softmax(allocator);
-        return self.registerSingleOutputOp(
-            C,
-            &.{A},
-            .Softmax,
-            .{ .Softmax = {} },
-            self.enable_grad and A.requires_grad,
-        );
-    }
-
-    pub fn rmsNorm(self: *Graph, X: *Tensor, G: *Tensor, eps: f32) !*Tensor {
-        const allocator = self.arena.allocator();
-        const Y = try X.rmsNorm(G, eps, allocator);
-        return self.registerSingleOutputOp(
-            Y,
-            &.{ X, G },
-            .RmsNorm,
-            .{ .RmsNorm = .{ .eps = eps } },
-            self.enable_grad and (X.requires_grad or G.requires_grad),
-        );
-    }
-
-    pub fn layerNorm(self: *Graph, X: *Tensor, G: *Tensor, B: *Tensor, eps: f32) !*Tensor {
-        const allocator = self.arena.allocator();
-        const Y = try X.layerNorm(G, B, eps, allocator);
-        return self.registerSingleOutputOp(
-            Y,
-            &.{ X, G, B },
-            .LayerNorm,
-            .{ .LayerNorm = .{ .eps = eps } },
-            self.enable_grad and (X.requires_grad or G.requires_grad or B.requires_grad),
-        );
-    }
-
-    pub fn batchNorm2d(
-        self: *Graph,
-        X: *Tensor,
-        G: *Tensor,
-        B: *Tensor,
-        running_mean: *Tensor,
-        running_var: *Tensor,
-        eps: f32,
-        momentum: f32,
-        training: bool,
-    ) !*Tensor {
-        if (X.shape.len != 4) return error.IncompatibleDimensions;
-        const N = X.shape.dims[0];
-        const C = X.shape.dims[1];
-        const H = X.shape.dims[2];
-        const W = X.shape.dims[3];
-        if (G.data.len != C or B.data.len != C or running_mean.data.len != C or running_var.data.len != C) {
-            return error.ShapeMismatch;
-        }
-
-        const allocator = self.arena.allocator();
-        const req_grad = self.enable_grad and (X.requires_grad or G.requires_grad or B.requires_grad);
-        const Y = try self.tensorND(&.{ N, C, H, W }, req_grad);
-
-        const save_mean = try allocator.alloc(f32, C);
-        const save_inv_std = try allocator.alloc(f32, C);
-
-        const spatial_size = H * W;
-        const total_samples_f = @as(f32, @floatFromInt(N * spatial_size));
-
-        for (0..C) |c| {
-            var mean_val: f32 = 0.0;
-            var var_val: f32 = 0.0;
-
-            if (training) {
-                var sum_val: f32 = 0.0;
-                for (0..N) |n| {
-                    const c_slice = X.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
-                    for (c_slice) |val| sum_val += val;
-                }
-                mean_val = sum_val / total_samples_f;
-
-                var var_sum: f32 = 0.0;
-                for (0..N) |n| {
-                    const c_slice = X.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
-                    for (c_slice) |val| {
-                        const diff = val - mean_val;
-                        var_sum += diff * diff;
-                    }
-                }
-                var_val = var_sum / total_samples_f;
-
-                running_mean.data[c] = (1.0 - momentum) * running_mean.data[c] + momentum * mean_val;
-                running_var.data[c] = (1.0 - momentum) * running_var.data[c] + momentum * var_val;
-            } else {
-                mean_val = running_mean.data[c];
-                var_val = running_var.data[c];
-            }
-
-            const inv_std = 1.0 / @sqrt(var_val + eps);
-            save_mean[c] = mean_val;
-            save_inv_std[c] = inv_std;
-
-            const g_val = G.data[c];
-            const b_val = B.data[c];
-
-            for (0..N) |n| {
-                const in_slice = X.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
-                const out_slice = Y.data[(n * C + c) * spatial_size .. (n * C + c + 1) * spatial_size];
-                for (in_slice, out_slice) |val, *o| {
-                    o.* = (val - mean_val) * inv_std * g_val + b_val;
-                }
-            }
-        }
-
-        if (self.enable_grad) {
-            const inputs = try allocator.alloc(*Tensor, 3);
-            inputs[0] = X;
-            inputs[1] = G;
-            inputs[2] = B;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = Y;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .BatchNorm2d,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .BatchNorm2d = .{
-                    .eps = eps,
-                    .training = training,
-                    .save_mean = save_mean,
-                    .save_inv_std = save_inv_std,
-                } },
-            };
-            Y.creator = o;
-            try self.recordOp(o);
-        }
-
-        return Y;
-    }
-
-    pub fn dropout(self: *Graph, X: *Tensor, p: f32, random: std.Random) !*Tensor {
-        const allocator = self.arena.allocator();
-        const req_grad = self.enable_grad and X.requires_grad;
-        const Y = try self.tensorND(X.shape.dims[0..X.shape.len], req_grad);
-
-        const mask_scale = try allocator.alloc(f32, X.data.len);
-        const scale = 1.0 / (1.0 - p);
-
-        for (X.data, Y.data, mask_scale) |val, *o, *m| {
-            if (random.float(f32) < p) {
-                m.* = 0.0;
-                o.* = 0.0;
-            } else {
-                m.* = scale;
-                o.* = val * scale;
-            }
-        }
-
-        if (self.enable_grad) {
-            const inputs = try allocator.alloc(*Tensor, 1);
-            inputs[0] = X;
-            const outputs = try allocator.alloc(*Tensor, 1);
-            outputs[0] = Y;
-
-            const o = try allocator.create(Op);
-            o.* = Op{
-                .op_type = .Dropout,
-                .inputs = inputs,
-                .outputs = outputs,
-                .context = .{ .Dropout = .{ .mask_scale = mask_scale } },
-            };
-            Y.creator = o;
-            try self.recordOp(o);
-        }
-
-        return Y;
-    }
-
-    pub fn rope(self: *Graph, X: *Tensor, start_pos: usize) !*Tensor {
-        return self.ropeOffset(X, start_pos, 0);
-    }
-
-    pub fn ropeOffset(self: *Graph, X: *Tensor, start_pos: usize, rotary_offset: usize) !*Tensor {
-        const allocator = self.arena.allocator();
-        const Y = try X.ropeOffset(start_pos, rotary_offset, allocator);
-        return self.registerSingleOutputOp(
-            Y,
-            &.{X},
-            .RoPE,
-            .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = rotary_offset } },
-            self.enable_grad and X.requires_grad,
-        );
-    }
-
-    pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
-        const allocator = self.arena.allocator();
-        const C = try A.batchMatMul(B, allocator);
-        return self.registerSingleOutputOp(
-            C,
-            &.{ A, B },
-            .BatchMatMul,
-            .{ .BatchMatMul = {} },
-            self.enable_grad and (A.requires_grad or B.requires_grad),
-        );
-    }
-
-    pub fn embedding(self: *Graph, W: *Tensor, X: anytype) !*Tensor {
-        const allocator = self.arena.allocator();
-        const XT = @TypeOf(X);
-        const x_tensor: *Tensor = if (XT == *Tensor or XT == *const Tensor)
-            @constCast(X)
-        else blk: {
-            const ptr_info = @typeInfo(XT);
-            if (ptr_info == .pointer and ptr_info.pointer.size == .one and
-                @typeInfo(ptr_info.pointer.child) == .@"struct" and
-                @hasField(ptr_info.pointer.child, "shape"))
-            {
-                const t = try self.tensorND(X.shape.dims[0..X.shape.len], false);
-                const num_elem = X.shape.numel();
-                if (X.isContiguous() and X.data.len >= num_elem) {
-                    for (0..num_elem) |i| {
-                        t.data[i] = tensor_mod.convertScalar(f32, @TypeOf(X.data[0]), X.data[i]);
-                    }
-                } else {
-                    var coord = [_]usize{0} ** 8;
-                    const rank = X.shape.len;
-                    for (0..num_elem) |i| {
-                        var flat: usize = 0;
-                        for (0..rank) |d| flat += coord[d] * X.strides.dims[d];
-                        t.data[i] = tensor_mod.convertScalar(f32, @TypeOf(X.data[0]), X.data[flat]);
-                        var d = rank;
-                        while (d > 0) {
-                            d -= 1;
-                            coord[d] += 1;
-                            if (coord[d] < X.shape.dims[d]) break;
-                            coord[d] = 0;
-                        }
-                    }
-                }
-                break :blk t;
-            } else {
-                const t = try self.tensorND(&.{X.len}, false);
-                for (0..X.len) |i| {
-                    t.data[i] = tensor_mod.convertScalar(f32, @TypeOf(X[0]), X[i]);
-                }
-                break :blk t;
-            }
-        };
-
-        const Y = try W.embedding(x_tensor, allocator);
-        return self.registerSingleOutputOp(
-            Y,
-            &.{ W, x_tensor },
-            .Embedding,
-            .{ .Embedding = {} },
-            self.enable_grad and W.requires_grad,
-        );
-    }
+    // 神经网络层算子绑定 (来自 graph_nn.zig)
+    pub const conv2d = graph_nn.conv2d;
+    pub const conv2dWithConfig = graph_nn.conv2dWithConfig;
+    pub const convTranspose2D = graph_nn.convTranspose2D;
+    pub const maxpool2d = graph_nn.maxpool2d;
+    pub const avgpool2d = graph_nn.avgpool2d;
+    pub const softmax = graph_nn.softmax;
+    pub const rmsNorm = graph_nn.rmsNorm;
+    pub const layerNorm = graph_nn.layerNorm;
+    pub const batchNorm2d = graph_nn.batchNorm2d;
+    pub const dropout = graph_nn.dropout;
+    pub const rope = graph_nn.rope;
+    pub const ropeOffset = graph_nn.ropeOffset;
+    pub const batchMatMul = graph_nn.batchMatMul;
+    pub const embedding = graph_nn.embedding;
 
     pub fn sqrt(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
@@ -1579,284 +951,13 @@ pub const Graph = struct {
         }
     }
 
-    /// 在图建立完毕后，智能探查参数节点的下游消费者算子并自动初始化权重
-    pub fn initWeights(self: *Graph, random: std.Random) void {
-        const init_mod = @import("../nn/init.zig");
-
-        // 搜集图内所有 Ops 的输入参数节点与 registered tensors
-        const allocator = self.arena.allocator();
-        var visited = std.AutoHashMap(*Tensor, void).init(allocator);
-        defer visited.deinit();
-
-        // 1. 扫描图中的 Ops 所有输入
-        for (self.ops.items) |op| {
-            for (op.inputs) |t| {
-                if (visited.contains(t)) continue;
-                visited.put(t, {}) catch continue;
-                self.initSingleTensor(t, random, init_mod);
-            }
-        }
-
-        // 2. 扫描显式注册的 tensors
-        for (self.tensors.items) |t| {
-            if (visited.contains(t)) continue;
-            visited.put(t, {}) catch continue;
-            self.initSingleTensor(t, random, init_mod);
-        }
-    }
-
-    fn initSingleTensor(self: *Graph, t: *Tensor, random: std.Random, comptime init_mod: type) void {
-        // 只对属于可训练参数（requires_grad=true 且非中间激活运算生成）的节点进行初始化
-        // 如果已经被层的 customInit 初始化过，则坚决跳过，绝不覆盖！
-        if (!t.requires_grad or t.is_custom_initialized or t.creator != null) return;
-
-        // 1. 如果是 1D 参数向量 (归一化缩放因子 gamma 初始化为 1.0，偏置向量初始化为 0.0)
-        if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
-            for (self.ops.items) |op| {
-                switch (op.op_type) {
-                    .RmsNorm, .LayerNorm, .BatchNorm2d => {
-                        if (op.inputs.len >= 2 and op.inputs[1] == t) {
-                            @memset(t.data, 1.0);
-                            return;
-                        }
-                    },
-                    else => {},
-                }
-            }
-            @memset(t.data, 0.0);
-            return;
-        }
-
-        // 2. 如果是高维权重矩阵 (Linear, Conv2D, ConvTranspose2D 等)
-        // 沿计算图中的 Ops 向后探测第一个下游消费算子 (Consumer Op)
-        const nonlinearity = self.detectConsumerActivation(t);
-        const gain = init_mod.calculateGain(nonlinearity);
-
-        var fan_in: usize = 1;
-        var fan_out: usize = 1;
-        if (t.shape.len == 2) {
-            fan_in = t.shape.dims[0];
-            fan_out = t.shape.dims[1];
-        } else if (t.shape.len == 4) {
-            // Conv2D: [out_channels, in_channels, kh, kw]
-            const out_c = t.shape.dims[0];
-            const in_c = t.shape.dims[1];
-            const kh = t.shape.dims[2];
-            const kw = t.shape.dims[3];
-            fan_in = in_c * kh * kw;
-            fan_out = out_c * kh * kw;
-        } else {
-            for (t.shape.dims[0 .. t.shape.len - 1]) |d| fan_in *= d;
-            fan_out = t.shape.dims[t.shape.len - 1];
-        }
-
-        const method: init_mod.InitMethod = switch (nonlinearity) {
-            .tanh, .sigmoid => .{ .xavier_normal = .{ .gain = gain } },
-            .selu => .lecun_normal,
-            else => .{ .he_normal = .{ .gain = gain } },
-        };
-
-        init_mod.initWeights(random, t.data, fan_in, fan_out, method);
-    }
-
-    /// 格式化全图各节点（包括输入数据、模型参数及中间算子输出）的详情与初始化报告为分配的字符串
-    pub fn formatInitReport(self: *Graph, allocator: std.mem.Allocator) ![]const u8 {
-        const init_mod = @import("../nn/init.zig");
-        var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(allocator);
-
-        try buf.appendSlice(allocator, "\n=== Graph Architecture & Initialization Report ===\n");
-        try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
-            "Node", "Kind", "Shape", "Status", "Inferred / Op", "Strategy / Details",
-        });
-        try buf.print(allocator, "{s:-<24} {s:-<12} {s:-<18} {s:-<14} {s:-<16} {s:-<28}\n", .{
-            "", "", "", "", "", "",
-        });
-
-        const arena_alloc = self.arena.allocator();
-        var visited = std.AutoHashMap(*Tensor, void).init(arena_alloc);
-        defer visited.deinit();
-
-        var param_idx: usize = 0;
-        var input_idx: usize = 0;
-        var op_idx: usize = 0;
-
-        for (self.ops.items) |op| {
-            for (op.inputs) |t| {
-                if (visited.contains(t)) continue;
-                visited.put(t, {}) catch continue;
-                try self.appendSingleTensorReport(t, &param_idx, &input_idx, &op_idx, &buf, allocator, init_mod);
-            }
-            for (op.outputs) |t| {
-                if (visited.contains(t)) continue;
-                visited.put(t, {}) catch continue;
-                try self.appendSingleTensorReport(t, &param_idx, &input_idx, &op_idx, &buf, allocator, init_mod);
-            }
-        }
-
-        for (self.tensors.items) |t| {
-            if (visited.contains(t)) continue;
-            visited.put(t, {}) catch continue;
-            try self.appendSingleTensorReport(t, &param_idx, &input_idx, &op_idx, &buf, allocator, init_mod);
-        }
-        try buf.appendSlice(allocator, "=========================================================================================================\n\n");
-        return buf.toOwnedSlice(allocator);
-    }
-
-    /// 在标准输出/调试控制台直接打印初始化详情报告
-    pub fn printInitReport(self: *Graph) void {
-        const report = self.formatInitReport(self.backing_allocator) catch return;
-        defer self.backing_allocator.free(report);
-        std.debug.print("{s}", .{report});
-    }
-
-    /// 将计算图与模块层级结构序列化为递归的 JSON 数据字符串 (供前端直接解析并构建完整模型拓扑)
-    pub fn formatJson(self: *Graph, allocator: std.mem.Allocator) ![]const u8 {
-        const vis = @import("../nn/visualization.zig");
-        return vis.graph_ir.generateJson(self, allocator);
-    }
-
-    /// 将计算图与模块层级结构直接导出保存为独立的 JSON 文件 (如 "model_graph.json")
-    pub fn exportJson(self: *Graph, file_path: []const u8) !void {
-        const vis = @import("../nn/visualization.zig");
-        try vis.graph_ir.exportJson(self, file_path, self.backing_allocator);
-    }
-
-    fn appendSingleTensorReport(
-        self: *Graph,
-        t: *Tensor,
-        param_idx: *usize,
-        input_idx: *usize,
-        op_idx: *usize,
-        buf: *std.ArrayList(u8),
-        allocator: std.mem.Allocator,
-        comptime init_mod: type,
-    ) !void {
-        var shape_buf: [64]u8 = undefined;
-        var shape_len: usize = 0;
-        shape_buf[0] = '[';
-        shape_len += 1;
-        for (0..t.shape.len) |d| {
-            if (d > 0) {
-                shape_buf[shape_len] = ',';
-                shape_buf[shape_len + 1] = ' ';
-                shape_len += 2;
-            }
-            const part = std.fmt.bufPrint(shape_buf[shape_len..], "{d}", .{t.shape.dims[d]}) catch "";
-            shape_len += part.len;
-        }
-        shape_buf[shape_len] = ']';
-        shape_len += 1;
-        const shape_str = shape_buf[0..shape_len];
-
-        // 1. 算子生成的中间计算节点 / 激活输出
-        if (t.creator) |creator_op| {
-            var name_buf: [48]u8 = undefined;
-            const op_name = @tagName(creator_op.op_type);
-            const name: []const u8 = if (t.name) |n| n else (std.fmt.bufPrint(&name_buf, "Node_{s}_{d}", .{ op_name, op_idx.* }) catch "Node_Op");
-            op_idx.* += 1;
-
-            var detail_buf: [64]u8 = undefined;
-            const detail = std.fmt.bufPrint(&detail_buf, "produced by {s}", .{op_name}) catch "op output";
-
-            try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
-                name, "Activation", shape_str, "OP_OUTPUT", op_name, detail,
-            });
-            return;
-        }
-
-        // 2. 外部输入或常量张量 (非可学习参数)
-        if (!t.requires_grad) {
-            var name_buf: [48]u8 = undefined;
-            const name: []const u8 = if (t.name) |n| n else (std.fmt.bufPrint(&name_buf, "Input_{d}", .{input_idx.*}) catch "Input");
-            input_idx.* += 1;
-
-            try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
-                name, "Input", shape_str, "INPUT", "N/A", "user input / constant",
-            });
-            return;
-        }
-
-        // 3. 模型可学习参数节点
-        var name_buf: [48]u8 = undefined;
-        const name: []const u8 = if (t.name) |n| n else (std.fmt.bufPrint(&name_buf, "Param_{d}", .{param_idx.*}) catch "Param");
-        param_idx.* += 1;
-
-        if (t.is_custom_initialized) {
-            try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
-                name, "Param", shape_str, "CUSTOM_INIT", "N/A", "user-defined customInit",
-            });
-            return;
-        }
-
-        if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
-            try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
-                name, "Param", shape_str, "AUTO_GRAPH", "bias", "zeros (0.0)",
-            });
-            return;
-        }
-
-        const act = self.detectConsumerActivation(t);
-        const gain = init_mod.calculateGain(act);
-        const act_name = switch (act) {
-            .relu => "ReLU",
-            .tanh => "Tanh",
-            .sigmoid => "Sigmoid",
-            .gelu => "GELU",
-            .silu => "SiLU",
-            .selu => "SELU",
-            .leaky_relu => "LeakyReLU",
-            .linear => "Linear (None)",
-        };
-
-        var strat_buf: [64]u8 = undefined;
-        const strat = switch (act) {
-            .tanh, .sigmoid => std.fmt.bufPrint(&strat_buf, "Xavier Normal (gain={d:.3})", .{gain}) catch "Xavier Normal",
-            .selu => "LeCun Normal",
-            else => std.fmt.bufPrint(&strat_buf, "He Normal (gain={d:.3})", .{gain}) catch "He Normal",
-        };
-
-        try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
-            name, "Param", shape_str, "AUTO_GRAPH", act_name, strat,
-        });
-    }
-
-    /// 顺着张量 t 往后在图的 Ops 列表中探查下游消费者的激活函数类型
-    pub fn detectConsumerActivation(self: *Graph, target: *Tensor) @import("../nn/init.zig").Nonlinearity {
-        var current: *Tensor = target;
-
-        // BFS / DFS 往后搜寻直到遇到激活函数或多层终点
-        while (true) {
-            var found_consumer = false;
-            for (self.ops.items) |op| {
-                for (op.inputs) |inp| {
-                    if (inp == current) {
-                        found_consumer = true;
-                        switch (op.op_type) {
-                            .Relu => return .relu,
-                            .Tanh => return .tanh,
-                            .Sigmoid => return .sigmoid,
-                            .Gelu => return .gelu,
-                            .Silu => return .silu,
-                            .LeakyRelu => return .{ .leaky_relu = op.context.LeakyRelu.alpha },
-                            // 如果经过了 MatMul/Conv2D/AddBias/Add 等中间运算，顺着它的 output 继续往后看
-                            .MatMul, .BatchMatMul, .Conv2D, .ConvTranspose2D, .AddBias, .Add, .Reshape, .Transpose => {
-                                if (op.outputs.len > 0) {
-                                    current = op.outputs[0];
-                                    break;
-                                }
-                            },
-                            else => {},
-                        }
-                    }
-                }
-                if (found_consumer and current != target) break;
-            }
-            if (!found_consumer or current == target) break;
-        }
-
-        // 如果下游没有接激活函数或直接进入输出/损失层，判定为 linear (gain=1.0)
-        return .linear;
-    }
+    // 参数初始化、架构报告与 JSON 导出绑定 (来自 graph_init.zig)
+    pub const initWeights = graph_init.initWeights;
+    pub const initSingleTensor = graph_init.initSingleTensor;
+    pub const formatInitReport = graph_init.formatInitReport;
+    pub const printInitReport = graph_init.printInitReport;
+    pub const formatJson = graph_init.formatJson;
+    pub const exportJson = graph_init.exportJson;
+    pub const appendSingleTensorReport = graph_init.appendSingleTensorReport;
+    pub const detectConsumerActivation = graph_init.detectConsumerActivation;
 };
-

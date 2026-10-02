@@ -15,7 +15,6 @@ pub const InitMethod = init_mod.InitMethod;
 pub const InitOptions = init_mod.InitOptions;
 pub const normalRandom = init_mod.normalRandom;
 pub const initWeights = init_mod.initWeights;
-pub const initializeWeights = init_mod.initializeWeights;
 
 pub fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: usize, requires_grad: bool) !*Tensor {
     const t = try allocator.create(Tensor);
@@ -104,9 +103,13 @@ pub const Linear = struct {
 
     /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "fc1"，自动设置 "fc1.weight" 与 "fc1.bias")
     pub fn setName(self: *Linear, name: []const u8) void {
-        self.name = name;
-        self.weight.setNameFormatted("{s}.weight", .{name});
-        self.bias.setNameFormatted("{s}.bias", .{name});
+        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
+            self.name = s;
+        } else |_| {
+            self.name = name;
+        }
+        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
+        self.bias.setNameFormatted("{s}.bias", .{self.name.?});
     }
 
     /// 使用格式化模板为层设置人类可读的名称 (如 "{s}.fc1", parent_name)
@@ -602,6 +605,45 @@ fn collectParametersInternal(model: anytype, list: *std.ArrayList(*Tensor), allo
     }
 }
 
+pub fn setTrainingModel(model: anytype, is_training: bool) void {
+    const T = @TypeOf(model.*);
+    const info = @typeInfo(T);
+    if (info != .@"struct") return;
+    if (@hasField(T, "training") and @TypeOf(@field(model, "training")) == bool) {
+        @field(model, "training") = is_training;
+    }
+    inline for (info.@"struct".fields) |field| {
+        const FieldType = field.type;
+        if (@sizeOf(FieldType) == 0) continue;
+        const field_info = @typeInfo(FieldType);
+        if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
+            const ElemT = field_info.pointer.child;
+            if (@typeInfo(ElemT) == .@"struct") {
+                for (@field(model, field.name)) |*item| {
+                    setTrainingModel(item, is_training);
+                }
+            }
+        } else if (field_info == .@"struct") {
+            setTrainingModel(&@field(model, field.name), is_training);
+        } else if (field_info == .@"array") {
+            const ElemT = field_info.@"array".child;
+            if (@typeInfo(ElemT) == .@"struct") {
+                for (&@field(model, field.name)) |*item| {
+                    setTrainingModel(item, is_training);
+                }
+            }
+        }
+    }
+}
+
+pub fn trainModel(model: anytype) void {
+    setTrainingModel(model, true);
+}
+
+pub fn evalModel(model: anytype) void {
+    setTrainingModel(model, false);
+}
+
 pub fn Module(comptime T: type) type {
     return struct {
         allocator: std.mem.Allocator,
@@ -622,6 +664,18 @@ pub fn Module(comptime T: type) type {
 
         pub fn zeroGrad(self: *Self) void {
             zeroGradModel(&self.inner);
+        }
+
+        pub fn setTraining(self: *Self, is_training: bool) void {
+            setTrainingModel(&self.inner, is_training);
+        }
+
+        pub fn train(self: *Self) void {
+            trainModel(&self.inner);
+        }
+
+        pub fn eval(self: *Self) void {
+            evalModel(&self.inner);
         }
 
         pub fn save(self: *const Self, io: std.Io, file_path: []const u8) !void {
@@ -668,6 +722,18 @@ pub fn Sequential(comptime LayersTuple: type) type {
                     layer.zeroGrad();
                 }
             }
+        }
+
+        pub fn setTraining(self: *Self, is_training: bool) void {
+            setTrainingModel(&self.layers, is_training);
+        }
+
+        pub fn train(self: *Self) void {
+            trainModel(&self.layers);
+        }
+
+        pub fn eval(self: *Self) void {
+            evalModel(&self.layers);
         }
 
         pub fn autoInit(self: *Self, random: std.Random) void {

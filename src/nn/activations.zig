@@ -29,6 +29,16 @@ pub const Tanh = struct {
 pub const LeakyReLU = struct {
     alpha: f32 = 0.2,
 
+    pub const default: LeakyReLU = .{};
+
+    pub fn defaultOptions() LeakyReLU {
+        return .{};
+    }
+
+    pub fn initDefault() LeakyReLU {
+        return .{};
+    }
+
     pub fn forward(self: LeakyReLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         return try graph.leakyRelu(x, self.alpha);
     }

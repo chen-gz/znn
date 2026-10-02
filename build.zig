@@ -113,6 +113,12 @@ const examples = [_]ExampleTarget{
         .run_desc = "Run the 5-Fold Cross-Validation hyperparameter tuning example",
     },
     .{
+        .name = "comptime_static_tensor",
+        .src = "examples/comptime_static_tensor.zig",
+        .run_step = "run-static",
+        .run_desc = "Run the Comptime StaticTensor demo",
+    },
+    .{
         .name = "benchmark",
         .src = "examples/benchmark.zig",
         .run_step = "run-bench",

@@ -30,10 +30,11 @@ Module.forward ──(作用域栈)──▶ autodiff.Graph ──graph_ir.build
 
 | 位置 | 内容 |
 | :--- | :--- |
-| `src/autodiff/graph.zig` | 作用域栈、`enterModule` / `enterChildScope` |
-| `src/nn/visualization.zig` | 模块树、局部图构建、枚举、JSON 序列化 |
-| `src/nn.zig` | 作用域归属、黄金边集、schema 一致性与枚举一致性测试 |
+| `src/autodiff/graph.zig` / `src/autodiff/graph_init.zig` | 作用域栈、`enterModule` / `enterChildScope`、`formatJson` / `exportJson` |
+| `src/nn/visualization.zig` & `src/nn/graph_ir.zig` | 强类型枚举、作用域解析、局部图构建 (`LocalGraphBuilder`)、模块树 (`graph_ir.build`) 与 JSON 序列化 (`graph_ir.serializeJson`) |
+| `src/nn/tests_vis.zig` | 作用域归属、黄金边集、schema 一致性、枚举一致性与 18 个经典模型导出测试 |
 | `examples/export_model_report.zig` | `zig build run-report` 导出 `examples/sample_model_graph.json`（2 层 GPT）与 `examples/minimal_model_graph.json`（单个 `Linear`） |
+| `examples/export_book_models.zig` | `zig build run-book-models` 导出 `examples/models/manifest.json` 与 18 个经典章节模型的 schema 2.0 计算图 JSON |
 
 ## 4. 修改导出格式
 

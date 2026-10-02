@@ -14,6 +14,8 @@ pub const core = @import("nn/core.zig");
 pub const activations = @import("nn/activations.zig");
 pub const normalization = @import("nn/normalization.zig");
 pub const recurrent = @import("nn/recurrent.zig");
+pub const attention = @import("nn/attention.zig");
+pub const llm = @import("nn/llm.zig");
 pub const transformer = @import("nn/transformer.zig");
 pub const serialization = @import("nn/serialization.zig");
 pub const visualization = @import("nn/visualization.zig");
@@ -39,7 +41,6 @@ pub const InitMethod = core.InitMethod;
 pub const InitOptions = core.InitOptions;
 pub const normalRandom = core.normalRandom;
 pub const initWeights = core.initWeights;
-pub const initializeWeights = core.initializeWeights;
 pub const createPersistentTensor = core.createPersistentTensor;
 pub const freePersistentTensor = core.freePersistentTensor;
 pub const Linear = core.Linear;
@@ -48,6 +49,9 @@ pub const ConvTranspose2D = core.ConvTranspose2D;
 pub const Module = core.Module;
 pub const deinitModel = core.deinitModel;
 pub const zeroGradModel = core.zeroGradModel;
+pub const setTrainingModel = core.setTrainingModel;
+pub const trainModel = core.trainModel;
+pub const evalModel = core.evalModel;
 pub const collectParameters = core.collectParameters;
 pub const Sequential = core.Sequential;
 pub const sequential = core.sequential;
@@ -87,8 +91,8 @@ pub const GRUResult = recurrent.GRUResult;
 // 5. Transformer、注意力与生成对齐 (Transformer, Attention & Alignment)
 pub const Embedding = transformer.Embedding;
 pub const KVCache = transformer.KVCache;
+pub const ScaledDotProductAttention = transformer.ScaledDotProductAttention;
 pub const MLP = transformer.MLP;
-pub const swigluForward = transformer.swigluForward;
 pub const SwiGLU = transformer.SwiGLU;
 pub const MoELayer = transformer.MoELayer;
 pub const CausalSelfAttention = transformer.CausalSelfAttention;
@@ -99,11 +103,10 @@ pub const TransformerBlock = transformer.TransformerBlock;
 pub const TransformerDecoder = transformer.TransformerDecoder;
 pub const GPTConfig = transformer.GPTConfig;
 pub const GPT = transformer.GPT;
+pub const DefaultGPT = transformer.DefaultGPT;
 pub const LoRALinear = transformer.LoRALinear;
 pub const maskedCrossEntropyLoss = transformer.maskedCrossEntropyLoss;
 pub const maskedCrossEntropyLossGraph = transformer.maskedCrossEntropyLossGraph;
-pub const sftCrossEntropyLoss = transformer.sftCrossEntropyLoss;
-pub const sftCrossEntropyLossGraph = transformer.sftCrossEntropyLossGraph;
 pub const dpoLoss = transformer.dpoLoss;
 pub const dpoLossGraph = transformer.dpoLossGraph;
 pub const computeGroupAdvantages = transformer.computeGroupAdvantages;
@@ -135,5 +138,6 @@ pub const EpochResult = engine.EpochResult;
 // ============================================================================
 
 test {
+    std.testing.refAllDecls(@This());
     _ = @import("nn/tests.zig");
 }
