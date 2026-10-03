@@ -1,26 +1,146 @@
 const std = @import("std");
 const c = @import("../cblas.zig");
 const core = @import("core.zig");
+const types = @import("types.zig");
 const Tensor = core.Tensor;
+const ConvOptions = types.ConvOptions;
 const ops_mod = @import("ops.zig");
 const zeros = ops_mod.zeros;
 const free = ops_mod.free;
 
-pub fn conv2d(self: *Tensor, weight: *Tensor, bias: ?*Tensor, allocator: std.mem.Allocator) !*Tensor {
-    return self.conv2dWithConfig(weight, bias, 1, 0, allocator);
-}
-
-pub fn conv2dWithConfig(
+pub fn conv1d(
     self: *Tensor,
     weight: *Tensor,
     bias: ?*Tensor,
-    stride: usize,
-    padding: usize,
+    options: ConvOptions,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len != 3 or weight.shape.len != 3) {
+        return error.IncompatibleDimensions;
+    }
+    const stride = options.stride;
+    const padding = options.padding;
+    if (stride == 0) {
+        return error.InvalidStride;
+    }
+    const N = self.shape.dims[0];
+    const C_in = self.shape.dims[1];
+    const L = self.shape.dims[2];
+
+    const C_out = weight.shape.dims[0];
+    if (weight.shape.dims[1] != C_in) return error.ShapeMismatch;
+    const K = weight.shape.dims[2];
+
+    if (bias) |b| {
+        if (b.shape.len != 1 or b.shape.dims[0] != C_out) return error.ShapeMismatch;
+    }
+
+    const L_padded = L + 2 * padding;
+    if (L_padded < K) return error.KernelBiggerThanInput;
+
+    const L_out = (L_padded - K) / stride + 1;
+
+    const out = try zeros(allocator, &.{ N, C_out, L_out });
+    errdefer out.deinit(allocator);
+
+    const s_n = self.strides.dims[0];
+    const s_c = self.strides.dims[1];
+    const s_l = self.strides.dims[2];
+
+    const K_col = C_in * K;
+
+    if (weight.isContiguous() and K_col > 0 and L_out > 0 and C_out > 0) {
+        const col_buf = try allocator.alloc(f32, K_col * L_out);
+        defer allocator.free(col_buf);
+
+        for (0..N) |n| {
+            // 图像转列 (Image to Column, im2col): 展平当前样本的一维感受野窗口为 [K_col, L_out] 矩阵
+            for (0..C_in) |ci| {
+                for (0..K) |k| {
+                    const k_row = ci * K + k;
+                    const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
+                    for (0..L_out) |l_out| {
+                        const il_signed: isize = @as(isize, @intCast(l_out * stride + k)) - @as(isize, @intCast(padding));
+                        if (il_signed >= 0 and il_signed < @as(isize, @intCast(L))) {
+                            const il: usize = @intCast(il_signed);
+                            col_row[l_out] = self.data[n * s_n + ci * s_c + il * s_l];
+                        } else {
+                            col_row[l_out] = 0.0;
+                        }
+                    }
+                }
+            }
+
+            const out_n = out.data[n * C_out * L_out .. (n + 1) * C_out * L_out];
+            if (bias) |b| {
+                const b_stride = b.strides.dims[0];
+                for (0..C_out) |co| {
+                    @memset(out_n[co * L_out .. (co + 1) * L_out], b.data[co * b_stride]);
+                }
+            }
+
+            c.cblas_sgemm(
+                c.CblasRowMajor,
+                c.CblasNoTrans,
+                c.CblasNoTrans,
+                @intCast(C_out),
+                @intCast(L_out),
+                @intCast(K_col),
+                1.0,
+                weight.data.ptr,
+                @intCast(K_col),
+                col_buf.ptr,
+                @intCast(L_out),
+                if (bias != null) @as(f32, 1.0) else @as(f32, 0.0),
+                out_n.ptr,
+                @intCast(L_out),
+            );
+        }
+        return out;
+    }
+
+    const w_co = weight.strides.dims[0];
+    const w_ci = weight.strides.dims[1];
+    const w_k = weight.strides.dims[2];
+
+    const o_n = out.strides.dims[0];
+    const o_c = out.strides.dims[1];
+    const o_l = out.strides.dims[2];
+
+    for (0..N) |n| {
+        for (0..C_out) |co| {
+            const b_val = if (bias) |b| b.data[co * b.strides.dims[0]] else 0.0;
+            for (0..L_out) |l_out| {
+                var acc: f32 = b_val;
+                for (0..C_in) |ci| {
+                    for (0..K) |k| {
+                        const il_signed: isize = @as(isize, @intCast(l_out * stride + k)) - @as(isize, @intCast(padding));
+                        if (il_signed < 0 or il_signed >= @as(isize, @intCast(L))) continue;
+                        const il: usize = @intCast(il_signed);
+                        const input_val = self.data[n * s_n + ci * s_c + il * s_l];
+                        const weight_val = weight.data[co * w_co + ci * w_ci + k * w_k];
+                        acc += input_val * weight_val;
+                    }
+                }
+                out.data[n * o_n + co * o_c + l_out * o_l] = acc;
+            }
+        }
+    }
+    return out;
+}
+
+pub fn conv2d(
+    self: *Tensor,
+    weight: *Tensor,
+    bias: ?*Tensor,
+    options: ConvOptions,
     allocator: std.mem.Allocator,
 ) !*Tensor {
     if (self.shape.len != 4 or weight.shape.len != 4) {
         return error.IncompatibleDimensions;
     }
+    const stride = options.stride;
+    const padding = options.padding;
     if (stride == 0) {
         return error.InvalidStride;
     }

@@ -34,6 +34,7 @@ const initWeights = nn.initWeights;
 const createPersistentTensor = nn.createPersistentTensor;
 const freePersistentTensor = nn.freePersistentTensor;
 const Linear = nn.Linear;
+const Conv1D = nn.Conv1D;
 const Conv2D = nn.Conv2D;
 const ConvTranspose2D = nn.ConvTranspose2D;
 const Module = nn.Module;
@@ -1270,6 +1271,46 @@ test "Conv2D with stride and padding forward and backward (im2col + sgemm)" {
     try std.testing.expectApproxEqAbs(@as(f32, 4.0), conv.bias.grad[1], 1e-4);
     // x[0, 0] is covered only by window (0, 0) at (kh=1, kw=1), so dL/dx[0,0] = w[0,0,1,1] + w[1,0,1,1] = 1 + 2 = 3
     try std.testing.expectApproxEqAbs(@as(f32, 3.0), x.grad[0], 1e-4);
+}
+
+test "Conv1D with stride and padding forward and backward (im2col + sgemm)" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(2026);
+    const random = prng.random();
+
+    var conv = try Conv1D.init(allocator, 1, 2, 3, .{ .stride = 2, .padding = 1 });
+    conv.resetParameters(random, .{});
+    defer nn.deinitModel(&conv, allocator);
+    @memset(conv.weight.data[0..3], 1.0);
+    @memset(conv.weight.data[3..6], 2.0);
+    conv.bias.data[0] = 0.5;
+    conv.bias.data[1] = -0.5;
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    // Input [1, 1, 4] = {1, 2, 3, 4} with kernel=3, stride=2, padding=1 -> Output [1, 2, 2]
+    // Window 0 (l_out=0): [0, 1, 2] -> sum = 3
+    // Window 1 (l_out=1): [2, 3, 4] -> sum = 9
+    const x = try graph.tensorNDWithData(&.{ 1, 1, 4 }, &.{ 1.0, 2.0, 3.0, 4.0 }, true);
+
+    const out = try conv.forward(&graph, x);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 2, 2 }, out.shape.dims[0..out.shape.len]);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 3.5), out.data[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 9.5), out.data[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.5), out.data[2], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 17.5), out.data[3], 1e-4);
+
+    const loss = try graph.sum(out, null, false);
+    try graph.backward(loss);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), conv.bias.grad[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), conv.bias.grad[1], 1e-4);
+    // x[0] is covered only by window 0 at k=1 -> dL/dx[0] = w[0,0,1] + w[1,0,1] = 1 + 2 = 3
+    // x[1] is covered by window 0 (k=2) and window 1 (k=0) -> dL/dx[1] = 2 * (1 + 2) = 6
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), x.grad[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), x.grad[1], 1e-4);
 }
 
 test "MoELayer sparse top-k expert execution skips inactive experts" {

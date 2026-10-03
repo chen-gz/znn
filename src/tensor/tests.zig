@@ -273,13 +273,22 @@ test "tensor typed error handling and boundary validation" {
     // 7. transpose dimension out of bounds
     try std.testing.expectError(error.DimensionOutOfBounds, t2x2.transpose(0, 3, allocator));
 
-    // 8. conv2d error conditions
+    // 8. conv1d and conv2d error conditions
+    const t3d_a = try zeros(allocator, &.{ 1, 2, 4 });
+    defer free(allocator, t3d_a);
+    const w1d_bad_c = try zeros(allocator, &.{ 2, 3, 2 });
+    defer free(allocator, w1d_bad_c);
+    try std.testing.expectError(error.ShapeMismatch, t3d_a.conv1d(w1d_bad_c, null, .{}, allocator));
+    const w1d_too_big = try zeros(allocator, &.{ 2, 2, 10 });
+    defer free(allocator, w1d_too_big);
+    try std.testing.expectError(error.KernelBiggerThanInput, t3d_a.conv1d(w1d_too_big, null, .{}, allocator));
+
     const w_bad_c = try zeros(allocator, &.{ 2, 3, 2, 2 }); // C_in mismatch with t4d_a (C_in is 2, weight has 3)
     defer free(allocator, w_bad_c);
-    try std.testing.expectError(error.ShapeMismatch, t4d_a.conv2d(w_bad_c, null, allocator));
+    try std.testing.expectError(error.ShapeMismatch, t4d_a.conv2d(w_bad_c, null, .{}, allocator));
     const w_too_big = try zeros(allocator, &.{ 2, 2, 5, 5 }); // KH/KW > H/W (5 > 3 or 4)
     defer free(allocator, w_too_big);
-    try std.testing.expectError(error.KernelBiggerThanInput, t4d_a.conv2d(w_too_big, null, allocator));
+    try std.testing.expectError(error.KernelBiggerThanInput, t4d_a.conv2d(w_too_big, null, .{}, allocator));
 
     // 9. concat error conditions
     try std.testing.expectError(error.EmptyInputs, concat(allocator, &.{}, 0));

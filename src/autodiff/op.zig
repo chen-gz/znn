@@ -207,10 +207,15 @@ pub const Op = struct {
             .Div => {
                 copyFromEager(self.outputs[0], try self.inputs[0].div(self.inputs[1], allocator), allocator);
             },
+            .Conv1D => {
+                const bias = if (self.inputs.len > 2) self.inputs[2] else null;
+                const ctx = self.context.Conv1D;
+                copyFromEager(self.outputs[0], try self.inputs[0].conv1d(self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            },
             .Conv2D => {
                 const bias = if (self.inputs.len > 2) self.inputs[2] else null;
                 const ctx = self.context.Conv2D;
-                copyFromEager(self.outputs[0], try self.inputs[0].conv2dWithConfig(self.inputs[1], bias, ctx.stride, ctx.padding, allocator), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].conv2d(self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
             },
             .ConvTranspose2D => {
                 const bias = if (self.inputs.len > 2) self.inputs[2] else null;
@@ -409,6 +414,7 @@ pub const Op = struct {
             .Div,
             => try backward_core.backwardCore(self),
 
+            .Conv1D,
             .Conv2D,
             .ConvTranspose2D,
             .MaxPool2D,

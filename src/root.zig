@@ -46,6 +46,7 @@ pub const BFloat16Tensor = tensor.BFloat16Tensor;
 pub const bf16 = tensor.bf16;
 pub const DType = tensor.DType;
 pub const SliceRange = tensor.SliceRange;
+pub const ConvOptions = tensor.ConvOptions;
 
 pub const CrossValidationOptions = cv.CrossValidationOptions;
 

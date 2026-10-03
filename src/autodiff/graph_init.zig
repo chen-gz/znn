@@ -45,6 +45,7 @@ pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u
     // 4. 根据模块注册的原生类型推导标准公式 (避免脆弱的字符串模式推测)
     if (self.getModuleType(module_path)) |m_type| {
         if (std.mem.eql(u8, m_type, "Linear")) return "y = x W^T + b";
+        if (std.mem.eql(u8, m_type, "Conv1D")) return "y = \\text{Conv1D}(x; W, b)";
         if (std.mem.eql(u8, m_type, "Conv2D")) return "y = \\text{Conv2D}(x; W, b)";
         if (std.mem.eql(u8, m_type, "ConvTranspose2D")) return "y = \\text{ConvTranspose2D}(x; W, b)";
         if (std.mem.eql(u8, m_type, "RMSNorm")) return "y = \\text{RMSNorm}(x; \\gamma, \\epsilon)";
@@ -240,6 +241,7 @@ pub const ParamFans = struct {
 /// 依据计算图中直接消费该参数的算子确定 fan_in / fan_out：
 /// - `MatMul` / `BatchMatMul` 右操作数 (`y = x W`，W 为 `[..., in, out]`)：fan_in = 倒数第二维，fan_out = 最后一维；
 ///   左操作数 (`y = W x`，W 为 `[..., out, in]`)：fan_in = 最后一维，fan_out = 倒数第二维；
+/// - `Conv1D` 卷积核 `[out_c, in_c, k]`：fan_in = in_c·k，fan_out = out_c·k；
 /// - `Conv2D` 卷积核 `[out_c, in_c, kh, kw]`：fan_in = in_c·kh·kw，fan_out = out_c·kh·kw；
 /// - `ConvTranspose2D` 卷积核 `[in_c, out_c, kh, kw]`：fan_in = in_c·kh·kw，fan_out = out_c·kh·kw；
 /// - 参数先经 `Transpose` 再参与投影 (如 `y = x W^T`) 时，按转置后的张量及其消费算子确定；
@@ -254,6 +256,11 @@ pub fn computeParamFans(self: *const Graph, t: *const Tensor) ParamFans {
                 const cols = dims[dims.len - 1];
                 if (op.inputs[1] == t) return .{ .fan_in = rows, .fan_out = cols };
                 if (op.inputs[0] == t) return .{ .fan_in = cols, .fan_out = rows };
+            },
+            .Conv1D => {
+                if (dims.len != 3 or op.inputs.len < 2 or op.inputs[1] != t) continue;
+                const receptive = dims[2];
+                return .{ .fan_in = dims[1] * receptive, .fan_out = dims[0] * receptive };
             },
             .Conv2D => {
                 if (dims.len != 4 or op.inputs.len < 2 or op.inputs[1] != t) continue;
@@ -275,11 +282,15 @@ pub fn computeParamFans(self: *const Graph, t: *const Tensor) ParamFans {
     return shapeParamFans(t);
 }
 
-/// 仅依据形状推断 fan：2 维视为 `[in, out]`，4 维视为卷积核 `[out_c, in_c, kh, kw]`，
-/// 其余维数以除最后一维外各维之积为 fan_in、最后一维为 fan_out
+/// 仅依据形状推断 fan：2 维视为 `[in, out]`，3 维视为一维卷积核 `[out_c, in_c, k]`，
+/// 4 维视为二维卷积核 `[out_c, in_c, kh, kw]`，其余维数以除最后一维外各维之积为 fan_in、最后一维为 fan_out
 pub fn shapeParamFans(t: *const Tensor) ParamFans {
     const dims = t.shape.dims[0..t.shape.len];
     if (dims.len == 2) return .{ .fan_in = dims[0], .fan_out = dims[1] };
+    if (dims.len == 3) {
+        const receptive = dims[2];
+        return .{ .fan_in = dims[1] * receptive, .fan_out = dims[0] * receptive };
+    }
     if (dims.len == 4) {
         const receptive = dims[2] * dims[3];
         return .{ .fan_in = dims[1] * receptive, .fan_out = dims[0] * receptive };
@@ -448,7 +459,7 @@ pub fn detectConsumerActivation(self: *Graph, target: *Tensor) @import("../nn/in
                         .Gelu => return .gelu,
                         .Silu => return .silu,
                         .LeakyRelu => return .{ .leaky_relu = op.context.LeakyRelu.alpha },
-                        .MatMul, .Conv2D, .ConvTranspose2D => {
+                        .MatMul, .Conv1D, .Conv2D, .ConvTranspose2D => {
                             if (!passed_projection and op.outputs.len > 0) {
                                 passed_projection = true;
                                 current = op.outputs[0];

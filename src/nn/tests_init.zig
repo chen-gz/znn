@@ -141,6 +141,8 @@ test "Graph.computeParamFans derives fan_in and fan_out from the consuming op" {
 
     var linear = try Linear.init(allocator, 5, 7);
     defer nn.deinitModel(&linear, allocator);
+    var conv1d = try nn.Conv1D.init(allocator, 3, 8, 5, .{});
+    defer nn.deinitModel(&conv1d, allocator);
     var conv = try nn.Conv2D.init(allocator, 3, 8, 3, .{});
     defer nn.deinitModel(&conv, allocator);
     var deconv = try nn.ConvTranspose2D.init(allocator, 6, 2, 3, 1, 0, true);
@@ -157,6 +159,8 @@ test "Graph.computeParamFans derives fan_in and fan_out from the consuming op" {
     // 先转置再投影 y = x W^T，W: [out=7, in=5]
     const w_t = try graph.tensorND(&.{ 7, 5 }, true);
     _ = try graph.matmul(try graph.ones(&.{ 2, 5 }, false), try graph.transpose(w_t, 0, 1));
+    // Conv1D 卷积核 [out_c=8, in_c=3, 5]
+    _ = try conv1d.forward(&graph, try graph.ones(&.{ 1, 3, 10 }, false));
     // Conv2D 卷积核 [out_c=8, in_c=3, 3, 3]
     _ = try conv.forward(&graph, try graph.ones(&.{ 1, 3, 6, 6 }, false));
     // ConvTranspose2D 卷积核 [in_c=6, out_c=2, 3, 3]
@@ -171,6 +175,7 @@ test "Graph.computeParamFans derives fan_in and fan_out from the consuming op" {
     try expectFans(graph.computeParamFans(linear.weight), 5, 7);
     try expectFans(graph.computeParamFans(w_left), 4, 6);
     try expectFans(graph.computeParamFans(w_t), 5, 7);
+    try expectFans(graph.computeParamFans(conv1d.weight), 3 * 5, 8 * 5);
     try expectFans(graph.computeParamFans(conv.weight), 3 * 9, 8 * 9);
     try expectFans(graph.computeParamFans(deconv.weight), 6 * 9, 2 * 9);
 }

@@ -64,6 +64,17 @@ pub const SliceRange = struct {
     }
 };
 
+/// 卷积步长与填充配置 (Convolution Options)
+pub const ConvOptions = struct {
+    stride: usize = 1,
+    padding: usize = 0,
+
+    pub const default: ConvOptions = .{};
+    pub fn defaultOptions() ConvOptions {
+        return .{};
+    }
+};
+
 /// 通用标量类型转换函数
 pub fn convertScalar(comptime DestT: type, comptime SrcT: type, val: SrcT) DestT {
     if (DestT == SrcT) return val;
