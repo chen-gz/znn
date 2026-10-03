@@ -377,7 +377,7 @@ test "AdamOptimizer model parameter updates" {
     var prng = std.Random.DefaultPrng.init(42);
     var linear = try nn.Linear.init(allocator, 2, 2);
     linear.resetParameters(prng.random(), .{});
-    defer linear.deinit(allocator);
+    defer nn.deinitModel(&linear, allocator);
 
     var opt = try optim.AdamOptimizer.init(allocator, &linear, .{
         .lr = 0.01,
@@ -627,7 +627,7 @@ test "End-to-End LLM Pipeline integration demo" {
     // 2. SwiGLU MLP
     var swiglu = try nn.SwiGLU.init(allocator, 8, 16);
     try testing_init.initFromOnes(&swiglu, allocator, random, &.{ 2, 8 });
-    defer swiglu.deinit(allocator);
+    defer nn.deinitModel(&swiglu, allocator);
 
     // 3. AdamW Optimizer with Cosine Scheduler
     var opt = try optim.AdamWOptimizer.init(allocator, &swiglu, .{
@@ -755,7 +755,7 @@ test "GQA CausalSelfAttention and KVCache forwardInference" {
 
     var gqa_attn = try nn.CausalSelfAttention.initGQA(allocator, n_embd, n_head, num_kv_heads);
     try testing_init.initFromOnes(&gqa_attn, allocator, random, &.{ 1, 2, n_embd });
-    defer gqa_attn.deinit(allocator);
+    defer nn.deinitModel(&gqa_attn, allocator);
 
     // 1. Test Autograd Forward and Backward with GQA
     var graph = autodiff.Graph.init(allocator);
@@ -911,7 +911,7 @@ test "MoELayer Top-K routing and autograd" {
         top_k,
     );
     try testing_init.initFromOnes(&moe, allocator, random, &.{ 2, dim });
-    defer moe.deinit(allocator);
+    defer nn.deinitModel(&moe, allocator);
 
     // 1. Eager mode test on 3D input [2, 3, 8]
     const x_eager = try tensor.zeros(allocator, &.{ 2, 3, dim });
@@ -976,7 +976,7 @@ test "MLALayer with MLACache matrix absorption inference" {
 
     var mla = try nn.MLALayer.init(allocator, dim, n_head, head_dim, d_c, d_r);
     try testing_init.initFromOnes(&mla, allocator, random, &.{ 1, 2, dim });
-    defer mla.deinit(allocator);
+    defer nn.deinitModel(&mla, allocator);
 
     // 1. Eager mode full forward
     const x_eager = try tensor.zeros(allocator, &.{ 2, 3, dim });
@@ -1083,7 +1083,7 @@ test "ConvTranspose2D eager and autograd backward" {
         true,
     );
     conv_t.resetParameters(random, .{});
-    defer conv_t.deinit(allocator);
+    defer nn.deinitModel(&conv_t, allocator);
 
     // 1. Eager mode on input [1, 1, 2, 2] -> expected [1, 2, 4, 4]
     const x_eager = try tensor.zeros(allocator, &.{ 1, in_channels, 2, 2 });
@@ -1140,7 +1140,7 @@ test "ConvTranspose2D eager and autograd backward" {
         false,
     );
     upsample_conv.resetParameters(random, .{});
-    defer upsample_conv.deinit(allocator);
+    defer nn.deinitModel(&upsample_conv, allocator);
 
     const x_up = try tensor.zeros(allocator, &.{ 1, 1, 3, 3 });
     defer tensor.free(allocator, x_up);
@@ -1173,12 +1173,12 @@ test "GAN adversarial training step" {
             };
         }
         pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
-            self.l1.deinit(alloc);
-            self.l2.deinit(alloc);
+            nn.deinitModel(&self.l1, alloc);
+            nn.deinitModel(&self.l2, alloc);
         }
         pub fn zeroGrad(self: *@This()) void {
-            self.l1.zeroGrad();
-            self.l2.zeroGrad();
+            nn.zeroGradModel(&self.l1);
+            nn.zeroGradModel(&self.l2);
         }
         pub fn forward(self: *@This(), g: *autodiff.Graph, z: *tensor.Tensor) !*tensor.Tensor {
             const h = try self.l1.forward(g, z);
@@ -1201,12 +1201,12 @@ test "GAN adversarial training step" {
             };
         }
         pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
-            self.l1.deinit(alloc);
-            self.l2.deinit(alloc);
+            nn.deinitModel(&self.l1, alloc);
+            nn.deinitModel(&self.l2, alloc);
         }
         pub fn zeroGrad(self: *@This()) void {
-            self.l1.zeroGrad();
-            self.l2.zeroGrad();
+            nn.zeroGradModel(&self.l1);
+            nn.zeroGradModel(&self.l2);
         }
         pub fn forward(self: *@This(), g: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
             const h = try self.l1.forward(g, x);
@@ -1371,22 +1371,27 @@ test "Fixed array [N]*Tensor reflection and Safetensors serialization" {
     try std.testing.expectEqualSlices(f32, m1.bank[1].data, m2.bank[1].data);
 }
 
-test "Linear.setName copies stack buffer into internal storage" {
+test "nameModules copies the root name and names survive moving the module" {
     const std = @import("std");
     const allocator = std.testing.allocator;
 
+    var names = std.heap.ArenaAllocator.init(allocator);
+    defer names.deinit();
+
     var lin = try nn.Linear.init(allocator, 4, 2);
-    defer lin.deinit(allocator);
+    defer nn.deinitModel(&lin, allocator);
 
     {
         var stack_buf: [16]u8 = undefined;
         const dynamic_name = try std.fmt.bufPrint(&stack_buf, "layer_{d}", .{7});
-        lin.setName(dynamic_name);
+        try nn.nameModules(&lin, names.allocator(), dynamic_name);
         @memset(&stack_buf, 'X');
     }
 
-    try std.testing.expectEqualStrings("layer_7", lin.getName().?);
-    try std.testing.expectEqualStrings("layer_7.weight", lin.weight.getName().?);
+    // 名称存放在 arena 中而非模块自身，按值复制 (如放入 nn.sequential) 后仍然有效
+    const seq = nn.sequential(.{lin});
+    try std.testing.expectEqualStrings("layer_7", seq.layers[0].name.?);
+    try std.testing.expectEqualStrings("layer_7.weight", seq.layers[0].weight.getName().?);
     try std.testing.expectEqualStrings("layer_7.bias", lin.bias.getName().?);
 }
 

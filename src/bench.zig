@@ -751,7 +751,7 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
 
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
-                self.ln.deinit(self.allocator);
+                nn.deinitModel(&self.ln, self.allocator);
                 self.allocator.free(self.x_data);
             }
 
@@ -796,7 +796,7 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
 
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
-                self.rms.deinit(self.allocator);
+                nn.deinitModel(&self.rms, self.allocator);
                 self.allocator.free(self.x_data);
             }
 

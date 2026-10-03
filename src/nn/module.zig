@@ -3,9 +3,16 @@
 //! znn 中的模块就是普通 struct：字段中的 `*Tensor` / `?*Tensor` / `[]*Tensor` / `[N]*Tensor` 是该模块持有的张量
 //! (`requires_grad = true` 为可训练参数，否则为缓冲区)，struct 字段及其切片 / 数组是子模块。
 //! `walk` 在编译期展开字段，按字段路径 (如 `cell.w_ih_r.weight`、`layers.0.attn.c_attn.bias`) 访问所有张量与子模块，
-//! 释放、清零梯度、收集参数、训练 / 推理模式切换、自定义初始化与序列化均建立在这一个遍历之上。
+//! 释放、清零梯度、收集参数、训练 / 推理模式切换、自定义初始化、序列化与命名均建立在这一个遍历之上。
+//!
+//! 库层只需声明数据字段、`name: ?[]const u8 = null`、`module_type` 与可选的 `pub const formula`，
+//! 不再各自实现 `deinit` / `zeroGrad` / `setName`：
+//! - `nameModules(&model, arena, root)` 按字段路径为子模块与张量命名 (如 `gpt.decoder.h.0.attn`)，
+//!   名称字符串存放在调用方的 arena 中，模型按值移动后仍然有效；
+//! - `enterModuleScope(graph, self)` 在 `forward` 开头进入模块作用域并登记 `formula`。
 const std = @import("std");
 const tensor = @import("../tensor.zig");
+const autodiff = @import("../autodiff.zig");
 const Tensor = tensor.Tensor;
 const freePersistentTensor = @import("core.zig").freePersistentTensor;
 
@@ -44,6 +51,10 @@ pub const Path = struct {
 /// - `pub const wants_path = true` (可选)：需要字段路径时声明；未声明时 `path` 恒为空串，遍历不做任何字符串拼接。
 /// 编译期字段与零大小字段会被跳过。
 pub fn walk(model: anytype, visitor: anytype) !void {
+    const M = @TypeOf(model);
+    if (comptime @typeInfo(M) != .pointer or @typeInfo(@typeInfo(M).pointer.child) != .@"struct") {
+        @compileError("expected a pointer to a module struct, found " ++ @typeName(M));
+    }
     var path = Path{};
     try walkStruct(model, visitor, &path);
 }
@@ -292,4 +303,50 @@ pub fn markCustomInitialized(model: anytype) void {
     };
     var v = Visitor{};
     walk(model, &v) catch |err| switch (err) {};
+}
+
+/// 按字段路径为模型内全部子模块与张量命名 (名称与 PyTorch `named_modules()` / `named_parameters()` 一致)：
+/// 含 `name: ?[]const u8` 字段的子模块得到 `root.<字段路径>` (如 `gpt.decoder.h.0.attn`)，张量得到 `root.<字段路径>`
+/// (如 `gpt.decoder.h.0.attn.q_attn.weight`)；`root` 为空串时根模块不命名，子模块与张量直接使用字段路径。
+/// 模块名决定前向计算时在计算图中进入的作用域，用于可视化导出与初始化报告。
+/// 名称字符串由 `allocator` 分配且不单独释放，应传入生命周期不短于模型的 arena (`nn.Module` 自带)；
+/// 模型须已位于最终地址 (名称写入模型字段，按值复制模型后应对新副本重新命名)。
+pub fn nameModules(model: anytype, allocator: std.mem.Allocator, root: []const u8) !void {
+    const Visitor = struct {
+        allocator: std.mem.Allocator,
+        root: []const u8,
+        pub const wants_path = true;
+
+        fn fullPath(self: *@This(), path: []const u8) !?[]const u8 {
+            if (path.len == 0) return if (self.root.len == 0) null else try self.allocator.dupe(u8, self.root);
+            if (self.root.len == 0) return try self.allocator.dupe(u8, path);
+            return try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ self.root, path });
+        }
+
+        pub fn enterModule(self: *@This(), path: []const u8, module: anytype) !bool {
+            const M = @TypeOf(module.*);
+            if (comptime @hasField(M, "name") and @FieldType(M, "name") == ?[]const u8) {
+                module.name = try self.fullPath(path);
+            }
+            return true;
+        }
+
+        pub fn visitTensor(self: *@This(), path: []const u8, t: *Tensor) !void {
+            t.name = try self.fullPath(path);
+        }
+    };
+    var v = Visitor{ .allocator = allocator, .root = root };
+    try walk(model, &v);
+}
+
+/// 模块 `forward` 入口：已命名 (`module.name != null`) 时进入以模块名为路径的计算图作用域，登记 `module_type`，
+/// 并在模块类型声明了 `pub const formula` 时登记其公式；未命名时返回空守卫。
+/// 用法: `const scope = try enterModuleScope(graph, self); defer scope.exit();`
+pub fn enterModuleScope(graph: *autodiff.Graph, module: anytype) !autodiff.Graph.ScopeGuard {
+    const M = @TypeOf(module.*);
+    const guard = try graph.enterModule(module.name, module.module_type);
+    if (comptime @hasDecl(M, "formula")) {
+        if (module.name) |n| try graph.setModuleFormula(n, M.formula);
+    }
+    return guard;
 }

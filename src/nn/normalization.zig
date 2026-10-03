@@ -2,6 +2,7 @@ const std = @import("std");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const core = @import("core.zig");
+const enterModuleScope = core.enterModuleScope;
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
 const createPersistentTensor = core.createPersistentTensor;
@@ -12,7 +13,6 @@ pub const RMSNorm = struct {
     weight: *Tensor, // 可学习的缩放因子 gamma (Shape: [dim])
     eps: f32, // 均方根分母防止除以 0 的极小常数 (epsilon, eps)
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "RMSNorm",
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !RMSNorm {
@@ -29,49 +29,12 @@ pub const RMSNorm = struct {
         };
     }
 
-    pub fn setName(self: *RMSNorm, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
-    }
-
-    pub fn setNameFormatted(self: *RMSNorm, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("rmsnorm");
-        }
-    }
-
-    pub fn getName(self: *const RMSNorm) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn deinit(self: RMSNorm, allocator: std.mem.Allocator) void {
-        freePersistentTensor(allocator, self.weight);
-    }
-
-    pub fn zeroGrad(self: RMSNorm) void {
-        self.weight.zeroGrad();
-    }
-
     /// 模块标准数学变换公式
     pub const formula = "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma";
 
-    pub fn registerFormula(self: *const RMSNorm, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-        }
-    }
-
     pub fn forward(self: *const RMSNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         return try graph.rmsNorm(x, self.weight, self.eps);
     }
 };
@@ -82,31 +45,7 @@ pub const LayerNorm = struct {
     bias: *Tensor, // 可学习的平移偏置 beta [dim]
     eps: f32,
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "LayerNorm",
-
-    pub fn setName(self: *LayerNorm, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
-        self.bias.setNameFormatted("{s}.bias", .{self.name.?});
-    }
-
-    pub fn setNameFormatted(self: *LayerNorm, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("layernorm");
-        }
-    }
-
-    pub fn getName(self: *const LayerNorm) ?[]const u8 {
-        return self.name;
-    }
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !LayerNorm {
         const weight = try createPersistentTensor(allocator, 1, dim, true);
@@ -128,29 +67,12 @@ pub const LayerNorm = struct {
         };
     }
 
-    pub fn deinit(self: LayerNorm, allocator: std.mem.Allocator) void {
-        freePersistentTensor(allocator, self.weight);
-        freePersistentTensor(allocator, self.bias);
-    }
-
-    pub fn zeroGrad(self: LayerNorm) void {
-        self.weight.zeroGrad();
-        self.bias.zeroGrad();
-    }
-
     /// 模块标准数学变换公式
     pub const formula = "y = \\frac{x - \\mu}{\\sqrt{\\sigma^2 + \\epsilon}} \\odot \\gamma + \\beta";
 
-    pub fn registerFormula(self: *const LayerNorm, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-        }
-    }
-
     pub fn forward(self: *const LayerNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         return try graph.layerNorm(x, self.weight, self.bias, self.eps);
     }
 };
@@ -166,7 +88,6 @@ pub const BatchNorm2d = struct {
     running_mean: *Tensor,
     running_var: *Tensor,
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "BatchNorm2d",
 
     pub fn init(allocator: std.mem.Allocator, num_features: usize, eps: f32, momentum: f32) !BatchNorm2d {
@@ -206,56 +127,12 @@ pub const BatchNorm2d = struct {
         };
     }
 
-    pub fn setName(self: *BatchNorm2d, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.gamma.setNameFormatted("{s}.gamma", .{self.name.?});
-        self.beta.setNameFormatted("{s}.beta", .{self.name.?});
-        self.running_mean.setNameFormatted("{s}.running_mean", .{self.name.?});
-        self.running_var.setNameFormatted("{s}.running_var", .{self.name.?});
-    }
-
-    pub fn setNameFormatted(self: *BatchNorm2d, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("batchnorm");
-        }
-    }
-
-    pub fn getName(self: *const BatchNorm2d) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn deinit(self: BatchNorm2d, allocator: std.mem.Allocator) void {
-        freePersistentTensor(allocator, self.gamma);
-        freePersistentTensor(allocator, self.beta);
-        freePersistentTensor(allocator, self.running_mean);
-        freePersistentTensor(allocator, self.running_var);
-    }
-
-    pub fn zeroGrad(self: BatchNorm2d) void {
-        self.gamma.zeroGrad();
-        self.beta.zeroGrad();
-    }
-
     /// 模块标准数学变换公式
     pub const formula = "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta";
 
-    pub fn registerFormula(self: *const BatchNorm2d, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-        }
-    }
-
     pub fn forward(self: *BatchNorm2d, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         return try graph.batchNorm2d(
             x,
             self.gamma,
@@ -274,7 +151,6 @@ pub const Dropout = struct {
     p: f32 = 0.5, // 丢弃概率 (0.0 <= p < 1.0)
     training: bool = true, // 是否处于训练模式
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Dropout",
 
     pub const formula = "y = \\frac{m \\odot x}{1 - p}";
@@ -293,40 +169,12 @@ pub const Dropout = struct {
         return .{ .p = p, .training = true };
     }
 
-    pub fn setName(self: *Dropout, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-    }
-
-    pub fn setNameFormatted(self: *Dropout, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("dropout");
-        }
-    }
-
-    pub fn getName(self: *const Dropout) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn registerFormula(self: *const Dropout, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-        }
-    }
-
     pub fn forward(self: *const Dropout, graph: *autodiff.Graph, x: *Tensor, random: ?std.Random) !*Tensor {
         if (!self.training or self.p == 0.0 or random == null) {
             return x;
         }
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         return try graph.dropout(x, self.p, random.?);
     }
 };
@@ -336,7 +184,6 @@ pub const AvgPool2D = struct {
     kernel_size: usize,
     stride: usize,
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "AvgPool2D",
 
     pub const formula = "y = \\frac{1}{k^2} \\sum_{k \\times k} x";
@@ -345,37 +192,9 @@ pub const AvgPool2D = struct {
         return .{ .kernel_size = kernel_size, .stride = stride };
     }
 
-    pub fn setName(self: *AvgPool2D, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-    }
-
-    pub fn setNameFormatted(self: *AvgPool2D, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("avgpool2d");
-        }
-    }
-
-    pub fn getName(self: *const AvgPool2D) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn registerFormula(self: *const AvgPool2D, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-        }
-    }
-
     pub fn forward(self: *const AvgPool2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         return try graph.avgpool2d(x, self.kernel_size, self.stride);
     }
 };

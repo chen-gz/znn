@@ -2,6 +2,8 @@ const std = @import("std");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const core = @import("core.zig");
+const deinitModel = core.deinitModel;
+const enterModuleScope = core.enterModuleScope;
 
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
@@ -62,9 +64,6 @@ pub const KVCache = struct {
 pub const ScaledDotProductAttention = struct {
     causal: bool = true, // 是否应用自回归因果掩码 (Causal Mask)
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
-    mask_prefix: ?[]const u8 = null,
-    mask_prefix_buf: [64]u8 = undefined,
     module_type: []const u8 = "ScaledDotProductAttention",
 
     /// 缩放点积注意力配置选项 (Scaled Dot-Product Attention Options)
@@ -87,51 +86,14 @@ pub const ScaledDotProductAttention = struct {
         return init(Options.default);
     }
 
-    pub fn setName(self: *ScaledDotProductAttention, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-    }
-
-    pub fn setNameFormatted(self: *ScaledDotProductAttention, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("core");
-        }
-    }
-
-    /// 设置因果掩码缓冲区节点 (Causal Mask Buffer) 的命名前缀 (如父级注意力模块名 "{attn}")
-    pub fn setMaskPrefix(self: *ScaledDotProductAttention, prefix: []const u8) void {
-        if (std.fmt.bufPrint(&self.mask_prefix_buf, "{s}", .{prefix})) |s| {
-            self.mask_prefix = s;
-        } else |_| {
-            self.mask_prefix = prefix;
-        }
-    }
-
-    pub fn getName(self: *const ScaledDotProductAttention) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn registerFormula(self: *const ScaledDotProductAttention, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-            try graph.registerModuleType(n, self.module_type);
-        }
-    }
-
-    /// 开启注意力核心子作用域 ("core" 或显式模块名) 并执行缩放点积注意力前向传播
+    /// 开启注意力核心子作用域 (显式模块名，未命名时为当前模块下的 "core") 并执行缩放点积注意力前向传播
     pub fn forward(self: *const ScaledDotProductAttention, graph: *autodiff.Graph, q: *Tensor, k: *Tensor, v: *Tensor) !*Tensor {
         const core_scope = if (self.name) |n|
             try graph.enterModule(n, self.module_type)
         else
             try graph.enterChildScope("core", self.module_type);
         defer core_scope.exit();
-        try self.registerFormula(graph);
+        if (core_scope.graph != null) try graph.setModuleFormula(graph.currentScope(), formula);
         return self.forwardCore(graph, q, k, v);
     }
 
@@ -161,8 +123,10 @@ pub const ScaledDotProductAttention = struct {
                     mask_node.data[i * T + j] = -1e9;
                 }
             }
-            if (self.mask_prefix orelse self.name) |prefix| {
-                mask_node.setNameFormatted("{s}.causal_mask", .{prefix});
+            // 掩码缓冲区以其所在的计算图作用域命名 (如 "{attn}.core.causal_mask")
+            const scope = graph.currentScope();
+            if (scope.len > 0) {
+                mask_node.name = try std.fmt.allocPrint(graph.arenaAllocator(), "{s}.causal_mask", .{scope});
             }
             scores = try graph.add(scores, mask_node);
         }
@@ -197,7 +161,6 @@ pub const CausalSelfAttention = struct {
     n_embd: usize, // 隐藏特征嵌入维度 (Embedding Dimension, n_embd)
     num_kv_heads: usize, // 键值头数 (Key-Value Heads)：1 为多查询注意力 (Multi-Query Attention, MQA)，< n_head 为分组查询注意力 (Grouped-Query Attention, GQA)，== n_head 为多头注意力 (Multi-Head Attention, MHA)
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "CausalSelfAttention",
 
     /// 初始化支持分组查询注意力 (Grouped-Query Attention, GQA)、多查询注意力 (Multi-Query Attention, MQA) 与多头注意力 (Multi-Head Attention, MHA) 的自注意力层
@@ -211,13 +174,13 @@ pub const CausalSelfAttention = struct {
         const kv_dim = num_kv_heads * hs;
 
         const q_attn = try Linear.init(allocator, n_embd, n_embd);
-        errdefer q_attn.deinit(allocator);
+        errdefer deinitModel(&q_attn, allocator);
         const k_attn = try Linear.init(allocator, n_embd, kv_dim);
-        errdefer k_attn.deinit(allocator);
+        errdefer deinitModel(&k_attn, allocator);
         const v_attn = try Linear.init(allocator, n_embd, kv_dim);
-        errdefer v_attn.deinit(allocator);
+        errdefer deinitModel(&v_attn, allocator);
         const c_proj = try Linear.init(allocator, n_embd, n_embd);
-        errdefer c_proj.deinit(allocator);
+        errdefer deinitModel(&c_proj, allocator);
 
         return CausalSelfAttention{
             .q_attn = q_attn,
@@ -235,77 +198,16 @@ pub const CausalSelfAttention = struct {
         return initGQA(allocator, n_embd, n_head, n_head);
     }
 
-    /// 为注意力层、缩放点积注意力核心及 4 个线性投影子层统一设置人类可读的名称 (如 "{name}.q_attn", "{name}.core", "{name}.c_proj")
-    pub fn setName(self: *CausalSelfAttention, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.q_attn.setNameFormatted("{s}.q_attn", .{self.name.?});
-        self.k_attn.setNameFormatted("{s}.k_attn", .{self.name.?});
-        self.v_attn.setNameFormatted("{s}.v_attn", .{self.name.?});
-        self.core.setNameFormatted("{s}.core", .{self.name.?});
-        self.core.setMaskPrefix(self.name.?);
-        self.c_proj.setNameFormatted("{s}.c_proj", .{self.name.?});
-    }
-
-    pub fn setNameFormatted(self: *CausalSelfAttention, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("attn");
-        }
-    }
-
-    pub fn getName(self: *const CausalSelfAttention) ?[]const u8 {
-        return self.name;
-    }
-
-    /// 释放所有线性投射子层的内存资源
-    pub fn deinit(self: CausalSelfAttention, allocator: std.mem.Allocator) void {
-        self.q_attn.deinit(allocator);
-        self.k_attn.deinit(allocator);
-        self.v_attn.deinit(allocator);
-        self.c_proj.deinit(allocator);
-    }
-
-    /// 所有线性投射子层的梯度清零
-    pub fn zeroGrad(self: CausalSelfAttention) void {
-        self.q_attn.zeroGrad();
-        self.k_attn.zeroGrad();
-        self.v_attn.zeroGrad();
-        self.c_proj.zeroGrad();
-    }
-
     /// 模块标准数学变换公式
     pub const formula = "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o";
     pub const core_formula = ScaledDotProductAttention.formula;
-
-    pub fn registerFormula(self: *const CausalSelfAttention, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-            try graph.registerModuleType(n, self.module_type);
-            if (self.core.name != null) {
-                try self.core.registerFormula(graph);
-            } else {
-                var buf: [128]u8 = undefined;
-                if (std.fmt.bufPrint(&buf, "{s}.core", .{n})) |core_name| {
-                    try graph.setModuleFormula(core_name, core_formula);
-                    try graph.registerModuleType(core_name, self.core.module_type);
-                } else |_| {}
-            }
-        }
-    }
 
     /// 前向注意力计算流程
     /// 输入 x 的形状必须为三维张量 (3-Dimensional Tensor, 3D): [B, T, C]
     /// 其中 B 为批次大小 (Batch Size, B)，T 为时间步序列长度 (Sequence Length, T)，C 为通道特征维数 (Embedding Dimension, C / n_embd)
     pub fn forward(self: *const CausalSelfAttention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        try self.registerFormula(graph);
 
         const B = x.shape.dims[0];
         const T = x.shape.dims[1];
@@ -346,12 +248,7 @@ pub const CausalSelfAttention = struct {
         }
 
         // 5. 委托给缩放点积注意力核心子模块 (ScaledDotProductAttention) 执行 K^T -> QK^T -> 缩放 -> 因果掩码 -> Softmax -> ·V
-        // 若 CausalSelfAttention 仅设置了 self.name 而未通过 setName 同步 core.mask_prefix，则在此补齐前缀
-        var core_mod = self.core;
-        if (core_mod.mask_prefix == null) {
-            if (self.name) |mod_name| core_mod.setMaskPrefix(mod_name);
-        }
-        const y_4d = try core_mod.forward(graph, q, k, v);
+        const y_4d = try self.core.forward(graph, q, k, v);
 
         // 6. 将多头的输出转置回去，重新展平拼接成单头向量表示
         // 转置: [B, nh, T, hs] -> [B, T, nh, hs]
@@ -539,7 +436,6 @@ pub const MLALayer = struct {
     core: ScaledDotProductAttention = .{}, // 缩放点积注意力核心子模块 (Scaled Dot-Product Attention, SDPA)
     o_proj: Linear, // 输出投影 (Output Projection): n_head * head_dim -> dim
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "MLALayer",
 
     pub const formula = "c_t^{KV} = x_t W^{DKV}, \\quad y = \\text{MLA}(Q, c^{KV}, k^R) W^O";
@@ -556,22 +452,22 @@ pub const MLALayer = struct {
         const total_kv_dim = n_head * head_dim;
 
         const q_proj = try Linear.init(allocator, dim, total_q_dim);
-        errdefer q_proj.deinit(allocator);
+        errdefer deinitModel(&q_proj, allocator);
 
         const w_dkv = try Linear.init(allocator, dim, d_c);
-        errdefer w_dkv.deinit(allocator);
+        errdefer deinitModel(&w_dkv, allocator);
 
         const w_kr = try Linear.init(allocator, dim, d_r);
-        errdefer w_kr.deinit(allocator);
+        errdefer deinitModel(&w_kr, allocator);
 
         const w_uk = try Linear.init(allocator, d_c, total_kv_dim);
-        errdefer w_uk.deinit(allocator);
+        errdefer deinitModel(&w_uk, allocator);
 
         const w_uv = try Linear.init(allocator, d_c, total_kv_dim);
-        errdefer w_uv.deinit(allocator);
+        errdefer deinitModel(&w_uv, allocator);
 
         const o_proj = try Linear.init(allocator, total_kv_dim, dim);
-        errdefer o_proj.deinit(allocator);
+        errdefer deinitModel(&o_proj, allocator);
 
         return MLALayer{
             .dim = dim,
@@ -588,69 +484,10 @@ pub const MLALayer = struct {
         };
     }
 
-    pub fn setName(self: *MLALayer, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.q_proj.setNameFormatted("{s}.q_proj", .{self.name.?});
-        self.w_dkv.setNameFormatted("{s}.w_dkv", .{self.name.?});
-        self.w_kr.setNameFormatted("{s}.w_kr", .{self.name.?});
-        self.w_uk.setNameFormatted("{s}.w_uk", .{self.name.?});
-        self.w_uv.setNameFormatted("{s}.w_uv", .{self.name.?});
-        self.o_proj.setNameFormatted("{s}.o_proj", .{self.name.?});
-    }
-
-    pub fn setNameFormatted(self: *MLALayer, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("mla");
-        }
-    }
-
-    pub fn getName(self: *const MLALayer) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn registerFormula(self: *const MLALayer, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-            try graph.registerModuleType(n, self.module_type);
-            try self.q_proj.registerFormula(graph);
-            try self.w_dkv.registerFormula(graph);
-            try self.w_kr.registerFormula(graph);
-            try self.w_uk.registerFormula(graph);
-            try self.w_uv.registerFormula(graph);
-            try self.o_proj.registerFormula(graph);
-        }
-    }
-
-    pub fn deinit(self: MLALayer, allocator: std.mem.Allocator) void {
-        self.q_proj.deinit(allocator);
-        self.w_dkv.deinit(allocator);
-        self.w_kr.deinit(allocator);
-        self.w_uk.deinit(allocator);
-        self.w_uv.deinit(allocator);
-        self.o_proj.deinit(allocator);
-    }
-
-    pub fn zeroGrad(self: MLALayer) void {
-        self.q_proj.zeroGrad();
-        self.w_dkv.zeroGrad();
-        self.w_kr.zeroGrad();
-        self.w_uk.zeroGrad();
-        self.w_uv.zeroGrad();
-        self.o_proj.zeroGrad();
-    }
-
     /// 全序列前向传播 (经由计算图执行，支持自动微分 (Automatic Differentiation, Autograd) 梯度回传)
     pub fn forward(self: *const MLALayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         const B = if (is_3d) old_shape.dims[0] else 1;

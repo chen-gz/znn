@@ -65,9 +65,20 @@ pub const graph_ir = struct {
         const m = try ModuleNode.init(ctx.arena, name, path_copy);
         m.module_type = ctx.graph.getModuleType(path) orelse "Module";
         m.formula = ctx.formulas.get(path) orelse ctx.graph.inferModuleFormula(path);
+        // 模块切片 / 数组字段 (如 `decoder.h`、`routed_experts`) 没有自己的 forward 作用域，
+        // 其子模块以下标命名；与 PyTorch `nn.ModuleList` 对应，标注为 "ModuleList"
+        if (isIndex(name) and parent != ctx.module_map.get("").? and ctx.graph.getModuleType(parent_path) == null) {
+            parent.module_type = "ModuleList";
+        }
         try parent.children.append(ctx.arena, m);
         try ctx.module_map.put(path_copy, m);
         return m;
+    }
+
+    fn isIndex(name: []const u8) bool {
+        if (name.len == 0) return false;
+        for (name) |c| if (!std.ascii.isDigit(c)) return false;
+        return true;
     }
 
     fn buildLocalGraphs(

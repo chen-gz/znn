@@ -2,6 +2,7 @@ const std = @import("std");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const core = @import("core.zig");
+const enterModuleScope = core.enterModuleScope;
 
 const Tensor = tensor.Tensor;
 const createPersistentTensor = core.createPersistentTensor;
@@ -23,7 +24,6 @@ pub const LoRALinear = struct {
     r: usize,
     scaling: f32,
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "LoRALinear",
 
     pub const formula = "y = x W_0 + \\frac{\\alpha}{r} (x A) B + b";
@@ -37,38 +37,6 @@ pub const LoRALinear = struct {
             return .{};
         }
     };
-
-    pub fn setName(self: *LoRALinear, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
-        self.lora_a.setNameFormatted("{s}.lora_a", .{self.name.?});
-        self.lora_b.setNameFormatted("{s}.lora_b", .{self.name.?});
-        if (self.bias) |b| b.setNameFormatted("{s}.bias", .{self.name.?});
-    }
-
-    pub fn setNameFormatted(self: *LoRALinear, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("lora_linear");
-        }
-    }
-
-    pub fn getName(self: *const LoRALinear) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn registerFormula(self: *const LoRALinear, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-            try graph.registerModuleType(n, self.module_type);
-        }
-    }
 
     pub fn initDefault(
         allocator: std.mem.Allocator,
@@ -135,25 +103,10 @@ pub const LoRALinear = struct {
         }
     }
 
-    pub fn deinit(self: LoRALinear, allocator: std.mem.Allocator) void {
-        freePersistentTensor(allocator, self.weight);
-        if (self.bias) |b| freePersistentTensor(allocator, b);
-        freePersistentTensor(allocator, self.lora_a);
-        freePersistentTensor(allocator, self.lora_b);
-    }
-
-    pub fn zeroGrad(self: LoRALinear) void {
-        self.weight.zeroGrad();
-        self.lora_a.zeroGrad();
-        self.lora_b.zeroGrad();
-        if (self.bias) |b| b.zeroGrad();
-    }
-
     /// 前向传播：Y = X * W_0 + (X * A) * B * scaling (+ bias)
     pub fn forward(self: *const LoRALinear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         // 1. 冻结主干前向：x * W_0
         const base_out = try graph.matmul(x, self.weight);
 

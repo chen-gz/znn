@@ -44,14 +44,16 @@ test "Hierarchical module naming and interactive HTML report export" {
     // 1. 创建 Embedding 模块并设置顶级层次命名
     var emb = try transformer.Embedding.init(allocator, 1000, 64);
     emb.resetParameters(random, .{});
-    defer emb.deinit(allocator);
-    emb.setName("gpt.wte");
+    defer nn.deinitModel(&emb, allocator);
+    var names = std.heap.ArenaAllocator.init(allocator);
+    defer names.deinit();
+    try nn.nameModules(&emb, names.allocator(), "gpt.wte");
 
     // 2. 创建 TransformerBlock 并分层命名为 "gpt.layers.0"
     var block = try transformer.TransformerBlock.init(allocator, 64, 4);
     try testing_init.initFromOnes(&block, allocator, random, &.{ 1, 2, 64 });
-    defer block.deinit(allocator);
-    block.setName("gpt.layers.0");
+    defer nn.deinitModel(&block, allocator);
+    try nn.nameModules(&block, names.allocator(), "gpt.layers.0");
     try graph.registerModuleType("gpt", "GPT");
 
     // 验证子层参数名称是否按层次正确拼接
@@ -216,8 +218,10 @@ test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivit
 
     var gpt = try transformer.GPT(config).init(allocator);
     try testing_init.initFromOnes(&gpt, allocator, random, &.{ 1, 2 });
-    defer gpt.deinit(allocator);
-    gpt.setName("gpt");
+    defer nn.deinitModel(&gpt, allocator);
+    var names = std.heap.ArenaAllocator.init(allocator);
+    defer names.deinit();
+    try nn.nameModules(&gpt, names.allocator(), "gpt");
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -244,11 +248,13 @@ test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivit
 
     const root_obj = parsed.value.object.get("root").?.object;
     const gpt_obj = root_obj.get("children").?.array.items[0].object; // "gpt"
-    const layers_obj = gpt_obj.get("children").?.array.items[2].object; // "layers"
-    try std.testing.expectEqualStrings("TransformerDecoder", layers_obj.get("module_type").?.string);
+    const decoder_obj = gpt_obj.get("children").?.array.items[2].object; // "decoder"
+    try std.testing.expectEqualStrings("TransformerDecoder", decoder_obj.get("module_type").?.string);
+    const layers_obj = decoder_obj.get("children").?.array.items[0].object; // "decoder.h"
+    try std.testing.expectEqualStrings("ModuleList", layers_obj.get("module_type").?.string);
 
     // 4. 校验跨层连接 (Cross-layer continuity between Layer 0 and Layer 1)
-    // layers 容器内部必须正确记录 0 -> 1 的前向流以及 0 到 1 的残差连接
+    // h 容器内部必须正确记录 0 -> 1 的前向流
     var found_layer0_to_1 = false;
     for (layers_obj.get("edges").?.array.items) |e_item| {
         const edge = e_item.object;
@@ -261,7 +267,7 @@ test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivit
     try std.testing.expect(found_layer0_to_1);
 
     // 5. 校验 Layer 1 内部的残差汇聚结构与公式
-    const layer1_obj = layers_obj.get("children").?.array.items[1].object; // "gpt.layers.1"
+    const layer1_obj = layers_obj.get("children").?.array.items[1].object; // "gpt.decoder.h.1"
     try std.testing.expectEqualStrings("TransformerBlock", layer1_obj.get("module_type").?.string);
     try std.testing.expect(layer1_obj.get("edges").?.array.items.len > 0);
 
@@ -353,8 +359,10 @@ test "Explicit module scopes attribute ops and tensors to the executing module" 
     const config = transformer.GPTConfig{ .vocab_size = 128, .block_size = 16, .n_embd = 32, .n_head = 2, .n_layer = 2 };
     var gpt = try transformer.GPT(config).init(allocator);
     try testing_init.initFromOnes(&gpt, allocator, random, &.{ 1, 2 });
-    defer gpt.deinit(allocator);
-    gpt.setName("gpt");
+    defer nn.deinitModel(&gpt, allocator);
+    var names = std.heap.ArenaAllocator.init(allocator);
+    defer names.deinit();
+    try nn.nameModules(&gpt, names.allocator(), "gpt");
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -379,18 +387,18 @@ test "Explicit module scopes attribute ops and tensors to the executing module" 
             .Gelu => if (gelu_scope == null) {
                 gelu_scope = o.scope;
             },
-            .Transpose => if (std.mem.eql(u8, o.scope, "gpt.layers.0.attn.core")) {
+            .Transpose => if (std.mem.eql(u8, o.scope, "gpt.decoder.h.0.attn.core")) {
                 core_transpose_found = true;
             },
-            .Reshape => if (std.mem.eql(u8, o.scope, "gpt.layers.0.attn")) {
+            .Reshape => if (std.mem.eql(u8, o.scope, "gpt.decoder.h.0.attn")) {
                 attn_reshape_found = true;
             },
             else => {},
         }
         // 叶子模块 ln_1 只执行 RMSNorm 计算，不应拥有任何 Reshape
-        if (o.op_type == .Reshape) try std.testing.expect(!std.mem.eql(u8, o.scope, "gpt.layers.0.ln_1"));
+        if (o.op_type == .Reshape) try std.testing.expect(!std.mem.eql(u8, o.scope, "gpt.decoder.h.0.ln_1"));
     }
-    try std.testing.expectEqualStrings("gpt.layers.0.mlp", gelu_scope.?);
+    try std.testing.expectEqualStrings("gpt.decoder.h.0.mlp", gelu_scope.?);
     try std.testing.expect(core_transpose_found);
     try std.testing.expect(attn_reshape_found);
 
@@ -411,8 +419,8 @@ test "Explicit module scopes attribute ops and tensors to the executing module" 
     try std.testing.expect(pos_found);
 
     // 模块类型由 enterModule 自动注册
-    try std.testing.expectEqualStrings("CausalSelfAttention", graph.module_types.get("gpt.layers.0.attn").?);
-    try std.testing.expectEqualStrings("ScaledDotProductAttention", graph.module_types.get("gpt.layers.0.attn.core").?);
+    try std.testing.expectEqualStrings("CausalSelfAttention", graph.module_types.get("gpt.decoder.h.0.attn").?);
+    try std.testing.expectEqualStrings("ScaledDotProductAttention", graph.module_types.get("gpt.decoder.h.0.attn.core").?);
 }
 
 test "Scoped local graph export matches golden edge sets (schema 2.0)" {
@@ -423,8 +431,10 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     const config = transformer.GPTConfig{ .vocab_size = 128, .block_size = 16, .n_embd = 32, .n_head = 2, .n_layer = 2 };
     var gpt = try transformer.GPT(config).init(allocator);
     try testing_init.initFromOnes(&gpt, allocator, random, &.{ 1, 2 });
-    defer gpt.deinit(allocator);
-    gpt.setName("gpt");
+    defer nn.deinitModel(&gpt, allocator);
+    var names = std.heap.ArenaAllocator.init(allocator);
+    defer names.deinit();
+    try nn.nameModules(&gpt, names.allocator(), "gpt");
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -459,21 +469,23 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
 
     // gpt：pos_indices 为缓冲区边，而非模型输入；Reshape 折叠进边的 transforms
     try VisTestUtil.expectEdgeSet(allocator, root, "gpt", &.{
-        "@in0->wte",
-        "pos_indices->wpe buffer",
-        "wte->embeddings_sum",
-        "wpe->embeddings_sum",
-        "embeddings_sum->layers",
-        "layers->lm_head",
+        "@in0->token_embedding",
+        "pos_indices->position_embedding buffer",
+        "token_embedding->embeddings_sum",
+        "position_embedding->embeddings_sum",
+        "embeddings_sum->decoder",
+        "decoder->lm_head",
         "lm_head->@out0",
     });
-    const to_head = try VisTestUtil.findEdge(root, "gpt", "layers", "lm_head");
+    const to_head = try VisTestUtil.findEdge(root, "gpt", "decoder", "lm_head");
     try std.testing.expectEqualStrings("[2, 8, 32]", to_head.get("shape").?.string);
     try std.testing.expectEqualStrings("[16, 32]", to_head.get("dst_shape").?.string);
     try std.testing.expectEqual(@as(usize, 1), to_head.get("transforms").?.array.items.len);
 
-    // gpt.layers：层间串联，无虚假残差
-    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.layers", &.{ "@in0->0", "0->1", "1->ln_f", "ln_f->@out0" });
+    // gpt.decoder：块列表 h (ModuleList 容器) 之后接 ln_f；h 内部层间串联，无虚假残差
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.decoder", &.{ "@in0->h", "h->ln_f", "ln_f->@out0" });
+    try std.testing.expectEqualStrings("ModuleList", VisTestUtil.findModule(root, "gpt.decoder.h").?.get("module_type").?.string);
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.decoder.h", &.{ "@in0->0", "0->1", "1->@out0" });
 
     // 每个 Block：两条残差边都在 Block 自身作用域内，且端口引用在最近公共作用域中解析
     const block_edges = [_][]const u8{
@@ -487,14 +499,14 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
         "mlp->residual_mlp",
         "residual_mlp->@out0",
     };
-    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.layers.0", &block_edges);
-    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.layers.1", &block_edges);
-    try VisTestUtil.expectPortRef(root, "gpt.layers.0", "inputs", 0, "gpt.embeddings_sum");
-    try VisTestUtil.expectPortRef(root, "gpt.layers.0", "outputs", 0, "gpt.layers.1");
-    try VisTestUtil.expectPortRef(root, "gpt.layers.1", "outputs", 0, "gpt.layers.ln_f");
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.decoder.h.0", &block_edges);
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.decoder.h.1", &block_edges);
+    try VisTestUtil.expectPortRef(root, "gpt.decoder.h.0", "inputs", 0, "gpt.embeddings_sum");
+    try VisTestUtil.expectPortRef(root, "gpt.decoder.h.0", "outputs", 0, "gpt.decoder.h.1");
+    try VisTestUtil.expectPortRef(root, "gpt.decoder.h.1", "outputs", 0, "gpt.decoder.ln_f");
 
     // 注意力：共享输入扇出到 q/k/v，核心计算封装在 core 子作用域
-    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.layers.0.attn", &.{
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.decoder.h.0.attn", &.{
         "@in0->q_attn",
         "@in0->k_attn",
         "@in0->v_attn",
@@ -506,7 +518,7 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     });
 
     // core：无参数多算子叶子导出算子级局部图，causal_mask 以缓冲区边接入
-    const core_mod = VisTestUtil.findModule(root, "gpt.layers.0.attn.core").?;
+    const core_mod = VisTestUtil.findModule(root, "gpt.decoder.h.0.attn.core").?;
     try std.testing.expectEqualStrings("ScaledDotProductAttention", core_mod.get("module_type").?.string);
     try std.testing.expectEqual(@as(usize, 3), core_mod.get("ports").?.object.get("inputs").?.array.items.len);
     var mask_edges: usize = 0;
@@ -520,10 +532,10 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     try std.testing.expectEqual(@as(usize, 1), mask_edges);
 
     // MLP：激活函数作为命名算子节点出现
-    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.layers.0.mlp", &.{ "@in0->c_fc", "c_fc->gelu", "gelu->c_proj", "c_proj->@out0" });
+    try VisTestUtil.expectEdgeSet(allocator, root, "gpt.decoder.h.0.mlp", &.{ "@in0->c_fc", "c_fc->gelu", "gelu->c_proj", "c_proj->@out0" });
 
     // 带参数的叶子模块 (Linear / RMSNorm) 不导出算子级局部图
-    for ([_][]const u8{ "gpt.layers.0.attn.q_attn", "gpt.layers.0.ln_1" }) |leaf_path| {
+    for ([_][]const u8{ "gpt.decoder.h.0.attn.q_attn", "gpt.decoder.h.0.ln_1" }) |leaf_path| {
         const leaf = VisTestUtil.findModule(root, leaf_path).?;
         if (leaf.get("edges")) |e| try std.testing.expectEqual(@as(usize, 0), e.array.items.len);
     }
@@ -661,8 +673,10 @@ test "Model graph JSON export conforms to the published JSON Schema" {
         const config = transformer.GPTConfig{ .vocab_size = 64, .block_size = 8, .n_embd = 16, .n_head = 2, .n_layer = 2 };
         var gpt = try transformer.GPT(config).init(allocator);
         try testing_init.initFromOnes(&gpt, allocator, random, &.{ 1, 2 });
-        defer gpt.deinit(allocator);
-        gpt.setName("gpt");
+        defer nn.deinitModel(&gpt, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&gpt, names.allocator(), "gpt");
 
         var graph = autodiff.Graph.init(allocator);
         defer graph.deinit();
@@ -682,8 +696,10 @@ test "Model graph JSON export conforms to the published JSON Schema" {
     {
         var linear = try core.Linear.init(allocator, 8, 4);
         linear.resetParameters(random, .{});
-        defer linear.deinit(allocator);
-        linear.setName("linear");
+        defer nn.deinitModel(&linear, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&linear, names.allocator(), "linear");
 
         var graph = autodiff.Graph.init(allocator);
         defer graph.deinit();
@@ -775,8 +791,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try Linear.init(allocator, 16, 10);
         m.resetParameters(random, .{});
-        defer m.deinit(allocator);
-        m.setName("linear");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "linear");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 16 }, false);
@@ -794,34 +812,19 @@ test "All 18 canonical models export conforming schema and valid ports" {
             fc1: Linear,
             fc2: Linear,
             fc3: Linear,
-            name: ?[]const u8 = "mlp",
+            name: ?[]const u8 = null,
             module_type: []const u8 = "MLP",
 
             pub fn init(alloc: std.mem.Allocator) !@This() {
-                var mlp = @This(){
+                return .{
                     .fc1 = try Linear.init(alloc, 16, 32),
                     .fc2 = try Linear.init(alloc, 32, 16),
                     .fc3 = try Linear.init(alloc, 16, 10),
                 };
-                mlp.setName("mlp");
-                return mlp;
-            }
-
-            pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
-                self.fc1.deinit(alloc);
-                self.fc2.deinit(alloc);
-                self.fc3.deinit(alloc);
-            }
-
-            pub fn setName(self: *@This(), name: []const u8) void {
-                self.name = name;
-                self.fc1.setName("mlp.fc1");
-                self.fc2.setName("mlp.fc2");
-                self.fc3.setName("mlp.fc3");
             }
 
             pub fn forward(self: *const @This(), g: *autodiff.Graph, x: *Tensor) !*Tensor {
-                const scope = try g.enterModule(self.name, self.module_type);
+                const scope = try nn.enterModuleScope(g, self);
                 defer scope.exit();
                 const x1 = try self.fc1.forward(g, x);
                 const a1 = try g.relu(x1);
@@ -833,8 +836,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
         var m = try TestMLP.init(allocator);
         try testing_init.initFromOnes(&m, allocator, random, &.{ 2, 16 });
-        defer m.deinit(allocator);
-        m.setName("mlp");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "mlp");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 16 }, false);
@@ -850,8 +855,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try RNN.init(allocator, 16, 32);
         try testing_init.initRecurrent(&m, allocator, random);
-        defer m.deinit(allocator);
-        m.setName("rnn");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "rnn");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         var inps: [4]*Tensor = undefined;
@@ -870,8 +877,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try LSTM.init(allocator, 16, 32);
         try testing_init.initRecurrent(&m, allocator, random);
-        defer m.deinit(allocator);
-        m.setName("lstm");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "lstm");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         var inps: [4]*Tensor = undefined;
@@ -891,8 +900,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try StackedLSTM.init(allocator, 16, 32, 2);
         try testing_init.initRecurrent(&m, allocator, random);
-        defer m.deinit(allocator);
-        m.setName("stacked_lstm");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "stacked_lstm");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         var inps: [4]*Tensor = undefined;
@@ -911,8 +922,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try GRU.init(allocator, 16, 32);
         try testing_init.initRecurrent(&m, allocator, random);
-        defer m.deinit(allocator);
-        m.setName("gru");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "gru");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         var inps: [4]*Tensor = undefined;
@@ -931,8 +944,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try Embedding.init(allocator, 128, 32);
         m.resetParameters(random, .{});
-        defer m.deinit(allocator);
-        m.setName("embedding");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "embedding");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const tokens = try g.zeros(&.{ 2, 8 }, false);
@@ -949,8 +964,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try CausalSelfAttention.init(allocator, 32, 4);
         try testing_init.initFromOnes(&m, allocator, random, &.{ 1, 2, 32 });
-        defer m.deinit(allocator);
-        m.setName("causal_self_attention");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "causal_self_attention");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 4, 32 }, false);
@@ -966,8 +983,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try TransformerBlock.init(allocator, 32, 4);
         try testing_init.initFromOnes(&m, allocator, random, &.{ 1, 2, 32 });
-        defer m.deinit(allocator);
-        m.setName("transformer_block");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "transformer_block");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 4, 32 }, false);
@@ -990,8 +1009,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
         };
         var m = try GPT(cfg).init(allocator);
         try testing_init.initFromOnes(&m, allocator, random, &.{ 1, 2 });
-        defer m.deinit(allocator);
-        m.setName("gpt");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "gpt");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const tokens = try g.zeros(&.{ 2, 16 }, false);
@@ -1008,8 +1029,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try SwiGLU.init(allocator, 32, 64);
         try testing_init.initFromOnes(&m, allocator, random, &.{ 2, 32 });
-        defer m.deinit(allocator);
-        m.setName("swiglu");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "swiglu");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 4, 32 }, false);
@@ -1025,8 +1048,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try LoRALinear.init(allocator, 32, 32, 4, 8.0);
         m.resetParameters(random, .{});
-        defer m.deinit(allocator);
-        m.setName("lora_linear");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "lora_linear");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 4, 32 }, false);
@@ -1041,8 +1066,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     // 13. layernorm
     {
         var m = try LayerNorm.init(allocator, 32, 1e-5);
-        defer m.deinit(allocator);
-        m.setName("layernorm");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "layernorm");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 4, 32 }, false);
@@ -1058,8 +1085,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try MLALayer.init(allocator, 32, 4, 8, 16, 8);
         try testing_init.initFromOnes(&m, allocator, random, &.{ 1, 2, 32 });
-        defer m.deinit(allocator);
-        m.setName("mla");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "mla");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 4, 32 }, false);
@@ -1075,8 +1104,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try MoELayer.init(allocator, 32, 64, 4, 1, 2);
         try testing_init.initFromOnes(&m, allocator, random, &.{ 2, 32 });
-        defer m.deinit(allocator);
-        m.setName("deepseek_moe");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "deepseek_moe");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 4, 32 }, false);
@@ -1092,13 +1123,15 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var l1 = try Linear.init(allocator, 2, 16);
         l1.resetParameters(random, .{});
-        l1.setName("generator.fc1");
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&l1, names.allocator(), "generator.fc1");
         var l2 = try Linear.init(allocator, 16, 16);
         l2.resetParameters(random, .{});
-        l2.setName("generator.fc2");
+        try nn.nameModules(&l2, names.allocator(), "generator.fc2");
         var l3 = try Linear.init(allocator, 16, 2);
         l3.resetParameters(random, .{});
-        l3.setName("generator.fc3");
+        try nn.nameModules(&l3, names.allocator(), "generator.fc3");
         var net_g = sequential(.{
             l1,
             LeakyReLU{ .alpha = 0.2 },
@@ -1106,7 +1139,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
             LeakyReLU{ .alpha = 0.2 },
             l3,
         });
-        defer net_g.deinit(allocator);
+        defer nn.deinitModel(&net_g, allocator);
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const z = try g.ones(&.{ 4, 2 }, false);
@@ -1124,13 +1157,15 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var d1 = try Linear.init(allocator, 2, 16);
         d1.resetParameters(random, .{});
-        d1.setName("discriminator.fc1");
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&d1, names.allocator(), "discriminator.fc1");
         var d2 = try Linear.init(allocator, 16, 16);
         d2.resetParameters(random, .{});
-        d2.setName("discriminator.fc2");
+        try nn.nameModules(&d2, names.allocator(), "discriminator.fc2");
         var d3 = try Linear.init(allocator, 16, 1);
         d3.resetParameters(random, .{});
-        d3.setName("discriminator.fc3");
+        try nn.nameModules(&d3, names.allocator(), "discriminator.fc3");
         var net_d = sequential(.{
             d1,
             LeakyReLU{ .alpha = 0.2 },
@@ -1138,7 +1173,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
             LeakyReLU{ .alpha = 0.2 },
             d3,
         });
-        defer net_d.deinit(allocator);
+        defer nn.deinitModel(&net_d, allocator);
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 4, 2 }, false);
@@ -1156,8 +1191,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
     {
         var m = try Conv2D.init(allocator, 1, 4, 3);
         m.resetParameters(random, .{});
-        defer m.deinit(allocator);
-        m.setName("conv2d");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "conv2d");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 1, 1, 8, 8 }, false);

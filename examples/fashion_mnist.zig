@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Loaded {} training images, {} test images.\n", .{ train_dataset.images.num_images, test_dataset.images.num_images });
 
     std.debug.print("Initializing Standard Model (3-layer MLP: 784 -> 128 -> 64 -> 10)...\n", .{});
-    var model = NeuralNetwork.init(arena, try MLP.init(arena));
+    var model = try NeuralNetwork.init(arena, try MLP.init(arena));
     defer model.deinit();
     // 用一个样本批次建立前向计算图，依据计算图与激活函数初始化参数
     var prng = std.Random.DefaultPrng.init(42);
@@ -236,7 +236,7 @@ fn printPredictions(
 test "MLP model initialization and forward passes (no-grad & gradient graphs)" {
     const allocator = std.testing.allocator;
 
-    var model = NeuralNetwork.init(allocator, try MLP.init(allocator));
+    var model = try NeuralNetwork.init(allocator, try MLP.init(allocator));
     defer model.deinit();
 
     const x_data = try allocator.alloc(f32, 2 * 784);

@@ -36,7 +36,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
-                self.linear.deinit(self.allocator);
+                nn.deinitModel(&self.linear, self.allocator);
                 tensor.free(self.allocator, self.x);
             }
 
@@ -78,7 +78,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
-                self.linear.deinit(self.allocator);
+                nn.deinitModel(&self.linear, self.allocator);
                 self.allocator.free(self.x_data);
             }
 
@@ -91,7 +91,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 const x = try graph.tensorNDWithData(&.{ 64, 784 }, self.x_data, true);
                 const out = try self.linear.forward(&graph, x);
                 @memset(out.grad, 1.0);
-                self.linear.zeroGrad();
+                nn.zeroGradModel(&self.linear);
                 try graph.backward(out);
                 std.mem.doNotOptimizeAway(self.linear.weight.grad.ptr);
             }
@@ -127,7 +127,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
-                self.conv.deinit(self.allocator);
+                nn.deinitModel(&self.conv, self.allocator);
                 tensor.free(self.allocator, self.x);
             }
 
@@ -171,7 +171,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
-                self.conv.deinit(self.allocator);
+                nn.deinitModel(&self.conv, self.allocator);
                 self.allocator.free(self.x_data);
             }
 
@@ -184,7 +184,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 const x = try graph.tensorNDWithData(&.{ 32, 1, 28, 28 }, self.x_data, true);
                 const out = try self.conv.forward(&graph, x);
                 @memset(out.grad, 1.0);
-                self.conv.zeroGrad();
+                nn.zeroGradModel(&self.conv);
                 try graph.backward(out);
                 std.mem.doNotOptimizeAway(self.conv.weight.grad.ptr);
             }
@@ -261,7 +261,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
-                self.swiglu.deinit(self.allocator);
+                nn.deinitModel(&self.swiglu, self.allocator);
                 self.allocator.free(self.x_data);
             }
 
@@ -274,7 +274,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
                 const out = try self.swiglu.forward(&graph, x);
                 @memset(out.grad, 1.0);
-                self.swiglu.zeroGrad();
+                nn.zeroGradModel(&self.swiglu);
                 try graph.backward(out);
                 std.mem.doNotOptimizeAway(self.swiglu.w_gate.weight.grad.ptr);
             }
@@ -309,7 +309,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
-                self.attn.deinit(self.allocator);
+                nn.deinitModel(&self.attn, self.allocator);
                 tensor.free(self.allocator, self.x);
             }
 
@@ -351,7 +351,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
-                self.attn.deinit(self.allocator);
+                nn.deinitModel(&self.attn, self.allocator);
                 self.allocator.free(self.x_data);
             }
 
@@ -364,7 +364,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
                 const out = try self.attn.forward(&graph, x);
                 @memset(out.grad, 1.0);
-                self.attn.zeroGrad();
+                nn.zeroGradModel(&self.attn);
                 try graph.backward(out);
                 std.mem.doNotOptimizeAway(self.attn.q_attn.weight.grad.ptr);
             }
@@ -399,7 +399,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
-                self.block.deinit(self.allocator);
+                nn.deinitModel(&self.block, self.allocator);
                 self.allocator.free(self.x_data);
             }
 
@@ -412,7 +412,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
                 const out = try self.block.forward(&graph, x);
                 @memset(out.grad, 1.0);
-                self.block.zeroGrad();
+                nn.zeroGradModel(&self.block);
                 try graph.backward(out);
                 std.mem.doNotOptimizeAway(self.block.attn.q_attn.weight.grad.ptr);
             }
@@ -447,13 +447,13 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var fc1 = try nn.Linear.init(alloc, 784, 128);
                 fc1.resetParameters(rnd, .{});
-                errdefer fc1.deinit(alloc);
+                errdefer nn.deinitModel(&fc1, alloc);
                 var fc2 = try nn.Linear.init(alloc, 128, 64);
                 fc2.resetParameters(rnd, .{});
-                errdefer fc2.deinit(alloc);
+                errdefer nn.deinitModel(&fc2, alloc);
                 var fc3 = try nn.Linear.init(alloc, 64, 10);
                 fc3.resetParameters(rnd, .{});
-                errdefer fc3.deinit(alloc);
+                errdefer nn.deinitModel(&fc3, alloc);
 
                 const ModelWrap = struct {
                     fc1: nn.Linear,
@@ -486,9 +486,9 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
                 self.opt.deinit();
-                self.fc1.deinit(self.allocator);
-                self.fc2.deinit(self.allocator);
-                self.fc3.deinit(self.allocator);
+                nn.deinitModel(&self.fc1, self.allocator);
+                nn.deinitModel(&self.fc2, self.allocator);
+                nn.deinitModel(&self.fc3, self.allocator);
                 self.allocator.free(self.x_data);
             }
 
@@ -512,9 +512,9 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 const loss = try graph.softmaxCrossEntropy(logits, &self.targets);
 
                 // Backward & Optimizer
-                self.fc1.zeroGrad();
-                self.fc2.zeroGrad();
-                self.fc3.zeroGrad();
+                nn.zeroGradModel(&self.fc1);
+                nn.zeroGradModel(&self.fc2);
+                nn.zeroGradModel(&self.fc3);
                 try graph.backward(loss);
                 self.opt.step();
 
@@ -543,16 +543,16 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var conv1 = try nn.Conv2D.init(alloc, 1, 4, 3);
                 conv1.resetParameters(rnd, .{});
-                errdefer conv1.deinit(alloc);
+                errdefer nn.deinitModel(&conv1, alloc);
                 var conv2 = try nn.Conv2D.init(alloc, 4, 8, 3);
                 conv2.resetParameters(rnd, .{});
-                errdefer conv2.deinit(alloc);
+                errdefer nn.deinitModel(&conv2, alloc);
                 var conv3 = try nn.Conv2D.init(alloc, 8, 16, 3);
                 conv3.resetParameters(rnd, .{});
-                errdefer conv3.deinit(alloc);
+                errdefer nn.deinitModel(&conv3, alloc);
                 var fc1 = try nn.Linear.init(alloc, 144, 10);
                 fc1.resetParameters(rnd, .{});
-                errdefer fc1.deinit(alloc);
+                errdefer nn.deinitModel(&fc1, alloc);
 
                 const ModelWrap = struct {
                     conv1: nn.Conv2D,
@@ -587,10 +587,10 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
                 self.opt.deinit();
-                self.conv1.deinit(self.allocator);
-                self.conv2.deinit(self.allocator);
-                self.conv3.deinit(self.allocator);
-                self.fc1.deinit(self.allocator);
+                nn.deinitModel(&self.conv1, self.allocator);
+                nn.deinitModel(&self.conv2, self.allocator);
+                nn.deinitModel(&self.conv3, self.allocator);
+                nn.deinitModel(&self.fc1, self.allocator);
                 self.allocator.free(self.x_data);
             }
 
@@ -627,10 +627,10 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 const loss = try graph.softmaxCrossEntropy(logits, &self.targets);
 
                 // Backward & Optimizer
-                self.conv1.zeroGrad();
-                self.conv2.zeroGrad();
-                self.conv3.zeroGrad();
-                self.fc1.zeroGrad();
+                nn.zeroGradModel(&self.conv1);
+                nn.zeroGradModel(&self.conv2);
+                nn.zeroGradModel(&self.conv3);
+                nn.zeroGradModel(&self.fc1);
                 try graph.backward(loss);
                 self.opt.step();
 
@@ -655,7 +655,7 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var block = try nn.TransformerBlock.init(alloc, 128, 4);
                 try testing_init.initFromOnes(&block, alloc, rnd, &.{ 1, 2, 128 });
-                errdefer block.deinit(alloc);
+                errdefer nn.deinitModel(&block, alloc);
 
                 const ModelWrap = struct {
                     block: nn.TransformerBlock,
@@ -678,7 +678,7 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn deinit(self: *@This()) void {
                 self.arena.deinit();
                 self.opt.deinit();
-                self.block.deinit(self.allocator);
+                nn.deinitModel(&self.block, self.allocator);
                 self.allocator.free(self.x_data);
             }
 
@@ -692,7 +692,7 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 const out = try self.block.forward(&graph, x);
 
                 @memset(out.grad, 1.0);
-                self.block.zeroGrad();
+                nn.zeroGradModel(&self.block);
                 try graph.backward(out);
                 self.opt.step();
 
@@ -722,7 +722,7 @@ pub fn runOptimizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
                 var prng = std.Random.DefaultPrng.init(42);
                 var linear = try nn.Linear.init(alloc, 1000, 1000);
                 linear.resetParameters(prng.random(), .{});
-                errdefer linear.deinit(alloc);
+                errdefer nn.deinitModel(&linear, alloc);
 
                 @memset(linear.weight.grad, 0.05);
                 @memset(linear.bias.grad, 0.01);
@@ -741,7 +741,7 @@ pub fn runOptimizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
 
             pub fn deinit(self: *@This()) void {
                 self.opt.deinit();
-                self.linear.deinit(self.allocator);
+                nn.deinitModel(&self.linear, self.allocator);
             }
 
             pub fn run(self: *@This()) !void {
@@ -768,7 +768,7 @@ pub fn runOptimizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
                 var prng = std.Random.DefaultPrng.init(42);
                 var linear = try nn.Linear.init(alloc, 1000, 1000);
                 linear.resetParameters(prng.random(), .{});
-                errdefer linear.deinit(alloc);
+                errdefer nn.deinitModel(&linear, alloc);
 
                 @memset(linear.weight.grad, 0.05);
                 @memset(linear.bias.grad, 0.01);
@@ -787,7 +787,7 @@ pub fn runOptimizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
 
             pub fn deinit(self: *@This()) void {
                 self.opt.deinit();
-                self.linear.deinit(self.allocator);
+                nn.deinitModel(&self.linear, self.allocator);
             }
 
             pub fn run(self: *@This()) !void {

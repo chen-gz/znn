@@ -144,9 +144,13 @@ flowchart TD
 
 ### 3.3 模块作用域跟踪 (Module Scoping in Graph)
 为了支持深层神经网络的层次化拓扑推导与可视化导出，`Graph` 维护了一个当前正在执行 forward 的作用域栈：
-* **`graph.enterModule(name, module_type)`**：模块在 forward 开始前压栈，通过 `defer scope.exit()` 保证在退出作用域时自动弹栈；模块未命名时返回空守卫；
+* **`graph.enterModule(name, module_type)`**：模块在 forward 开始前压栈，通过 `defer scope.exit()` 保证在退出作用域时自动弹栈；模块未命名时返回空守卫。库层统一通过 `nn.enterModuleScope(graph, self)` 调用它，并顺带登记模块的 `pub const formula`：
+  ```zig
+  const module_scope = try enterModuleScope(graph, self);
+  defer module_scope.exit();
+  ```
 * **`graph.enterChildScope(local_name, module_type)`**：用于模块内部复杂子逻辑（如注意力机制内部的 "core" 运算）的命名空间隔离；
-* 运算过程中创建的所有算子与激活张量均自动打上当前作用域标签 (`Op.scope` / `Tensor.scope`)。
+* 运算过程中创建的所有算子与激活张量均自动打上当前作用域标签 (`Op.scope` / `Tensor.scope`)。导出时 `graph_ir` 依据作用域路径重建模块树；子模块切片 / 数组对应的中间层级（路径段为数字，如 `gpt.decoder.h.0`）标记为 `ModuleList`。
 
 ### 3.4 分层依赖：Tensor ← Graph ← nn (Layered Dependencies)
 三层之间是严格的单向调用关系：
@@ -188,7 +192,14 @@ flowchart LR
   | `nn.trainModel(&m)` / `nn.evalModel(&m)`（更新含 `training: bool` 字段的模块，如 `BatchNorm2d`、`Dropout`） | `m.train()` / `m.eval()` |
   | `nn.callForward(&m, &g, x)` / `nn.callForward(&m, &g, .{ x, h_0 })` | `m(x)` / `m(x, h_0)` |
   `customInit` 分派、Safetensors 读写 (`saveModel` / `loadModel`) 也都基于同一遍历；`parameters` 只收集 `requires_grad == true` 的张量，冻结权重（如 `LoRALinear.weight`）与缓冲区不在其中。
-* **`nn.Module(T)` 包装器**：持有 `allocator` 与内部模型，提供 `forward`（单个输入直接传入，多个输入以元组传入，如 `gru.forward(&g, .{ inputs, h_0 })`，返回类型与内部模型的 `forward` 相同）、`parameters` / `namedParameters` / `numParameters` / `setRequiresGrad`、`initParameters` / `initParametersWithSample`、`zeroGrad` / `train` / `eval` / `save` / `load` / `deinit`。
+* **库层只声明数据**：每个库层只包含参数 / 子模块字段、`name: ?[]const u8 = null`、`module_type`、可选的 `pub const formula`，以及 `init` / `forward` 等计算逻辑；释放、清零梯度与命名不再由各层手写，全部由上表中的通用函数完成（没有 `Linear.deinit`、`Linear.zeroGrad`、`Linear.setName` 之类的逐层方法）。
+* **按字段路径自动命名 `nn.nameModules(&m, arena, root)`**：与 PyTorch `named_modules()` 一样，子模块名称即字段路径。含 `name` 字段的子模块得到 `root.<字段路径>`，张量得到 `root.<字段路径>`（如 `gpt.decoder.h.0.attn.c_attn.weight`、`deep_lstm.layers.1`）；`root` 为空串时根模块保持未命名、子模块使用相对路径。名称字符串分配在调用方传入的 arena 中，模型按值移动后仍然有效，arena 须在模型使用期间保持存活：
+  ```zig
+  var names = std.heap.ArenaAllocator.init(allocator);
+  defer names.deinit();
+  try nn.nameModules(&gpt, names.allocator(), "gpt");
+  ```
+* **`nn.Module(T)` 包装器**：持有 `allocator`、内部模型与名称 arena。`init` 返回错误联合并自动以空根路径为子模块命名，`setName(root)` 重置 arena 后按新根路径重新命名；提供 `forward`（单个输入直接传入，多个输入以元组传入，如 `gru.forward(&g, .{ inputs, h_0 })`，返回类型与内部模型的 `forward` 相同）、`parameters` / `namedParameters` / `numParameters` / `setRequiresGrad`、`initParameters` / `initParametersWithSample`、`zeroGrad` / `train` / `eval` / `save` / `load` / `deinit`。
 * 所有库层的 `forward` 统一以 `self: *const Self` 接收自身，避免按值复制整个模块。
 
 ### 4.2 权重初始化与增益管理 (`nn/init.zig`)
@@ -246,7 +257,7 @@ flowchart LR
     }
 
     // 方式二：使用 nn.Module 包装，并以真实样本批次建立计算图
-    var module = nn.Module(MyModel).init(allocator, try MyModel.init(allocator));
+    var module = try nn.Module(MyModel).init(allocator, try MyModel.init(allocator));
     defer module.deinit();
     try module.initParametersWithSample(prng.random(), .{sample_batch});
     ```

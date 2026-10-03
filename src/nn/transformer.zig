@@ -2,6 +2,8 @@ const std = @import("std");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const core = @import("core.zig");
+const deinitModel = core.deinitModel;
+const enterModuleScope = core.enterModuleScope;
 const normalization = @import("normalization.zig");
 pub const attention = @import("attention.zig");
 pub const llm = @import("llm.zig");
@@ -48,7 +50,6 @@ pub const sampleTopK = llm.sampleTopK;
 pub const Embedding = struct {
     weight: *Tensor, // 嵌入层权重矩阵表 (Shape: [vocab_size, embedding_dim])
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Embedding",
 
     /// 嵌入层初始化选项
@@ -76,56 +77,14 @@ pub const Embedding = struct {
         initWeights(random, self.weight.data, vocab_size, embedding_dim, options.init_method);
     }
 
-    /// 为嵌入层及权重张量设置人类可读的名称 (如传入 "wte"，自动设置 "wte.weight")
-    pub fn setName(self: *Embedding, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
-    }
-
-    /// 使用格式化模板为嵌入层设置人类可读的名称 (如 "{s}.wte", parent_name)
-    pub fn setNameFormatted(self: *Embedding, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("embedding");
-        }
-    }
-
-    /// 获取嵌入层的人类可读名称
-    pub fn getName(self: *const Embedding) ?[]const u8 {
-        return self.name;
-    }
-
-    /// 释放层内所有关联的张量 (Tensor) 内存资源
-    pub fn deinit(self: Embedding, allocator: std.mem.Allocator) void {
-        freePersistentTensor(allocator, self.weight);
-    }
-
-    /// 清空权重对应的梯度
-    pub fn zeroGrad(self: Embedding) void {
-        self.weight.zeroGrad();
-    }
-
     /// 模块标准数学变换公式
     pub const formula = "y = \\text{Embedding}(\\text{indices}; W_e \\in \\mathbb{R}^{V \\times D})";
-
-    pub fn registerFormula(self: *const Embedding, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-        }
-    }
 
     /// 查找映射前向传播
     /// 输入 x 为包含词元标识符 (Token Identifier, Token ID) 的任意维度张量 (Tensor)、`GenericTensor(IntT)` 或整数切片，输出形状为 x.shape + [embedding_dim]
     pub fn forward(self: *const Embedding, graph: *autodiff.Graph, x: anytype) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         return try graph.embedding(self.weight, x);
     }
 };
@@ -147,7 +106,6 @@ pub const MLP = struct {
     c_fc: Linear, // 升维全连接投影层 (Fully Connected Layer, c_fc: dim -> hidden_dim)
     c_proj: Linear, // 降维投影层 (Output Projection, c_proj: hidden_dim -> dim)
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "MLP",
 
     /// 初始化多层感知机 (Multi-Layer Perceptron, MLP) 模块
@@ -155,9 +113,9 @@ pub const MLP = struct {
     /// hidden_dim: 中间隐藏维度 (一般为 4 * dim)
     pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize) !MLP {
         const c_fc = try Linear.init(allocator, dim, hidden_dim);
-        errdefer c_fc.deinit(allocator);
+        errdefer deinitModel(&c_fc, allocator);
         const c_proj = try Linear.init(allocator, hidden_dim, dim);
-        errdefer c_proj.deinit(allocator);
+        errdefer deinitModel(&c_proj, allocator);
 
         return MLP{
             .c_fc = c_fc,
@@ -165,57 +123,14 @@ pub const MLP = struct {
         };
     }
 
-    /// 为多层感知机 (Multi-Layer Perceptron, MLP) 模块及子层统一设置人类可读的名称 (自动设置 "{name}.c_fc" 与 "{name}.c_proj")
-    pub fn setName(self: *MLP, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.c_fc.setNameFormatted("{s}.c_fc", .{self.name.?});
-        self.c_proj.setNameFormatted("{s}.c_proj", .{self.name.?});
-    }
-
-    pub fn setNameFormatted(self: *MLP, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("mlp");
-        }
-    }
-
-    pub fn getName(self: *const MLP) ?[]const u8 {
-        return self.name;
-    }
-
-    /// 释放子层的所有内存资源
-    pub fn deinit(self: MLP, allocator: std.mem.Allocator) void {
-        self.c_fc.deinit(allocator);
-        self.c_proj.deinit(allocator);
-    }
-
-    /// 子层梯度全部清零
-    pub fn zeroGrad(self: MLP) void {
-        self.c_fc.zeroGrad();
-        self.c_proj.zeroGrad();
-    }
-
     /// 模块标准数学变换公式
     pub const formula = "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}";
-
-    pub fn registerFormula(self: *const MLP, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-        }
-    }
 
     /// 前向传播逻辑
     /// 支持输入二维张量 (2-Dimensional Tensor, 2D) [B*T, D] 或三维张量 (3-Dimensional Tensor, 3D) [B, T, D]
     pub fn forward(self: *const MLP, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
@@ -257,16 +172,15 @@ pub const SwiGLU = struct {
     w_up: Linear, // 升维投影层 (dim -> hidden_dim)
     w_down: Linear, // 降维投影层 (hidden_dim -> dim)
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "SwiGLU",
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize) !SwiGLU {
         const w_gate = try Linear.init(allocator, dim, hidden_dim);
-        errdefer w_gate.deinit(allocator);
+        errdefer deinitModel(&w_gate, allocator);
         const w_up = try Linear.init(allocator, dim, hidden_dim);
-        errdefer w_up.deinit(allocator);
+        errdefer deinitModel(&w_up, allocator);
         const w_down = try Linear.init(allocator, hidden_dim, dim);
-        errdefer w_down.deinit(allocator);
+        errdefer deinitModel(&w_down, allocator);
 
         return SwiGLU{
             .w_gate = w_gate,
@@ -275,57 +189,13 @@ pub const SwiGLU = struct {
         };
     }
 
-    /// 为 Swish 门控线性单元 (Swish-Gated Linear Unit, SwiGLU) 模块及子层统一设置人类可读的名称 (自动设置 "{name}.w_gate", "{name}.w_up", "{name}.w_down")
-    pub fn setName(self: *SwiGLU, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.w_gate.setNameFormatted("{s}.w_gate", .{self.name.?});
-        self.w_up.setNameFormatted("{s}.w_up", .{self.name.?});
-        self.w_down.setNameFormatted("{s}.w_down", .{self.name.?});
-    }
-
-    pub fn setNameFormatted(self: *SwiGLU, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("swiglu");
-        }
-    }
-
-    pub fn getName(self: *const SwiGLU) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn deinit(self: SwiGLU, allocator: std.mem.Allocator) void {
-        self.w_gate.deinit(allocator);
-        self.w_up.deinit(allocator);
-        self.w_down.deinit(allocator);
-    }
-
-    pub fn zeroGrad(self: SwiGLU) void {
-        self.w_gate.zeroGrad();
-        self.w_up.zeroGrad();
-        self.w_down.zeroGrad();
-    }
-
     /// 模块标准数学变换公式
     pub const formula = "y = (\\text{SiLU}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
 
-    pub fn registerFormula(self: *const SwiGLU, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-        }
-    }
-
     /// 前向传播逻辑：支持二维 (2-Dimensional, 2D) [B*T, D] 或三维 (3-Dimensional, 3D) [B, T, D]
     pub fn forward(self: *const SwiGLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
@@ -383,7 +253,6 @@ pub const MoELayer = struct {
     routed_experts: []MLP,
     shared_experts: []MLP,
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "MoELayer",
 
     pub const formula = "y = \\sum_{i \\in \\text{TopK}(g(x))} p_i(x) E_i(x) + \\sum_{j} E^{\\text{shared}}_j(x)";
@@ -399,14 +268,14 @@ pub const MoELayer = struct {
         std.debug.assert(top_k > 0 and top_k <= num_routed_experts);
 
         const gate = try Linear.init(allocator, dim, num_routed_experts);
-        errdefer gate.deinit(allocator);
+        errdefer deinitModel(&gate, allocator);
 
         const routed = try allocator.alloc(MLP, num_routed_experts);
         errdefer allocator.free(routed);
 
         var init_r: usize = 0;
         errdefer {
-            for (0..init_r) |i| routed[i].deinit(allocator);
+            for (0..init_r) |i| deinitModel(&routed[i], allocator);
         }
         for (0..num_routed_experts) |i| {
             routed[i] = try MLP.init(allocator, dim, hidden_dim);
@@ -418,7 +287,7 @@ pub const MoELayer = struct {
 
         var init_s: usize = 0;
         errdefer {
-            for (0..init_s) |i| shared[i].deinit(allocator);
+            for (0..init_s) |i| deinitModel(&shared[i], allocator);
         }
         for (0..num_shared_experts) |i| {
             shared[i] = try MLP.init(allocator, dim, hidden_dim);
@@ -436,66 +305,9 @@ pub const MoELayer = struct {
         };
     }
 
-    pub fn setName(self: *MoELayer, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.gate.setNameFormatted("{s}.gate", .{self.name.?});
-        for (self.routed_experts, 0..) |*exp, i| {
-            exp.setNameFormatted("{s}.routed_{d}", .{ self.name.?, i });
-        }
-        for (self.shared_experts, 0..) |*exp, i| {
-            exp.setNameFormatted("{s}.shared_{d}", .{ self.name.?, i });
-        }
-    }
-
-    pub fn setNameFormatted(self: *MoELayer, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("moe");
-        }
-    }
-
-    pub fn getName(self: *const MoELayer) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn registerFormula(self: *const MoELayer, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-            try graph.registerModuleType(n, self.module_type);
-            try self.gate.registerFormula(graph);
-            for (self.routed_experts) |*exp| {
-                try exp.registerFormula(graph);
-            }
-            for (self.shared_experts) |*exp| {
-                try exp.registerFormula(graph);
-            }
-        }
-    }
-
-    pub fn deinit(self: MoELayer, allocator: std.mem.Allocator) void {
-        self.gate.deinit(allocator);
-        for (self.routed_experts) |exp| exp.deinit(allocator);
-        allocator.free(self.routed_experts);
-        for (self.shared_experts) |exp| exp.deinit(allocator);
-        allocator.free(self.shared_experts);
-    }
-
-    pub fn zeroGrad(self: MoELayer) void {
-        self.gate.zeroGrad();
-        for (self.routed_experts) |exp| exp.zeroGrad();
-        for (self.shared_experts) |exp| exp.zeroGrad();
-    }
-
     pub fn forward(self: *const MoELayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         const old_shape = x.shape;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
@@ -645,7 +457,6 @@ pub const TransformerBlock = struct {
     ln_2: RMSNorm, // 第二层均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)，在多层感知机 (Multi-Layer Perceptron, MLP) 计算前执行
     mlp: MLP, // 前馈多层感知机 (Multi-Layer Perceptron, MLP) 层
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "TransformerBlock",
 
     /// 初始化变换器块 (Transformer Block)
@@ -653,13 +464,13 @@ pub const TransformerBlock = struct {
     /// n_head: 注意力头数
     pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize) !TransformerBlock {
         const ln_1 = try RMSNorm.init(allocator, n_embd, 1e-5);
-        errdefer ln_1.deinit(allocator);
+        errdefer deinitModel(&ln_1, allocator);
         const attn = try CausalSelfAttention.init(allocator, n_embd, n_head);
-        errdefer attn.deinit(allocator);
+        errdefer deinitModel(&attn, allocator);
         const ln_2 = try RMSNorm.init(allocator, n_embd, 1e-5);
-        errdefer ln_2.deinit(allocator);
+        errdefer deinitModel(&ln_2, allocator);
         const mlp = try MLP.init(allocator, n_embd, 4 * n_embd);
-        errdefer mlp.deinit(allocator);
+        errdefer deinitModel(&mlp, allocator);
 
         return TransformerBlock{
             .ln_1 = ln_1,
@@ -669,67 +480,13 @@ pub const TransformerBlock = struct {
         };
     }
 
-    /// 为变换器块 (Transformer Block) 及内部各子层统一设置分层名称 (自动递归设置 ln_1, attn, ln_2, mlp)
-    pub fn setName(self: *TransformerBlock, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.ln_1.setNameFormatted("{s}.ln_1", .{self.name.?});
-        self.attn.setNameFormatted("{s}.attn", .{self.name.?});
-        self.ln_2.setNameFormatted("{s}.ln_2", .{self.name.?});
-        self.mlp.setNameFormatted("{s}.mlp", .{self.name.?});
-    }
-
-    pub fn setNameFormatted(self: *TransformerBlock, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("block");
-        }
-    }
-
-    pub fn getName(self: *const TransformerBlock) ?[]const u8 {
-        return self.name;
-    }
-
-    /// 释放所有内部子层的资源
-    pub fn deinit(self: TransformerBlock, allocator: std.mem.Allocator) void {
-        self.ln_1.deinit(allocator);
-        self.attn.deinit(allocator);
-        self.ln_2.deinit(allocator);
-        self.mlp.deinit(allocator);
-    }
-
-    /// 块内所有子层的梯度清零
-    pub fn zeroGrad(self: TransformerBlock) void {
-        self.ln_1.zeroGrad();
-        self.attn.zeroGrad();
-        self.ln_2.zeroGrad();
-        self.mlp.zeroGrad();
-    }
-
     /// 模块标准数学变换公式
     pub const formula = "\\begin{aligned} h_l &= x_l + \\text{Attention}(\\text{RMSNorm}(x_l)) \\\\ x_{l+1} &= \\text{TransformerBlock}(x_l) = h_l + \\text{MLP}(\\text{RMSNorm}(h_l)) \\end{aligned}";
 
-    pub fn registerFormula(self: *const TransformerBlock, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-            try graph.registerModuleType(n, self.module_type);
-            try self.ln_1.registerFormula(graph);
-            try self.attn.registerFormula(graph);
-            try self.ln_2.registerFormula(graph);
-            try self.mlp.registerFormula(graph);
-        }
-    }
-
     /// 前向传播流程：x -> Block(x) -> out
     pub fn forward(self: *const TransformerBlock, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         // 1. 第一条支路: 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) -> 注意力 (Attention)
         const x_norm1 = try self.ln_1.forward(graph, x);
 
@@ -766,34 +523,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
         ln_f: RMSNorm, // 骨架最末端用于规范化的均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) 层
 
         name: ?[]const u8 = null,
-        name_buf: [64]u8 = undefined,
         module_type: []const u8 = "TransformerDecoder",
-
-        /// 为整个解码器 (Decoder) 骨架及其包含的每层变换器块 (Transformer Block) 统一设置分层名称
-        pub fn setName(self: *Self, name: []const u8) void {
-            if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-                self.name = s;
-            } else |_| {
-                self.name = name;
-            }
-            for (&self.h, 0..) |*layer, i| {
-                layer.setNameFormatted("{s}.{d}", .{ self.name.?, i });
-            }
-            self.ln_f.setNameFormatted("{s}.ln_f", .{self.name.?});
-        }
-
-        pub fn setNameFormatted(self: *Self, comptime fmt: []const u8, args: anytype) void {
-            var buf: [64]u8 = undefined;
-            if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-                self.setName(s);
-            } else |_| {
-                self.setName("decoder");
-            }
-        }
-
-        pub fn getName(self: *const Self) ?[]const u8 {
-            return self.name;
-        }
 
         /// 初始化整个解码器组件
         pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize) !Self {
@@ -801,7 +531,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             var i: usize = 0;
             errdefer {
                 for (0..i) |j| {
-                    h[j].deinit(allocator);
+                    deinitModel(&h[j], allocator);
                 }
             }
             // 循环初始化每一层变换器块 (TransformerBlock)
@@ -811,12 +541,6 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
 
             // 初始化最后的均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) 层
             const ln_f = try RMSNorm.init(allocator, n_embd, 1e-5);
-            errdefer {
-                for (0..n_layer) |j| {
-                    h[j].deinit(allocator);
-                }
-                ln_f.deinit(allocator);
-            }
 
             return Self{
                 .h = h,
@@ -824,41 +548,13 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             };
         }
 
-        /// 释放整个骨架层及各变换器块 (Transformer Block) 的内存
-        pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
-            for (self.h) |layer| {
-                layer.deinit(allocator);
-            }
-            self.ln_f.deinit(allocator);
-        }
-
-        /// 将所有变换器块 (Transformer Block) 和最末端均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) 层的梯度全部清零
-        pub fn zeroGrad(self: Self) void {
-            for (self.h) |layer| {
-                layer.zeroGrad();
-            }
-            self.ln_f.zeroGrad();
-        }
-
         /// 模块标准数学变换公式
         pub const formula = "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)";
 
-        pub fn registerFormula(self: *const Self, graph: *autodiff.Graph) !void {
-            if (self.name) |n| {
-                try graph.setModuleFormula(n, formula);
-                try graph.registerModuleType(n, self.module_type);
-                for (&self.h) |*layer| {
-                    try layer.registerFormula(graph);
-                }
-                try self.ln_f.registerFormula(graph);
-            }
-        }
-
         /// 解码器主干网络的前向传播流程
         pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-            const module_scope = try graph.enterModule(self.name, self.module_type);
+            const module_scope = try enterModuleScope(graph, self);
             defer module_scope.exit();
-            if (self.name) |n| try graph.setModuleFormula(n, formula);
             var current_x = x;
             // 依次贯穿每一层变换器块 (Transformer Block)
             for (self.h) |layer| {
@@ -897,52 +593,9 @@ pub fn GPT(comptime config: GPTConfig) type {
         decoder: TransformerDecoder(config.n_layer), // 堆叠的变换器解码器 (Transformer Decoder) 层与最终归一化层
         lm_head: Linear, // 最终输出概率的语言模型线性分类投影头 (Language Model Head, lm_head)
         name: ?[]const u8 = null,
-        name_buf: [64]u8 = undefined,
         module_type: []const u8 = "GPT",
 
         const Self = @This();
-
-        /// 为生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 顶层及其包含的词元嵌入 (wte)、位置嵌入 (wpe)、解码器 (decoder)、语言模型头 (lm_head) 统一设置分层命名
-        pub fn setName(self: *Self, name: []const u8) void {
-            if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-                self.name = s;
-            } else |_| {
-                self.name = name;
-            }
-            self.token_embedding.setNameFormatted("{s}.wte", .{self.name.?});
-            self.position_embedding.setNameFormatted("{s}.wpe", .{self.name.?});
-            self.decoder.setNameFormatted("{s}.layers", .{self.name.?});
-            self.lm_head.setNameFormatted("{s}.lm_head", .{self.name.?});
-        }
-
-        pub fn setNameFormatted(self: *Self, comptime fmt: []const u8, args: anytype) void {
-            var buf: [64]u8 = undefined;
-            if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-                self.setName(s);
-            } else |_| {
-                self.setName("gpt");
-            }
-        }
-
-        pub fn getName(self: *const Self) ?[]const u8 {
-            return self.name;
-        }
-
-        /// 释放生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型所有子模块的内存资源
-        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.token_embedding.deinit(allocator);
-            self.position_embedding.deinit(allocator);
-            self.decoder.deinit(allocator);
-            self.lm_head.deinit(allocator);
-        }
-
-        /// 模型所有参数梯度清零
-        pub fn zeroGrad(self: *Self) void {
-            self.token_embedding.zeroGrad();
-            self.position_embedding.zeroGrad();
-            self.decoder.zeroGrad();
-            self.lm_head.zeroGrad();
-        }
 
         /// 初始化默认配置的生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型实例
         pub fn initDefault(allocator: std.mem.Allocator) !Self {
@@ -953,28 +606,18 @@ pub fn GPT(comptime config: GPTConfig) type {
         pub fn init(allocator: std.mem.Allocator) !Self {
             // 初始化词元 (Token) 嵌入矩阵 [vocab_size, n_embd]
             const token_embedding = try Embedding.init(allocator, config.vocab_size, config.n_embd);
-            errdefer token_embedding.deinit(allocator);
+            errdefer deinitModel(&token_embedding, allocator);
 
             // 初始化位置 (Position) 嵌入矩阵 [block_size, n_embd]
             const position_embedding = try Embedding.init(allocator, config.block_size, config.n_embd);
-            errdefer position_embedding.deinit(allocator);
+            errdefer deinitModel(&position_embedding, allocator);
 
             // 初始化变换器解码器 (Transformer Decoder) 主干网络
             const decoder = try TransformerDecoder(config.n_layer).init(allocator, config.n_embd, config.n_head);
-            errdefer {
-                token_embedding.deinit(allocator);
-                position_embedding.deinit(allocator);
-                decoder.deinit(allocator);
-            }
+            errdefer deinitModel(&decoder, allocator);
 
             // 初始化输出映射语言模型分类头 (Language Model Head, lm_head) [n_embd, vocab_size]
             const lm_head = try Linear.init(allocator, config.n_embd, config.vocab_size);
-            errdefer {
-                token_embedding.deinit(allocator);
-                position_embedding.deinit(allocator);
-                decoder.deinit(allocator);
-                lm_head.deinit(allocator);
-            }
 
             return Self{
                 .token_embedding = token_embedding,
@@ -987,24 +630,12 @@ pub fn GPT(comptime config: GPTConfig) type {
         /// 模块标准数学变换公式
         pub const formula = "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]";
 
-        pub fn registerFormula(self: *const Self, graph: *autodiff.Graph) !void {
-            if (self.name) |n| {
-                try graph.setModuleFormula(n, formula);
-                try graph.registerModuleType(n, self.module_type);
-                try self.token_embedding.registerFormula(graph);
-                try self.position_embedding.registerFormula(graph);
-                try self.decoder.registerFormula(graph);
-                try self.lm_head.registerFormula(graph);
-            }
-        }
-
         /// 前向推理传播流程
         /// 输入 x 为包含词元标识符 (Token Identifier, Token ID) 的二维张量 (2-Dimensional Tensor, 2D，支持 `*Tensor` 或 `*GenericTensor(IntT)`)，形状为 [B, T]
         /// 输出为未归一化的预测对数几率 (Logits)，形状为三维 (3-Dimensional, 3D): [B, T, vocab_size]
         pub fn forward(self: *const Self, graph: *autodiff.Graph, x: anytype) !*Tensor {
-            const module_scope = try graph.enterModule(self.name, self.module_type);
+            const module_scope = try enterModuleScope(graph, self);
             defer module_scope.exit();
-            if (self.name) |n| try graph.setModuleFormula(n, formula);
             const B = x.shape.dims[0];
             const T = x.shape.dims[1];
 
