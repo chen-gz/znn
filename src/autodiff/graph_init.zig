@@ -395,14 +395,15 @@ pub fn appendSingleTensorReport(
 /// 顺着张量 t 往后在图的 Ops 列表中探查下游消费者的激活函数类型
 pub fn detectConsumerActivation(self: *Graph, target: *Tensor) @import("../nn/init.zig").Nonlinearity {
     var current: *Tensor = target;
+    var passed_projection = false;
 
-    // 广度优先搜索 (Breadth-First Search, BFS) / 深度优先搜索 (Depth-First Search, DFS) 往后搜寻直到遇到激活函数或多层终点
-    while (true) {
-        var found_consumer = false;
+    // 顺着当前层的线性/卷积投影、偏置加法与形状变换向后搜寻紧邻的激活函数
+    var steps: usize = 0;
+    while (steps < 16) : (steps += 1) {
+        var advanced = false;
         for (self.ops.items) |op| {
             for (op.inputs) |inp| {
                 if (inp == current) {
-                    found_consumer = true;
                     switch (op.op_type) {
                         .Relu => return .relu,
                         .Tanh => return .tanh,
@@ -410,10 +411,18 @@ pub fn detectConsumerActivation(self: *Graph, target: *Tensor) @import("../nn/in
                         .Gelu => return .gelu,
                         .Silu => return .silu,
                         .LeakyRelu => return .{ .leaky_relu = op.context.LeakyRelu.alpha },
-                        // 如果经过了 MatMul/Conv2D/AddBias/Add 等中间运算，顺着它的 output 继续往后看
-                        .MatMul, .BatchMatMul, .Conv2D, .ConvTranspose2D, .AddBias, .Add, .Reshape, .Transpose => {
+                        .MatMul, .Conv2D, .ConvTranspose2D => {
+                            if (!passed_projection and op.outputs.len > 0) {
+                                passed_projection = true;
+                                current = op.outputs[0];
+                                advanced = true;
+                                break;
+                            }
+                        },
+                        .AddBias, .Add, .Reshape, .Transpose => {
                             if (op.outputs.len > 0) {
                                 current = op.outputs[0];
+                                advanced = true;
                                 break;
                             }
                         },
@@ -421,9 +430,9 @@ pub fn detectConsumerActivation(self: *Graph, target: *Tensor) @import("../nn/in
                     }
                 }
             }
-            if (found_consumer and current != target) break;
+            if (advanced) break;
         }
-        if (!found_consumer or current == target) break;
+        if (!advanced) break;
     }
 
     // 如果下游没有接激活函数或直接进入输出/损失层，判定为 linear (gain=1.0)
