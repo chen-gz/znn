@@ -961,4 +961,5 @@ pub const Graph = struct {
     pub const exportJson = graph_init.exportJson;
     pub const appendSingleTensorReport = graph_init.appendSingleTensorReport;
     pub const detectConsumerActivation = graph_init.detectConsumerActivation;
+    pub const computeParamFans = graph_init.computeParamFans;
 };

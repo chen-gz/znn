@@ -136,6 +136,71 @@ test "initModel infers per-layer initialization from the forward graph" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.01), var_fc3, 0.003);
 }
 
+test "Graph.computeParamFans derives fan_in and fan_out from the consuming op" {
+    const allocator = std.testing.allocator;
+
+    var linear = try Linear.init(allocator, 5, 7);
+    defer linear.deinit(allocator);
+    var conv = try nn.Conv2D.init(allocator, 3, 8, 3);
+    defer conv.deinit(allocator);
+    var deconv = try nn.ConvTranspose2D.init(allocator, 6, 2, 3, 1, 0, true);
+    defer deconv.deinit(allocator);
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    // MatMul 右操作数 y = x W，W: [in=5, out=7]
+    _ = try linear.forward(&graph, try graph.ones(&.{ 2, 5 }, false));
+    // MatMul 左操作数 y = W x，W: [out=6, in=4]
+    const w_left = try graph.tensorND(&.{ 6, 4 }, true);
+    _ = try graph.matmul(w_left, try graph.ones(&.{ 4, 2 }, false));
+    // 先转置再投影 y = x W^T，W: [out=7, in=5]
+    const w_t = try graph.tensorND(&.{ 7, 5 }, true);
+    _ = try graph.matmul(try graph.ones(&.{ 2, 5 }, false), try graph.transpose(w_t, 0, 1));
+    // Conv2D 卷积核 [out_c=8, in_c=3, 3, 3]
+    _ = try conv.forward(&graph, try graph.ones(&.{ 1, 3, 6, 6 }, false));
+    // ConvTranspose2D 卷积核 [in_c=6, out_c=2, 3, 3]
+    _ = try deconv.forward(&graph, try graph.ones(&.{ 1, 6, 4, 4 }, false));
+
+    const expectFans = struct {
+        fn run(fans: autodiff.graph_init.ParamFans, fan_in: usize, fan_out: usize) !void {
+            try std.testing.expectEqual(fan_in, fans.fan_in);
+            try std.testing.expectEqual(fan_out, fans.fan_out);
+        }
+    }.run;
+    try expectFans(graph.computeParamFans(linear.weight), 5, 7);
+    try expectFans(graph.computeParamFans(w_left), 4, 6);
+    try expectFans(graph.computeParamFans(w_t), 5, 7);
+    try expectFans(graph.computeParamFans(conv.weight), 3 * 9, 8 * 9);
+    try expectFans(graph.computeParamFans(deconv.weight), 6 * 9, 2 * 9);
+}
+
+test "initModel uses the transposed-convolution kernel layout for ConvTranspose2D fans" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+
+    // 卷积核 [in_c=32, out_c=4, 3, 3]：fan_in = 32·9 = 288，下游无激活函数 -> He Normal (gain=1)，Var = 1/288
+    var deconv = try nn.ConvTranspose2D.init(allocator, 32, 4, 3, 1, 0, true);
+    defer deconv.deinit(allocator);
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+    _ = try deconv.forward(&graph, try graph.ones(&.{ 1, 32, 4, 4 }, false));
+    try nn.initModel(&deconv, &graph, random);
+
+    var sum: f64 = 0.0;
+    for (deconv.weight.data) |v| sum += v;
+    const mean = sum / @as(f64, @floatFromInt(deconv.weight.data.len));
+    var var_sum: f64 = 0.0;
+    for (deconv.weight.data) |v| {
+        const diff = @as(f64, v) - mean;
+        var_sum += diff * diff;
+    }
+    const variance: f32 = @floatCast(var_sum / @as(f64, @floatFromInt(deconv.weight.data.len)));
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0 / 288.0), variance, 0.0006);
+}
+
 test "Graph.initWeights dynamically infers activations and respects customInit" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(999);
