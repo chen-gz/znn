@@ -189,7 +189,7 @@ flowchart LR
   - **He (Kaiming) Normal / Uniform**：针对深层 ReLU / GELU 网络的方差平衡；
   - **Xavier (Glorot) Normal / Uniform**：针对 Sigmoid / Tanh 的对称双端收敛；
   - **LeCun Normal**：自归一化神经网络推荐；
-  - **自定义初始化保护机制**：通过 `is_custom_initialized` 标志位，确保特定层（如 LoRA 旁路 B 初始全零、Embedding 自定义分布）在全局初始化时不会被意外覆盖。
+  - **外部自定义初始化保护机制**：内置库层默认通过 `reinit` / `AUTO_GRAPH` 进行标准初始化；仅当库外用户代码显式调用 `customInit` 时才会设置 `is_custom_initialized = true`（标记为 `CUSTOM_INIT`），确保用户自定义的特殊初始化策略在 `Graph.initWeights` 全局初始化时不会被覆盖。
 
 ### 4.3 现代大模型架构核心 (`nn/attention.zig`, `nn/transformer.zig`, `nn/llm.zig`)
 1. **因果多头自注意力 (`CausalSelfAttention`, `nn/attention.zig`)**：

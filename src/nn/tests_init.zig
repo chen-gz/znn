@@ -320,3 +320,46 @@ test "Comprehensive coverage of all InitMethod strategies" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), lu_stats.mean, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 0.01), lu_stats.variance, 0.002);
 }
+
+test "Built-in library layers do not mark is_custom_initialized unless customInit is called externally" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(2026);
+    const random = prng.random();
+
+    var lin = try Linear.init(allocator, 8, 4, random);
+    defer lin.deinit(allocator);
+    try std.testing.expect(!lin.weight.is_custom_initialized);
+    try std.testing.expect(!lin.bias.is_custom_initialized);
+
+    var conv = try nn.Conv2D.init(allocator, 3, 4, 3, random);
+    defer conv.deinit(allocator);
+    try std.testing.expect(!conv.weight.is_custom_initialized);
+    try std.testing.expect(!conv.bias.is_custom_initialized);
+
+    var deconv = try nn.ConvTranspose2D.init(allocator, 4, 3, 3, 1, 0, true, random);
+    defer deconv.deinit(allocator);
+    try std.testing.expect(!deconv.weight.is_custom_initialized);
+    try std.testing.expect(!deconv.bias.?.is_custom_initialized);
+
+    var emb = try nn.Embedding.init(allocator, 32, 8, random);
+    defer emb.deinit(allocator);
+    try std.testing.expect(!emb.weight.is_custom_initialized);
+
+    var lora = try nn.LoRALinear.initWithBias(allocator, 8, 4, 2, 4.0, true, random);
+    defer lora.deinit(allocator);
+    try std.testing.expect(!lora.weight.is_custom_initialized);
+    try std.testing.expect(!lora.lora_a.is_custom_initialized);
+    try std.testing.expect(!lora.lora_b.is_custom_initialized);
+    try std.testing.expect(!lora.bias.?.is_custom_initialized);
+
+    var lstm = try nn.LSTM.init(allocator, 8, 8, random);
+    defer lstm.deinit(allocator);
+    try std.testing.expect(!lstm.cell.w_ih_f.weight.is_custom_initialized);
+    try std.testing.expect(!lstm.cell.w_ih_f.bias.is_custom_initialized);
+
+    // Explicit external customInit marks parameters as custom-initialized
+    lin.customInit(random, .{ .nonlinearity = .relu });
+    try std.testing.expect(lin.weight.is_custom_initialized);
+    try std.testing.expect(lin.bias.is_custom_initialized);
+}
+

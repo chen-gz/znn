@@ -54,15 +54,15 @@ pub const Linear = struct {
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Linear",
 
-    /// 构造线性层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
+    /// 构造线性层：默认分配张量形状与内存；若传入可选的 random: ?std.Random 则按库默认策略初始化权重（不标记 customInit）
     pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize, random_opt: anytype) !Linear {
         var l = try initUninitialized(allocator, in_features, out_features);
         const ArgT = @TypeOf(random_opt);
         if (ArgT == std.Random) {
-            l.customInit(random_opt, InitOptions.default);
+            l.reinit(random_opt, InitOptions.default);
         } else if (ArgT == ?std.Random) {
             if (random_opt) |rnd| {
-                l.customInit(rnd, InitOptions.default);
+                l.reinit(rnd, InitOptions.default);
             }
         }
         return l;
@@ -85,20 +85,21 @@ pub const Linear = struct {
         };
     }
 
-    /// 显式自定义初始化后门：由用户手动指定策略或在模型 customInit 中调用，
-    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
-    pub fn customInit(self: *Linear, random: std.Random, options: InitOptions) void {
+    /// 库内标准权重重初始化：按指定选项初始化权重与偏置，不设置 is_custom_initialized 标记
+    pub fn reinit(self: *Linear, random: std.Random, options: InitOptions) void {
         const in_features = self.weight.shape.dims[0];
         const out_features = self.weight.shape.dims[1];
         const w_init = options.resolveWeightInit();
         initWeights(random, self.weight.data, in_features, out_features, w_init);
         initWeights(random, self.bias.data, in_features, out_features, options.bias_init);
-        self.weight.is_custom_initialized = true;
-        self.bias.is_custom_initialized = true;
     }
 
-    pub fn reinit(self: *Linear, random: std.Random, options: InitOptions) void {
-        self.customInit(random, options);
+    /// 显式自定义初始化（仅限库外用户代码调用）：
+    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
+    pub fn customInit(self: *Linear, random: std.Random, options: InitOptions) void {
+        self.reinit(random, options);
+        self.weight.is_custom_initialized = true;
+        self.bias.is_custom_initialized = true;
     }
 
     /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "fc1"，自动设置 "fc1.weight" 与 "fc1.bias")
@@ -168,7 +169,7 @@ pub const Conv2D = struct {
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Conv2D",
 
-    /// 构造卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
+    /// 构造卷积层：默认分配张量形状与内存；若传入可选的 random: ?std.Random 则按库默认策略初始化权重（不标记 customInit）
     pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random_opt: anytype) !Conv2D {
         return initWithConfig(allocator, in_channels, out_channels, kernel_size, 1, 0, random_opt);
     }
@@ -186,10 +187,10 @@ pub const Conv2D = struct {
         var c = try initUninitializedWithConfig(allocator, in_channels, out_channels, kernel_size, stride, padding);
         const ArgT = @TypeOf(random_opt);
         if (ArgT == std.Random) {
-            c.customInit(random_opt, InitOptions.default);
+            c.reinit(random_opt, InitOptions.default);
         } else if (ArgT == ?std.Random) {
             if (random_opt) |rnd| {
-                c.customInit(rnd, InitOptions.default);
+                c.reinit(rnd, InitOptions.default);
             }
         }
         return c;
@@ -242,9 +243,8 @@ pub const Conv2D = struct {
         };
     }
 
-    /// 显式自定义初始化后门：由用户手动指定策略或在模型 customInit 中调用，
-    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
-    pub fn customInit(self: *Conv2D, random: std.Random, options: InitOptions) void {
+    /// 库内标准权重重初始化：按指定选项初始化卷积核与偏置，不设置 is_custom_initialized 标记
+    pub fn reinit(self: *Conv2D, random: std.Random, options: InitOptions) void {
         const out_channels = self.weight.shape.dims[0];
         const in_channels = self.weight.shape.dims[1];
         const kernel_size = self.weight.shape.dims[2];
@@ -253,12 +253,14 @@ pub const Conv2D = struct {
         const w_init = options.resolveWeightInit();
         initWeights(random, self.weight.data, fan_in, fan_out, w_init);
         initWeights(random, self.bias.data, fan_in, fan_out, options.bias_init);
-        self.weight.is_custom_initialized = true;
-        self.bias.is_custom_initialized = true;
     }
 
-    pub fn reinit(self: *Conv2D, random: std.Random, options: InitOptions) void {
-        self.customInit(random, options);
+    /// 显式自定义初始化（仅限库外用户代码调用）：
+    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
+    pub fn customInit(self: *Conv2D, random: std.Random, options: InitOptions) void {
+        self.reinit(random, options);
+        self.weight.is_custom_initialized = true;
+        self.bias.is_custom_initialized = true;
     }
 
     /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "conv1"，自动设置 "conv1.weight" 与 "conv1.bias")
@@ -326,7 +328,7 @@ pub const ConvTranspose2D = struct {
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "ConvTranspose2D",
 
-    /// 构造反卷积层：默认只分配张量形状和内存；若显式传入可选的 random: ?std.Random 则立即标记 customInit
+    /// 构造反卷积层：默认分配张量形状与内存；若传入可选的 random: ?std.Random 则按库默认策略初始化权重（不标记 customInit）
     pub fn init(
         allocator: std.mem.Allocator,
         in_channels: usize,
@@ -340,10 +342,10 @@ pub const ConvTranspose2D = struct {
         var c = try initUninitialized(allocator, in_channels, out_channels, kernel_size, stride, padding, use_bias);
         const ArgT = @TypeOf(random_opt);
         if (ArgT == std.Random) {
-            c.customInit(random_opt, InitOptions.default);
+            c.reinit(random_opt, InitOptions.default);
         } else if (ArgT == ?std.Random) {
             if (random_opt) |rnd| {
-                c.customInit(rnd, InitOptions.default);
+                c.reinit(rnd, InitOptions.default);
             }
         }
         return c;
@@ -396,22 +398,25 @@ pub const ConvTranspose2D = struct {
         };
     }
 
-    /// 显式自定义初始化后门：由用户手动指定策略或在模型 customInit 中调用，
-    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
-    pub fn customInit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
+    /// 库内标准权重重初始化：按指定选项初始化反卷积核与偏置，不设置 is_custom_initialized 标记
+    pub fn reinit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
         const fan_in = self.in_channels * self.kernel_size * self.kernel_size;
         const fan_out = self.out_channels * self.kernel_size * self.kernel_size;
         const w_init = options.resolveWeightInit();
         initWeights(random, self.weight.data, fan_in, fan_out, w_init);
-        self.weight.is_custom_initialized = true;
         if (self.bias) |b| {
             initWeights(random, b.data, fan_in, fan_out, options.bias_init);
-            b.is_custom_initialized = true;
         }
     }
 
-    pub fn reinit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
-        self.customInit(random, options);
+    /// 显式自定义初始化（仅限库外用户代码调用）：
+    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
+    pub fn customInit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
+        self.reinit(random, options);
+        self.weight.is_custom_initialized = true;
+        if (self.bias) |b| {
+            b.is_custom_initialized = true;
+        }
     }
 
     /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "deconv1"，自动设置 "deconv1.weight" 与 "deconv1.bias")

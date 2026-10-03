@@ -215,7 +215,7 @@
           "minimum": 0
         },
         "status": {
-          "description": "CUSTOM_INIT: initialized by module code. AUTO_GRAPH: initializer chosen from the consuming activation.",
+          "description": "CUSTOM_INIT: initialized by external user-defined customInit. AUTO_GRAPH: standard library or graph-inferred initializer.",
           "enum": ["CUSTOM_INIT", "AUTO_GRAPH"]
         },
         "strategy": {

@@ -954,6 +954,7 @@ pub const Graph = struct {
     // 参数初始化、架构报告与 JSON 导出绑定 (来自 graph_init.zig)
     pub const initWeights = graph_init.initWeights;
     pub const initSingleTensor = graph_init.initSingleTensor;
+    pub const describeAutoGraphParam = graph_init.describeAutoGraphParam;
     pub const formatInitReport = graph_init.formatInitReport;
     pub const printInitReport = graph_init.printInitReport;
     pub const formatJson = graph_init.formatJson;

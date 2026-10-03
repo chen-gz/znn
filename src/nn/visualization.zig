@@ -1,7 +1,6 @@
 const std = @import("std");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
-const init_mod = @import("init.zig");
 
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
@@ -37,9 +36,9 @@ pub const NodeKind = enum {
 
 /// 张量来源 / 初始化状态枚举 (Tensor Node Status)
 pub const NodeStatus = enum {
-    /// 参数：由模块代码显式初始化 (customInit)
+    /// 参数：由库外用户代码显式自定义初始化 (customInit)
     CUSTOM_INIT,
-    /// 参数：依据消费端激活函数自动选择初始化策略
+    /// 参数：库默认或依据消费端算子/激活函数自动选择初始化策略
     AUTO_GRAPH,
     /// 图输入
     INPUT,
@@ -319,40 +318,8 @@ fn appendNodeData(
         return;
     }
 
-    if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
-        try nodes.append(allocator, .{
-            .name = name,
-            .kind = .Param,
-            .module = module,
-            .shape_str = shape_str,
-            .elements = elements,
-            .bytes = bytes,
-            .status = .AUTO_GRAPH,
-            .inferred_act = try allocator.dupe(u8, "bias"),
-            .strategy = try allocator.dupe(u8, "zeros (0.0)"),
-        });
-        return;
-    }
-
-    const act = graph.detectConsumerActivation(t);
-    const gain = init_mod.calculateGain(act);
-    const act_name = switch (act) {
-        .relu => "ReLU",
-        .tanh => "Tanh",
-        .sigmoid => "Sigmoid",
-        .gelu => "GELU",
-        .silu => "SiLU",
-        .selu => "SELU",
-        .leaky_relu => "LeakyReLU",
-        .linear => "Linear (None)",
-    };
-
     var strat_buf: [64]u8 = undefined;
-    const strat = switch (act) {
-        .tanh, .sigmoid => try allocator.dupe(u8, std.fmt.bufPrint(&strat_buf, "Xavier Normal (gain={d:.3})", .{gain}) catch "Xavier Normal"),
-        .selu => try allocator.dupe(u8, "LeCun Normal"),
-        else => try allocator.dupe(u8, std.fmt.bufPrint(&strat_buf, "He Normal (gain={d:.3})", .{gain}) catch "He Normal"),
-    };
+    const info = graph.describeAutoGraphParam(t, &strat_buf);
 
     try nodes.append(allocator, .{
         .name = name,
@@ -362,8 +329,8 @@ fn appendNodeData(
         .elements = elements,
         .bytes = bytes,
         .status = .AUTO_GRAPH,
-        .inferred_act = try allocator.dupe(u8, act_name),
-        .strategy = strat,
+        .inferred_act = try allocator.dupe(u8, info.act_name),
+        .strategy = try allocator.dupe(u8, info.strategy),
     });
 }
 

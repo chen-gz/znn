@@ -103,14 +103,12 @@ pub const LoRALinear = struct {
         const weight = try createPersistentTensor(allocator, in_features, out_features, false);
         errdefer freePersistentTensor(allocator, weight);
         initWeights(random, weight.data, in_features, out_features, .{ .he_normal = .{} });
-        weight.is_custom_initialized = true;
 
         var bias: ?*Tensor = null;
         if (use_bias) {
             const b = try createPersistentTensor(allocator, 1, out_features, true);
             errdefer freePersistentTensor(allocator, b);
             @memset(b.data, 0.0);
-            b.is_custom_initialized = true;
             bias = b;
         }
         errdefer if (bias) |b| freePersistentTensor(allocator, b);
@@ -119,13 +117,11 @@ pub const LoRALinear = struct {
         const lora_a = try createPersistentTensor(allocator, in_features, r, true);
         errdefer freePersistentTensor(allocator, lora_a);
         initWeights(random, lora_a.data, in_features, r, .{ .he_normal = .{} });
-        lora_a.is_custom_initialized = true;
 
         // 可微调低秩旁路 B：全 0 初始化以保证初始状态等价于基座 (Base) 模型
         const lora_b = try createPersistentTensor(allocator, r, out_features, true);
         errdefer freePersistentTensor(allocator, lora_b);
         @memset(lora_b.data, 0.0);
-        lora_b.is_custom_initialized = true;
 
         return LoRALinear{
             .weight = weight,
@@ -137,6 +133,20 @@ pub const LoRALinear = struct {
             .r = r,
             .scaling = lora_alpha / @as(f32, @floatFromInt(r)),
         };
+    }
+
+    /// 显式自定义初始化（仅限库外用户代码调用）：
+    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
+    pub fn customInit(self: *LoRALinear, random: std.Random, options: core.InitOptions) void {
+        const w_init = options.resolveWeightInit();
+        initWeights(random, self.lora_a.data, self.in_features, self.r, w_init);
+        @memset(self.lora_b.data, 0.0);
+        self.lora_a.is_custom_initialized = true;
+        self.lora_b.is_custom_initialized = true;
+        if (self.bias) |b| {
+            initWeights(random, b.data, self.in_features, self.out_features, options.bias_init);
+            b.is_custom_initialized = true;
+        }
     }
 
     pub fn deinit(self: LoRALinear, allocator: std.mem.Allocator) void {
