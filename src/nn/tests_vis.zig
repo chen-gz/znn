@@ -1189,7 +1189,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 18. conv2d
     {
-        var m = try Conv2D.init(allocator, 1, 4, 3);
+        var m = try Conv2D.init(allocator, 1, 4, 3, .{});
         m.resetParameters(random, .{});
         defer nn.deinitModel(&m, allocator);
         var names = std.heap.ArenaAllocator.init(allocator);

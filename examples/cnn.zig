@@ -19,9 +19,9 @@ pub const CNN = struct {
     /// 只分配各层参数内存，参数数值在建立前向计算图后由 nn.initModel / Module.initParameters 统一初始化
     pub fn init(allocator: std.mem.Allocator) !CNN {
         return .{
-            .conv1 = try nn.Conv2D.init(allocator, 1, 4, 3),
-            .conv2 = try nn.Conv2D.init(allocator, 4, 8, 3),
-            .conv3 = try nn.Conv2D.init(allocator, 8, 16, 3),
+            .conv1 = try nn.Conv2D.init(allocator, 1, 4, 3, .{}),
+            .conv2 = try nn.Conv2D.init(allocator, 4, 8, 3, .{}),
+            .conv3 = try nn.Conv2D.init(allocator, 8, 16, 3, .{}),
             .fc1 = try nn.Linear.init(allocator, 144, 10),
         };
     }

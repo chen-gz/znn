@@ -109,21 +109,25 @@ pub const Conv2D = struct {
     name: ?[]const u8 = null,
     module_type: []const u8 = "Conv2D",
 
-    /// 构造 stride = 1、padding = 0 的卷积层 (只分配参数内存，见 initWithConfig)
-    pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize) !Conv2D {
-        return initWithConfig(allocator, in_channels, out_channels, kernel_size, 1, 0);
-    }
+    pub const Options = struct {
+        stride: usize = 1,
+        padding: usize = 0,
 
-    /// 构造支持自定义 stride 与 padding 的卷积层：只分配参数内存 (卷积核与偏置全零)，不做任何数值初始化
-    pub fn initWithConfig(
+        pub const default: Options = .{};
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    /// 构造卷积层：只分配参数内存 (卷积核与偏置全零)，不做任何数值初始化
+    pub fn init(
         allocator: std.mem.Allocator,
         in_channels: usize,
         out_channels: usize,
         kernel_size: usize,
-        stride: usize,
-        padding: usize,
+        options: Options,
     ) !Conv2D {
-        if (stride == 0) return error.InvalidStride;
+        if (options.stride == 0) return error.InvalidStride;
         const weight = try createPersistentTensor(allocator, out_channels, in_channels * kernel_size * kernel_size, true);
         errdefer freePersistentTensor(allocator, weight);
         weight.shape = Shape.init(&.{ out_channels, in_channels, kernel_size, kernel_size });
@@ -137,8 +141,8 @@ pub const Conv2D = struct {
         return Conv2D{
             .weight = weight,
             .bias = bias,
-            .stride = stride,
-            .padding = padding,
+            .stride = options.stride,
+            .padding = options.padding,
         };
     }
 

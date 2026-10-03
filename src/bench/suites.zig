@@ -113,7 +113,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             x: *tensor.Tensor,
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
-                var conv = try nn.Conv2D.init(alloc, 1, 16, 3);
+                var conv = try nn.Conv2D.init(alloc, 1, 16, 3, .{});
                 conv.resetParameters(rnd, .{});
                 const x = try tensor.zeros(alloc, &.{ 32, 1, 28, 28 });
                 @memset(x.data, 0.1);
@@ -157,7 +157,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             x_data: []f32,
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
-                var conv = try nn.Conv2D.init(alloc, 1, 16, 3);
+                var conv = try nn.Conv2D.init(alloc, 1, 16, 3, .{});
                 conv.resetParameters(rnd, .{});
                 const x_data = try alloc.alloc(f32, 32 * 1 * 28 * 28);
                 @memset(x_data, 0.1);
@@ -541,13 +541,13 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             targets: [32]u8,
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
-                var conv1 = try nn.Conv2D.init(alloc, 1, 4, 3);
+                var conv1 = try nn.Conv2D.init(alloc, 1, 4, 3, .{});
                 conv1.resetParameters(rnd, .{});
                 errdefer nn.deinitModel(&conv1, alloc);
-                var conv2 = try nn.Conv2D.init(alloc, 4, 8, 3);
+                var conv2 = try nn.Conv2D.init(alloc, 4, 8, 3, .{});
                 conv2.resetParameters(rnd, .{});
                 errdefer nn.deinitModel(&conv2, alloc);
-                var conv3 = try nn.Conv2D.init(alloc, 8, 16, 3);
+                var conv3 = try nn.Conv2D.init(alloc, 8, 16, 3, .{});
                 conv3.resetParameters(rnd, .{});
                 errdefer nn.deinitModel(&conv3, alloc);
                 var fc1 = try nn.Linear.init(alloc, 144, 10);

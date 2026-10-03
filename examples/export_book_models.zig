@@ -455,7 +455,7 @@ pub fn main(init: std.process.Init) !void {
         // 18. conv2d
         try exportModel(allocator, "conv2d", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
-                var conv = try nn.Conv2D.init(alloc, 1, 4, 3);
+                var conv = try nn.Conv2D.init(alloc, 1, 4, 3, .{});
                 defer nn.deinitModel(&conv, alloc);
                 var names = std.heap.ArenaAllocator.init(alloc);
                 defer names.deinit();
