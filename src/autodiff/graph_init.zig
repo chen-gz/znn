@@ -99,29 +99,129 @@ pub fn initWeights(self: *Graph, random: std.Random) void {
     }
 }
 
+pub fn isNormScaleParam(self: *const Graph, t: *const Tensor) bool {
+    for (self.ops.items) |op| {
+        switch (op.op_type) {
+            .RmsNorm, .LayerNorm, .BatchNorm2d => {
+                if (op.inputs.len >= 2 and op.inputs[1] == t) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
+pub fn isForgetGateBiasParam(self: *const Graph, t: *const Tensor) bool {
+    if (t.name) |n| {
+        if (std.mem.endsWith(u8, n, "w_ih_f.bias")) return true;
+    }
+    for (self.ops.items) |op| {
+        for (op.inputs) |inp| {
+            if (inp == t and std.mem.endsWith(u8, op.scope, "w_ih_f")) return true;
+        }
+    }
+    return false;
+}
+
+pub fn isEmbeddingParam(self: *const Graph, t: *const Tensor) bool {
+    for (self.ops.items) |op| {
+        if (op.op_type == .Embedding and op.inputs.len >= 1 and op.inputs[0] == t) return true;
+    }
+    return false;
+}
+
+pub fn isLoRABParam(self: *const Graph, t: *const Tensor) bool {
+    if (t.name) |n| {
+        if (std.mem.endsWith(u8, n, ".lora_b") or std.mem.eql(u8, n, "lora_b")) return true;
+    }
+    for (self.ops.items) |op| {
+        if (op.op_type == .MatMul and op.inputs.len >= 2 and op.inputs[1] == t) {
+            if (self.getModuleType(op.scope)) |m_type| {
+                if (std.mem.eql(u8, m_type, "LoRALinear")) {
+                    if (op.inputs[0].creator) |prev_op| {
+                        if (prev_op.op_type == .MatMul and std.mem.eql(u8, prev_op.scope, op.scope)) return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+pub const AutoGraphParamInfo = struct {
+    act_name: []const u8,
+    strategy: []const u8,
+};
+
+pub fn describeAutoGraphParam(self: *Graph, t: *Tensor, strat_buf: *[64]u8) AutoGraphParamInfo {
+    const init_mod = @import("../nn/init.zig");
+
+    if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
+        if (isNormScaleParam(self, t)) {
+            return .{ .act_name = "scale", .strategy = "ones (1.0)" };
+        }
+        if (isForgetGateBiasParam(self, t)) {
+            return .{ .act_name = "bias", .strategy = "ones (1.0)" };
+        }
+        return .{ .act_name = "bias", .strategy = "zeros (0.0)" };
+    }
+
+    if (isEmbeddingParam(self, t)) {
+        return .{ .act_name = "Embedding", .strategy = "Normal (mean=0.0, std=0.02)" };
+    }
+
+    if (isLoRABParam(self, t)) {
+        return .{ .act_name = "LoRA-B", .strategy = "zeros (0.0)" };
+    }
+
+    const act = detectConsumerActivation(self, t);
+    const gain = init_mod.calculateGain(act);
+    const act_name = switch (act) {
+        .relu => "ReLU",
+        .tanh => "Tanh",
+        .sigmoid => "Sigmoid",
+        .gelu => "GELU",
+        .silu => "SiLU",
+        .selu => "SELU",
+        .leaky_relu => "LeakyReLU",
+        .linear => "Linear (None)",
+    };
+
+    const strat = switch (act) {
+        .tanh, .sigmoid => std.fmt.bufPrint(strat_buf, "Xavier Normal (gain={d:.3})", .{gain}) catch "Xavier Normal",
+        .selu => "LeCun Normal",
+        else => std.fmt.bufPrint(strat_buf, "He Normal (gain={d:.3})", .{gain}) catch "He Normal",
+    };
+
+    return .{ .act_name = act_name, .strategy = strat };
+}
+
 pub fn initSingleTensor(self: *Graph, t: *Tensor, random: std.Random, comptime init_mod: type) void {
     // 只对属于可训练参数（requires_grad=true 且非中间激活运算生成）的节点进行初始化
-    // 如果已经被层的 customInit 初始化过，则坚决跳过，绝不覆盖！
+    // 如果已经被库外用户代码的 customInit 初始化过，则坚决跳过，绝不覆盖！
     if (!t.requires_grad or t.is_custom_initialized or t.creator != null) return;
 
-    // 1. 如果是 1D 参数向量 (归一化缩放因子 gamma 初始化为 1.0，偏置向量初始化为 0.0)
+    // 1. 如果是 1D 参数向量 (归一化缩放因子 gamma 与 LSTM 遗忘门偏置初始化为 1.0，其余偏置向量初始化为 0.0)
     if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
-        for (self.ops.items) |op| {
-            switch (op.op_type) {
-                .RmsNorm, .LayerNorm, .BatchNorm2d => {
-                    if (op.inputs.len >= 2 and op.inputs[1] == t) {
-                        @memset(t.data, 1.0);
-                        return;
-                    }
-                },
-                else => {},
-            }
+        if (isNormScaleParam(self, t) or isForgetGateBiasParam(self, t)) {
+            @memset(t.data, 1.0);
+            return;
         }
         @memset(t.data, 0.0);
         return;
     }
 
-    // 2. 如果是高维权重矩阵 (Linear, Conv2D, ConvTranspose2D 等)
+    // 2. 如果是词嵌入表权重 (Embedding: Normal(0, 0.02)) 或 LoRA 旁路 B 矩阵 (全 0 初始化)
+    if (isEmbeddingParam(self, t)) {
+        init_mod.initWeights(random, t.data, t.shape.dims[0], t.shape.dims[1], .{ .normal = .{ .mean = 0.0, .std = 0.02 } });
+        return;
+    }
+    if (isLoRABParam(self, t)) {
+        @memset(t.data, 0.0);
+        return;
+    }
+
+    // 3. 如果是高维权重矩阵 (Linear, Conv2D, ConvTranspose2D 等)
     // 沿计算图中的 Ops 向后探测第一个下游消费算子 (Consumer Op)
     const nonlinearity = detectConsumerActivation(self, t);
     const gain = init_mod.calculateGain(nonlinearity);
@@ -226,6 +326,7 @@ pub fn appendSingleTensorReport(
     allocator: std.mem.Allocator,
     comptime init_mod: type,
 ) !void {
+    _ = init_mod;
     var shape_buf: [64]u8 = undefined;
     var shape_len: usize = 0;
     shape_buf[0] = '[';
@@ -283,35 +384,11 @@ pub fn appendSingleTensorReport(
         return;
     }
 
-    if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
-        try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
-            name, "Param", shape_str, "AUTO_GRAPH", "bias", "zeros (0.0)",
-        });
-        return;
-    }
-
-    const act = detectConsumerActivation(self, t);
-    const gain = init_mod.calculateGain(act);
-    const act_name = switch (act) {
-        .relu => "ReLU",
-        .tanh => "Tanh",
-        .sigmoid => "Sigmoid",
-        .gelu => "GELU",
-        .silu => "SiLU",
-        .selu => "SELU",
-        .leaky_relu => "LeakyReLU",
-        .linear => "Linear (None)",
-    };
-
     var strat_buf: [64]u8 = undefined;
-    const strat = switch (act) {
-        .tanh, .sigmoid => std.fmt.bufPrint(&strat_buf, "Xavier Normal (gain={d:.3})", .{gain}) catch "Xavier Normal",
-        .selu => "LeCun Normal",
-        else => std.fmt.bufPrint(&strat_buf, "He Normal (gain={d:.3})", .{gain}) catch "He Normal",
-    };
+    const info = describeAutoGraphParam(self, t, &strat_buf);
 
     try buf.print(allocator, "{s:<24} {s:<12} {s:<18} {s:<14} {s:<16} {s:<28}\n", .{
-        name, "Param", shape_str, "AUTO_GRAPH", act_name, strat,
+        name, "Param", shape_str, "AUTO_GRAPH", info.act_name, info.strategy,
     });
 }
 

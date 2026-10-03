@@ -270,7 +270,6 @@ pub const LSTMCell = struct {
 
         // 关键技巧：将遗忘门偏置初始化为 +1.0，促进长程梯度回传 (Gers et al., 2000)
         @memset(w_ih_f.bias.data, 1.0);
-        w_ih_f.bias.is_custom_initialized = true;
 
         return LSTMCell{
             .input_dim = input_dim,

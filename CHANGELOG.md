@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 为 `RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`MoELayer`、`MLALayer`、`LoRALinear` 补齐 `setName` / `setNameFormatted` / `getName` / `formula` / `registerFormula` 与 `Graph.enterModule` 作用域追踪。
 
 ### Changed
+- **内置库层初始化与外部 `customInit` 职责解耦 (`src/nn/core.zig`, `src/nn/transformer.zig`, `src/nn/llm.zig`, `src/nn/recurrent.zig`, `src/autodiff/graph_init.zig`, `src/nn/visualization.zig`, `src/nn/tests_init.zig`, `src/nn/tests_vis.zig`)**:
+  - `Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding` 的 `init` 与 `reinit`（含 `Sequential.autoInit`），以及 `LoRALinear.initWithBias` 与 `LSTMCell.init` 在库内初始化时不再调用 `customInit` 或设置 `is_custom_initialized = true`；`customInit` 与 `CUSTOM_INIT` 状态严格保留给库外用户代码显式调用。
+  - `Graph.initSingleTensor` 与 `Graph.describeAutoGraphParam` 统一覆盖归一化缩放参数 (`ones (1.0)`)、LSTM 遗忘门偏置 (`ones (1.0)`)、`Embedding` 词表 (`Normal (mean=0.0, std=0.02)`)、`LoRALinear` 旁路矩阵 $B$ (`zeros (0.0)`) 及下游激活函数增益推导，并同步更新 `examples/` 与可视化器下的全部模型图 JSON。
 - **全库超长模块解耦重构（单实现文件 `< 60 KB`）(`src/tensor/`, `src/autodiff/`, `src/nn/`, `src/bench/`)**:
   - 将 `src/tensor/core.zig` (84.7 KB) 按职责拆分为 `core.zig`、`nn_kernels.zig` 与 `reductions.zig`；
   - 将 `src/autodiff/op.zig` (98.6 KB) 拆分为 `op.zig`、`backward_core.zig`、`backward_nn.zig` 与 `backward_math.zig`；

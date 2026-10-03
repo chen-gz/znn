@@ -716,6 +716,10 @@ test "All 18 canonical models export conforming schema and valid ports" {
             var parsed = try std.json.parseFromSlice(std.json.Value, alloc, json_data, .{});
             defer parsed.deinit();
 
+            const summary = parsed.value.object.get("summary").?.object;
+            try std.testing.expectEqual(@as(i64, 0), summary.get("custom_init_count").?.integer);
+            try std.testing.expectEqual(summary.get("param_nodes").?.integer, summary.get("auto_graph_count").?.integer);
+
             const root = parsed.value.object.get("root").?.object;
             const ports = root.get("ports").?.object;
             const in_ports = ports.get("inputs").?.array;
