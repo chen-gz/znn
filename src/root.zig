@@ -23,6 +23,7 @@ pub const InitMethod = nn.InitMethod;
 pub const InitOptions = nn.InitOptions;
 pub const initWeights = nn.initWeights;
 pub const autoSequential = nn.autoSequential;
+pub const initModel = nn.initModel;
 pub const setTrainingModel = nn.setTrainingModel;
 pub const trainModel = nn.trainModel;
 pub const evalModel = nn.evalModel;

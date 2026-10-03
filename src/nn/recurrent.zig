@@ -285,6 +285,14 @@ pub const LSTMCell = struct {
         };
     }
 
+    /// 库内标准参数重初始化：8 个门控线性层按 options 初始化，遗忘门偏置重置为 +1.0
+    pub fn reinit(self: *LSTMCell, random: std.Random, options: core.InitOptions) void {
+        inline for (.{ "w_ih_f", "w_hh_f", "w_ih_i", "w_hh_i", "w_ih_c", "w_hh_c", "w_ih_o", "w_hh_o" }) |field_name| {
+            @field(self, field_name).reinit(random, options);
+        }
+        @memset(self.w_ih_f.bias.data, 1.0);
+    }
+
     pub fn setName(self: *LSTMCell, name: []const u8) void {
         if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
             self.name = s;

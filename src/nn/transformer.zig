@@ -90,13 +90,6 @@ pub const Embedding = struct {
         initWeights(random, self.weight.data, vocab_size, embedding_dim, options.init_method);
     }
 
-    /// 显式自定义初始化（仅限库外用户代码调用）：
-    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
-    pub fn customInit(self: *Embedding, random: std.Random, options: Options) void {
-        self.reinit(random, options);
-        self.weight.is_custom_initialized = true;
-    }
-
     /// 为嵌入层及权重张量设置人类可读的名称 (如传入 "wte"，自动设置 "wte.weight")
     pub fn setName(self: *Embedding, name: []const u8) void {
         if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {

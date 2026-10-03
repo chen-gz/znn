@@ -94,14 +94,6 @@ pub const Linear = struct {
         initWeights(random, self.bias.data, in_features, out_features, options.bias_init);
     }
 
-    /// 显式自定义初始化（仅限库外用户代码调用）：
-    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
-    pub fn customInit(self: *Linear, random: std.Random, options: InitOptions) void {
-        self.reinit(random, options);
-        self.weight.is_custom_initialized = true;
-        self.bias.is_custom_initialized = true;
-    }
-
     /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "fc1"，自动设置 "fc1.weight" 与 "fc1.bias")
     pub fn setName(self: *Linear, name: []const u8) void {
         if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
@@ -255,14 +247,6 @@ pub const Conv2D = struct {
         initWeights(random, self.bias.data, fan_in, fan_out, options.bias_init);
     }
 
-    /// 显式自定义初始化（仅限库外用户代码调用）：
-    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
-    pub fn customInit(self: *Conv2D, random: std.Random, options: InitOptions) void {
-        self.reinit(random, options);
-        self.weight.is_custom_initialized = true;
-        self.bias.is_custom_initialized = true;
-    }
-
     /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "conv1"，自动设置 "conv1.weight" 与 "conv1.bias")
     pub fn setName(self: *Conv2D, name: []const u8) void {
         if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
@@ -406,16 +390,6 @@ pub const ConvTranspose2D = struct {
         initWeights(random, self.weight.data, fan_in, fan_out, w_init);
         if (self.bias) |b| {
             initWeights(random, b.data, fan_in, fan_out, options.bias_init);
-        }
-    }
-
-    /// 显式自定义初始化（仅限库外用户代码调用）：
-    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
-    pub fn customInit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
-        self.reinit(random, options);
-        self.weight.is_custom_initialized = true;
-        if (self.bias) |b| {
-            b.is_custom_initialized = true;
         }
     }
 
@@ -649,6 +623,85 @@ pub fn evalModel(model: anytype) void {
     setTrainingModel(model, false);
 }
 
+/// 模型参数初始化入口 (编译期反射分派)：
+/// 1. 若模块类型定义了 `pub fn customInit(self: *Self, random: std.Random) void` (由库外用户模块定义)，
+///    则调用该函数，并将该模块内所有可训练参数标记为 `is_custom_initialized = true`
+///    (`Graph.initWeights` 不再覆盖，模型图导出为 `CUSTOM_INIT`)；
+/// 2. 否则使用库内置初始化：模块定义了 `reinit(self, random, options)` 时以默认选项调用，
+///    `Sequential` 调用 `autoInit`；其余结构体递归处理各子模块字段。
+pub fn initModel(model: anytype, random: std.Random) void {
+    const T = @TypeOf(model.*);
+    if (@typeInfo(T) != .@"struct") return;
+
+    if (@hasDecl(T, "customInit")) {
+        model.customInit(random);
+        markCustomInitializedModel(model);
+        return;
+    }
+    if (@hasDecl(T, "reinit")) {
+        model.reinit(random, .{});
+        return;
+    }
+    if (@hasDecl(T, "autoInit")) {
+        model.autoInit(random);
+        return;
+    }
+
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        const FieldType = field.type;
+        if (field.is_comptime or @sizeOf(FieldType) == 0) continue;
+        const field_info = @typeInfo(FieldType);
+        if (field_info == .@"struct") {
+            initModel(&@field(model, field.name), random);
+        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
+            if (@typeInfo(field_info.pointer.child) == .@"struct") {
+                for (@field(model, field.name)) |*item| initModel(item, random);
+            }
+        } else if (field_info == .@"array") {
+            if (@typeInfo(field_info.@"array".child) == .@"struct") {
+                for (&@field(model, field.name)) |*item| initModel(item, random);
+            }
+        }
+    }
+}
+
+/// 将模型内所有可训练参数标记为自定义初始化 (由 `initModel` 在调用外部模块的 `customInit` 后执行)
+fn markCustomInitializedModel(model: anytype) void {
+    const T = @TypeOf(model.*);
+    const info = @typeInfo(T);
+    if (info != .@"struct") return;
+    inline for (info.@"struct".fields) |field| {
+        const FieldType = field.type;
+        if (field.is_comptime or @sizeOf(FieldType) == 0) continue;
+        const field_info = @typeInfo(FieldType);
+        if (FieldType == *Tensor) {
+            markTensorCustomInitialized(@field(model, field.name));
+        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
+            if (@field(model, field.name)) |t| markTensorCustomInitialized(t);
+        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
+            const ElemT = field_info.pointer.child;
+            if (ElemT == *Tensor) {
+                for (@field(model, field.name)) |t| markTensorCustomInitialized(t);
+            } else if (@typeInfo(ElemT) == .@"struct") {
+                for (@field(model, field.name)) |*item| markCustomInitializedModel(item);
+            }
+        } else if (field_info == .@"struct") {
+            markCustomInitializedModel(&@field(model, field.name));
+        } else if (field_info == .@"array") {
+            const ElemT = field_info.@"array".child;
+            if (ElemT == *Tensor) {
+                for (@field(model, field.name)) |t| markTensorCustomInitialized(t);
+            } else if (@typeInfo(ElemT) == .@"struct") {
+                for (&@field(model, field.name)) |*item| markCustomInitializedModel(item);
+            }
+        }
+    }
+}
+
+fn markTensorCustomInitialized(t: *Tensor) void {
+    if (t.requires_grad) t.is_custom_initialized = true;
+}
+
 pub fn Module(comptime T: type) type {
     return struct {
         allocator: std.mem.Allocator,
@@ -661,6 +714,11 @@ pub fn Module(comptime T: type) type {
                 .allocator = allocator,
                 .inner = inner,
             };
+        }
+
+        /// 初始化内部模型参数：内部模型定义了 customInit 时调用之，否则使用库内置初始化 (见 `initModel`)
+        pub fn initParameters(self: *Self, random: std.Random) void {
+            initModel(&self.inner, random);
         }
 
         pub fn deinit(self: *Self) void {
@@ -741,13 +799,20 @@ pub fn Sequential(comptime LayersTuple: type) type {
             evalModel(&self.layers);
         }
 
+        /// 按层初始化：外部层定义了 customInit 时调用之 (经 `initModel`)；
+        /// Linear / Conv2D / ConvTranspose2D 依据其后的激活函数选择内置初始化；其余层使用库内置初始化
         pub fn autoInit(self: *Self, random: std.Random) void {
             const fields = @typeInfo(LayersTuple).@"struct".fields;
             inline for (fields, 0..) |field, i| {
                 const LayerT = field.type;
-                if (LayerT == Linear or LayerT == Conv2D or LayerT == ConvTranspose2D) {
+                if (field.is_comptime or @sizeOf(LayerT) == 0) continue;
+                if (@hasDecl(LayerT, "customInit")) {
+                    initModel(&@field(self.layers, field.name), random);
+                } else if (LayerT == Linear or LayerT == Conv2D or LayerT == ConvTranspose2D) {
                     const act = comptime detectNextActivation(LayersTuple, i);
                     @field(self.layers, field.name).reinit(random, .{ .nonlinearity = act });
+                } else {
+                    initModel(&@field(self.layers, field.name), random);
                 }
             }
         }
