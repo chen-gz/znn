@@ -74,9 +74,8 @@ pub const LoRALinear = struct {
         allocator: std.mem.Allocator,
         in_features: usize,
         out_features: usize,
-        random: std.Random,
     ) !LoRALinear {
-        return init(allocator, in_features, out_features, Options.default.r, Options.default.lora_alpha, random);
+        return init(allocator, in_features, out_features, Options.default.r, Options.default.lora_alpha);
     }
 
     pub fn init(
@@ -85,9 +84,8 @@ pub const LoRALinear = struct {
         out_features: usize,
         r: usize,
         lora_alpha: f32,
-        random: std.Random,
     ) !LoRALinear {
-        return initWithBias(allocator, in_features, out_features, r, lora_alpha, false, random);
+        return initWithBias(allocator, in_features, out_features, r, lora_alpha, false);
     }
 
     pub fn initWithBias(
@@ -97,12 +95,10 @@ pub const LoRALinear = struct {
         r: usize,
         lora_alpha: f32,
         use_bias: bool,
-        random: std.Random,
     ) !LoRALinear {
         // 冻结的基础权重
         const weight = try createPersistentTensor(allocator, in_features, out_features, false);
         errdefer freePersistentTensor(allocator, weight);
-        initWeights(random, weight.data, in_features, out_features, .{ .he_normal = .{} });
 
         var bias: ?*Tensor = null;
         if (use_bias) {
@@ -116,7 +112,7 @@ pub const LoRALinear = struct {
         const lora_b = try createPersistentTensor(allocator, r, out_features, true);
         errdefer freePersistentTensor(allocator, lora_b);
 
-        var layer = LoRALinear{
+        return LoRALinear{
             .weight = weight,
             .bias = bias,
             .lora_a = lora_a,
@@ -126,13 +122,12 @@ pub const LoRALinear = struct {
             .r = r,
             .scaling = lora_alpha / @as(f32, @floatFromInt(r)),
         };
-        layer.resetParameters(random, core.InitOptions.default);
-        return layer;
     }
 
-    /// 库内标准参数重初始化 (冻结的基础权重保持不变)：
+    /// 库内标准参数初始化：冻结的基础权重按 He Normal 初始化 (加载预训练权重时由 loadModel 覆盖)；
     /// 低秩旁路 A 按 options 的权重策略初始化；旁路 B 全 0 以保证初始状态等价于基座 (Base) 模型；偏置按 options.bias_init 初始化
     pub fn resetParameters(self: *LoRALinear, random: std.Random, options: core.InitOptions) void {
+        initWeights(random, self.weight.data, self.in_features, self.out_features, .{ .he_normal = .{} });
         initWeights(random, self.lora_a.data, self.in_features, self.r, options.resolveWeightInit());
         @memset(self.lora_b.data, 0.0);
         if (self.bias) |b| {

@@ -45,7 +45,8 @@ pub fn main() !void {
 
     const dim: usize = 16;
     const hidden_dim: usize = 32;
-    var swiglu = try nn.SwiGLU.init(allocator, dim, hidden_dim, random);
+    var swiglu = try nn.SwiGLU.init(allocator, dim, hidden_dim);
+    nn.initModel(&swiglu, random);
     defer swiglu.deinit(allocator);
 
     const adamw_cfg = optim.AdamWConfig{
@@ -108,7 +109,8 @@ pub fn main() !void {
     // 阶段 3: LoRA 低秩适配微调 (LoRA Adaptation & Fusing)
     // ---------------------------------------------------------------
     std.debug.print("[Stage 3] Injecting LoRA Adapters (r=4, alpha=8)...\n", .{});
-    var lora_layer = try nn.LoRALinear.init(allocator, 16, 16, 4, 8.0, random);
+    var lora_layer = try nn.LoRALinear.init(allocator, 16, 16, 4, 8.0);
+    nn.initModel(&lora_layer, random);
     defer lora_layer.deinit(allocator);
 
     var lora_graph = autodiff.Graph.init(allocator);

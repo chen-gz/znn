@@ -29,7 +29,8 @@ pub fn main() !void {
 
     // Config: n_embd = 8, n_head = 2 (so head_dim = 4), block_size (max seq len) = 4
     // We will test with batch = 1, seq_len = 3.
-    var att = try nn.CausalSelfAttention.init(allocator, 8, 2, random);
+    var att = try nn.CausalSelfAttention.init(allocator, 8, 2);
+    nn.initModel(&att, random);
     defer att.deinit(allocator);
 
     // Input: Shape [1, 3, 8] (B=1, T=3, C=8)

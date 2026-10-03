@@ -41,12 +41,14 @@ test "Hierarchical module naming and interactive HTML report export" {
     defer graph.deinit();
 
     // 1. 创建 Embedding 模块并设置顶级层次命名
-    var emb = try transformer.Embedding.init(allocator, 1000, 64, random);
+    var emb = try transformer.Embedding.init(allocator, 1000, 64);
+    nn.initModel(&emb, random);
     defer emb.deinit(allocator);
     emb.setName("gpt.wte");
 
     // 2. 创建 TransformerBlock 并分层命名为 "gpt.layers.0"
-    var block = try transformer.TransformerBlock.init(allocator, 64, 4, random);
+    var block = try transformer.TransformerBlock.init(allocator, 64, 4);
+    nn.initModel(&block, random);
     defer block.deinit(allocator);
     block.setName("gpt.layers.0");
     try graph.registerModuleType("gpt", "GPT");
@@ -211,7 +213,8 @@ test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivit
         .n_layer = 2,
     };
 
-    var gpt = try transformer.GPT(config).init(allocator, random);
+    var gpt = try transformer.GPT(config).init(allocator);
+    nn.initModel(&gpt, random);
     defer gpt.deinit(allocator);
     gpt.setName("gpt");
 
@@ -347,7 +350,8 @@ test "Explicit module scopes attribute ops and tensors to the executing module" 
     const random = prng.random();
 
     const config = transformer.GPTConfig{ .vocab_size = 128, .block_size = 16, .n_embd = 32, .n_head = 2, .n_layer = 2 };
-    var gpt = try transformer.GPT(config).init(allocator, random);
+    var gpt = try transformer.GPT(config).init(allocator);
+    nn.initModel(&gpt, random);
     defer gpt.deinit(allocator);
     gpt.setName("gpt");
 
@@ -416,7 +420,8 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     const random = prng.random();
 
     const config = transformer.GPTConfig{ .vocab_size = 128, .block_size = 16, .n_embd = 32, .n_head = 2, .n_layer = 2 };
-    var gpt = try transformer.GPT(config).init(allocator, random);
+    var gpt = try transformer.GPT(config).init(allocator);
+    nn.initModel(&gpt, random);
     defer gpt.deinit(allocator);
     gpt.setName("gpt");
 
@@ -653,7 +658,8 @@ test "Model graph JSON export conforms to the published JSON Schema" {
     // 1. 多层 GPT：覆盖端口、缓冲区边、折叠变换与残差边
     {
         const config = transformer.GPTConfig{ .vocab_size = 64, .block_size = 8, .n_embd = 16, .n_head = 2, .n_layer = 2 };
-        var gpt = try transformer.GPT(config).init(allocator, random);
+        var gpt = try transformer.GPT(config).init(allocator);
+        nn.initModel(&gpt, random);
         defer gpt.deinit(allocator);
         gpt.setName("gpt");
 
@@ -673,7 +679,8 @@ test "Model graph JSON export conforms to the published JSON Schema" {
 
     // 2. 单个 Linear：最小模型
     {
-        var linear = try core.Linear.init(allocator, 8, 4, random);
+        var linear = try core.Linear.init(allocator, 8, 4);
+        nn.initModel(&linear, random);
         defer linear.deinit(allocator);
         linear.setName("linear");
 
@@ -765,7 +772,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 1. linear
     {
-        var m = try Linear.init(allocator, 16, 10, random);
+        var m = try Linear.init(allocator, 16, 10);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("linear");
         var g = autodiff.Graph.init(allocator);
@@ -788,11 +796,12 @@ test "All 18 canonical models export conforming schema and valid ports" {
             name: ?[]const u8 = "mlp",
             module_type: []const u8 = "MLP",
 
-            pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
-                const fc1 = try Linear.init(alloc, 16, 32, rnd);
-                const fc2 = try Linear.init(alloc, 32, 16, rnd);
-                const fc3 = try Linear.init(alloc, 16, 10, rnd);
-                var mlp = @This(){ .fc1 = fc1, .fc2 = fc2, .fc3 = fc3 };
+            pub fn init(alloc: std.mem.Allocator) !@This() {
+                var mlp = @This(){
+                    .fc1 = try Linear.init(alloc, 16, 32),
+                    .fc2 = try Linear.init(alloc, 32, 16),
+                    .fc3 = try Linear.init(alloc, 16, 10),
+                };
                 mlp.setName("mlp");
                 return mlp;
             }
@@ -821,7 +830,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
             }
         };
 
-        var m = try TestMLP.init(allocator, random);
+        var m = try TestMLP.init(allocator);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("mlp");
         var g = autodiff.Graph.init(allocator);
@@ -837,7 +847,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 3. rnn
     {
-        var m = try RNN.init(allocator, 16, 32, random);
+        var m = try RNN.init(allocator, 16, 32);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("rnn");
         var g = autodiff.Graph.init(allocator);
@@ -856,7 +867,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 4. lstm
     {
-        var m = try LSTM.init(allocator, 16, 32, random);
+        var m = try LSTM.init(allocator, 16, 32);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("lstm");
         var g = autodiff.Graph.init(allocator);
@@ -876,7 +888,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 5. stacked_lstm
     {
-        var m = try StackedLSTM.init(allocator, 16, 32, 2, random);
+        var m = try StackedLSTM.init(allocator, 16, 32, 2);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("stacked_lstm");
         var g = autodiff.Graph.init(allocator);
@@ -895,7 +908,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 6. gru
     {
-        var m = try GRU.init(allocator, 16, 32, random);
+        var m = try GRU.init(allocator, 16, 32);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("gru");
         var g = autodiff.Graph.init(allocator);
@@ -914,7 +928,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 7. embedding
     {
-        var m = try Embedding.init(allocator, 128, 32, random);
+        var m = try Embedding.init(allocator, 128, 32);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("embedding");
         var g = autodiff.Graph.init(allocator);
@@ -931,7 +946,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 8. attention
     {
-        var m = try CausalSelfAttention.init(allocator, 32, 4, random);
+        var m = try CausalSelfAttention.init(allocator, 32, 4);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("causal_self_attention");
         var g = autodiff.Graph.init(allocator);
@@ -947,7 +963,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 9. transformer_block
     {
-        var m = try TransformerBlock.init(allocator, 32, 4, random);
+        var m = try TransformerBlock.init(allocator, 32, 4);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("transformer_block");
         var g = autodiff.Graph.init(allocator);
@@ -970,7 +987,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
             .n_head = 4,
             .n_layer = 2,
         };
-        var m = try GPT(cfg).init(allocator, random);
+        var m = try GPT(cfg).init(allocator);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("gpt");
         var g = autodiff.Graph.init(allocator);
@@ -987,7 +1005,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 11. swiglu
     {
-        var m = try SwiGLU.init(allocator, 32, 64, random);
+        var m = try SwiGLU.init(allocator, 32, 64);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("swiglu");
         var g = autodiff.Graph.init(allocator);
@@ -1003,7 +1022,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 12. lora_linear
     {
-        var m = try LoRALinear.init(allocator, 32, 32, 4, 8.0, random);
+        var m = try LoRALinear.init(allocator, 32, 32, 4, 8.0);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("lora_linear");
         var g = autodiff.Graph.init(allocator);
@@ -1035,7 +1055,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 14. mla
     {
-        var m = try MLALayer.init(allocator, 32, 4, 8, 16, 8, random);
+        var m = try MLALayer.init(allocator, 32, 4, 8, 16, 8);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("mla");
         var g = autodiff.Graph.init(allocator);
@@ -1051,7 +1072,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 15. deepseek_moe
     {
-        var m = try MoELayer.init(allocator, 32, 64, 4, 1, 2, random);
+        var m = try MoELayer.init(allocator, 32, 64, 4, 1, 2);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("deepseek_moe");
         var g = autodiff.Graph.init(allocator);
@@ -1067,11 +1089,14 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 16. gan_generator
     {
-        var l1 = try Linear.init(allocator, 2, 16, random);
+        var l1 = try Linear.init(allocator, 2, 16);
+        nn.initModel(&l1, random);
         l1.setName("generator.fc1");
-        var l2 = try Linear.init(allocator, 16, 16, random);
+        var l2 = try Linear.init(allocator, 16, 16);
+        nn.initModel(&l2, random);
         l2.setName("generator.fc2");
-        var l3 = try Linear.init(allocator, 16, 2, random);
+        var l3 = try Linear.init(allocator, 16, 2);
+        nn.initModel(&l3, random);
         l3.setName("generator.fc3");
         var net_g = sequential(.{
             l1,
@@ -1096,11 +1121,14 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 17. gan_discriminator
     {
-        var d1 = try Linear.init(allocator, 2, 16, random);
+        var d1 = try Linear.init(allocator, 2, 16);
+        nn.initModel(&d1, random);
         d1.setName("discriminator.fc1");
-        var d2 = try Linear.init(allocator, 16, 16, random);
+        var d2 = try Linear.init(allocator, 16, 16);
+        nn.initModel(&d2, random);
         d2.setName("discriminator.fc2");
-        var d3 = try Linear.init(allocator, 16, 1, random);
+        var d3 = try Linear.init(allocator, 16, 1);
+        nn.initModel(&d3, random);
         d3.setName("discriminator.fc3");
         var net_d = sequential(.{
             d1,
@@ -1125,7 +1153,8 @@ test "All 18 canonical models export conforming schema and valid ports" {
 
     // 18. conv2d
     {
-        var m = try Conv2D.init(allocator, 1, 4, 3, random);
+        var m = try Conv2D.init(allocator, 1, 4, 3);
+        nn.initModel(&m, random);
         defer m.deinit(allocator);
         m.setName("conv2d");
         var g = autodiff.Graph.init(allocator);

@@ -66,7 +66,7 @@ test "Weight initialization methods and Linear initWithOptions" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.01), lecun_stats.variance, 0.002);
 
     // 7. Linear built-in resetParameters specifying nonlinearity
-    var lin_tanh = try Linear.init(allocator, 100, 100, null);
+    var lin_tanh = try Linear.init(allocator, 100, 100);
     defer lin_tanh.deinit(allocator);
     lin_tanh.resetParameters(random, .{
         .nonlinearity = .tanh, // Gain = 5/3 ~ 1.6667 -> Xavier Normal with Gain
@@ -94,11 +94,11 @@ test "Sequential autoInit and detectNextActivation" {
     // fc2 -> Tanh (自动探测为 .tanh -> Xavier Normal, gain=5/3)
     // fc3 -> 无激活函数 (自动探测为 .linear, gain=1.0)
     var model = autoSequential(.{
-        try Linear.init(allocator, 100, 100, null),
+        try Linear.init(allocator, 100, 100),
         ReLU{},
-        try Linear.init(allocator, 100, 100, null),
+        try Linear.init(allocator, 100, 100),
         Tanh{},
-        try Linear.init(allocator, 100, 10, null),
+        try Linear.init(allocator, 100, 10),
     }, random);
     defer model.deinit(allocator);
 
@@ -144,12 +144,12 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
 
-    // 1. 各层通过 init(..., null) 创建（只分配内存，参数保持全零）并设置人类可读名字
-    var fc_relu = try Linear.init(allocator, 100, 100, null);
+    // 1. 各层通过 init 创建（只分配内存，参数保持全零）并设置人类可读名字
+    var fc_relu = try Linear.init(allocator, 100, 100);
     defer fc_relu.deinit(allocator);
     fc_relu.setName("dense_relu_1");
 
-    var fc_tanh = try Linear.init(allocator, 100, 100, null);
+    var fc_tanh = try Linear.init(allocator, 100, 100);
     defer fc_tanh.deinit(allocator);
     fc_tanh.setName("dense_tanh_2");
 
@@ -165,7 +165,7 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
         }
     };
 
-    var special = SpecialHead{ .head = try Linear.init(allocator, 100, 10, null) };
+    var special = SpecialHead{ .head = try Linear.init(allocator, 100, 10) };
     defer special.head.deinit(allocator);
     special.head.setName("special_head");
     const fc_custom = &special.head;
@@ -188,7 +188,7 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     const z2 = try graph.addBias(try graph.matmul(a1, fc_tanh.weight), fc_tanh.bias);
     const a2 = try graph.tanh(z2); // 后续接 Tanh
 
-    var fc_out = try Linear.init(allocator, 10, 2, null);
+    var fc_out = try Linear.init(allocator, 10, 2);
     defer fc_out.deinit(allocator);
     fc_out.setName("logits_out");
 
@@ -339,33 +339,39 @@ test "Built-in library layers do not mark is_custom_initialized unless customIni
     var prng = std.Random.DefaultPrng.init(2026);
     const random = prng.random();
 
-    var lin = try Linear.init(allocator, 8, 4, random);
+    var lin = try Linear.init(allocator, 8, 4);
+    nn.initModel(&lin, random);
     defer lin.deinit(allocator);
     try std.testing.expect(!lin.weight.is_custom_initialized);
     try std.testing.expect(!lin.bias.is_custom_initialized);
 
-    var conv = try nn.Conv2D.init(allocator, 3, 4, 3, random);
+    var conv = try nn.Conv2D.init(allocator, 3, 4, 3);
+    nn.initModel(&conv, random);
     defer conv.deinit(allocator);
     try std.testing.expect(!conv.weight.is_custom_initialized);
     try std.testing.expect(!conv.bias.is_custom_initialized);
 
-    var deconv = try nn.ConvTranspose2D.init(allocator, 4, 3, 3, 1, 0, true, random);
+    var deconv = try nn.ConvTranspose2D.init(allocator, 4, 3, 3, 1, 0, true);
+    nn.initModel(&deconv, random);
     defer deconv.deinit(allocator);
     try std.testing.expect(!deconv.weight.is_custom_initialized);
     try std.testing.expect(!deconv.bias.?.is_custom_initialized);
 
-    var emb = try nn.Embedding.init(allocator, 32, 8, random);
+    var emb = try nn.Embedding.init(allocator, 32, 8);
+    nn.initModel(&emb, random);
     defer emb.deinit(allocator);
     try std.testing.expect(!emb.weight.is_custom_initialized);
 
-    var lora = try nn.LoRALinear.initWithBias(allocator, 8, 4, 2, 4.0, true, random);
+    var lora = try nn.LoRALinear.initWithBias(allocator, 8, 4, 2, 4.0, true);
+    nn.initModel(&lora, random);
     defer lora.deinit(allocator);
     try std.testing.expect(!lora.weight.is_custom_initialized);
     try std.testing.expect(!lora.lora_a.is_custom_initialized);
     try std.testing.expect(!lora.lora_b.is_custom_initialized);
     try std.testing.expect(!lora.bias.?.is_custom_initialized);
 
-    var lstm = try nn.LSTM.init(allocator, 8, 8, random);
+    var lstm = try nn.LSTM.init(allocator, 8, 8);
+    nn.initModel(&lstm, random);
     defer lstm.deinit(allocator);
     try std.testing.expect(!lstm.cell.w_ih_f.weight.is_custom_initialized);
     try std.testing.expect(!lstm.cell.w_ih_f.bias.is_custom_initialized);
@@ -376,19 +382,24 @@ test "initModel calls external customInit when defined and falls back to built-i
     var prng = std.Random.DefaultPrng.init(31415);
     const random = prng.random();
 
-    // 1. 外部模块定义 customInit：initModel 调用之，并标记其全部可训练参数为自定义初始化
+    // 0. 库层 init 只分配内存：参数全零，未消耗任何随机数
+    var bare = try Linear.init(allocator, 4, 3);
+    defer bare.deinit(allocator);
+    for (bare.weight.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
+    for (bare.bias.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
+
+    // 1. 外部模块定义确定性 customInit(self)：initModel 调用之 (不消耗随机数)，并标记其全部可训练参数为自定义初始化
     const CustomBlock = struct {
         fc: Linear,
         norm: nn.LayerNorm,
 
-        pub fn customInit(self: *@This(), rnd: std.Random) void {
-            _ = rnd;
+        pub fn customInit(self: *@This()) void {
             @memset(self.fc.weight.data, 0.25);
             @memset(self.fc.bias.data, -1.0);
         }
     };
     var custom = CustomBlock{
-        .fc = try Linear.init(allocator, 4, 3, null),
+        .fc = try Linear.init(allocator, 4, 3),
         .norm = try nn.LayerNorm.init(allocator, 3, 1e-5),
     };
     defer custom.fc.deinit(allocator);
@@ -407,8 +418,8 @@ test "initModel calls external customInit when defined and falls back to built-i
         cell: nn.LSTMCell,
     };
     var plain = PlainBlock{
-        .fc = try Linear.init(allocator, 4, 3, null),
-        .cell = try nn.LSTMCell.init(allocator, 4, 4, @as(?std.Random, null)),
+        .fc = try Linear.init(allocator, 4, 3),
+        .cell = try nn.LSTMCell.init(allocator, 4, 4),
     };
     defer plain.fc.deinit(allocator);
     defer plain.cell.deinit(allocator);
@@ -426,8 +437,7 @@ test "initModel calls external customInit when defined and falls back to built-i
     const ConstLayer = struct {
         fc: Linear,
 
-        pub fn customInit(self: *@This(), rnd: std.Random) void {
-            _ = rnd;
+        pub fn customInit(self: *@This()) void {
             @memset(self.fc.weight.data, 0.5);
             @memset(self.fc.bias.data, 0.0);
         }
@@ -441,14 +451,38 @@ test "initModel calls external customInit when defined and falls back to built-i
         }
     };
     var model = autoSequential(.{
-        try Linear.init(allocator, 4, 4, null),
+        try Linear.init(allocator, 4, 4),
         ReLU{},
-        ConstLayer{ .fc = try Linear.init(allocator, 4, 2, null) },
+        ConstLayer{ .fc = try Linear.init(allocator, 4, 2) },
     }, random);
     defer model.deinit(allocator);
     try std.testing.expect(!model.layers.@"0".weight.is_custom_initialized);
     for (model.layers.@"2".fc.weight.data) |v| try std.testing.expectEqual(@as(f32, 0.5), v);
     try std.testing.expect(model.layers.@"2".fc.weight.is_custom_initialized);
     try std.testing.expect(model.layers.@"2".fc.bias.is_custom_initialized);
+
+    // 4. 嵌套：未定义 customInit 的父模块递归初始化各字段，子模块的 customInit (含随机数签名) 在任意层级被调用
+    const RandomHead = struct {
+        fc: Linear,
+
+        pub fn customInit(self: *@This(), rnd: std.Random) void {
+            for (self.fc.weight.data) |*w| w.* = 2.0 + rnd.float(f32);
+            @memset(self.fc.bias.data, 0.0);
+        }
+    };
+    const Outer = struct {
+        backbone: Linear,
+        head: RandomHead,
+    };
+    var outer = Outer{
+        .backbone = try Linear.init(allocator, 4, 4),
+        .head = .{ .fc = try Linear.init(allocator, 4, 2) },
+    };
+    defer outer.backbone.deinit(allocator);
+    defer outer.head.fc.deinit(allocator);
+    nn.initModel(&outer, random);
+    try std.testing.expect(!outer.backbone.weight.is_custom_initialized);
+    for (outer.head.fc.weight.data) |v| try std.testing.expect(v >= 2.0 and v < 3.0);
+    try std.testing.expect(outer.head.fc.weight.is_custom_initialized);
 }
 

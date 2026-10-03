@@ -189,7 +189,33 @@ flowchart LR
   - **He (Kaiming) Normal / Uniform**：针对深层 ReLU / GELU 网络的方差平衡；
   - **Xavier (Glorot) Normal / Uniform**：针对 Sigmoid / Tanh 的对称双端收敛；
   - **LeCun Normal**：自归一化神经网络推荐；
-  - **外部自定义初始化与 `nn.initModel` 分派**：内置库层（`Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、`LoRALinear` 等）不定义 `customInit`，只通过 `init` / `resetParameters(random, options)` / `AUTO_GRAPH` 进行标准初始化。`customInit(self: *Self, random: std.Random) void` 仅由库外用户模块定义；`nn.initModel(&model, random)`（或 `Module(T).initParameters`）在模块类型定义了 `customInit` 时调用它，并将该模块全部可训练参数标记为 `is_custom_initialized = true`（`CUSTOM_INIT`），使其在 `Graph.initWeights` 全局初始化时不会被覆盖；未定义 `customInit` 时依次回退到内置 `resetParameters(random, .{})`、`autoInit(random)`，或递归初始化子字段。
+  - **两阶段构造：`init` 只分配，`nn.initModel` 统一初始化**：所有库层（`Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、RNN / LSTM / GRU 系列、`CausalSelfAttention`、`MLP`、`SwiGLU`、`MoELayer`、`MLALayer`、`TransformerBlock`、`GPT`、`LoRALinear` 等）的 `init` 不接收也不消耗随机数，只分配参数内存（全零）并设置与随机无关的结构默认值（归一化层 γ = 1 / β = 0、LSTM 遗忘门偏置 1.0）。参数数值统一由以下入口设置：
+    - `nn.initModel(&model, random)`（或 `Module(T).initParameters(random)`）：编译期反射逐模块分派。模块类型定义了 `customInit` 时调用它，并将该模块全部可训练参数标记为 `is_custom_initialized = true`（`CUSTOM_INIT`），使其在 `Graph.initWeights` 全局初始化时不会被覆盖；`customInit` 支持确定性签名 `fn(self: *Self) void`（常量、预设矩阵等，不消耗随机数）与随机签名 `fn(self: *Self, random: std.Random) void`。未定义 `customInit` 时依次回退到内置 `resetParameters(random, .{})`、`autoInit(random)`，或递归初始化各字段（子模块可在任意层级定义 `customInit`）。
+    - `Layer.resetParameters(random, options)`：在已分配张量上按 `InitOptions` 重新填充，可在 `customInit` 中复用库内初始化算法。
+    - `Graph.initWeights`：前向图构建后按下游激活函数推导增益（`AUTO_GRAPH`），跳过 `CUSTOM_INIT` 参数。
+    - 内置库层不定义 `customInit`；`customInit` 仅由库外用户模块定义。
+
+    ```zig
+    const MyModel = struct {
+        fc: nn.Linear,
+        head: nn.Linear,
+
+        pub fn init(allocator: std.mem.Allocator) !MyModel {
+            return .{ .fc = try nn.Linear.init(allocator, 16, 32), .head = try nn.Linear.init(allocator, 32, 4) };
+        }
+
+        // 确定性自定义初始化：不使用随机数
+        pub fn customInit(self: *MyModel) void {
+            @memset(self.fc.weight.data, 0.01);
+            @memset(self.fc.bias.data, 0.0);
+            @memset(self.head.weight.data, 0.0);
+            @memset(self.head.bias.data, 0.0);
+        }
+    };
+
+    var model = try MyModel.init(allocator); // 只分配内存
+    nn.initModel(&model, prng.random());     // 调用 customInit 并标记 CUSTOM_INIT
+    ```
 
 ### 4.3 现代大模型架构核心 (`nn/attention.zig`, `nn/transformer.zig`, `nn/llm.zig`)
 1. **因果多头自注意力 (`CausalSelfAttention`, `nn/attention.zig`)**：

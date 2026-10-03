@@ -28,7 +28,8 @@ pub fn main() !void {
     std.debug.print("Embedding maps integer token IDs to continuous vectors.\n", .{});
     std.debug.print("We will initialize an Embedding layer with vocab_size = 10, embedding_dim = 4.\n\n", .{});
 
-    var emb = try nn.Embedding.init(allocator, 10, 4, random);
+    var emb = try nn.Embedding.init(allocator, 10, 4);
+    nn.initModel(&emb, random);
     defer emb.deinit(allocator);
 
     std.debug.print("Initial Embedding Weights (Shape: [10, 4]):\n", .{});

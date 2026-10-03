@@ -32,7 +32,8 @@ pub fn main() !void {
 
     // Wrap GPT in Module for easy training
     const GPTModel = nn.Module(nn.GPT(config));
-    var model = GPTModel.init(allocator, try nn.GPT(config).init(allocator, random));
+    var model = GPTModel.init(allocator, try nn.GPT(config).init(allocator));
+    model.initParameters(random);
     defer model.deinit();
 
     const lr: f32 = 0.01;

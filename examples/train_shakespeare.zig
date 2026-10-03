@@ -70,7 +70,8 @@ pub fn main(init: std.process.Init) !void {
     });
 
     const GPTModule = nn.Module(nn.GPT(gpt_config));
-    var model = GPTModule.init(allocator, try nn.GPT(gpt_config).init(allocator, random));
+    var model = GPTModule.init(allocator, try nn.GPT(gpt_config).init(allocator));
+    model.initParameters(random);
     defer model.deinit();
 
     // 4. 优化器与学习率调度器

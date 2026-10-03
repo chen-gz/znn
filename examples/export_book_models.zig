@@ -14,9 +14,12 @@ const ThreeLayerMLP = struct {
     module_type: []const u8 = "MLP",
 
     pub fn init(allocator: std.mem.Allocator, random: std.Random) !ThreeLayerMLP {
-        const fc1 = try nn.Linear.init(allocator, 16, 32, random);
-        const fc2 = try nn.Linear.init(allocator, 32, 16, random);
-        const fc3 = try nn.Linear.init(allocator, 16, 10, random);
+        var fc1 = try nn.Linear.init(allocator, 16, 32);
+        nn.initModel(&fc1, random);
+        var fc2 = try nn.Linear.init(allocator, 32, 16);
+        nn.initModel(&fc2, random);
+        var fc3 = try nn.Linear.init(allocator, 16, 10);
+        nn.initModel(&fc3, random);
         var mlp = ThreeLayerMLP{ .fc1 = fc1, .fc2 = fc2, .fc3 = fc3 };
         mlp.setName("mlp");
         return mlp;
@@ -94,7 +97,8 @@ pub fn main(init: std.process.Init) !void {
         // 1. linear
         try exportModel(allocator, "linear", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var linear = try nn.Linear.init(alloc, 16, 8, rnd);
+                var linear = try nn.Linear.init(alloc, 16, 8);
+                nn.initModel(&linear, rnd);
                 defer linear.deinit(alloc);
                 linear.setName("linear");
 
@@ -122,7 +126,8 @@ pub fn main(init: std.process.Init) !void {
         // 3. rnn
         try exportModel(allocator, "rnn", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var rnn = try nn.RNN.init(alloc, 16, 32, rnd);
+                var rnn = try nn.RNN.init(alloc, 16, 32);
+                nn.initModel(&rnn, rnd);
                 defer rnn.deinit(alloc);
                 rnn.setName("rnn");
 
@@ -139,7 +144,8 @@ pub fn main(init: std.process.Init) !void {
         // 4. lstm
         try exportModel(allocator, "lstm", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var lstm = try nn.LSTM.init(alloc, 16, 32, rnd);
+                var lstm = try nn.LSTM.init(alloc, 16, 32);
+                nn.initModel(&lstm, rnd);
                 defer lstm.deinit(alloc);
                 lstm.setName("lstm");
 
@@ -157,7 +163,8 @@ pub fn main(init: std.process.Init) !void {
         // 5. stacked_lstm
         try exportModel(allocator, "stacked_lstm", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var slstm = try nn.StackedLSTM.init(alloc, 16, 32, 2, rnd);
+                var slstm = try nn.StackedLSTM.init(alloc, 16, 32, 2);
+                nn.initModel(&slstm, rnd);
                 defer slstm.deinit(alloc);
                 slstm.setName("stacked_lstm");
 
@@ -176,7 +183,8 @@ pub fn main(init: std.process.Init) !void {
         // 6. gru
         try exportModel(allocator, "gru", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var gru = try nn.GRU.init(alloc, 16, 32, rnd);
+                var gru = try nn.GRU.init(alloc, 16, 32);
+                nn.initModel(&gru, rnd);
                 defer gru.deinit(alloc);
                 gru.setName("gru");
 
@@ -193,7 +201,8 @@ pub fn main(init: std.process.Init) !void {
         // 7. embedding
         try exportModel(allocator, "embedding", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var emb = try nn.Embedding.init(alloc, 128, 32, rnd);
+                var emb = try nn.Embedding.init(alloc, 128, 32);
+                nn.initModel(&emb, rnd);
                 defer emb.deinit(alloc);
                 emb.setName("embedding");
 
@@ -208,7 +217,8 @@ pub fn main(init: std.process.Init) !void {
         // 8. attention
         try exportModel(allocator, "attention", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var attn = try nn.CausalSelfAttention.init(alloc, 32, 4, rnd);
+                var attn = try nn.CausalSelfAttention.init(alloc, 32, 4);
+                nn.initModel(&attn, rnd);
                 defer attn.deinit(alloc);
                 attn.setName("causal_self_attention");
 
@@ -222,7 +232,8 @@ pub fn main(init: std.process.Init) !void {
         // 9. transformer_block
         try exportModel(allocator, "transformer_block", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var block = try nn.TransformerBlock.init(alloc, 32, 4, rnd);
+                var block = try nn.TransformerBlock.init(alloc, 32, 4);
+                nn.initModel(&block, rnd);
                 defer block.deinit(alloc);
                 block.setName("transformer_block");
 
@@ -243,7 +254,8 @@ pub fn main(init: std.process.Init) !void {
                     .n_head = 4,
                     .n_layer = 2,
                 };
-                var gpt = try nn.GPT(cfg).init(alloc, rnd);
+                var gpt = try nn.GPT(cfg).init(alloc);
+                nn.initModel(&gpt, rnd);
                 defer gpt.deinit(alloc);
                 gpt.setName("gpt");
 
@@ -258,7 +270,8 @@ pub fn main(init: std.process.Init) !void {
         // 11. swiglu
         try exportModel(allocator, "swiglu", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var swiglu = try nn.SwiGLU.init(alloc, 32, 64, rnd);
+                var swiglu = try nn.SwiGLU.init(alloc, 32, 64);
+                nn.initModel(&swiglu, rnd);
                 defer swiglu.deinit(alloc);
                 swiglu.setName("swiglu");
 
@@ -272,7 +285,8 @@ pub fn main(init: std.process.Init) !void {
         // 12. lora_linear
         try exportModel(allocator, "lora_linear", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var lora = try nn.LoRALinear.init(alloc, 32, 32, 4, 8.0, rnd);
+                var lora = try nn.LoRALinear.init(alloc, 32, 32, 4, 8.0);
+                nn.initModel(&lora, rnd);
                 defer lora.deinit(alloc);
                 lora.setName("lora_linear");
 
@@ -300,7 +314,8 @@ pub fn main(init: std.process.Init) !void {
         // 14. mla
         try exportModel(allocator, "mla", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var mla = try nn.MLALayer.init(alloc, 32, 4, 8, 16, 8, rnd);
+                var mla = try nn.MLALayer.init(alloc, 32, 4, 8, 16, 8);
+                nn.initModel(&mla, rnd);
                 defer mla.deinit(alloc);
                 mla.setName("mla");
 
@@ -314,7 +329,8 @@ pub fn main(init: std.process.Init) !void {
         // 15. deepseek_moe
         try exportModel(allocator, "deepseek_moe", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var moe = try nn.MoELayer.init(alloc, 32, 64, 4, 1, 2, rnd);
+                var moe = try nn.MoELayer.init(alloc, 32, 64, 4, 1, 2);
+                nn.initModel(&moe, rnd);
                 defer moe.deinit(alloc);
                 moe.setName("deepseek_moe");
 
@@ -328,11 +344,14 @@ pub fn main(init: std.process.Init) !void {
         // 16. gan_generator
         try exportModel(allocator, "gan_generator", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var l1 = try nn.Linear.init(alloc, 2, 16, rnd);
+                var l1 = try nn.Linear.init(alloc, 2, 16);
+                nn.initModel(&l1, rnd);
                 l1.setName("generator.fc1");
-                var l2 = try nn.Linear.init(alloc, 16, 16, rnd);
+                var l2 = try nn.Linear.init(alloc, 16, 16);
+                nn.initModel(&l2, rnd);
                 l2.setName("generator.fc2");
-                var l3 = try nn.Linear.init(alloc, 16, 2, rnd);
+                var l3 = try nn.Linear.init(alloc, 16, 2);
+                nn.initModel(&l3, rnd);
                 l3.setName("generator.fc3");
 
                 var net_g = nn.sequential(.{
@@ -356,11 +375,14 @@ pub fn main(init: std.process.Init) !void {
         // 17. gan_discriminator
         try exportModel(allocator, "gan_discriminator", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var d1 = try nn.Linear.init(alloc, 2, 16, rnd);
+                var d1 = try nn.Linear.init(alloc, 2, 16);
+                nn.initModel(&d1, rnd);
                 d1.setName("discriminator.fc1");
-                var d2 = try nn.Linear.init(alloc, 16, 16, rnd);
+                var d2 = try nn.Linear.init(alloc, 16, 16);
+                nn.initModel(&d2, rnd);
                 d2.setName("discriminator.fc2");
-                var d3 = try nn.Linear.init(alloc, 16, 1, rnd);
+                var d3 = try nn.Linear.init(alloc, 16, 1);
+                nn.initModel(&d3, rnd);
                 d3.setName("discriminator.fc3");
 
                 var net_d = nn.sequential(.{
@@ -384,7 +406,8 @@ pub fn main(init: std.process.Init) !void {
         // 18. conv2d
         try exportModel(allocator, "conv2d", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var conv = try nn.Conv2D.init(alloc, 1, 4, 3, rnd);
+                var conv = try nn.Conv2D.init(alloc, 1, 4, 3);
+                nn.initModel(&conv, rnd);
                 defer conv.deinit(alloc);
                 conv.setName("conv2d");
 

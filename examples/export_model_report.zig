@@ -32,7 +32,8 @@ pub fn main() !void {
     std.debug.print("  * Attention Heads: {d}\n", .{config.n_head});
     std.debug.print("  * Decoder Layers:  {d}\n\n", .{config.n_layer});
 
-    var gpt = try nn.GPT(config).init(allocator, random);
+    var gpt = try nn.GPT(config).init(allocator);
+    nn.initModel(&gpt, random);
     defer gpt.deinit(allocator);
 
     // 2. 赋予顶级层次化模块命名 (自动递归设置至所有子模块与参数)
@@ -71,7 +72,8 @@ pub fn main() !void {
 
     // 5. 导出单个 Linear 层的最小参考 JSON (可视化器 JSON 格式指南中的模板)
     std.debug.print("[Step 4/4] Exporting minimal single-Linear reference JSON...\n", .{});
-    var linear = try nn.Linear.init(allocator, 8, 4, random);
+    var linear = try nn.Linear.init(allocator, 8, 4);
+    nn.initModel(&linear, random);
     defer linear.deinit(allocator);
     linear.setName("linear");
 

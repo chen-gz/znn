@@ -61,15 +61,12 @@ pub const Embedding = struct {
         }
     };
 
-    /// 构造嵌入层并分配词表内存。
-    /// random 非 null 时按库默认策略调用 resetParameters 填充词表；为 null 时词表保持全零，留待模型组装后统一初始化。
-    pub fn init(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize, random: ?std.Random) !Embedding {
+    /// 构造嵌入层：只分配词表内存 (全零)，不做任何数值初始化
+    pub fn init(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize) !Embedding {
         const weight = try createPersistentTensor(allocator, vocab_size, embedding_dim, true);
-        var emb = Embedding{
+        return Embedding{
             .weight = weight,
         };
-        if (random) |rnd| emb.resetParameters(rnd, Options.default);
-        return emb;
     }
 
     /// 库内标准参数初始化：在已分配的词表上按 options 重新填充，不分配内存，也不设置 is_custom_initialized 标记
@@ -156,10 +153,10 @@ pub const MLP = struct {
     /// 初始化多层感知机 (Multi-Layer Perceptron, MLP) 模块
     /// dim: 输入与输出隐藏维度
     /// hidden_dim: 中间隐藏维度 (一般为 4 * dim)
-    pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize, random: std.Random) !MLP {
-        const c_fc = try Linear.init(allocator, dim, hidden_dim, random);
+    pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize) !MLP {
+        const c_fc = try Linear.init(allocator, dim, hidden_dim);
         errdefer c_fc.deinit(allocator);
-        const c_proj = try Linear.init(allocator, hidden_dim, dim, random);
+        const c_proj = try Linear.init(allocator, hidden_dim, dim);
         errdefer c_proj.deinit(allocator);
 
         return MLP{
@@ -263,12 +260,12 @@ pub const SwiGLU = struct {
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "SwiGLU",
 
-    pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize, random: std.Random) !SwiGLU {
-        const w_gate = try Linear.init(allocator, dim, hidden_dim, random);
+    pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize) !SwiGLU {
+        const w_gate = try Linear.init(allocator, dim, hidden_dim);
         errdefer w_gate.deinit(allocator);
-        const w_up = try Linear.init(allocator, dim, hidden_dim, random);
+        const w_up = try Linear.init(allocator, dim, hidden_dim);
         errdefer w_up.deinit(allocator);
-        const w_down = try Linear.init(allocator, hidden_dim, dim, random);
+        const w_down = try Linear.init(allocator, hidden_dim, dim);
         errdefer w_down.deinit(allocator);
 
         return SwiGLU{
@@ -398,11 +395,10 @@ pub const MoELayer = struct {
         num_routed_experts: usize,
         num_shared_experts: usize,
         top_k: usize,
-        random: std.Random,
     ) !MoELayer {
         std.debug.assert(top_k > 0 and top_k <= num_routed_experts);
 
-        const gate = try Linear.init(allocator, dim, num_routed_experts, random);
+        const gate = try Linear.init(allocator, dim, num_routed_experts);
         errdefer gate.deinit(allocator);
 
         const routed = try allocator.alloc(MLP, num_routed_experts);
@@ -413,7 +409,7 @@ pub const MoELayer = struct {
             for (0..init_r) |i| routed[i].deinit(allocator);
         }
         for (0..num_routed_experts) |i| {
-            routed[i] = try MLP.init(allocator, dim, hidden_dim, random);
+            routed[i] = try MLP.init(allocator, dim, hidden_dim);
             init_r += 1;
         }
 
@@ -425,7 +421,7 @@ pub const MoELayer = struct {
             for (0..init_s) |i| shared[i].deinit(allocator);
         }
         for (0..num_shared_experts) |i| {
-            shared[i] = try MLP.init(allocator, dim, hidden_dim, random);
+            shared[i] = try MLP.init(allocator, dim, hidden_dim);
             init_s += 1;
         }
 
@@ -655,14 +651,14 @@ pub const TransformerBlock = struct {
     /// 初始化变换器块 (Transformer Block)
     /// n_embd: 隐藏特征嵌入维度
     /// n_head: 注意力头数
-    pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !TransformerBlock {
+    pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize) !TransformerBlock {
         const ln_1 = try RMSNorm.init(allocator, n_embd, 1e-5);
         errdefer ln_1.deinit(allocator);
-        const attn = try CausalSelfAttention.init(allocator, n_embd, n_head, random);
+        const attn = try CausalSelfAttention.init(allocator, n_embd, n_head);
         errdefer attn.deinit(allocator);
         const ln_2 = try RMSNorm.init(allocator, n_embd, 1e-5);
         errdefer ln_2.deinit(allocator);
-        const mlp = try MLP.init(allocator, n_embd, 4 * n_embd, random);
+        const mlp = try MLP.init(allocator, n_embd, 4 * n_embd);
         errdefer mlp.deinit(allocator);
 
         return TransformerBlock{
@@ -800,7 +796,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
         }
 
         /// 初始化整个解码器组件
-        pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !Self {
+        pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize) !Self {
             var h: [n_layer]TransformerBlock = undefined;
             var i: usize = 0;
             errdefer {
@@ -810,7 +806,7 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
             }
             // 循环初始化每一层变换器块 (TransformerBlock)
             while (i < n_layer) : (i += 1) {
-                h[i] = try TransformerBlock.init(allocator, n_embd, n_head, random);
+                h[i] = try TransformerBlock.init(allocator, n_embd, n_head);
             }
 
             // 初始化最后的均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) 层
@@ -949,22 +945,22 @@ pub fn GPT(comptime config: GPTConfig) type {
         }
 
         /// 初始化默认配置的生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型实例
-        pub fn initDefault(allocator: std.mem.Allocator, random: std.Random) !Self {
-            return init(allocator, random);
+        pub fn initDefault(allocator: std.mem.Allocator) !Self {
+            return init(allocator);
         }
 
         /// 初始化生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 模型中的所有网络层权重
-        pub fn init(allocator: std.mem.Allocator, random: std.Random) !Self {
+        pub fn init(allocator: std.mem.Allocator) !Self {
             // 初始化词元 (Token) 嵌入矩阵 [vocab_size, n_embd]
-            const token_embedding = try Embedding.init(allocator, config.vocab_size, config.n_embd, random);
+            const token_embedding = try Embedding.init(allocator, config.vocab_size, config.n_embd);
             errdefer token_embedding.deinit(allocator);
 
             // 初始化位置 (Position) 嵌入矩阵 [block_size, n_embd]
-            const position_embedding = try Embedding.init(allocator, config.block_size, config.n_embd, random);
+            const position_embedding = try Embedding.init(allocator, config.block_size, config.n_embd);
             errdefer position_embedding.deinit(allocator);
 
             // 初始化变换器解码器 (Transformer Decoder) 主干网络
-            const decoder = try TransformerDecoder(config.n_layer).init(allocator, config.n_embd, config.n_head, random);
+            const decoder = try TransformerDecoder(config.n_layer).init(allocator, config.n_embd, config.n_head);
             errdefer {
                 token_embedding.deinit(allocator);
                 position_embedding.deinit(allocator);
@@ -972,7 +968,7 @@ pub fn GPT(comptime config: GPTConfig) type {
             }
 
             // 初始化输出映射语言模型分类头 (Language Model Head, lm_head) [n_embd, vocab_size]
-            const lm_head = try Linear.init(allocator, config.n_embd, config.vocab_size, random);
+            const lm_head = try Linear.init(allocator, config.n_embd, config.vocab_size);
             errdefer {
                 token_embedding.deinit(allocator);
                 position_embedding.deinit(allocator);

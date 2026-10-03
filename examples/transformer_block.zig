@@ -29,7 +29,8 @@ pub fn main() !void {
 
     // Config: n_embd = 8, n_head = 2
     // We will test with batch = 1, seq_len = 3.
-    var block = try nn.TransformerBlock.init(allocator, 8, 2, random);
+    var block = try nn.TransformerBlock.init(allocator, 8, 2);
+    nn.initModel(&block, random);
     defer block.deinit(allocator);
 
     // Input: Shape [1, 3, 8]

@@ -16,15 +16,13 @@ pub const CNN = struct {
     conv3: nn.Conv2D,
     fc1: nn.Linear,
 
-    pub fn init(allocator: std.mem.Allocator, seed: u64) !CNN {
-        var prng = std.Random.DefaultPrng.init(seed);
-        const random = prng.random();
-
+    /// 只分配各层参数内存，参数数值由 nn.initModel / Module.initParameters 统一初始化
+    pub fn init(allocator: std.mem.Allocator) !CNN {
         return .{
-            .conv1 = try nn.Conv2D.init(allocator, 1, 4, 3, random),
-            .conv2 = try nn.Conv2D.init(allocator, 4, 8, 3, random),
-            .conv3 = try nn.Conv2D.init(allocator, 8, 16, 3, random),
-            .fc1 = try nn.Linear.init(allocator, 144, 10, random),
+            .conv1 = try nn.Conv2D.init(allocator, 1, 4, 3),
+            .conv2 = try nn.Conv2D.init(allocator, 4, 8, 3),
+            .conv3 = try nn.Conv2D.init(allocator, 8, 16, 3),
+            .fc1 = try nn.Linear.init(allocator, 144, 10),
         };
     }
 
@@ -79,7 +77,9 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Loaded {} training images, {} test images.\n", .{ train_dataset.images.num_images, test_dataset.images.num_images });
 
     std.debug.print("Initializing 3-Layer CNN Model (Conv1 1->4, Conv2 4->8, Conv3 8->16, FC 144->10)...\n", .{});
-    var model = NeuralNetwork.init(arena, try CNN.init(arena, 42));
+    var model = NeuralNetwork.init(arena, try CNN.init(arena));
+    var prng = std.Random.DefaultPrng.init(42);
+    model.initParameters(prng.random());
     defer model.deinit();
 
     try runTraining(&model, io, arena, train_dataset, test_dataset);
@@ -238,7 +238,9 @@ fn printPredictions(
 test "CNN model initialization and forward passes (no-grad & gradient graphs)" {
     const allocator = std.testing.allocator;
 
-    var model = NeuralNetwork.init(allocator, try CNN.init(allocator, 42));
+    var model = NeuralNetwork.init(allocator, try CNN.init(allocator));
+    var prng = std.Random.DefaultPrng.init(42);
+    model.initParameters(prng.random());
     defer model.deinit();
 
     const x_data = try allocator.alloc(f32, 2 * 784);

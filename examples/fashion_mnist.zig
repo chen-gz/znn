@@ -16,15 +16,12 @@ pub const MLP = struct {
     fc2: nn.Linear,
     fc3: nn.Linear,
 
-    // 定义初始化每一层参数的规则（直接字面量初始化返回，干净且无冗余变量）
-    pub fn init(allocator: std.mem.Allocator, seed: u64) !MLP {
-        var prng = std.Random.DefaultPrng.init(seed);
-        const random = prng.random();
-
+    // 定义模型结构：init 只负责分配各层参数内存，参数数值由 nn.initModel / Module.initParameters 统一初始化
+    pub fn init(allocator: std.mem.Allocator) !MLP {
         return .{
-            .fc1 = try nn.Linear.init(allocator, 784, 128, random),
-            .fc2 = try nn.Linear.init(allocator, 128, 64, random),
-            .fc3 = try nn.Linear.init(allocator, 64, 10, random),
+            .fc1 = try nn.Linear.init(allocator, 784, 128),
+            .fc2 = try nn.Linear.init(allocator, 128, 64),
+            .fc3 = try nn.Linear.init(allocator, 64, 10),
         };
     }
 
@@ -76,7 +73,9 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Loaded {} training images, {} test images.\n", .{ train_dataset.images.num_images, test_dataset.images.num_images });
 
     std.debug.print("Initializing Standard Model (3-layer MLP: 784 -> 128 -> 64 -> 10)...\n", .{});
-    var model = NeuralNetwork.init(arena, try MLP.init(arena, 42));
+    var model = NeuralNetwork.init(arena, try MLP.init(arena));
+    var prng = std.Random.DefaultPrng.init(42);
+    model.initParameters(prng.random());
     defer model.deinit();
     try runTraining(&model, io, arena, train_dataset, test_dataset);
     try printPredictions(&model, arena, test_dataset, 5);
@@ -235,7 +234,9 @@ fn printPredictions(
 test "MLP model initialization and forward passes (no-grad & gradient graphs)" {
     const allocator = std.testing.allocator;
 
-    var model = NeuralNetwork.init(allocator, try MLP.init(allocator, 42));
+    var model = NeuralNetwork.init(allocator, try MLP.init(allocator));
+    var prng = std.Random.DefaultPrng.init(42);
+    model.initParameters(prng.random());
     defer model.deinit();
 
     const x_data = try allocator.alloc(f32, 2 * 784);
