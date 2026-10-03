@@ -4,28 +4,28 @@ const Tensor = tensor.Tensor;
 
 /// 线性整流单元 (Rectified Linear Unit, ReLU) 激活层
 pub const ReLU = struct {
-    pub fn forward(_: ReLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(_: *const ReLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         return try graph.relu(x);
     }
 };
 
 /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活层
 pub const GELU = struct {
-    pub fn forward(_: GELU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(_: *const GELU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         return try graph.gelu(x);
     }
 };
 
 /// S 型激活函数 (Sigmoid Activation, Sigmoid) 层
 pub const Sigmoid = struct {
-    pub fn forward(_: Sigmoid, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(_: *const Sigmoid, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         return try graph.sigmoid(x);
     }
 };
 
 /// 双曲正切激活函数 (Hyperbolic Tangent Activation, Tanh) 层
 pub const Tanh = struct {
-    pub fn forward(_: Tanh, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(_: *const Tanh, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         return try graph.tanh(x);
     }
 };
@@ -44,14 +44,14 @@ pub const LeakyReLU = struct {
         return .{};
     }
 
-    pub fn forward(self: LeakyReLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const LeakyReLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         return try graph.leakyRelu(x, self.alpha);
     }
 };
 
 /// Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU) 激活层
 pub const SiLU = struct {
-    pub fn forward(_: SiLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(_: *const SiLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         return try graph.silu(x);
     }
 };

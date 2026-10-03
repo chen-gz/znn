@@ -68,7 +68,7 @@ pub const RMSNorm = struct {
         }
     }
 
-    pub fn forward(self: RMSNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const RMSNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -147,7 +147,7 @@ pub const LayerNorm = struct {
         }
     }
 
-    pub fn forward(self: LayerNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const LayerNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -320,7 +320,7 @@ pub const Dropout = struct {
         }
     }
 
-    pub fn forward(self: Dropout, graph: *autodiff.Graph, x: *Tensor, random: ?std.Random) !*Tensor {
+    pub fn forward(self: *const Dropout, graph: *autodiff.Graph, x: *Tensor, random: ?std.Random) !*Tensor {
         if (!self.training or self.p == 0.0 or random == null) {
             return x;
         }
@@ -372,7 +372,7 @@ pub const AvgPool2D = struct {
         }
     }
 
-    pub fn forward(self: AvgPool2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const AvgPool2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);

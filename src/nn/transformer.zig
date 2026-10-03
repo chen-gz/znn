@@ -122,7 +122,7 @@ pub const Embedding = struct {
 
     /// 查找映射前向传播
     /// 输入 x 为包含词元标识符 (Token Identifier, Token ID) 的任意维度张量 (Tensor)、`GenericTensor(IntT)` 或整数切片，输出形状为 x.shape + [embedding_dim]
-    pub fn forward(self: Embedding, graph: *autodiff.Graph, x: anytype) !*Tensor {
+    pub fn forward(self: *const Embedding, graph: *autodiff.Graph, x: anytype) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -212,7 +212,7 @@ pub const MLP = struct {
 
     /// 前向传播逻辑
     /// 支持输入二维张量 (2-Dimensional Tensor, 2D) [B*T, D] 或三维张量 (3-Dimensional Tensor, 3D) [B, T, D]
-    pub fn forward(self: MLP, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const MLP, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -322,7 +322,7 @@ pub const SwiGLU = struct {
     }
 
     /// 前向传播逻辑：支持二维 (2-Dimensional, 2D) [B*T, D] 或三维 (3-Dimensional, 3D) [B, T, D]
-    pub fn forward(self: SwiGLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const SwiGLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -492,7 +492,7 @@ pub const MoELayer = struct {
         for (self.shared_experts) |exp| exp.zeroGrad();
     }
 
-    pub fn forward(self: MoELayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const MoELayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -726,7 +726,7 @@ pub const TransformerBlock = struct {
     }
 
     /// 前向传播流程：x -> Block(x) -> out
-    pub fn forward(self: TransformerBlock, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const TransformerBlock, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);

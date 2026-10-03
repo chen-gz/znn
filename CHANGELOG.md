@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 为 `RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`MoELayer`、`MLALayer`、`LoRALinear` 补齐 `setName` / `setNameFormatted` / `getName` / `formula` / `registerFormula` 与 `Graph.enterModule` 作用域追踪。
 
 ### Changed
+- **PyTorch 风格模块协议 (`src/nn/module.zig`, `src/nn/core.zig`, `src/nn/serialization.zig`, `src/nn.zig`, `src/optim.zig`)**:
+  - 新增统一的编译期字段遍历 `nn.walk(model, visitor)`（可选字段路径、`enterModule` 剪枝、`visitOwnedSlice`），`deinitModel`、`zeroGradModel`、参数收集、`setTrainingModel`、`customInit` 分派与 Safetensors 读写全部改为基于它实现，删除 8 个重复的递归遍历函数，并统一跳过编译期字段（含编译期激活层字面量的 `nn.sequential` 元组可以直接调用 `deinitModel` / `zeroGradModel` / `evalModel`）。
+  - `nn.collectParameters` 更名为 `nn.parameters`；新增 `nn.namedParameters`（字段路径名称，与序列化键一致）、`nn.numParameters`、`nn.setRequiresGrad`（冻结 / 解冻任意子模块）与 `nn.callForward` / `nn.ForwardResult`。
+  - `nn.Module(T).forward(graph, args)` 支持单个输入或元组输入（如 `gru.forward(&g, .{ inputs, h_0 })`），返回类型与内部模型一致；新增 `parameters`、`namedParameters`、`numParameters`、`setRequiresGrad` 方法。`nn.initModelWithSample` 的样本参数同样接受单个值或元组。
+  - 参数收集不再在遇到 LoRA 结构时修改 `weight.requires_grad`（冻结由 `LoRALinear.init` 负责）；`freePersistentTensor` 按梯度缓冲是否已分配释放，冻结后的参数不会泄漏或重复释放。
+  - 所有库层（含激活函数）的 `forward` 统一以 `self: *const Self` 接收自身。
 - **内置库层移除 `customInit`，新增 `nn.initModel` 初始化分派 (`src/nn/core.zig`, `src/nn/transformer.zig`, `src/nn/llm.zig`, `src/nn/recurrent.zig`, `src/nn.zig`, `src/root.zig`, `src/autodiff/graph_init.zig`, `src/nn/visualization.zig`, `src/nn/tests_init.zig`, `src/nn/tests_vis.zig`)**:
   - `Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、`LoRALinear` 不再定义 `customInit`；库层只提供 `init` / `resetParameters(random, options)` 内置初始化，且不会设置 `is_custom_initialized`。
   - **依据前向计算图初始化**：新增 `nn.initModel(model, graph, random)`（`root.zig` 同步导出）与 `Module(T).initParameters(graph, random)`，必须在用样本输入执行过一次 `forward` 之后调用。先递归调用库外模块定义的 `customInit` 并将其可训练参数标记为 `CUSTOM_INIT`，再调用 `Graph.initWeights(random)` 依据计算图中的下游激活函数初始化其余参数；`graph` 为不记录算子的 `Graph.initNoGrad` 时返回 `error.GraphNotRecordingOps`；Debug 构建下报告未被计算图触达且未自定义初始化的可训练参数。

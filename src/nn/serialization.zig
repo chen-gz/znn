@@ -1,6 +1,7 @@
 const std = @import("std");
 const tensor = @import("../tensor.zig");
 const Tensor = tensor.Tensor;
+const module = @import("module.zig");
 
 // ============================================================================
 // Safetensors 格式模型权重序列化与反序列化
@@ -26,151 +27,30 @@ pub fn writeTensorEntry(
     try json_buf.print(allocator, "],\"data_offsets\":[{},{}]}}", .{ start, end });
 }
 
-pub fn writeModelTensors(
-    model: anytype,
+/// 按字段路径写入每个张量的 Safetensors 头部条目 (键与 `nn.namedParameters` 一致，含缓冲区)
+const HeaderWriter = struct {
     json_buf: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
-    offset: *usize,
-    first: *bool,
-    prefix: []const u8,
-) anyerror!void {
-    const T = @TypeOf(model.*);
-    const info = @typeInfo(T);
-    inline for (info.@"struct".fields) |field| {
-        const FieldType = field.type;
-        const field_info = @typeInfo(FieldType);
-        if (FieldType == *Tensor) {
-            var name: std.ArrayList(u8) = .empty;
-            defer name.deinit(allocator);
-            if (prefix.len > 0) {
-                try name.appendSlice(allocator, prefix);
-                try name.appendSlice(allocator, ".");
-            }
-            try name.appendSlice(allocator, field.name);
+    offset: usize = 0,
+    first: bool = true,
 
-            if (!first.*) try json_buf.appendSlice(allocator, ",") else first.* = false;
-            try writeTensorEntry(json_buf, allocator, name.items, @field(model, field.name), offset);
-        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
-            if (@field(model, field.name)) |tensor_ptr| {
-                var name: std.ArrayList(u8) = .empty;
-                defer name.deinit(allocator);
-                if (prefix.len > 0) {
-                    try name.appendSlice(allocator, prefix);
-                    try name.appendSlice(allocator, ".");
-                }
-                try name.appendSlice(allocator, field.name);
+    pub const wants_path = true;
 
-                if (!first.*) try json_buf.appendSlice(allocator, ",") else first.* = false;
-                try writeTensorEntry(json_buf, allocator, name.items, tensor_ptr, offset);
-            }
-        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
-            const ElemT = field_info.pointer.child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name), 0..) |tensor_ptr, idx| {
-                    var name: std.ArrayList(u8) = .empty;
-                    defer name.deinit(allocator);
-                    if (prefix.len > 0) {
-                        try name.appendSlice(allocator, prefix);
-                        try name.appendSlice(allocator, ".");
-                    }
-                    try name.print(allocator, "{s}.{d}", .{ field.name, idx });
-
-                    if (!first.*) try json_buf.appendSlice(allocator, ",") else first.* = false;
-                    try writeTensorEntry(json_buf, allocator, name.items, tensor_ptr, offset);
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (@field(model, field.name), 0..) |*item, idx| {
-                    var next_prefix: std.ArrayList(u8) = .empty;
-                    defer next_prefix.deinit(allocator);
-                    if (prefix.len > 0) {
-                        try next_prefix.appendSlice(allocator, prefix);
-                        try next_prefix.appendSlice(allocator, ".");
-                    }
-                    try next_prefix.print(allocator, "{s}.{d}", .{ field.name, idx });
-                    try writeModelTensors(item, json_buf, allocator, offset, first, next_prefix.items);
-                }
-            }
-        } else if (field_info == .@"struct") {
-            var next_prefix: std.ArrayList(u8) = .empty;
-            defer next_prefix.deinit(allocator);
-            if (prefix.len > 0) {
-                try next_prefix.appendSlice(allocator, prefix);
-                try next_prefix.appendSlice(allocator, ".");
-            }
-            try next_prefix.appendSlice(allocator, field.name);
-            try writeModelTensors(&@field(model, field.name), json_buf, allocator, offset, first, next_prefix.items);
-        } else if (field_info == .@"array") {
-            const ElemT = field_info.@"array".child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name), 0..) |tensor_ptr, idx| {
-                    var name: std.ArrayList(u8) = .empty;
-                    defer name.deinit(allocator);
-                    if (prefix.len > 0) {
-                        try name.appendSlice(allocator, prefix);
-                        try name.appendSlice(allocator, ".");
-                    }
-                    try name.print(allocator, "{s}.{d}", .{ field.name, idx });
-
-                    if (!first.*) try json_buf.appendSlice(allocator, ",") else first.* = false;
-                    try writeTensorEntry(json_buf, allocator, name.items, tensor_ptr, offset);
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (&@field(model, field.name), 0..) |*item, idx| {
-                    var next_prefix: std.ArrayList(u8) = .empty;
-                    defer next_prefix.deinit(allocator);
-                    if (prefix.len > 0) {
-                        try next_prefix.appendSlice(allocator, prefix);
-                        try next_prefix.appendSlice(allocator, ".");
-                    }
-                    try next_prefix.print(allocator, "{s}.{d}", .{ field.name, idx });
-                    try writeModelTensors(item, json_buf, allocator, offset, first, next_prefix.items);
-                }
-            }
-        }
+    pub fn visitTensor(self: *HeaderWriter, path: []const u8, t: *Tensor) !void {
+        if (!self.first) try self.json_buf.appendSlice(self.allocator, ",") else self.first = false;
+        try writeTensorEntry(self.json_buf, self.allocator, path, t, &self.offset);
     }
-}
+};
 
-pub fn writeModelData(
-    model: anytype,
-    writer: anytype,
-) anyerror!void {
-    const T = @TypeOf(model.*);
-    const info = @typeInfo(T);
-    inline for (info.@"struct".fields) |field| {
-        const FieldType = field.type;
-        const field_info = @typeInfo(FieldType);
-        if (FieldType == *Tensor) {
-            try writer.writeAll(std.mem.sliceAsBytes(@field(model, field.name).data));
-        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
-            if (@field(model, field.name)) |tensor_ptr| {
-                try writer.writeAll(std.mem.sliceAsBytes(tensor_ptr.data));
-            }
-        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
-            const ElemT = field_info.pointer.child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name)) |tensor_ptr| {
-                    try writer.writeAll(std.mem.sliceAsBytes(tensor_ptr.data));
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (@field(model, field.name)) |*item| {
-                    try writeModelData(item, writer);
-                }
-            }
-        } else if (field_info == .@"struct") {
-            try writeModelData(&@field(model, field.name), writer);
-        } else if (field_info == .@"array") {
-            const ElemT = field_info.@"array".child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name)) |tensor_ptr| {
-                    try writer.writeAll(std.mem.sliceAsBytes(tensor_ptr.data));
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (&@field(model, field.name)) |*item| {
-                    try writeModelData(item, writer);
-                }
-            }
+/// 按与 `HeaderWriter` 相同的遍历顺序写入张量二进制数据
+fn DataWriter(comptime Writer: type) type {
+    return struct {
+        writer: Writer,
+
+        pub fn visitTensor(self: *@This(), _: []const u8, t: *Tensor) !void {
+            try self.writer.writeAll(std.mem.sliceAsBytes(t.data));
         }
-    }
+    };
 }
 
 pub fn saveModel(model: anytype, io: std.Io, file_path: []const u8, allocator: std.mem.Allocator) !void {
@@ -182,10 +62,9 @@ pub fn saveModel(model: anytype, io: std.Io, file_path: []const u8, allocator: s
     var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(allocator);
     try json_buf.appendSlice(allocator, "{");
-    var first = true;
-    var offset: usize = 0;
 
-    try writeModelTensors(model, &json_buf, allocator, &offset, &first, "");
+    var header = HeaderWriter{ .json_buf = &json_buf, .allocator = allocator };
+    try module.walk(model, &header);
     try json_buf.appendSlice(allocator, "}");
 
     // 2. 对齐 JSON 头部长度至 8 字节的倍数（Safetensors 标准）
@@ -206,104 +85,22 @@ pub fn saveModel(model: anytype, io: std.Io, file_path: []const u8, allocator: s
     try writer.writeAll(json_buf.items);
 
     // 4. 顺序写入张量二进制权重数据
-    try writeModelData(model, writer);
+    var data_writer = DataWriter(@TypeOf(writer)){ .writer = writer };
+    try module.walk(model, &data_writer);
     try writer.flush();
 }
 
-pub fn loadModelTensors(
-    model: anytype,
+/// 按字段路径从 Safetensors 数据载荷中还原每个张量
+const TensorLoader = struct {
     data_payload: []const u8,
-    meta_obj: anytype,
-    allocator: std.mem.Allocator,
-    prefix: []const u8,
-) anyerror!void {
-    const T = @TypeOf(model.*);
-    const info = @typeInfo(T);
-    inline for (info.@"struct".fields) |field| {
-        const FieldType = field.type;
-        const field_info = @typeInfo(FieldType);
-        if (FieldType == *Tensor) {
-            var name: std.ArrayList(u8) = .empty;
-            defer name.deinit(allocator);
-            if (prefix.len > 0) {
-                try name.appendSlice(allocator, prefix);
-                try name.appendSlice(allocator, ".");
-            }
-            try name.appendSlice(allocator, field.name);
-            try loadTensorData(data_payload, meta_obj, name.items, @field(model, field.name));
-        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
-            if (@field(model, field.name)) |tensor_ptr| {
-                var name: std.ArrayList(u8) = .empty;
-                defer name.deinit(allocator);
-                if (prefix.len > 0) {
-                    try name.appendSlice(allocator, prefix);
-                    try name.appendSlice(allocator, ".");
-                }
-                try name.appendSlice(allocator, field.name);
-                try loadTensorData(data_payload, meta_obj, name.items, tensor_ptr);
-            }
-        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
-            const ElemT = field_info.pointer.child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name), 0..) |tensor_ptr, idx| {
-                    var name: std.ArrayList(u8) = .empty;
-                    defer name.deinit(allocator);
-                    if (prefix.len > 0) {
-                        try name.appendSlice(allocator, prefix);
-                        try name.appendSlice(allocator, ".");
-                    }
-                    try name.print(allocator, "{s}.{d}", .{ field.name, idx });
-                    try loadTensorData(data_payload, meta_obj, name.items, tensor_ptr);
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (@field(model, field.name), 0..) |*item, idx| {
-                    var next_prefix: std.ArrayList(u8) = .empty;
-                    defer next_prefix.deinit(allocator);
-                    if (prefix.len > 0) {
-                        try next_prefix.appendSlice(allocator, prefix);
-                        try next_prefix.appendSlice(allocator, ".");
-                    }
-                    try next_prefix.print(allocator, "{s}.{d}", .{ field.name, idx });
-                    try loadModelTensors(item, data_payload, meta_obj, allocator, next_prefix.items);
-                }
-            }
-        } else if (field_info == .@"struct") {
-            var next_prefix: std.ArrayList(u8) = .empty;
-            defer next_prefix.deinit(allocator);
-            if (prefix.len > 0) {
-                try next_prefix.appendSlice(allocator, prefix);
-                try next_prefix.appendSlice(allocator, ".");
-            }
-            try next_prefix.appendSlice(allocator, field.name);
-            try loadModelTensors(&@field(model, field.name), data_payload, meta_obj, allocator, next_prefix.items);
-        } else if (field_info == .@"array") {
-            const ElemT = field_info.@"array".child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name), 0..) |tensor_ptr, idx| {
-                    var name: std.ArrayList(u8) = .empty;
-                    defer name.deinit(allocator);
-                    if (prefix.len > 0) {
-                        try name.appendSlice(allocator, prefix);
-                        try name.appendSlice(allocator, ".");
-                    }
-                    try name.print(allocator, "{s}.{d}", .{ field.name, idx });
-                    try loadTensorData(data_payload, meta_obj, name.items, tensor_ptr);
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (&@field(model, field.name), 0..) |*item, idx| {
-                    var next_prefix: std.ArrayList(u8) = .empty;
-                    defer next_prefix.deinit(allocator);
-                    if (prefix.len > 0) {
-                        try next_prefix.appendSlice(allocator, prefix);
-                        try next_prefix.appendSlice(allocator, ".");
-                    }
-                    try next_prefix.print(allocator, "{s}.{d}", .{ field.name, idx });
-                    try loadModelTensors(item, data_payload, meta_obj, allocator, next_prefix.items);
-                }
-            }
-        }
+    meta_obj: std.json.ObjectMap,
+
+    pub const wants_path = true;
+
+    pub fn visitTensor(self: *TensorLoader, path: []const u8, t: *Tensor) !void {
+        try loadTensorData(self.data_payload, self.meta_obj, path, t);
     }
-}
+};
 
 pub fn loadTensorData(
     data_payload: []const u8,
@@ -405,6 +202,7 @@ pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8, allocator: s
     try reader.readSliceAll(data_payload);
 
     // 5. 按偏移量还原每一个 Tensor 字段
-    try loadModelTensors(model, data_payload, meta_obj, allocator, "");
+    var loader = TensorLoader{ .data_payload = data_payload, .meta_obj = meta_obj };
+    try module.walk(model, &loader);
 }
 

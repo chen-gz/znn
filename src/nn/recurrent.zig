@@ -98,7 +98,7 @@ pub const RNNCell = struct {
     /// 单时间步前向：h_t = tanh(W_ih * x_t + W_hh * h_{t-1} + b)
     /// x: [batch_size, input_dim], h_prev: [batch_size, hidden_dim]
     pub fn forward(
-        self: RNNCell,
+        self: *const RNNCell,
         graph: *autodiff.Graph,
         x: *Tensor,
         h_prev: *Tensor,
@@ -184,7 +184,7 @@ pub const RNN = struct {
     /// inputs: 长度为 seq_len 的 Tensor 切片，每个形状为 [batch_size, input_dim]
     /// h_0: 初始隐状态 [batch_size, hidden_dim]，若为 null 则自动置零
     pub fn forward(
-        self: RNN,
+        self: *const RNN,
         graph: *autodiff.Graph,
         inputs: []const *Tensor,
         h_0: ?*Tensor,
@@ -366,7 +366,7 @@ pub const LSTMCell = struct {
     /// h_prev: [batch_size, hidden_dim]
     /// c_prev: [batch_size, hidden_dim]
     pub fn forward(
-        self: LSTMCell,
+        self: *const LSTMCell,
         graph: *autodiff.Graph,
         x: *Tensor,
         h_prev: *Tensor,
@@ -482,7 +482,7 @@ pub const LSTM = struct {
     }
 
     pub fn forward(
-        self: LSTM,
+        self: *const LSTM,
         graph: *autodiff.Graph,
         inputs: []const *Tensor,
         h_0: ?*Tensor,
@@ -621,7 +621,7 @@ pub const StackedLSTM = struct {
     }
 
     pub fn forwardStep(
-        self: StackedLSTM,
+        self: *const StackedLSTM,
         graph: *autodiff.Graph,
         x_t: *Tensor,
         h_prevs: []const *Tensor,
@@ -643,7 +643,7 @@ pub const StackedLSTM = struct {
     }
 
     pub fn forwardSequence(
-        self: StackedLSTM,
+        self: *const StackedLSTM,
         graph: *autodiff.Graph,
         inputs: []const *Tensor,
         h_0: ?[]const *Tensor,
@@ -801,7 +801,7 @@ pub const GRUCell = struct {
     }
 
     pub fn forward(
-        self: GRUCell,
+        self: *const GRUCell,
         graph: *autodiff.Graph,
         x: *Tensor,
         h_prev: *Tensor,
@@ -905,7 +905,7 @@ pub const GRU = struct {
     }
 
     pub fn forward(
-        self: GRU,
+        self: *const GRU,
         graph: *autodiff.Graph,
         inputs: []const *Tensor,
         h_0: ?*Tensor,

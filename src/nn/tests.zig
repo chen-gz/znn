@@ -39,7 +39,7 @@ const ConvTranspose2D = nn.ConvTranspose2D;
 const Module = nn.Module;
 const deinitModel = nn.deinitModel;
 const zeroGradModel = nn.zeroGradModel;
-const collectParameters = nn.collectParameters;
+const parameters = nn.parameters;
 const Sequential = nn.Sequential;
 const sequential = nn.sequential;
 
@@ -113,6 +113,7 @@ const EpochResult = nn.EpochResult;
 
 test {
     _ = @import("tests_init.zig");
+    _ = @import("tests_module.zig");
     _ = @import("tests_vis.zig");
 }
 
@@ -423,7 +424,7 @@ test "Sequential container chaining" {
     try std.testing.expect(grad_sum > 0.0);
 
     // Test parameter collection on Sequential container
-    const params = try collectParameters(&seq, allocator);
+    const params = try parameters(&seq, allocator);
     defer allocator.free(params);
     // Two Linear layers each with weight and bias = 4 parameter tensors
     try std.testing.expectEqual(@as(usize, 4), params.len);
@@ -1056,7 +1057,7 @@ test "Comptime reflection supports slice modules, optional bias, and frozen LoRA
     var moe = try MoELayer.init(allocator, 4, 8, 3, 1, 2);
     try testing_init.initFromOnes(&moe, allocator, random, &.{ 2, 4 });
     defer deinitModel(&moe, allocator);
-    const moe_params = try collectParameters(&moe, allocator);
+    const moe_params = try parameters(&moe, allocator);
     defer allocator.free(moe_params);
     // gate (w + b = 2) + 3 routed experts (each c_fc.w, c_fc.b, c_proj.w, c_proj.b = 4) + 1 shared expert (4) = 18
     try std.testing.expectEqual(@as(usize, 18), moe_params.len);
@@ -1068,7 +1069,7 @@ test "Comptime reflection supports slice modules, optional bias, and frozen LoRA
     var stacked_lstm = try StackedLSTM.init(allocator, 4, 6, 2);
     try testing_init.initRecurrent(&stacked_lstm, allocator, random);
     defer deinitModel(&stacked_lstm, allocator);
-    const lstm_params = try collectParameters(&stacked_lstm, allocator);
+    const lstm_params = try parameters(&stacked_lstm, allocator);
     defer allocator.free(lstm_params);
     // 2 layers * 4 gates * 4 parameters (w_ih/w_hh Linear weights + bias) = 32
     try std.testing.expectEqual(@as(usize, 32), lstm_params.len);
@@ -1077,7 +1078,7 @@ test "Comptime reflection supports slice modules, optional bias, and frozen LoRA
     var deconv = try ConvTranspose2D.init(allocator, 2, 3, 2, 1, 0, true);
     deconv.resetParameters(random, .{});
     defer deinitModel(&deconv, allocator);
-    const deconv_params = try collectParameters(&deconv, allocator);
+    const deconv_params = try parameters(&deconv, allocator);
     defer allocator.free(deconv_params);
     try std.testing.expectEqual(@as(usize, 2), deconv_params.len);
 
@@ -1085,7 +1086,7 @@ test "Comptime reflection supports slice modules, optional bias, and frozen LoRA
     var lora = try LoRALinear.initWithBias(allocator, 4, 3, 2, 4.0, true);
     lora.resetParameters(random, .{});
     defer deinitModel(&lora, allocator);
-    const lora_params = try collectParameters(&lora, allocator);
+    const lora_params = try parameters(&lora, allocator);
     defer allocator.free(lora_params);
     // weight is frozen (requires_grad == false), only lora_a, lora_b, bias collected = 3
     try std.testing.expect(!lora.weight.requires_grad);
