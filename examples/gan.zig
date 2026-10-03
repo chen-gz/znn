@@ -17,13 +17,13 @@ pub const Generator = struct {
     act2: nn.LeakyReLU,
     l3: nn.Linear,
 
-    pub fn init(allocator: std.mem.Allocator, random: std.Random) !Generator {
+    pub fn init(allocator: std.mem.Allocator) !Generator {
         return Generator{
-            .l1 = try nn.Linear.init(allocator, 2, 16, random),
+            .l1 = try nn.Linear.init(allocator, 2, 16),
             .act1 = .{ .alpha = 0.2 },
-            .l2 = try nn.Linear.init(allocator, 16, 16, random),
+            .l2 = try nn.Linear.init(allocator, 16, 16),
             .act2 = .{ .alpha = 0.2 },
-            .l3 = try nn.Linear.init(allocator, 16, 2, random),
+            .l3 = try nn.Linear.init(allocator, 16, 2),
         };
     }
 
@@ -59,13 +59,13 @@ pub const Discriminator = struct {
     act2: nn.LeakyReLU,
     l3: nn.Linear,
 
-    pub fn init(allocator: std.mem.Allocator, random: std.Random) !Discriminator {
+    pub fn init(allocator: std.mem.Allocator) !Discriminator {
         return Discriminator{
-            .l1 = try nn.Linear.init(allocator, 2, 16, random),
+            .l1 = try nn.Linear.init(allocator, 2, 16),
             .act1 = .{ .alpha = 0.2 },
-            .l2 = try nn.Linear.init(allocator, 16, 16, random),
+            .l2 = try nn.Linear.init(allocator, 16, 16),
             .act2 = .{ .alpha = 0.2 },
-            .l3 = try nn.Linear.init(allocator, 16, 1, random),
+            .l3 = try nn.Linear.init(allocator, 16, 1),
         };
     }
 
@@ -117,10 +117,12 @@ pub fn main() !void {
     std.debug.print("=========================================================\n\n", .{});
 
     // 初始化 G 与 D
-    var net_g = try Generator.init(allocator, random);
+    var net_g = try Generator.init(allocator);
+    nn.initModel(&net_g, random);
     defer net_g.deinit(allocator);
 
-    var net_d = try Discriminator.init(allocator, random);
+    var net_d = try Discriminator.init(allocator);
+    nn.initModel(&net_d, random);
     defer net_d.deinit(allocator);
 
     // 初始化 Adam 优化器 (GAN 推荐参数 lr=0.005, beta1=0.5, beta2=0.999)

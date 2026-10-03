@@ -233,9 +233,9 @@ test "engine trainClassificationStep and evalClassificationStep" {
     const SimpleMLP = struct {
         fc: nn.Linear,
 
-        pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
+        pub fn init(alloc: std.mem.Allocator) !@This() {
             return .{
-                .fc = try nn.Linear.init(alloc, 4, 2, rnd),
+                .fc = try nn.Linear.init(alloc, 4, 2),
             };
         }
 
@@ -245,7 +245,8 @@ test "engine trainClassificationStep and evalClassificationStep" {
     };
 
     const Model = nn.Module(SimpleMLP);
-    var model = Model.init(arena, try SimpleMLP.init(arena, random));
+    var model = Model.init(arena, try SimpleMLP.init(arena));
+    model.initParameters(random);
     defer model.deinit();
 
     var optim = try @import("optim.zig").SGDOptimizer.init(arena, &model, .{ .lr = 0.1 });
@@ -303,8 +304,8 @@ test "engine trainClassificationEpoch and evaluateClassification with DataLoader
 
     const SimpleMLP = struct {
         fc: nn.Linear,
-        pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
-            return .{ .fc = try nn.Linear.init(alloc, 4, 2, rnd) };
+        pub fn init(alloc: std.mem.Allocator) !@This() {
+            return .{ .fc = try nn.Linear.init(alloc, 4, 2) };
         }
         pub fn forward(self: *const @This(), graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
             return try self.fc.forward(graph, x);
@@ -312,7 +313,8 @@ test "engine trainClassificationEpoch and evaluateClassification with DataLoader
     };
 
     const Model = nn.Module(SimpleMLP);
-    var model = Model.init(arena, try SimpleMLP.init(arena, random));
+    var model = Model.init(arena, try SimpleMLP.init(arena));
+    model.initParameters(random);
     defer model.deinit();
 
     var optim = try @import("optim.zig").AdamOptimizer.init(arena, &model, .{ .lr = 0.01 });

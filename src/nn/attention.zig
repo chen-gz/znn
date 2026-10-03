@@ -204,19 +204,19 @@ pub const CausalSelfAttention = struct {
     /// n_embd: 隐藏特征嵌入维度，必须能被 n_head 整除
     /// n_head: 查询 (Query) 注意力头数
     /// num_kv_heads: 键值 (Key-Value) 头数，必须能整除 n_head
-    pub fn initGQA(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, num_kv_heads: usize, random: std.Random) !CausalSelfAttention {
+    pub fn initGQA(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, num_kv_heads: usize) !CausalSelfAttention {
         std.debug.assert(n_embd % n_head == 0);
         std.debug.assert(n_head % num_kv_heads == 0);
         const hs = n_embd / n_head;
         const kv_dim = num_kv_heads * hs;
 
-        const q_attn = try Linear.init(allocator, n_embd, n_embd, random);
+        const q_attn = try Linear.init(allocator, n_embd, n_embd);
         errdefer q_attn.deinit(allocator);
-        const k_attn = try Linear.init(allocator, n_embd, kv_dim, random);
+        const k_attn = try Linear.init(allocator, n_embd, kv_dim);
         errdefer k_attn.deinit(allocator);
-        const v_attn = try Linear.init(allocator, n_embd, kv_dim, random);
+        const v_attn = try Linear.init(allocator, n_embd, kv_dim);
         errdefer v_attn.deinit(allocator);
-        const c_proj = try Linear.init(allocator, n_embd, n_embd, random);
+        const c_proj = try Linear.init(allocator, n_embd, n_embd);
         errdefer c_proj.deinit(allocator);
 
         return CausalSelfAttention{
@@ -231,8 +231,8 @@ pub const CausalSelfAttention = struct {
     }
 
     /// 初始化标准多头自注意力层 (Multi-Head Attention, MHA: num_kv_heads == n_head)
-    pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, random: std.Random) !CausalSelfAttention {
-        return initGQA(allocator, n_embd, n_head, n_head, random);
+    pub fn init(allocator: std.mem.Allocator, n_embd: usize, n_head: usize) !CausalSelfAttention {
+        return initGQA(allocator, n_embd, n_head, n_head);
     }
 
     /// 为注意力层、缩放点积注意力核心及 4 个线性投影子层统一设置人类可读的名称 (如 "{name}.q_attn", "{name}.core", "{name}.c_proj")
@@ -551,27 +551,26 @@ pub const MLALayer = struct {
         head_dim: usize,
         d_c: usize,
         d_r: usize,
-        random: std.Random,
     ) !MLALayer {
         const total_q_dim = n_head * (head_dim + d_r);
         const total_kv_dim = n_head * head_dim;
 
-        const q_proj = try Linear.init(allocator, dim, total_q_dim, random);
+        const q_proj = try Linear.init(allocator, dim, total_q_dim);
         errdefer q_proj.deinit(allocator);
 
-        const w_dkv = try Linear.init(allocator, dim, d_c, random);
+        const w_dkv = try Linear.init(allocator, dim, d_c);
         errdefer w_dkv.deinit(allocator);
 
-        const w_kr = try Linear.init(allocator, dim, d_r, random);
+        const w_kr = try Linear.init(allocator, dim, d_r);
         errdefer w_kr.deinit(allocator);
 
-        const w_uk = try Linear.init(allocator, d_c, total_kv_dim, random);
+        const w_uk = try Linear.init(allocator, d_c, total_kv_dim);
         errdefer w_uk.deinit(allocator);
 
-        const w_uv = try Linear.init(allocator, d_c, total_kv_dim, random);
+        const w_uv = try Linear.init(allocator, d_c, total_kv_dim);
         errdefer w_uv.deinit(allocator);
 
-        const o_proj = try Linear.init(allocator, total_kv_dim, dim, random);
+        const o_proj = try Linear.init(allocator, total_kv_dim, dim);
         errdefer o_proj.deinit(allocator);
 
         return MLALayer{

@@ -806,7 +806,8 @@ test "SGDOptimizer basic and momentum updates" {
     const allocator = testing.allocator;
 
     var prng = std.Random.DefaultPrng.init(42);
-    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    var linear = try nn.Linear.init(allocator, 2, 2);
+    nn.initModel(&linear, prng.random());
     defer linear.deinit(allocator);
 
     // 1. 测试无动量 SGD
@@ -841,7 +842,8 @@ test "AdamOptimizer multi-step parameter updates" {
     const allocator = testing.allocator;
 
     var prng = std.Random.DefaultPrng.init(42);
-    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    var linear = try nn.Linear.init(allocator, 2, 2);
+    nn.initModel(&linear, prng.random());
     defer linear.deinit(allocator);
 
     var opt = try AdamOptimizer.init(allocator, &linear, .{
@@ -868,7 +870,8 @@ test "AdamWOptimizer weight decay and step" {
     const allocator = testing.allocator;
 
     var prng = std.Random.DefaultPrng.init(42);
-    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    var linear = try nn.Linear.init(allocator, 2, 2);
+    nn.initModel(&linear, prng.random());
     defer linear.deinit(allocator);
 
     var opt = try AdamWOptimizer.init(allocator, &linear, .{
@@ -966,7 +969,8 @@ test "Optimizer checkpoint serialization and resumption" {
     const allocator = testing.allocator;
 
     var prng = std.Random.DefaultPrng.init(42);
-    var linear = try nn.Linear.init(allocator, 3, 2, prng.random());
+    var linear = try nn.Linear.init(allocator, 3, 2);
+    nn.initModel(&linear, prng.random());
     defer linear.deinit(allocator);
 
     // 1. Test SGDOptimizer checkpointing
@@ -1048,7 +1052,8 @@ test "Optimizer checkpoint error conditions and corruption resilience" {
     const allocator = testing.allocator;
 
     var prng = std.Random.DefaultPrng.init(99);
-    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    var linear = try nn.Linear.init(allocator, 2, 2);
+    nn.initModel(&linear, prng.random());
     defer linear.deinit(allocator);
 
     // 1. Test corrupt magic header
@@ -1093,8 +1098,8 @@ test "Optimizer checkpoint error conditions and corruption resilience" {
 
         // Different model with more layers (4 parameters instead of 2)
         var seq = nn.sequential(.{
-            try nn.Linear.init(allocator, 2, 2, prng.random()),
-            try nn.Linear.init(allocator, 2, 2, prng.random()),
+            try nn.Linear.init(allocator, 2, 2),
+            try nn.Linear.init(allocator, 2, 2),
         });
         defer seq.deinit(allocator);
 
@@ -1152,7 +1157,8 @@ test "Optimizer interface uniformity and scheduler stepping" {
     const allocator = testing.allocator;
 
     var prng = std.Random.DefaultPrng.init(77);
-    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    var linear = try nn.Linear.init(allocator, 2, 2);
+    nn.initModel(&linear, prng.random());
     defer linear.deinit(allocator);
 
     // Test getLR / setLR / stepWithLR across all 3 optimizers

@@ -375,7 +375,8 @@ test "AdamOptimizer model parameter updates" {
     const allocator = std.testing.allocator;
 
     var prng = std.Random.DefaultPrng.init(42);
-    var linear = try nn.Linear.init(allocator, 2, 2, prng.random());
+    var linear = try nn.Linear.init(allocator, 2, 2);
+    nn.initModel(&linear, prng.random());
     defer linear.deinit(allocator);
 
     var opt = try optim.AdamOptimizer.init(allocator, &linear, .{
@@ -624,7 +625,8 @@ test "End-to-End LLM Pipeline integration demo" {
     try std.testing.expectEqualStrings("Zig", decoded);
 
     // 2. SwiGLU MLP
-    var swiglu = try nn.SwiGLU.init(allocator, 8, 16, random);
+    var swiglu = try nn.SwiGLU.init(allocator, 8, 16);
+    nn.initModel(&swiglu, random);
     defer swiglu.deinit(allocator);
 
     // 3. AdamW Optimizer with Cosine Scheduler
@@ -751,7 +753,8 @@ test "GQA CausalSelfAttention and KVCache forwardInference" {
     const num_kv_heads: usize = 2; // GQA: 4 query heads, 2 KV heads (groups = 2)
     const head_dim = n_embd / n_head; // 4
 
-    var gqa_attn = try nn.CausalSelfAttention.initGQA(allocator, n_embd, n_head, num_kv_heads, random);
+    var gqa_attn = try nn.CausalSelfAttention.initGQA(allocator, n_embd, n_head, num_kv_heads);
+    nn.initModel(&gqa_attn, random);
     defer gqa_attn.deinit(allocator);
 
     // 1. Test Autograd Forward and Backward with GQA
@@ -906,8 +909,8 @@ test "MoELayer Top-K routing and autograd" {
         num_routed_experts,
         num_shared_experts,
         top_k,
-        random,
     );
+    nn.initModel(&moe, random);
     defer moe.deinit(allocator);
 
     // 1. Eager mode test on 3D input [2, 3, 8]
@@ -971,7 +974,8 @@ test "MLALayer with MLACache matrix absorption inference" {
     const d_c: usize = 8;
     const d_r: usize = 4;
 
-    var mla = try nn.MLALayer.init(allocator, dim, n_head, head_dim, d_c, d_r, random);
+    var mla = try nn.MLALayer.init(allocator, dim, n_head, head_dim, d_c, d_r);
+    nn.initModel(&mla, random);
     defer mla.deinit(allocator);
 
     // 1. Eager mode full forward
@@ -1077,8 +1081,8 @@ test "ConvTranspose2D eager and autograd backward" {
         stride,
         padding,
         true,
-        random,
     );
+    nn.initModel(&conv_t, random);
     defer conv_t.deinit(allocator);
 
     // 1. Eager mode on input [1, 1, 2, 2] -> expected [1, 2, 4, 4]
@@ -1134,8 +1138,8 @@ test "ConvTranspose2D eager and autograd backward" {
         2,
         1,
         false,
-        random,
     );
+    nn.initModel(&upsample_conv, random);
     defer upsample_conv.deinit(allocator);
 
     const x_up = try tensor.zeros(allocator, &.{ 1, 1, 3, 3 });
@@ -1161,11 +1165,11 @@ test "GAN adversarial training step" {
         act: nn.LeakyReLU,
         l2: nn.Linear,
 
-        pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
+        pub fn init(alloc: std.mem.Allocator) !@This() {
             return .{
-                .l1 = try nn.Linear.init(alloc, 2, 8, rnd),
+                .l1 = try nn.Linear.init(alloc, 2, 8),
                 .act = .{ .alpha = 0.2 },
-                .l2 = try nn.Linear.init(alloc, 8, 2, rnd),
+                .l2 = try nn.Linear.init(alloc, 8, 2),
             };
         }
         pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
@@ -1189,11 +1193,11 @@ test "GAN adversarial training step" {
         act: nn.LeakyReLU,
         l2: nn.Linear,
 
-        pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
+        pub fn init(alloc: std.mem.Allocator) !@This() {
             return .{
-                .l1 = try nn.Linear.init(alloc, 2, 8, rnd),
+                .l1 = try nn.Linear.init(alloc, 2, 8),
                 .act = .{ .alpha = 0.2 },
-                .l2 = try nn.Linear.init(alloc, 8, 1, rnd),
+                .l2 = try nn.Linear.init(alloc, 8, 1),
             };
         }
         pub fn deinit(self: @This(), alloc: std.mem.Allocator) void {
@@ -1211,10 +1215,12 @@ test "GAN adversarial training step" {
         }
     };
 
-    var gen = try TinyGenerator.init(allocator, random);
+    var gen = try TinyGenerator.init(allocator);
+    nn.initModel(&gen, random);
     defer gen.deinit(allocator);
 
-    var disc = try TinyDiscriminator.init(allocator, random);
+    var disc = try TinyDiscriminator.init(allocator);
+    nn.initModel(&disc, random);
     defer disc.deinit(allocator);
 
     var opt_g = try optim.AdamOptimizer.init(allocator, &gen, .{ .lr = 0.01, .beta1 = 0.5, .beta2 = 0.999 });
@@ -1369,7 +1375,7 @@ test "Linear.setName copies stack buffer into internal storage" {
     const std = @import("std");
     const allocator = std.testing.allocator;
 
-    var lin = try nn.Linear.init(allocator, 4, 2, null);
+    var lin = try nn.Linear.init(allocator, 4, 2);
     defer lin.deinit(allocator);
 
     {
