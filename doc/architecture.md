@@ -34,7 +34,7 @@ src/
 │   └── tests.zig                 # 自动微分与计算图单元测试集
 ├── nn.zig                        # 神经网络门面 (导出所有网络层、损失、序列化、可视化与反射工具)
 ├── nn/
-│   ├── core.zig                  # Linear, Conv2D, ConvTranspose2D, MaxPool2D, Module, Sequential 与反射遍历
+│   ├── core.zig                  # Linear, Conv1D, Conv2D, ConvTranspose2D, MaxPool2D, Module, Sequential 与反射遍历
 │   ├── activations.zig           # ReLU, LeakyReLU, Sigmoid, Tanh, GELU, SiLU 激活层
 │   ├── normalization.zig         # RMSNorm, LayerNorm, BatchNorm2d, AvgPool2D, Dropout
 │   ├── recurrent.zig             # RNNCell, RNN, LSTMCell, LSTM, StackedLSTM, GRUCell, GRU 与命名返回结构体

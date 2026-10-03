@@ -279,22 +279,35 @@ pub fn elasticNetLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *T
     return total_loss;
 }
 
-pub fn conv2d(self: *Graph, A: *Tensor, weight: *Tensor, bias: ?*Tensor) !*Tensor {
-    return self.conv2dWithConfig(A, weight, bias, 1, 0);
-}
-
-pub fn conv2dWithConfig(
+pub fn conv1d(
     self: *Graph,
     A: *Tensor,
     weight: *Tensor,
     bias: ?*Tensor,
-    stride: usize,
-    padding: usize,
+    options: tensor_mod.ConvOptions,
 ) !*Tensor {
     const allocator = self.arena.allocator();
-    const C = try A.conv2dWithConfig(weight, bias, stride, padding, allocator);
+    const C = try A.conv1d(weight, bias, options, allocator);
     const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
-    const ctx: OpContext = .{ .Conv2D = .{ .stride = stride, .padding = padding } };
+    const ctx: OpContext = .{ .Conv1D = .{ .stride = options.stride, .padding = options.padding } };
+    if (bias) |b| {
+        return self.registerSingleOutputOp(C, &.{ A, weight, b }, .Conv1D, ctx, req_grad);
+    } else {
+        return self.registerSingleOutputOp(C, &.{ A, weight }, .Conv1D, ctx, req_grad);
+    }
+}
+
+pub fn conv2d(
+    self: *Graph,
+    A: *Tensor,
+    weight: *Tensor,
+    bias: ?*Tensor,
+    options: tensor_mod.ConvOptions,
+) !*Tensor {
+    const allocator = self.arena.allocator();
+    const C = try A.conv2d(weight, bias, options, allocator);
+    const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
+    const ctx: OpContext = .{ .Conv2D = .{ .stride = options.stride, .padding = options.padding } };
     if (bias) |b| {
         return self.registerSingleOutputOp(C, &.{ A, weight, b }, .Conv2D, ctx, req_grad);
     } else {

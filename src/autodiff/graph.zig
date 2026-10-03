@@ -658,8 +658,8 @@ pub const Graph = struct {
     }
 
     // 神经网络层算子绑定 (来自 graph_nn.zig)
+    pub const conv1d = graph_nn.conv1d;
     pub const conv2d = graph_nn.conv2d;
-    pub const conv2dWithConfig = graph_nn.conv2dWithConfig;
     pub const convTranspose2D = graph_nn.convTranspose2D;
     pub const maxpool2d = graph_nn.maxpool2d;
     pub const avgpool2d = graph_nn.avgpool2d;

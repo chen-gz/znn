@@ -5,6 +5,170 @@ const Op = op_mod.Op;
 
 pub fn backwardNN(self: *Op) !void {
     switch (self.op_type) {
+        .Conv1D => {
+            const A = self.inputs[0];
+            const W = self.inputs[1];
+            const C = self.outputs[0];
+            const stride = self.context.Conv1D.stride;
+            const padding = self.context.Conv1D.padding;
+
+            const N = A.shape.dims[0];
+            const C_in = A.shape.dims[1];
+            const L = A.shape.dims[2];
+            const C_out = W.shape.dims[0];
+            const K = W.shape.dims[2];
+            const L_out = C.shape.dims[2];
+
+            const s_n = A.strides.dims[0];
+            const s_c = A.strides.dims[1];
+            const s_l = A.strides.dims[2];
+
+            const w_co = W.strides.dims[0];
+            const w_ci = W.strides.dims[1];
+            const w_k = W.strides.dims[2];
+
+            const o_n = C.strides.dims[0];
+            const o_c = C.strides.dims[1];
+            const o_l = C.strides.dims[2];
+
+            if (self.inputs.len > 2) {
+                const bias = self.inputs[2];
+                if (bias.requires_grad) {
+                    const b_stride = bias.strides.dims[0];
+                    for (0..N) |n| {
+                        for (0..C_out) |co| {
+                            var acc: f32 = 0.0;
+                            for (0..L_out) |l_out| {
+                                acc += C.grad[n * o_n + co * o_c + l_out * o_l];
+                            }
+                            bias.grad[co * b_stride] += acc;
+                        }
+                    }
+                }
+            }
+
+            const K_col = C_in * K;
+            var used_sgemm = false;
+
+            if ((A.requires_grad or W.requires_grad) and A.isContiguous() and W.isContiguous() and C.isContiguous() and K_col > 0 and L_out > 0 and C_out > 0) {
+                var stack_buf: [4096]f32 = undefined;
+                const need_len = K_col * L_out;
+                const heap_buf: ?[]f32 = if (need_len > stack_buf.len)
+                    (std.heap.c_allocator.alloc(f32, need_len) catch null)
+                else
+                    null;
+                defer if (heap_buf) |hb| std.heap.c_allocator.free(hb);
+
+                const col_opt: ?[]f32 = if (need_len <= stack_buf.len) stack_buf[0..need_len] else heap_buf;
+                if (col_opt) |col_buf| {
+                    used_sgemm = true;
+                    for (0..N) |n| {
+                        const dC_n = C.grad[n * C_out * L_out .. (n + 1) * C_out * L_out];
+
+                        if (W.requires_grad) {
+                            // 图像转列 (Image to Column, im2col) 展开 A_n -> col_buf [K_col, L_out]
+                            for (0..C_in) |ci| {
+                                for (0..K) |k| {
+                                    const k_row = ci * K + k;
+                                    const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
+                                    for (0..L_out) |l_out| {
+                                        const il_signed: isize = @as(isize, @intCast(l_out * stride + k)) - @as(isize, @intCast(padding));
+                                        if (il_signed >= 0 and il_signed < @as(isize, @intCast(L))) {
+                                            const il: usize = @intCast(il_signed);
+                                            col_row[l_out] = A.data[n * s_n + ci * s_c + il * s_l];
+                                        } else {
+                                            col_row[l_out] = 0.0;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // dW += dC_n * col_buf^T
+                            c.cblas_sgemm(
+                                c.CblasRowMajor,
+                                c.CblasNoTrans,
+                                c.CblasTrans,
+                                @intCast(C_out),
+                                @intCast(K_col),
+                                @intCast(L_out),
+                                1.0,
+                                dC_n.ptr,
+                                @intCast(L_out),
+                                col_buf.ptr,
+                                @intCast(L_out),
+                                1.0,
+                                W.grad.ptr,
+                                @intCast(K_col),
+                            );
+                        }
+
+                        if (A.requires_grad) {
+                            // col_buf = W^T * dC_n -> [K_col, L_out]
+                            c.cblas_sgemm(
+                                c.CblasRowMajor,
+                                c.CblasTrans,
+                                c.CblasNoTrans,
+                                @intCast(K_col),
+                                @intCast(L_out),
+                                @intCast(C_out),
+                                1.0,
+                                W.data.ptr,
+                                @intCast(K_col),
+                                dC_n.ptr,
+                                @intCast(L_out),
+                                0.0,
+                                col_buf.ptr,
+                                @intCast(L_out),
+                            );
+
+                            // 列转图像 (Column to Image, col2im) 累加 col_buf -> A.grad[n]
+                            for (0..C_in) |ci| {
+                                for (0..K) |k| {
+                                    const k_row = ci * K + k;
+                                    const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
+                                    for (0..L_out) |l_out| {
+                                        const il_signed: isize = @as(isize, @intCast(l_out * stride + k)) - @as(isize, @intCast(padding));
+                                        if (il_signed >= 0 and il_signed < @as(isize, @intCast(L))) {
+                                            const il: usize = @intCast(il_signed);
+                                            A.grad[n * s_n + ci * s_c + il * s_l] += col_row[l_out];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!used_sgemm and (A.requires_grad or W.requires_grad)) {
+                for (0..N) |n| {
+                    for (0..C_out) |co| {
+                        for (0..L_out) |l_out| {
+                            const grad_val = C.grad[n * o_n + co * o_c + l_out * o_l];
+                            if (grad_val == 0.0) continue;
+
+                            for (0..C_in) |ci| {
+                                for (0..K) |k| {
+                                    const il_signed: isize = @as(isize, @intCast(l_out * stride + k)) - @as(isize, @intCast(padding));
+                                    if (il_signed < 0 or il_signed >= @as(isize, @intCast(L))) continue;
+                                    const il: usize = @intCast(il_signed);
+
+                                    if (W.requires_grad) {
+                                        const input_val = A.data[n * s_n + ci * s_c + il * s_l];
+                                        W.grad[co * w_co + ci * w_ci + k * w_k] += grad_val * input_val;
+                                    }
+
+                                    if (A.requires_grad) {
+                                        const weight_val = W.data[co * w_co + ci * w_ci + k * w_k];
+                                        A.grad[n * s_n + ci * s_c + il * s_l] += grad_val * weight_val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
         .Conv2D => {
             const A = self.inputs[0];
             const W = self.inputs[1];

@@ -101,6 +101,65 @@ pub const Linear = struct {
     }
 };
 
+pub const Conv1D = struct {
+    weight: *Tensor,
+    bias: *Tensor,
+    stride: usize = 1,
+    padding: usize = 0,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "Conv1D",
+
+    pub const Options = tensor.ConvOptions;
+
+    /// 构造一维卷积层：只分配参数内存 (卷积核与偏置全零)，不做任何数值初始化
+    pub fn init(
+        allocator: std.mem.Allocator,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        options: Options,
+    ) !Conv1D {
+        if (options.stride == 0) return error.InvalidStride;
+        const weight = try createPersistentTensor(allocator, out_channels, in_channels * kernel_size, true);
+        errdefer freePersistentTensor(allocator, weight);
+        weight.shape = Shape.init(&.{ out_channels, in_channels, kernel_size });
+        weight.strides = tensor.computeContiguousStrides(weight.shape);
+
+        const bias = try createPersistentTensor(allocator, 1, out_channels, true);
+        errdefer freePersistentTensor(allocator, bias);
+        bias.shape = Shape.init(&.{out_channels});
+        bias.strides = tensor.computeContiguousStrides(bias.shape);
+
+        return Conv1D{
+            .weight = weight,
+            .bias = bias,
+            .stride = options.stride,
+            .padding = options.padding,
+        };
+    }
+
+    /// 库内标准参数初始化：在已分配的张量上按 options 重新填充卷积核与偏置，不分配内存，也不设置 is_custom_initialized 标记
+    pub fn resetParameters(self: *Conv1D, random: std.Random, options: InitOptions) void {
+        const out_channels = self.weight.shape.dims[0];
+        const in_channels = self.weight.shape.dims[1];
+        const kernel_size = self.weight.shape.dims[2];
+        const fan_in = in_channels * kernel_size;
+        const fan_out = out_channels * kernel_size;
+        const w_init = options.resolveWeightInit();
+        initWeights(random, self.weight.data, fan_in, fan_out, w_init);
+        initWeights(random, self.bias.data, fan_in, fan_out, options.bias_init);
+    }
+
+    /// 模块标准数学变换公式
+    pub const formula = "y = x \\ast W + b";
+
+    pub fn forward(self: *const Conv1D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+        return try graph.conv1d(x, self.weight, self.bias, .{ .stride = self.stride, .padding = self.padding });
+    }
+};
+
 pub const Conv2D = struct {
     weight: *Tensor,
     bias: *Tensor,
@@ -109,15 +168,7 @@ pub const Conv2D = struct {
     name: ?[]const u8 = null,
     module_type: []const u8 = "Conv2D",
 
-    pub const Options = struct {
-        stride: usize = 1,
-        padding: usize = 0,
-
-        pub const default: Options = .{};
-        pub fn defaultOptions() Options {
-            return .{};
-        }
-    };
+    pub const Options = tensor.ConvOptions;
 
     /// 构造卷积层：只分配参数内存 (卷积核与偏置全零)，不做任何数值初始化
     pub fn init(
@@ -164,7 +215,7 @@ pub const Conv2D = struct {
     pub fn forward(self: *const Conv2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        return try graph.conv2dWithConfig(x, self.weight, self.bias, self.stride, self.padding);
+        return try graph.conv2d(x, self.weight, self.bias, .{ .stride = self.stride, .padding = self.padding });
     }
 };
 

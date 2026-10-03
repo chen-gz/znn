@@ -39,6 +39,7 @@ pub const OpType = enum {
     Softmax, // 独立归一化指数函数 (Standalone Softmax)
 
     // --- 神经网络层与结构运算 (Neural Network Layers & Structural Ops) ---
+    Conv1D, // 一维卷积 (1D Convolution, Conv1D)
     Conv2D, // 二维卷积 (2D Convolution, Conv2D)
     ConvTranspose2D, // 二维转置卷积 / 反卷积 (2D Transposed Convolution, ConvTranspose2D)
     MaxPool2D, // 二维最大池化 (2D Max Pooling, MaxPool2D)
@@ -96,7 +97,7 @@ pub const OpType = enum {
             .Sigmoid => "y = \\frac{1}{1 + e^{-x}}",
             .Tanh => "y = \\tanh(x) = \\frac{e^x - e^{-x}}{e^x + e^{-x}}",
             .Softmax => "P_i = \\frac{e^{z_i - \\max(z)}}{\\sum_j e^{z_j - \\max(z)}}",
-            .Conv2D => "y = x \\ast W + b",
+            .Conv1D, .Conv2D => "y = x \\ast W + b",
             .ConvTranspose2D => "y = x \\ast_{\\text{deconv}} W + b",
             .MaxPool2D => "y = \\max_{k \\times k}(x)",
             .AvgPool2D => "y = \\frac{1}{k^2} \\sum_{k \\times k} x",
@@ -194,6 +195,10 @@ pub const OpContext = union(enum) {
     Softmax: void,
 
     // --- 神经网络层与结构运算 ---
+    Conv1D: struct {
+        stride: usize = 1,
+        padding: usize = 0,
+    },
     Conv2D: struct {
         stride: usize = 1,
         padding: usize = 0,

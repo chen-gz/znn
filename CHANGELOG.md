@@ -48,8 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 为 `RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`MoELayer`、`MLALayer`、`LoRALinear` 补齐 `formula` 与 `Graph.enterModule` 作用域追踪。
 
 ### Changed
-- **合并 `Conv2D.init` 与 `Conv2D.initWithConfig` (`src/nn/core.zig`, `src/nn/tests*.zig`, `src/bench/suites.zig`, `examples/`)**:
-  - `Conv2D` 新增带默认值的 `Options` 结构体（`stride: usize = 1`、`padding: usize = 0`、`default`、`defaultOptions()`），将 `Conv2D.initWithConfig` 合并入 `Conv2D.init(allocator, in_channels, out_channels, kernel_size, options: Options)`。
+- **统一卷积 `ConvOptions` 配置，新增一维卷积 `Conv1D` / `conv1d` (`src/tensor/types.zig`, `src/tensor/nn_kernels.zig`, `src/autodiff/`, `src/nn/core.zig`, `src/nn.zig`, `src/root.zig`)**:
+  - 新增 `tensor.ConvOptions`（`stride: usize = 1`、`padding: usize = 0`、`default`、`defaultOptions()`），将 `Tensor.conv2dWithConfig`、`Graph.conv2dWithConfig` 与 `Conv2D.initWithConfig` 统一合并为接收 `ConvOptions` 的 `Tensor.conv2d`、`Graph.conv2d` 与 `Conv2D.init`。
+  - 新增一维卷积内核 `Tensor.conv1d`、自动微分算子 `Graph.conv1d` / `OpType.Conv1D`（支持 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向传播）、`Graph.computeParamFans` 一维卷积核扇入/扇出推导及神经网络模块 `nn.Conv1D`。
 - **按字段路径自动命名，移除逐层样板代码 (`src/nn/module.zig`, `src/nn/core.zig`, `src/nn/recurrent.zig`, `src/nn/attention.zig`, `src/nn/transformer.zig`, `src/nn/normalization.zig`, `src/nn/llm.zig`, `src/nn/graph_ir.zig`, `src/nn.zig`, `examples/`)** (不兼容变更):
   - 新增 `nn.nameModules(&model, arena, root)`：基于 `walk` 按字段路径为子模块（含 `name` 字段的 struct）与张量命名，如 `gpt.decoder.h.0.attn.c_attn.weight`、`deep_lstm.layers.1`、`ffn_moe.routed_experts.0`；名称字符串分配在调用方 arena 中，模型按值移动后不再出现悬挂名称。
   - 新增 `nn.enterModuleScope(graph, self)`：进入模块作用域并登记 `pub const formula`，替代各层 `forward` 中重复的作用域与公式登记代码。

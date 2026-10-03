@@ -250,7 +250,7 @@ test "Conv2D autograd" {
 
     const bias = try graph.array(&.{1}, &[_]f32{0.5}, true);
 
-    const C = try graph.conv2d(A, W, bias);
+    const C = try graph.conv2d(A, W, bias, .{});
     try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2, 2 }, C.shape.dims[0..C.shape.len]);
 
     try std.testing.expectApproxEqAbs(@as(f32, 6.5), C.data[0], 1e-5);
@@ -1425,6 +1425,8 @@ test "Config defaults and initDefault ergonomics across modules" {
 
     try std.testing.expect(Nonlinearity.defaultOptions() == .relu);
     try std.testing.expect(InitMethod.defaultOptions() == .he_normal);
+    try std.testing.expectEqual(@as(usize, 1), nn.Conv1D.Options.defaultOptions().stride);
+    try std.testing.expectEqual(@as(usize, 0), nn.Conv1D.Options.defaultOptions().padding);
     try std.testing.expectEqual(@as(usize, 1), nn.Conv2D.Options.defaultOptions().stride);
     try std.testing.expectEqual(@as(usize, 0), nn.Conv2D.Options.defaultOptions().padding);
     try std.testing.expect(@TypeOf(root.DefaultGPT) == type);
