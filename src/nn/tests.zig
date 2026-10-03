@@ -124,7 +124,7 @@ test "Embedding Module" {
 
     var emb = try Embedding.init(arena, 10, 4);
     emb.resetParameters(random, .{});
-    defer emb.deinit(arena);
+    defer nn.deinitModel(&emb, arena);
 
     var x = try createPersistentTensor(arena, 2, 3, false);
     defer freePersistentTensor(arena, x);
@@ -144,7 +144,7 @@ test "Embedding Module Graph Mode" {
 
     var emb = try Embedding.init(arena, 10, 4);
     emb.resetParameters(random, .{});
-    defer emb.deinit(arena);
+    defer nn.deinitModel(&emb, arena);
 
     var graph = autodiff.Graph.init(arena);
     defer graph.deinit();
@@ -174,7 +174,7 @@ test "Embedding Module Graph Mode" {
 test "RMSNorm Module" {
     const arena = std.testing.allocator;
     var norm = try RMSNorm.init(arena, 4, 1e-5);
-    defer norm.deinit(arena);
+    defer nn.deinitModel(&norm, arena);
 
     var x = try createPersistentTensor(arena, 2, 4, false);
     defer freePersistentTensor(arena, x);
@@ -214,7 +214,7 @@ test "MLP Module" {
 
     var mlp = try MLP.init(arena, 4, 8);
     try testing_init.initFromOnes(&mlp, arena, random, &.{ 2, 4 });
-    defer mlp.deinit(arena);
+    defer nn.deinitModel(&mlp, arena);
 
     const x_3d = try arena.create(Tensor);
     const shape = Shape.init(&.{2, 3, 4});
@@ -263,7 +263,7 @@ test "CausalSelfAttention Module" {
 
     var attn = try CausalSelfAttention.init(arena, 8, 2);
     try testing_init.initFromOnes(&attn, arena, random, &.{ 1, 2, 8 });
-    defer attn.deinit(arena);
+    defer nn.deinitModel(&attn, arena);
 
     const x_3d = try arena.create(Tensor);
     const shape = Shape.init(&.{2, 3, 8});
@@ -404,7 +404,7 @@ test "Sequential container chaining" {
         ReLU{},
         try Linear.init(allocator, 20, 5),
     });
-    defer seq.deinit(allocator);
+    defer nn.deinitModel(&seq, allocator);
     try testing_init.initFromOnes(&seq, allocator, random, &.{ 2, 10 });
 
     var graph = autodiff.Graph.init(allocator);
@@ -447,7 +447,7 @@ test "SwiGLU forward and backward autograd" {
 
     var swiglu = try SwiGLU.init(allocator, 4, 8);
     try testing_init.initFromOnes(&swiglu, allocator, random, &.{ 2, 4 });
-    defer swiglu.deinit(allocator);
+    defer nn.deinitModel(&swiglu, allocator);
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -481,7 +481,7 @@ test "LoRALinear forward and fuse" {
 
     var lora = try LoRALinear.init(allocator, 4, 4, 2, 4.0);
     lora.resetParameters(random, .{});
-    defer lora.deinit(allocator);
+    defer nn.deinitModel(&lora, allocator);
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -581,7 +581,7 @@ test "maskedCrossEntropyLoss and dpoLoss" {
 test "LayerNorm forward and backward autograd" {
     const allocator = std.testing.allocator;
     var ln = try LayerNorm.init(allocator, 4, 1e-5);
-    defer ln.deinit(allocator);
+    defer nn.deinitModel(&ln, allocator);
 
     const x = try tensor.zeros(allocator, &.{ 2, 4 });
     defer tensor.free(allocator, x);
@@ -625,7 +625,7 @@ test "LayerNorm forward and backward autograd" {
 test "BatchNorm2d forward and backward autograd" {
     const allocator = std.testing.allocator;
     var bn = try BatchNorm2d.init(allocator, 2, 1e-5, 0.1);
-    defer bn.deinit(allocator);
+    defer nn.deinitModel(&bn, allocator);
 
     const x = try tensor.zeros(allocator, &.{ 2, 2, 2, 2 });
     defer tensor.free(allocator, x);
@@ -737,7 +737,7 @@ test "RNNCell and RNN forward and backward autograd" {
     // 1. RNNCell test
     var cell = try RNNCell.init(allocator, 4, 3);
     try testing_init.initRecurrent(&cell, allocator, random);
-    defer cell.deinit(allocator);
+    defer nn.deinitModel(&cell, allocator);
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -759,7 +759,7 @@ test "RNNCell and RNN forward and backward autograd" {
     // 2. RNN sequence container test
     var rnn = try RNN.init(allocator, 4, 3);
     try testing_init.initRecurrent(&rnn, allocator, random);
-    defer rnn.deinit(allocator);
+    defer nn.deinitModel(&rnn, allocator);
 
     var graph_seq = autodiff.Graph.init(allocator);
     defer graph_seq.deinit();
@@ -792,7 +792,7 @@ test "LSTMCell and LSTM forward and backward autograd" {
     // 1. LSTMCell test
     var cell = try LSTMCell.init(allocator, 4, 3);
     cell.resetParameters(random, .{});
-    defer cell.deinit(allocator);
+    defer nn.deinitModel(&cell, allocator);
 
     // Verify forget gate bias is initialized to 1.0
     for (cell.w_ih_f.bias.data) |b| {
@@ -821,7 +821,7 @@ test "LSTMCell and LSTM forward and backward autograd" {
     // 2. LSTM sequence container test
     var lstm = try LSTM.init(allocator, 4, 3);
     try testing_init.initRecurrent(&lstm, allocator, random);
-    defer lstm.deinit(allocator);
+    defer nn.deinitModel(&lstm, allocator);
 
     var graph_seq = autodiff.Graph.init(allocator);
     defer graph_seq.deinit();
@@ -854,7 +854,7 @@ test "StackedLSTM forward and backward autograd" {
 
     var stacked = try StackedLSTM.init(allocator, 4, 3, 2);
     try testing_init.initRecurrent(&stacked, allocator, random);
-    defer stacked.deinit(allocator);
+    defer nn.deinitModel(&stacked, allocator);
 
     try std.testing.expectEqual(2, stacked.num_layers);
 
@@ -890,7 +890,7 @@ test "GRUCell and GRU forward and backward autograd" {
     // 1. GRUCell test
     var cell = try GRUCell.init(allocator, 4, 3);
     try testing_init.initRecurrent(&cell, allocator, random);
-    defer cell.deinit(allocator);
+    defer nn.deinitModel(&cell, allocator);
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -912,7 +912,7 @@ test "GRUCell and GRU forward and backward autograd" {
     // 2. GRU sequence container test
     var gru = try GRU.init(allocator, 4, 3);
     try testing_init.initRecurrent(&gru, allocator, random);
-    defer gru.deinit(allocator);
+    defer nn.deinitModel(&gru, allocator);
 
     var graph_seq = autodiff.Graph.init(allocator);
     defer graph_seq.deinit();
@@ -994,7 +994,7 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
 
     // 1. RMSNorm with all zeros: denominator = sqrt(eps), output = 0.0 (no NaN)
     var rms = try RMSNorm.init(allocator, 4, 1e-5);
-    defer rms.deinit(allocator);
+    defer nn.deinitModel(&rms, allocator);
 
     const x_zeros = try tensor.zeros(allocator, &.{ 1, 4 });
     defer tensor.free(allocator, x_zeros);
@@ -1009,7 +1009,7 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
 
     // 2. LayerNorm with uniform row (all 3.0): mean=3.0, var=0.0 -> output is 0.0 (no NaN)
     var ln = try LayerNorm.init(allocator, 4, 1e-5);
-    defer ln.deinit(allocator);
+    defer nn.deinitModel(&ln, allocator);
 
     const x_uniform = try tensor.zeros(allocator, &.{ 1, 4 });
     defer tensor.free(allocator, x_uniform);
@@ -1140,7 +1140,7 @@ test "Safetensors serialization supports slice modules, optional bias, and out-o
     // 2. Out-of-order physical offsets (bias stored before weight in file) + __metadata__
     var lin = try Linear.init(allocator, 2, 2);
     lin.resetParameters(random, .{});
-    defer lin.deinit(allocator);
+    defer nn.deinitModel(&lin, allocator);
 
     const header_json =
         \\{"__metadata":{"format":"pt"},"bias":{"dtype":"F32","shape":[1,2],"data_offsets":[0,8]},"weight":{"dtype":"F32","shape":[2,2],"data_offsets":[8,24]}}
@@ -1177,46 +1177,48 @@ test "Recurrent and Transformer modules naming and Graph scope registration" {
 
     var rnn = try RNN.init(allocator, 4, 4);
     try testing_init.initRecurrent(&rnn, allocator, random);
-    defer rnn.deinit(allocator);
-    rnn.setName("enc_rnn");
-    try std.testing.expectEqualStrings("enc_rnn", rnn.getName().?);
-    try std.testing.expectEqualStrings("enc_rnn.cell", rnn.cell.getName().?);
+    defer nn.deinitModel(&rnn, allocator);
+    var names = std.heap.ArenaAllocator.init(allocator);
+    defer names.deinit();
+    try nn.nameModules(&rnn, names.allocator(), "enc_rnn");
+    try std.testing.expectEqualStrings("enc_rnn", rnn.name.?);
+    try std.testing.expectEqualStrings("enc_rnn.cell", rnn.cell.name.?);
 
     var lstm = try LSTM.init(allocator, 4, 4);
     try testing_init.initRecurrent(&lstm, allocator, random);
-    defer lstm.deinit(allocator);
-    lstm.setName("enc_lstm");
-    try std.testing.expectEqualStrings("enc_lstm", lstm.getName().?);
+    defer nn.deinitModel(&lstm, allocator);
+    try nn.nameModules(&lstm, names.allocator(), "enc_lstm");
+    try std.testing.expectEqualStrings("enc_lstm", lstm.name.?);
 
     var slstm = try StackedLSTM.init(allocator, 4, 4, 2);
     try testing_init.initRecurrent(&slstm, allocator, random);
-    defer slstm.deinit(allocator);
-    slstm.setName("deep_lstm");
-    try std.testing.expectEqualStrings("deep_lstm.layer_0", slstm.layers[0].getName().?);
+    defer nn.deinitModel(&slstm, allocator);
+    try nn.nameModules(&slstm, names.allocator(), "deep_lstm");
+    try std.testing.expectEqualStrings("deep_lstm.layers.0", slstm.layers[0].name.?);
 
     var gru = try GRU.init(allocator, 4, 4);
     try testing_init.initRecurrent(&gru, allocator, random);
-    defer gru.deinit(allocator);
-    gru.setName("enc_gru");
-    try std.testing.expectEqualStrings("enc_gru", gru.getName().?);
+    defer nn.deinitModel(&gru, allocator);
+    try nn.nameModules(&gru, names.allocator(), "enc_gru");
+    try std.testing.expectEqualStrings("enc_gru", gru.name.?);
 
     var moe = try MoELayer.init(allocator, 4, 8, 2, 1, 1);
     try testing_init.initFromOnes(&moe, allocator, random, &.{ 2, 4 });
-    defer moe.deinit(allocator);
-    moe.setName("ffn_moe");
-    try std.testing.expectEqualStrings("ffn_moe.gate", moe.gate.getName().?);
-    try std.testing.expectEqualStrings("ffn_moe.routed_0", moe.routed_experts[0].getName().?);
+    defer nn.deinitModel(&moe, allocator);
+    try nn.nameModules(&moe, names.allocator(), "ffn_moe");
+    try std.testing.expectEqualStrings("ffn_moe.gate", moe.gate.name.?);
+    try std.testing.expectEqualStrings("ffn_moe.routed_experts.0", moe.routed_experts[0].name.?);
 
     var mla = try MLALayer.init(allocator, 8, 2, 4, 4, 2);
     try testing_init.initFromOnes(&mla, allocator, random, &.{ 1, 2, 8 });
-    defer mla.deinit(allocator);
-    mla.setName("attn_mla");
-    try std.testing.expectEqualStrings("attn_mla.q_proj", mla.q_proj.getName().?);
+    defer nn.deinitModel(&mla, allocator);
+    try nn.nameModules(&mla, names.allocator(), "attn_mla");
+    try std.testing.expectEqualStrings("attn_mla.q_proj", mla.q_proj.name.?);
 
     var lora = try LoRALinear.initWithBias(allocator, 4, 4, 2, 4.0, true);
     lora.resetParameters(random, .{});
-    defer lora.deinit(allocator);
-    lora.setName("proj_lora");
+    defer nn.deinitModel(&lora, allocator);
+    try nn.nameModules(&lora, names.allocator(), "proj_lora");
     try std.testing.expectEqualStrings("proj_lora.lora_a", lora.lora_a.getName().?);
 
     const x = try graph.tensor(2, 4, true);
@@ -1233,7 +1235,7 @@ test "Conv2D with stride and padding forward and backward (im2col + sgemm)" {
 
     var conv = try Conv2D.initWithConfig(allocator, 1, 2, 3, 2, 1);
     conv.resetParameters(random, .{});
-    defer conv.deinit(allocator);
+    defer nn.deinitModel(&conv, allocator);
     @memset(conv.weight.data[0..9], 1.0);
     @memset(conv.weight.data[9..18], 2.0);
     conv.bias.data[0] = 0.5;
@@ -1278,7 +1280,7 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
     // 3 routed experts, 0 shared experts, top_k = 1
     var moe = try MoELayer.init(allocator, 4, 8, 3, 0, 1);
     try testing_init.initFromOnes(&moe, allocator, random, &.{ 2, 4 });
-    defer moe.deinit(allocator);
+    defer nn.deinitModel(&moe, allocator);
 
     // Force gate weights so expert 0 always wins for positive inputs
     @memset(moe.gate.weight.data, 0.0);
@@ -1341,8 +1343,10 @@ test "Recurrent zero initial states are named module buffers" {
     {
         var m = try LSTM.init(allocator, 4, 3);
         try testing_init.initRecurrent(&m, allocator, random);
-        defer m.deinit(allocator);
-        m.setName("lstm");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "lstm");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         var inps = [_]*Tensor{ try g.ones(&.{ 2, 4 }, false), try g.ones(&.{ 2, 4 }, false) };
@@ -1354,8 +1358,10 @@ test "Recurrent zero initial states are named module buffers" {
     {
         var m = try StackedLSTM.init(allocator, 4, 3, 2);
         try testing_init.initRecurrent(&m, allocator, random);
-        defer m.deinit(allocator);
-        m.setName("stacked_lstm");
+        defer nn.deinitModel(&m, allocator);
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&m, names.allocator(), "stacked_lstm");
         var g = autodiff.Graph.init(allocator);
         defer g.deinit();
         var inps = [_]*Tensor{ try g.ones(&.{ 2, 4 }, false), try g.ones(&.{ 2, 4 }, false) };
@@ -1376,7 +1382,9 @@ test "ScaledDotProductAttention standalone causal and non-causal forward and bac
     const v = try g.tensorNDWithData(&.{ 1, 1, 2, 2 }, &.{ 2.0, 4.0, 6.0, 8.0 }, true);
 
     var sdpa_causal = transformer.ScaledDotProductAttention.initDefault();
-    sdpa_causal.setName("sdpa");
+    var names = std.heap.ArenaAllocator.init(allocator);
+    defer names.deinit();
+    try nn.nameModules(&sdpa_causal, names.allocator(), "sdpa");
     const out_causal = try sdpa_causal.forward(&g, q, k, v);
     try std.testing.expectEqual(@as(usize, 4), out_causal.shape.len);
     // Position 0 only attends to position 0 (causal mask blocks position 1): output[0] == v[0] = [2.0, 4.0]

@@ -30,7 +30,7 @@ pub fn main() !void {
     // Config: n_embd = 8, n_head = 2
     // We will test with batch = 1, seq_len = 3.
     var block = try nn.TransformerBlock.init(allocator, 8, 2);
-    defer block.deinit(allocator);
+    defer nn.deinitModel(&block, allocator);
 
     // Input: Shape [1, 3, 8]
     std.debug.print("Input Tensor (Shape: [1, 3, 8]):\n", .{});

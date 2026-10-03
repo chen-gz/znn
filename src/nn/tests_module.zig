@@ -87,7 +87,7 @@ test "Module forwards a single input or a tuple of inputs to the wrapped model" 
     var prng = std.Random.DefaultPrng.init(3);
     const random = prng.random();
 
-    var gru = nn.Module(nn.GRU).init(allocator, try nn.GRU.init(allocator, 3, 4));
+    var gru = try nn.Module(nn.GRU).init(allocator, try nn.GRU.init(allocator, 3, 4));
     defer gru.deinit();
     try testing_init.initRecurrent(&gru.inner, allocator, random);
 
@@ -99,7 +99,7 @@ test "Module forwards a single input or a tuple of inputs to the wrapped model" 
     try std.testing.expectEqual(@as(usize, 2), res.outputs.len);
     try std.testing.expectEqual(@as(usize, 4), res.h_n.shape.dims[1]);
 
-    var mlp = nn.Module(nn.Linear).init(allocator, try nn.Linear.init(allocator, 3, 2));
+    var mlp = try nn.Module(nn.Linear).init(allocator, try nn.Linear.init(allocator, 3, 2));
     defer mlp.deinit();
     try mlp.initParametersWithSample(random, x0);
     const y = try mlp.forward(&graph, x0);

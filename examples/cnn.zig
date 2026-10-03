@@ -77,7 +77,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Loaded {} training images, {} test images.\n", .{ train_dataset.images.num_images, test_dataset.images.num_images });
 
     std.debug.print("Initializing 3-Layer CNN Model (Conv1 1->4, Conv2 4->8, Conv3 8->16, FC 144->10)...\n", .{});
-    var model = NeuralNetwork.init(arena, try CNN.init(arena));
+    var model = try NeuralNetwork.init(arena, try CNN.init(arena));
     defer model.deinit();
     // 用一个样本批次建立前向计算图，依据计算图与激活函数初始化参数
     var prng = std.Random.DefaultPrng.init(42);
@@ -240,7 +240,7 @@ fn printPredictions(
 test "CNN model initialization and forward passes (no-grad & gradient graphs)" {
     const allocator = std.testing.allocator;
 
-    var model = NeuralNetwork.init(allocator, try CNN.init(allocator));
+    var model = try NeuralNetwork.init(allocator, try CNN.init(allocator));
     defer model.deinit();
 
     const x_data = try allocator.alloc(f32, 2 * 784);

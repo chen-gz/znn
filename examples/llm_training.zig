@@ -46,7 +46,7 @@ pub fn main() !void {
     const dim: usize = 16;
     const hidden_dim: usize = 32;
     var swiglu = try nn.SwiGLU.init(allocator, dim, hidden_dim);
-    defer swiglu.deinit(allocator);
+    defer nn.deinitModel(&swiglu, allocator);
     {
         // 用样本输入建立一次前向计算图，依据计算图与下游激活函数初始化参数
         const init_x = try zig_ml.tensor.ones(allocator, &.{ 1, 1, dim });
@@ -79,7 +79,7 @@ pub fn main() !void {
         const out = try swiglu.forward(&graph, x);
 
         // 模拟损失 (MSE / L2 目标)
-        swiglu.zeroGrad();
+        nn.zeroGradModel(&swiglu);
         @memset(out.grad, 0.1);
         try graph.backward(out);
 
@@ -117,7 +117,7 @@ pub fn main() !void {
     var lora_layer = try nn.LoRALinear.init(allocator, 16, 16, 4, 8.0);
     // 外部显式指定库内标准初始化：模拟加载预训练的冻结基座权重，并按 LoRA 约定初始化 A (随机) 与 B (全 0)
     lora_layer.resetParameters(random, .{});
-    defer lora_layer.deinit(allocator);
+    defer nn.deinitModel(&lora_layer, allocator);
 
     var lora_graph = autodiff.Graph.init(allocator);
     defer lora_graph.deinit();

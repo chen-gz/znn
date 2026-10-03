@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 新增 `nn.inspectParameterInit(params) ParameterInitReport` 与 `nn.warnIfParametersUninitialized(params)`：只统计可训练权重矩阵（向量形参数如偏置、归一化 γ / β 不参与判断），所有权重矩阵都全为 0 时判定为未初始化。
   - `SGDOptimizer`、`AdamOptimizer`、`AdamWOptimizer` 构造时调用该检查，Debug 构建下输出 `std.log.warn` 提示先调用 `nn.initModel` / `Module.initParameters` / `Graph.initWeights`；非 Debug 构建下为空操作。
 - **独立可调用的缩放点积注意力模块 (`src/nn/attention.zig`, `src/nn.zig`, `src/root.zig`, `src/nn/tests.zig`)**:
-  - 将此前仅承载可视化元数据的空壳结构体 `ScaledDotProductAttention` 升级为完整的功能模块：内置 `causal: bool = true`、`Options` (`defaultOptions()`)、`init()`、`initDefault()`、`setName()` / `setNameFormatted()` / `setMaskPrefix()` / `getName()`、`registerFormula()`、`forward()`（独立进入模块作用域）与 `forwardCore()`（在父模块子作用域内执行 $[B, H, T, D_q] \times [B, H, T_{kv}, D_q] \times [B, H, T_{kv}, D_v] \to [B, H, T, D_v]$ 核心计算，兼容 $D_q \neq D_v$）。
+  - 将此前仅承载可视化元数据的空壳结构体 `ScaledDotProductAttention` 升级为完整的功能模块：内置 `causal: bool = true`、`Options` (`defaultOptions()`)、`init()`、`initDefault()`、`forward()`（独立进入模块作用域）与 `forwardCore()`（在父模块子作用域内执行 $[B, H, T, D_q] \times [B, H, T_{kv}, D_q] \times [B, H, T_{kv}, D_v] \to [B, H, T, D_v]$ 核心计算，兼容 $D_q \neq D_v$）。
   - `CausalSelfAttention` 与 `MLALayer` 均内嵌 `core: ScaledDotProductAttention = .{}` 并复用其核心前向实现，消除两处重复的注意力矩阵乘法、缩放、因果掩码与 Softmax 逻辑，同时保持 Schema 2.0 计算图导出逐字节一致。
 - **全库注释术语全称与缩写规范 (`src/`, `AGENTS.md`)**:
   - 在 `AGENTS.md` 新增第 5 节《注释缩写规范》，并统一梳理 `src/` 下所有源码注释：凡在注释中使用专业缩写（如 SDPA、MHA、GQA、MQA、MLA、MoE、LoRA、RoPE、KVCache、RMSNorm、BN、MLP、GELU、ReLU、SiLU、RNN、LSTM、GRU、SGD、AdamW、BCE、MSE、DPO、GRPO、OLS、PCA、t-SNE、BLAS、JSON、IR 等），均先写出完整名称再接括号缩写。
@@ -45,9 +45,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `GenericTensor(T)` 新增 `fromSlice`、`zeros`、`ones`、`full`、`reshape`、`transpose`、`add`/`sub`/`mul`、`sum`/`mean`、`eq`/`ne`/`gt`/`lt`、`any`/`all` 及与 `Tensor` 双向转换接口。
   - `Embedding.forward` 支持直接传入 `GenericTensor(u32)` / `GenericTensor(usize)` / `GenericTensor(i32)` 或整型切片；`Tensor.where` 与 `Tensor.maskedFill` 支持直接接收 `BoolTensor`。
 - **全模块命名与可视化作用域覆盖 (`src/nn/recurrent.zig`, `src/nn/attention.zig`, `src/nn/transformer.zig`, `src/nn/llm.zig`)**:
-  - 为 `RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`MoELayer`、`MLALayer`、`LoRALinear` 补齐 `setName` / `setNameFormatted` / `getName` / `formula` / `registerFormula` 与 `Graph.enterModule` 作用域追踪。
+  - 为 `RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`MoELayer`、`MLALayer`、`LoRALinear` 补齐 `formula` 与 `Graph.enterModule` 作用域追踪。
 
 ### Changed
+- **按字段路径自动命名，移除逐层样板代码 (`src/nn/module.zig`, `src/nn/core.zig`, `src/nn/recurrent.zig`, `src/nn/attention.zig`, `src/nn/transformer.zig`, `src/nn/normalization.zig`, `src/nn/llm.zig`, `src/nn/graph_ir.zig`, `src/nn.zig`, `examples/`)** (不兼容变更):
+  - 新增 `nn.nameModules(&model, arena, root)`：基于 `walk` 按字段路径为子模块（含 `name` 字段的 struct）与张量命名，如 `gpt.decoder.h.0.attn.c_attn.weight`、`deep_lstm.layers.1`、`ffn_moe.routed_experts.0`；名称字符串分配在调用方 arena 中，模型按值移动后不再出现悬挂名称。
+  - 新增 `nn.enterModuleScope(graph, self)`：进入模块作用域并登记 `pub const formula`，替代各层 `forward` 中重复的作用域与公式登记代码。
+  - 删除全部库层的 `setName`、`setNameFormatted`、`getName`、`registerFormula`、`setMaskPrefix`、`deinit`、`zeroGrad` 及 `name_buf` / `mask_prefix` 字段（`Sequential` 同样移除 `deinit` / `zeroGrad`），统一改用 `nn.nameModules`、`nn.deinitModel`、`nn.zeroGradModel`；`KVCache.deinit` 与 `MLACache.deinit` 保留。库层自身构造失败时的 `errdefer` 改用 `deinitModel`，修复 `TransformerDecoder.init` 与 `GPT.init` 中重复释放的 `errdefer`。
+  - `nn.Module(T)` 新增名称 arena：`init` 返回错误联合并自动以空根路径命名子模块，`setName(root)` 返回错误联合并按新根路径重新命名。
+  - `nn.walk` 只接受指向 struct 的指针，传入其他类型时编译期报错。
+  - 导出 JSON 的名称随字段路径变化：注意力因果掩码为 `*.attn.core.causal_mask`（MLA 的 `buffer_1` 同样改为 `causal_mask`），`MoELayer` 专家位于 `routed_experts` / `shared_experts`，`StackedLSTM` 各层位于 `layers.N`，`GPT` 子模块为 `token_embedding` / `position_embedding` / `decoder.h.N` / `decoder.ln_f`。`graph_ir` 将路径段为数字的未登记父级标记为 `ModuleList`；同步更新 `examples/sample_model_graph.json`、`examples/models/*.json` 与可视化器副本。
 - **PyTorch 风格模块协议 (`src/nn/module.zig`, `src/nn/core.zig`, `src/nn/serialization.zig`, `src/nn.zig`, `src/optim.zig`)**:
   - 新增统一的编译期字段遍历 `nn.walk(model, visitor)`（可选字段路径、`enterModule` 剪枝、`visitOwnedSlice`），`deinitModel`、`zeroGradModel`、参数收集、`setTrainingModel`、`customInit` 分派与 Safetensors 读写全部改为基于它实现，删除 8 个重复的递归遍历函数，并统一跳过编译期字段（含编译期激活层字面量的 `nn.sequential` 元组可以直接调用 `deinitModel` / `zeroGradModel` / `evalModel`）。
   - `nn.collectParameters` 更名为 `nn.parameters`；新增 `nn.namedParameters`（字段路径名称，与序列化键一致）、`nn.numParameters`、`nn.setRequiresGrad`（冻结 / 解冻任意子模块）与 `nn.callForward` / `nn.ForwardResult`。

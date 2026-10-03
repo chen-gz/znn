@@ -33,10 +33,12 @@ pub fn main() !void {
     std.debug.print("  * Decoder Layers:  {d}\n\n", .{config.n_layer});
 
     var gpt = try nn.GPT(config).init(allocator);
-    defer gpt.deinit(allocator);
+    defer nn.deinitModel(&gpt, allocator);
 
     // 2. 赋予顶级层次化模块命名 (自动递归设置至所有子模块与参数)
-    gpt.setName("gpt");
+    var names = std.heap.ArenaAllocator.init(allocator);
+    defer names.deinit();
+    try nn.nameModules(&gpt, names.allocator(), "gpt");
 
     // 3. 构建计算图并执行前向推理
     std.debug.print("[Step 2/4] Constructing Autodiff Graph and Running Forward Pass...\n", .{});
@@ -74,8 +76,8 @@ pub fn main() !void {
     // 5. 导出单个 Linear 层的最小参考 JSON (可视化器 JSON 格式指南中的模板)
     std.debug.print("[Step 4/4] Exporting minimal single-Linear reference JSON...\n", .{});
     var linear = try nn.Linear.init(allocator, 8, 4);
-    defer linear.deinit(allocator);
-    linear.setName("linear");
+    defer nn.deinitModel(&linear, allocator);
+    try nn.nameModules(&linear, names.allocator(), "linear");
 
     var min_graph = autodiff.Graph.init(allocator);
     defer min_graph.deinit();

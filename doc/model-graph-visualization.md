@@ -8,7 +8,9 @@
 Module.forward ──(作用域栈)──▶ autodiff.Graph ──graph_ir.build──▶ ModelHierarchyGraph ──serializeJson──▶ JSON
 ```
 
-* **模块作用域**：每个模块在 `forward` 开头调用 `graph.enterModule(self.name, self.module_type)`，并以 `defer scope.exit()` 退出；模块内部的子逻辑用 `graph.enterChildScope`（例如注意力核心 `core`）。算子与张量在创建时记录所在作用域（`Op.scope`、`Tensor.scope`）。
+* **模块命名**：`nn.nameModules(&model, arena, root)`（或 `nn.Module(T).setName(root)`）按字段路径为子模块与参数命名，例如 `gpt.decoder.h.0.attn`；作用域路径即该名称。
+* **模块作用域**：每个模块在 `forward` 开头调用 `nn.enterModuleScope(graph, self)`（内部调用 `graph.enterModule(self.name, self.module_type)` 并登记 `formula`），并以 `defer scope.exit()` 退出；模块内部的子逻辑用 `graph.enterChildScope`（例如注意力核心 `core`）。算子与张量在创建时记录所在作用域（`Op.scope`、`Tensor.scope`）。
+* **ModuleList**：子模块切片 / 数组在作用域路径中表现为数字路径段（如 `decoder.h.0`、`routed_experts.1`）；`graph_ir` 将这类未登记的父级记为 `module_type = "ModuleList"`，其局部图按执行顺序连接各元素。
 * **局部图**：root、有子模块的模块，以及无参数但在自身作用域内执行了算子的模块，各自导出 `ports`、`flow_nodes`、`edges`。节点是直接子模块、自身算子、常量缓冲区与边界端口 `@in<k>` / `@out<k>`；端口的 `ref` 在最近公共祖先作用域中解析。
 * **透明算子**：`Reshape`、`Transpose`、`RepeatKV` 不作为节点，按执行顺序折叠进边的 `transforms`。
 * **残差**：终点为 Add、且起点在局部图内可达该 Add 另一条入边来源的边标记 `is_skip`。

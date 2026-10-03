@@ -10,36 +10,24 @@ const ThreeLayerMLP = struct {
     fc1: nn.Linear,
     fc2: nn.Linear,
     fc3: nn.Linear,
-    name: ?[]const u8 = "mlp",
+    name: ?[]const u8 = null,
     module_type: []const u8 = "MLP",
+
+    pub const formula = "h_1 = \\text{ReLU}(x W_1^T + b_1), \\; h_2 = \\text{ReLU}(h_1 W_2^T + b_2), \\; y = h_2 W_3^T + b_3";
 
     /// 只分配各层参数内存；参数数值在建立前向计算图后由 nn.initModel 依据计算图初始化
     pub fn init(allocator: std.mem.Allocator) !ThreeLayerMLP {
         const fc1 = try nn.Linear.init(allocator, 16, 32);
+        errdefer nn.deinitModel(&fc1, allocator);
         const fc2 = try nn.Linear.init(allocator, 32, 16);
+        errdefer nn.deinitModel(&fc2, allocator);
         const fc3 = try nn.Linear.init(allocator, 16, 10);
-        var mlp = ThreeLayerMLP{ .fc1 = fc1, .fc2 = fc2, .fc3 = fc3 };
-        mlp.setName("mlp");
-        return mlp;
-    }
-
-    pub fn deinit(self: ThreeLayerMLP, allocator: std.mem.Allocator) void {
-        self.fc1.deinit(allocator);
-        self.fc2.deinit(allocator);
-        self.fc3.deinit(allocator);
-    }
-
-    pub fn setName(self: *ThreeLayerMLP, name: []const u8) void {
-        self.name = name;
-        self.fc1.setName("mlp.fc1");
-        self.fc2.setName("mlp.fc2");
-        self.fc3.setName("mlp.fc3");
+        return .{ .fc1 = fc1, .fc2 = fc2, .fc3 = fc3 };
     }
 
     pub fn forward(self: *const ThreeLayerMLP, g: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const scope = try g.enterModule(self.name, self.module_type);
+        const scope = try nn.enterModuleScope(g, self);
         defer scope.exit();
-        try g.setModuleFormula("mlp", "h_1 = \\text{ReLU}(x W_1^T + b_1), \\; h_2 = \\text{ReLU}(h_1 W_2^T + b_2), \\; y = h_2 W_3^T + b_3");
         const x1 = try self.fc1.forward(g, x);
         const a1 = try g.relu(x1);
         const x2 = try self.fc2.forward(g, a1);
@@ -95,8 +83,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "linear", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var linear = try nn.Linear.init(alloc, 16, 8);
-                defer linear.deinit(alloc);
-                linear.setName("linear");
+                defer nn.deinitModel(&linear, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&linear, names.allocator(), "linear");
 
                 const x = try g.ones(&.{ 2, 16 }, false);
                 x.setName("inputs.x");
@@ -112,8 +102,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "mlp", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var model = try ThreeLayerMLP.init(alloc);
-                defer model.deinit(alloc);
-                model.setName("mlp");
+                defer nn.deinitModel(&model, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&model, names.allocator(), "mlp");
 
                 const x = try g.ones(&.{ 2, 16 }, false);
                 x.setName("inputs.x");
@@ -129,8 +121,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "rnn", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var rnn = try nn.RNN.init(alloc, 16, 32);
-                defer rnn.deinit(alloc);
-                rnn.setName("rnn");
+                defer nn.deinitModel(&rnn, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&rnn, names.allocator(), "rnn");
 
                 var inputs: [4]*Tensor = undefined;
                 for (0..4) |t| {
@@ -149,8 +143,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "lstm", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var lstm = try nn.LSTM.init(alloc, 16, 32);
-                defer lstm.deinit(alloc);
-                lstm.setName("lstm");
+                defer nn.deinitModel(&lstm, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&lstm, names.allocator(), "lstm");
 
                 var inputs: [4]*Tensor = undefined;
                 for (0..4) |t| {
@@ -170,8 +166,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "stacked_lstm", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var slstm = try nn.StackedLSTM.init(alloc, 16, 32, 2);
-                defer slstm.deinit(alloc);
-                slstm.setName("stacked_lstm");
+                defer nn.deinitModel(&slstm, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&slstm, names.allocator(), "stacked_lstm");
 
                 var inputs: [4]*Tensor = undefined;
                 for (0..4) |t| {
@@ -192,8 +190,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "gru", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var gru = try nn.GRU.init(alloc, 16, 32);
-                defer gru.deinit(alloc);
-                gru.setName("gru");
+                defer nn.deinitModel(&gru, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&gru, names.allocator(), "gru");
 
                 var inputs: [4]*Tensor = undefined;
                 for (0..4) |t| {
@@ -212,8 +212,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "embedding", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var emb = try nn.Embedding.init(alloc, 128, 32);
-                defer emb.deinit(alloc);
-                emb.setName("embedding");
+                defer nn.deinitModel(&emb, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&emb, names.allocator(), "embedding");
 
                 const tokens = try g.zeros(&.{ 2, 8 }, false);
                 tokens.setName("inputs.token_ids");
@@ -230,8 +232,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "attention", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var attn = try nn.CausalSelfAttention.init(alloc, 32, 4);
-                defer attn.deinit(alloc);
-                attn.setName("causal_self_attention");
+                defer nn.deinitModel(&attn, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&attn, names.allocator(), "causal_self_attention");
 
                 const x = try g.ones(&.{ 2, 4, 32 }, false);
                 x.setName("inputs.x");
@@ -247,8 +251,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "transformer_block", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var block = try nn.TransformerBlock.init(alloc, 32, 4);
-                defer block.deinit(alloc);
-                block.setName("transformer_block");
+                defer nn.deinitModel(&block, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&block, names.allocator(), "transformer_block");
 
                 const x = try g.ones(&.{ 2, 4, 32 }, false);
                 x.setName("inputs.x");
@@ -271,8 +277,10 @@ pub fn main(init: std.process.Init) !void {
                     .n_layer = 2,
                 };
                 var gpt = try nn.GPT(cfg).init(alloc);
-                defer gpt.deinit(alloc);
-                gpt.setName("gpt");
+                defer nn.deinitModel(&gpt, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&gpt, names.allocator(), "gpt");
 
                 const tokens = try g.zeros(&.{ 2, 16 }, false);
                 tokens.setName("inputs.token_ids");
@@ -289,8 +297,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "swiglu", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var swiglu = try nn.SwiGLU.init(alloc, 32, 64);
-                defer swiglu.deinit(alloc);
-                swiglu.setName("swiglu");
+                defer nn.deinitModel(&swiglu, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&swiglu, names.allocator(), "swiglu");
 
                 const x = try g.ones(&.{ 2, 4, 32 }, false);
                 x.setName("inputs.x");
@@ -306,8 +316,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "lora_linear", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var lora = try nn.LoRALinear.init(alloc, 32, 32, 4, 8.0);
-                defer lora.deinit(alloc);
-                lora.setName("lora_linear");
+                defer nn.deinitModel(&lora, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&lora, names.allocator(), "lora_linear");
 
                 const x = try g.ones(&.{ 4, 32 }, false);
                 x.setName("inputs.x");
@@ -323,8 +335,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "layernorm", struct {
             fn run(alloc: std.mem.Allocator, _: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var ln = try nn.LayerNorm.init(alloc, 32, 1e-5);
-                defer ln.deinit(alloc);
-                ln.setName("layernorm");
+                defer nn.deinitModel(&ln, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&ln, names.allocator(), "layernorm");
 
                 const x = try g.ones(&.{ 2, 4, 32 }, false);
                 x.setName("inputs.x");
@@ -338,8 +352,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "mla", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var mla = try nn.MLALayer.init(alloc, 32, 4, 8, 16, 8);
-                defer mla.deinit(alloc);
-                mla.setName("mla");
+                defer nn.deinitModel(&mla, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&mla, names.allocator(), "mla");
 
                 const x = try g.ones(&.{ 2, 4, 32 }, false);
                 x.setName("inputs.x");
@@ -355,8 +371,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "deepseek_moe", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var moe = try nn.MoELayer.init(alloc, 32, 64, 4, 1, 2);
-                defer moe.deinit(alloc);
-                moe.setName("deepseek_moe");
+                defer nn.deinitModel(&moe, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&moe, names.allocator(), "deepseek_moe");
 
                 const x = try g.ones(&.{ 4, 32 }, false);
                 x.setName("inputs.x");
@@ -372,11 +390,13 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "gan_generator", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var l1 = try nn.Linear.init(alloc, 2, 16);
-                l1.setName("generator.fc1");
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&l1, names.allocator(), "generator.fc1");
                 var l2 = try nn.Linear.init(alloc, 16, 16);
-                l2.setName("generator.fc2");
+                try nn.nameModules(&l2, names.allocator(), "generator.fc2");
                 var l3 = try nn.Linear.init(alloc, 16, 2);
-                l3.setName("generator.fc3");
+                try nn.nameModules(&l3, names.allocator(), "generator.fc3");
 
                 var net_g = nn.sequential(.{
                     l1,
@@ -385,7 +405,7 @@ pub fn main(init: std.process.Init) !void {
                     nn.LeakyReLU{ .alpha = 0.2 },
                     l3,
                 });
-                defer net_g.deinit(alloc);
+                defer nn.deinitModel(&net_g, alloc);
 
                 const z = try g.ones(&.{ 4, 2 }, false);
                 z.setName("inputs.z");
@@ -403,11 +423,13 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "gan_discriminator", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var d1 = try nn.Linear.init(alloc, 2, 16);
-                d1.setName("discriminator.fc1");
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&d1, names.allocator(), "discriminator.fc1");
                 var d2 = try nn.Linear.init(alloc, 16, 16);
-                d2.setName("discriminator.fc2");
+                try nn.nameModules(&d2, names.allocator(), "discriminator.fc2");
                 var d3 = try nn.Linear.init(alloc, 16, 1);
-                d3.setName("discriminator.fc3");
+                try nn.nameModules(&d3, names.allocator(), "discriminator.fc3");
 
                 var net_d = nn.sequential(.{
                     d1,
@@ -416,7 +438,7 @@ pub fn main(init: std.process.Init) !void {
                     nn.LeakyReLU{ .alpha = 0.2 },
                     d3,
                 });
-                defer net_d.deinit(alloc);
+                defer nn.deinitModel(&net_d, alloc);
 
                 const x = try g.ones(&.{ 4, 2 }, false);
                 x.setName("inputs.x");
@@ -434,8 +456,10 @@ pub fn main(init: std.process.Init) !void {
         try exportModel(allocator, "conv2d", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var conv = try nn.Conv2D.init(alloc, 1, 4, 3);
-                defer conv.deinit(alloc);
-                conv.setName("conv2d");
+                defer nn.deinitModel(&conv, alloc);
+                var names = std.heap.ArenaAllocator.init(alloc);
+                defer names.deinit();
+                try nn.nameModules(&conv, names.allocator(), "conv2d");
 
                 const x = try g.ones(&.{ 1, 1, 8, 8 }, false);
                 x.setName("inputs.x");

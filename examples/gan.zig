@@ -28,15 +28,11 @@ pub const Generator = struct {
     }
 
     pub fn deinit(self: Generator, allocator: std.mem.Allocator) void {
-        self.l1.deinit(allocator);
-        self.l2.deinit(allocator);
-        self.l3.deinit(allocator);
+        nn.deinitModel(&self, allocator);
     }
 
     pub fn zeroGrad(self: *Generator) void {
-        self.l1.zeroGrad();
-        self.l2.zeroGrad();
-        self.l3.zeroGrad();
+        nn.zeroGradModel(self);
     }
 
     pub fn forward(self: *Generator, graph: *autodiff.Graph, z: *Tensor) !*Tensor {
@@ -70,15 +66,11 @@ pub const Discriminator = struct {
     }
 
     pub fn deinit(self: Discriminator, allocator: std.mem.Allocator) void {
-        self.l1.deinit(allocator);
-        self.l2.deinit(allocator);
-        self.l3.deinit(allocator);
+        nn.deinitModel(&self, allocator);
     }
 
     pub fn zeroGrad(self: *Discriminator) void {
-        self.l1.zeroGrad();
-        self.l2.zeroGrad();
-        self.l3.zeroGrad();
+        nn.zeroGradModel(self);
     }
 
     pub fn forward(self: *Discriminator, graph: *autodiff.Graph, x: *Tensor) !*Tensor {

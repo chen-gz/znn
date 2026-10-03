@@ -811,7 +811,7 @@ test "SGDOptimizer basic and momentum updates" {
     var prng = std.Random.DefaultPrng.init(42);
     var linear = try nn.Linear.init(allocator, 2, 2);
     linear.resetParameters(prng.random(), .{});
-    defer linear.deinit(allocator);
+    defer nn.deinitModel(&linear, allocator);
 
     // 1. 测试无动量 SGD
     var opt_plain = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.1, .momentum = 0.0 });
@@ -847,7 +847,7 @@ test "AdamOptimizer multi-step parameter updates" {
     var prng = std.Random.DefaultPrng.init(42);
     var linear = try nn.Linear.init(allocator, 2, 2);
     linear.resetParameters(prng.random(), .{});
-    defer linear.deinit(allocator);
+    defer nn.deinitModel(&linear, allocator);
 
     var opt = try AdamOptimizer.init(allocator, &linear, .{
         .lr = 0.01,
@@ -875,7 +875,7 @@ test "AdamWOptimizer weight decay and step" {
     var prng = std.Random.DefaultPrng.init(42);
     var linear = try nn.Linear.init(allocator, 2, 2);
     linear.resetParameters(prng.random(), .{});
-    defer linear.deinit(allocator);
+    defer nn.deinitModel(&linear, allocator);
 
     var opt = try AdamWOptimizer.init(allocator, &linear, .{
         .lr = 0.01,
@@ -974,7 +974,7 @@ test "Optimizer checkpoint serialization and resumption" {
     var prng = std.Random.DefaultPrng.init(42);
     var linear = try nn.Linear.init(allocator, 3, 2);
     linear.resetParameters(prng.random(), .{});
-    defer linear.deinit(allocator);
+    defer nn.deinitModel(&linear, allocator);
 
     // 1. Test SGDOptimizer checkpointing
     {
@@ -1057,7 +1057,7 @@ test "Optimizer checkpoint error conditions and corruption resilience" {
     var prng = std.Random.DefaultPrng.init(99);
     var linear = try nn.Linear.init(allocator, 2, 2);
     linear.resetParameters(prng.random(), .{});
-    defer linear.deinit(allocator);
+    defer nn.deinitModel(&linear, allocator);
 
     // 1. Test corrupt magic header
     {
@@ -1104,7 +1104,7 @@ test "Optimizer checkpoint error conditions and corruption resilience" {
             try nn.Linear.init(allocator, 2, 2),
             try nn.Linear.init(allocator, 2, 2),
         });
-        defer seq.deinit(allocator);
+        defer nn.deinitModel(&seq, allocator);
         {
             var init_graph = @import("autodiff.zig").Graph.init(allocator);
             defer init_graph.deinit();
@@ -1168,7 +1168,7 @@ test "Optimizer interface uniformity and scheduler stepping" {
     var prng = std.Random.DefaultPrng.init(77);
     var linear = try nn.Linear.init(allocator, 2, 2);
     linear.resetParameters(prng.random(), .{});
-    defer linear.deinit(allocator);
+    defer nn.deinitModel(&linear, allocator);
 
     // Test getLR / setLR / stepWithLR across all 3 optimizers
     var sgd = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.1 });

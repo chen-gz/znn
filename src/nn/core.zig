@@ -16,6 +16,8 @@ pub const setRequiresGrad = module.setRequiresGrad;
 pub const setTrainingModel = module.setTrainingModel;
 pub const trainModel = module.trainModel;
 pub const evalModel = module.evalModel;
+pub const nameModules = module.nameModules;
+pub const enterModuleScope = module.enterModuleScope;
 const applyCustomInit = module.applyCustomInit;
 
 // ============================================================================
@@ -63,7 +65,6 @@ pub const Linear = struct {
     weight: *Tensor,
     bias: *Tensor,
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Linear",
 
     /// 构造线性层：只分配参数内存 (权重与偏置全零)，不做任何数值初始化。
@@ -89,59 +90,12 @@ pub const Linear = struct {
         initWeights(random, self.bias.data, in_features, out_features, options.bias_init);
     }
 
-    /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "fc1"，自动设置 "fc1.weight" 与 "fc1.bias")
-    pub fn setName(self: *Linear, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
-        self.bias.setNameFormatted("{s}.bias", .{self.name.?});
-    }
-
-    /// 使用格式化模板为层设置人类可读的名称 (如 "{s}.fc1", parent_name)
-    pub fn setNameFormatted(self: *Linear, comptime fmt: []const u8, args: anytype) void {
-        if (std.fmt.bufPrint(&self.name_buf, fmt, args)) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = "linear";
-        }
-        if (self.name) |n| {
-            self.weight.setNameFormatted("{s}.weight", .{n});
-            self.bias.setNameFormatted("{s}.bias", .{n});
-        }
-    }
-
-    /// 获取层的人类可读名称
-    pub fn getName(self: *const Linear) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn deinit(self: Linear, allocator: std.mem.Allocator) void {
-        freePersistentTensor(allocator, self.weight);
-        freePersistentTensor(allocator, self.bias);
-    }
-
-    pub fn zeroGrad(self: Linear) void {
-        self.weight.zeroGrad();
-        self.bias.zeroGrad();
-    }
-
     /// 模块标准数学变换公式
     pub const formula = "y = x W^T + b";
 
-    /// 向计算图注册该模块的数学公式
-    pub fn registerFormula(self: *const Linear, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-        }
-    }
-
     pub fn forward(self: *const Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         const z = try graph.matmul(x, self.weight);
         return try graph.addBias(z, self.bias);
     }
@@ -153,7 +107,6 @@ pub const Conv2D = struct {
     stride: usize = 1,
     padding: usize = 0,
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Conv2D",
 
     /// 构造 stride = 1、padding = 0 的卷积层 (只分配参数内存，见 initWithConfig)
@@ -201,55 +154,12 @@ pub const Conv2D = struct {
         initWeights(random, self.bias.data, fan_in, fan_out, options.bias_init);
     }
 
-    /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "conv1"，自动设置 "conv1.weight" 与 "conv1.bias")
-    pub fn setName(self: *Conv2D, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
-        self.bias.setNameFormatted("{s}.bias", .{self.name.?});
-    }
-
-    /// 使用格式化模板为层设置人类可读的名称 (如 "{s}.conv1", parent_name)
-    pub fn setNameFormatted(self: *Conv2D, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("conv2d");
-        }
-    }
-
-    /// 获取层的人类可读名称
-    pub fn getName(self: *const Conv2D) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn deinit(self: Conv2D, allocator: std.mem.Allocator) void {
-        freePersistentTensor(allocator, self.weight);
-        freePersistentTensor(allocator, self.bias);
-    }
-
-    pub fn zeroGrad(self: Conv2D) void {
-        self.weight.zeroGrad();
-        self.bias.zeroGrad();
-    }
-
     /// 模块标准数学变换公式
     pub const formula = "y = x \\ast W + b";
 
-    pub fn registerFormula(self: *const Conv2D, graph: *autodiff.Graph) !void {
-        if (self.name) |n| {
-            try graph.setModuleFormula(n, formula);
-        }
-    }
-
     pub fn forward(self: *const Conv2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        if (self.name) |n| try graph.setModuleFormula(n, formula);
         return try graph.conv2dWithConfig(x, self.weight, self.bias, self.stride, self.padding);
     }
 };
@@ -263,7 +173,6 @@ pub const ConvTranspose2D = struct {
     weight: *Tensor,
     bias: ?*Tensor,
     name: ?[]const u8 = null,
-    name_buf: [64]u8 = undefined,
     module_type: []const u8 = "ConvTranspose2D",
 
     /// 构造反卷积层：只分配参数内存 (反卷积核与可选偏置全零)，不做任何数值初始化
@@ -312,44 +221,8 @@ pub const ConvTranspose2D = struct {
         }
     }
 
-    /// 为层内权重与偏置张量统一设置人类可读的名称 (如传入 "deconv1"，自动设置 "deconv1.weight" 与 "deconv1.bias")
-    pub fn setName(self: *ConvTranspose2D, name: []const u8) void {
-        if (std.fmt.bufPrint(&self.name_buf, "{s}", .{name})) |s| {
-            self.name = s;
-        } else |_| {
-            self.name = name;
-        }
-        self.weight.setNameFormatted("{s}.weight", .{self.name.?});
-        if (self.bias) |b| b.setNameFormatted("{s}.bias", .{self.name.?});
-    }
-
-    /// 使用格式化模板为层设置人类可读的名称 (如 "{s}.deconv1", parent_name)
-    pub fn setNameFormatted(self: *ConvTranspose2D, comptime fmt: []const u8, args: anytype) void {
-        var buf: [64]u8 = undefined;
-        if (std.fmt.bufPrint(&buf, fmt, args)) |s| {
-            self.setName(s);
-        } else |_| {
-            self.setName("deconv2d");
-        }
-    }
-
-    /// 获取层的人类可读名称
-    pub fn getName(self: *const ConvTranspose2D) ?[]const u8 {
-        return self.name;
-    }
-
-    pub fn deinit(self: ConvTranspose2D, allocator: std.mem.Allocator) void {
-        freePersistentTensor(allocator, self.weight);
-        if (self.bias) |b| freePersistentTensor(allocator, b);
-    }
-
-    pub fn zeroGrad(self: ConvTranspose2D) void {
-        self.weight.zeroGrad();
-        if (self.bias) |b| b.zeroGrad();
-    }
-
     pub fn forward(self: *const ConvTranspose2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try graph.enterModule(self.name, self.module_type);
+        const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
         return try graph.convTranspose2D(x, self.weight, self.bias, self.stride, self.padding);
     }
@@ -494,18 +367,31 @@ fn warnParametersOutsideGraph(model: anytype, graph: *autodiff.Graph) !void {
     }
 }
 
+/// 模型包装器 (类似 PyTorch `nn.Module` 实例)：持有分配器与内部模型，并自带存放模块 / 参数名称的 arena
 pub fn Module(comptime T: type) type {
     return struct {
         allocator: std.mem.Allocator,
         inner: T,
+        names: std.heap.ArenaAllocator,
 
         const Self = @This();
 
-        pub fn init(allocator: std.mem.Allocator, inner: T) Self {
-            return Self{
+        /// 包装模型，并按字段路径为全部子模块与参数命名 (根模块不命名，如 `decoder.h.0.attn`；需要前缀时调用 `setName`)
+        pub fn init(allocator: std.mem.Allocator, inner: T) !Self {
+            var self = Self{
                 .allocator = allocator,
                 .inner = inner,
+                .names = std.heap.ArenaAllocator.init(allocator),
             };
+            errdefer self.names.deinit();
+            try nameModules(&self.inner, self.names.allocator(), "");
+            return self;
+        }
+
+        /// 以 `root` 为根模块名重新命名全部子模块与参数 (如 `setName("gpt")` 得到 `gpt.decoder.h.0.attn`)
+        pub fn setName(self: *Self, root: []const u8) !void {
+            _ = self.names.reset(.retain_capacity);
+            try nameModules(&self.inner, self.names.allocator(), root);
         }
 
         /// 依据前向计算图初始化内部模型参数 (见 `initModel`)：graph 需已对本模块执行过一次前向计算
@@ -520,6 +406,7 @@ pub fn Module(comptime T: type) type {
 
         pub fn deinit(self: *Self) void {
             deinitModel(&self.inner, self.allocator);
+            self.names.deinit();
         }
 
         pub fn zeroGrad(self: *Self) void {
@@ -584,26 +471,6 @@ pub fn Sequential(comptime LayersTuple: type) type {
 
         pub fn init(layers: LayersTuple) Self {
             return .{ .layers = layers };
-        }
-
-        pub fn deinit(self: Self, allocator: std.mem.Allocator) void {
-            inline for (@typeInfo(LayersTuple).@"struct".fields) |field| {
-                const layer = @field(self.layers, field.name);
-                const LayerT = @TypeOf(layer);
-                if (@hasDecl(LayerT, "deinit")) {
-                    layer.deinit(allocator);
-                }
-            }
-        }
-
-        pub fn zeroGrad(self: Self) void {
-            inline for (@typeInfo(LayersTuple).@"struct".fields) |field| {
-                const layer = @field(self.layers, field.name);
-                const LayerT = @TypeOf(layer);
-                if (@hasDecl(LayerT, "zeroGrad")) {
-                    layer.zeroGrad();
-                }
-            }
         }
 
         pub fn setTraining(self: *Self, is_training: bool) void {

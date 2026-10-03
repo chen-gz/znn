@@ -68,7 +68,7 @@ test "Weight initialization methods and Linear initWithOptions" {
 
     // 7. Linear built-in resetParameters specifying nonlinearity
     var lin_tanh = try Linear.init(allocator, 100, 100);
-    defer lin_tanh.deinit(allocator);
+    defer nn.deinitModel(&lin_tanh, allocator);
     lin_tanh.resetParameters(random, .{
         .nonlinearity = .tanh, // Gain = 5/3 ~ 1.6667 -> Xavier Normal with Gain
         .bias_init = .{ .constant = 0.5 },
@@ -101,7 +101,7 @@ test "initModel infers per-layer initialization from the forward graph" {
         Tanh{},
         try Linear.init(allocator, 100, 10),
     });
-    defer model.deinit(allocator);
+    defer nn.deinitModel(&model, allocator);
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -140,11 +140,11 @@ test "Graph.computeParamFans derives fan_in and fan_out from the consuming op" {
     const allocator = std.testing.allocator;
 
     var linear = try Linear.init(allocator, 5, 7);
-    defer linear.deinit(allocator);
+    defer nn.deinitModel(&linear, allocator);
     var conv = try nn.Conv2D.init(allocator, 3, 8, 3);
-    defer conv.deinit(allocator);
+    defer nn.deinitModel(&conv, allocator);
     var deconv = try nn.ConvTranspose2D.init(allocator, 6, 2, 3, 1, 0, true);
-    defer deconv.deinit(allocator);
+    defer nn.deinitModel(&deconv, allocator);
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -182,7 +182,7 @@ test "initModel uses the transposed-convolution kernel layout for ConvTranspose2
 
     // 卷积核 [in_c=32, out_c=4, 3, 3]：fan_in = 32·9 = 288，下游无激活函数 -> He Normal (gain=1)，Var = 1/288
     var deconv = try nn.ConvTranspose2D.init(allocator, 32, 4, 3, 1, 0, true);
-    defer deconv.deinit(allocator);
+    defer nn.deinitModel(&deconv, allocator);
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -211,12 +211,14 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
 
     // 1. 各层通过 init 创建（只分配内存，参数保持全零）并设置人类可读名字
     var fc_relu = try Linear.init(allocator, 100, 100);
-    defer fc_relu.deinit(allocator);
-    fc_relu.setName("dense_relu_1");
+    defer nn.deinitModel(&fc_relu, allocator);
+    var names = std.heap.ArenaAllocator.init(allocator);
+    defer names.deinit();
+    try nn.nameModules(&fc_relu, names.allocator(), "dense_relu_1");
 
     var fc_tanh = try Linear.init(allocator, 100, 100);
-    defer fc_tanh.deinit(allocator);
-    fc_tanh.setName("dense_tanh_2");
+    defer nn.deinitModel(&fc_tanh, allocator);
+    try nn.nameModules(&fc_tanh, names.allocator(), "dense_tanh_2");
 
     // 库外用户模块：定义 customInit，由 nn.initModel 调用并标记为自定义初始化
     const SpecialHead = struct {
@@ -231,8 +233,8 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     };
 
     var special = SpecialHead{ .head = try Linear.init(allocator, 100, 10) };
-    defer special.head.deinit(allocator);
-    special.head.setName("special_head");
+    defer nn.deinitModel(&special.head, allocator);
+    try nn.nameModules(&special.head, names.allocator(), "special_head");
     const fc_custom = &special.head;
 
     // 2. 在构造/连接期通过各类 Operation 将图自然动态串联起来
@@ -247,8 +249,8 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     const a2 = try graph.tanh(z2); // 后续接 Tanh
 
     var fc_out = try Linear.init(allocator, 10, 2);
-    defer fc_out.deinit(allocator);
-    fc_out.setName("logits_out");
+    defer nn.deinitModel(&fc_out, allocator);
+    try nn.nameModules(&fc_out, names.allocator(), "logits_out");
 
     const logits = try graph.addBias(try graph.matmul(a2, fc_custom.weight), fc_custom.bias);
     logits.setName("custom_head_logits");
@@ -403,30 +405,30 @@ test "Built-in library initialization never marks is_custom_initialized" {
     const random = prng.random();
 
     var lin = try Linear.init(allocator, 8, 4);
-    defer lin.deinit(allocator);
+    defer nn.deinitModel(&lin, allocator);
     lin.resetParameters(random, .{});
     try std.testing.expect(!lin.weight.is_custom_initialized);
     try std.testing.expect(!lin.bias.is_custom_initialized);
 
     var conv = try nn.Conv2D.init(allocator, 3, 4, 3);
-    defer conv.deinit(allocator);
+    defer nn.deinitModel(&conv, allocator);
     conv.resetParameters(random, .{});
     try std.testing.expect(!conv.weight.is_custom_initialized);
     try std.testing.expect(!conv.bias.is_custom_initialized);
 
     var deconv = try nn.ConvTranspose2D.init(allocator, 4, 3, 3, 1, 0, true);
-    defer deconv.deinit(allocator);
+    defer nn.deinitModel(&deconv, allocator);
     deconv.resetParameters(random, .{});
     try std.testing.expect(!deconv.weight.is_custom_initialized);
     try std.testing.expect(!deconv.bias.?.is_custom_initialized);
 
     var emb = try nn.Embedding.init(allocator, 32, 8);
-    defer emb.deinit(allocator);
+    defer nn.deinitModel(&emb, allocator);
     emb.resetParameters(random, .{});
     try std.testing.expect(!emb.weight.is_custom_initialized);
 
     var lora = try nn.LoRALinear.initWithBias(allocator, 8, 4, 2, 4.0, true);
-    defer lora.deinit(allocator);
+    defer nn.deinitModel(&lora, allocator);
     lora.resetParameters(random, .{});
     try std.testing.expect(!lora.weight.is_custom_initialized);
     try std.testing.expect(!lora.lora_a.is_custom_initialized);
@@ -435,7 +437,7 @@ test "Built-in library initialization never marks is_custom_initialized" {
 
     // 依据计算图的默认初始化同样不标记
     var lstm = try nn.LSTM.init(allocator, 8, 8);
-    defer lstm.deinit(allocator);
+    defer nn.deinitModel(&lstm, allocator);
     try testing_init.initRecurrent(&lstm, allocator, random);
     try std.testing.expect(!lstm.cell.w_ih_f.weight.is_custom_initialized);
     try std.testing.expect(!lstm.cell.w_ih_f.bias.is_custom_initialized);
@@ -448,7 +450,7 @@ test "initModel runs external customInit first and initializes the rest from the
 
     // 0. 库层 init 只分配内存：参数全零，未消耗任何随机数
     var bare = try Linear.init(allocator, 4, 3);
-    defer bare.deinit(allocator);
+    defer nn.deinitModel(&bare, allocator);
     for (bare.weight.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
     for (bare.bias.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
 
@@ -466,8 +468,8 @@ test "initModel runs external customInit first and initializes the rest from the
         .fc = try Linear.init(allocator, 4, 3),
         .norm = try nn.LayerNorm.init(allocator, 3, 1e-5),
     };
-    defer custom.fc.deinit(allocator);
-    defer custom.norm.deinit(allocator);
+    defer nn.deinitModel(&custom.fc, allocator);
+    defer nn.deinitModel(&custom.norm, allocator);
     {
         var empty_graph = autodiff.Graph.init(allocator);
         defer empty_graph.deinit();
@@ -488,8 +490,8 @@ test "initModel runs external customInit first and initializes the rest from the
         .fc = try Linear.init(allocator, 4, 4),
         .cell = try nn.LSTMCell.init(allocator, 4, 4),
     };
-    defer plain.fc.deinit(allocator);
-    defer plain.cell.deinit(allocator);
+    defer nn.deinitModel(&plain.fc, allocator);
+    defer nn.deinitModel(&plain.cell, allocator);
     {
         var graph = autodiff.Graph.init(allocator);
         defer graph.deinit();
@@ -531,7 +533,7 @@ test "initModel runs external customInit first and initializes the rest from the
         ReLU{},
         ConstLayer{ .fc = try Linear.init(allocator, 4, 2) },
     });
-    defer model.deinit(allocator);
+    defer nn.deinitModel(&model, allocator);
     try testing_init.initFromOnes(&model, allocator, random, &.{ 2, 4 });
     try std.testing.expect(!model.layers.@"0".weight.is_custom_initialized);
     try std.testing.expect(model.layers.@"0".weight.data[0] != 0.0 or model.layers.@"0".weight.data[1] != 0.0);
@@ -556,8 +558,8 @@ test "initModel runs external customInit first and initializes the rest from the
         .backbone = try Linear.init(allocator, 4, 4),
         .head = .{ .fc = try Linear.init(allocator, 4, 2) },
     };
-    defer outer.backbone.deinit(allocator);
-    defer outer.head.fc.deinit(allocator);
+    defer nn.deinitModel(&outer.backbone, allocator);
+    defer nn.deinitModel(&outer.head.fc, allocator);
     {
         var graph = autodiff.Graph.init(allocator);
         defer graph.deinit();

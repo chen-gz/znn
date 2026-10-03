@@ -29,7 +29,7 @@ pub fn main() !void {
     std.debug.print("We will initialize an Embedding layer with vocab_size = 10, embedding_dim = 4.\n\n", .{});
 
     var emb = try nn.Embedding.init(allocator, 10, 4);
-    defer emb.deinit(allocator);
+    defer nn.deinitModel(&emb, allocator);
 
     // Input: Batch = 2, SeqLen = 3
     std.debug.print("\nInput Token IDs (Shape: [2, 3]):\n", .{});

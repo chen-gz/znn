@@ -245,7 +245,7 @@ test "engine trainClassificationStep and evalClassificationStep" {
     };
 
     const Model = nn.Module(SimpleMLP);
-    var model = Model.init(arena, try SimpleMLP.init(arena));
+    var model = try Model.init(arena, try SimpleMLP.init(arena));
     {
         var init_graph = autodiff.Graph.init(arena);
         defer init_graph.deinit();
@@ -318,7 +318,7 @@ test "engine trainClassificationEpoch and evaluateClassification with DataLoader
     };
 
     const Model = nn.Module(SimpleMLP);
-    var model = Model.init(arena, try SimpleMLP.init(arena));
+    var model = try Model.init(arena, try SimpleMLP.init(arena));
     {
         var init_graph = autodiff.Graph.init(arena);
         defer init_graph.deinit();
