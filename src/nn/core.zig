@@ -438,6 +438,57 @@ pub fn collectParameters(model: anytype, allocator: std.mem.Allocator) ![]*Tenso
     return list.toOwnedSlice(allocator);
 }
 
+/// 参数初始化状态统计：只统计可训练的权重矩阵。
+/// 向量形参数 (除最后一维外各维均为 1，如 [n] / [1, n] 的偏置与归一化 γ / β) 可能按设计为常量或全零，不作为判据；
+/// 单个权重矩阵全零也可能是设计使然 (如 LoRA 旁路 B)，因此只在所有权重矩阵都全零时才判定为未初始化。
+pub const ParameterInitReport = struct {
+    /// 可训练权重矩阵 (非向量形参数) 的数量
+    weight_tensors: usize = 0,
+    /// 其中数据全为 0 的权重矩阵数量
+    zero_weight_tensors: usize = 0,
+
+    /// 所有可训练权重矩阵都全为 0：通常意味着只调用了 init 而遗漏了 nn.initModel / Graph.initWeights
+    pub fn looksUninitialized(self: ParameterInitReport) bool {
+        return self.weight_tensors > 0 and self.zero_weight_tensors == self.weight_tensors;
+    }
+};
+
+/// 统计参数列表中可训练权重矩阵的初始化状态
+pub fn inspectParameterInit(params: []const *Tensor) ParameterInitReport {
+    var report = ParameterInitReport{};
+    for (params) |p| {
+        if (!p.requires_grad or isVectorShaped(p)) continue;
+        report.weight_tensors += 1;
+        const all_zero = for (p.data) |v| {
+            if (v != 0.0) break false;
+        } else true;
+        if (all_zero) report.zero_weight_tensors += 1;
+    }
+    return report;
+}
+
+fn isVectorShaped(t: *const Tensor) bool {
+    if (t.shape.len == 0) return true;
+    for (t.shape.dims[0 .. t.shape.len - 1]) |d| {
+        if (d != 1) return false;
+    }
+    return true;
+}
+
+/// 调试构建 (Debug) 下检查参数是否已初始化：所有可训练权重矩阵都全为 0 时输出警告。
+/// 优化器在构造时调用 (训练开始前)；非 Debug 构建下为空操作，不产生任何开销。
+pub fn warnIfParametersUninitialized(params: []const *Tensor) void {
+    if (@import("builtin").mode != .Debug) return;
+    const report = inspectParameterInit(params);
+    if (report.looksUninitialized()) {
+        std.log.warn(
+            "all {d} trainable weight matrices are zero before training; layer init only allocates memory, " ++
+                "call nn.initModel(&model, random) / Module.initParameters(random) or Graph.initWeights first",
+            .{report.weight_tensors},
+        );
+    }
+}
+
 fn collectParametersInternal(model: anytype, list: *std.ArrayList(*Tensor), allocator: std.mem.Allocator) !void {
     const T = @TypeOf(model.*);
     const info = @typeInfo(T);

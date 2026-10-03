@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **调试构建下的参数未初始化检查 (`src/nn/core.zig`, `src/nn.zig`, `src/optim.zig`, `src/nn/tests_init.zig`)**:
+  - 新增 `nn.inspectParameterInit(params) ParameterInitReport` 与 `nn.warnIfParametersUninitialized(params)`：只统计可训练权重矩阵（向量形参数如偏置、归一化 γ / β 不参与判断），所有权重矩阵都全为 0 时判定为未初始化。
+  - `SGDOptimizer`、`AdamOptimizer`、`AdamWOptimizer` 构造时调用该检查，Debug 构建下输出 `std.log.warn` 提示先调用 `nn.initModel` / `Module.initParameters` / `Graph.initWeights`；非 Debug 构建下为空操作。
 - **独立可调用的缩放点积注意力模块 (`src/nn/attention.zig`, `src/nn.zig`, `src/root.zig`, `src/nn/tests.zig`)**:
   - 将此前仅承载可视化元数据的空壳结构体 `ScaledDotProductAttention` 升级为完整的功能模块：内置 `causal: bool = true`、`Options` (`defaultOptions()`)、`init()`、`initDefault()`、`setName()` / `setNameFormatted()` / `setMaskPrefix()` / `getName()`、`registerFormula()`、`forward()`（独立进入模块作用域）与 `forwardCore()`（在父模块子作用域内执行 $[B, H, T, D_q] \times [B, H, T_{kv}, D_q] \times [B, H, T_{kv}, D_v] \to [B, H, T, D_v]$ 核心计算，兼容 $D_q \neq D_v$）。
   - `CausalSelfAttention` 与 `MLALayer` 均内嵌 `core: ScaledDotProductAttention = .{}` 并复用其核心前向实现，消除两处重复的注意力矩阵乘法、缩放、因果掩码与 Softmax 逻辑，同时保持 Schema 2.0 计算图导出逐字节一致。
