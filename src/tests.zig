@@ -1343,7 +1343,7 @@ test "Fixed array [N]*Tensor reflection and Safetensors serialization" {
     m1.bank[1].data[0] = 4.25;
     m1.bank[1].data[1] = -5.75;
 
-    const params = try nn.collectParameters(&m1, allocator);
+    const params = try nn.parameters(&m1, allocator);
     defer allocator.free(params);
     try std.testing.expectEqual(@as(usize, 2), params.len);
 

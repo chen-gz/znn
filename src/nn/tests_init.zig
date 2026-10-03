@@ -595,7 +595,7 @@ test "inspectParameterInit detects models whose weight matrices were never initi
     defer nn.deinitModel(&block, allocator);
 
     // 1. 只调用 init：LayerNorm γ = 1 与偏置等向量形参数不参与判断，全部权重矩阵为 0 -> 判定为未初始化
-    const params = try nn.collectParameters(&block, allocator);
+    const params = try nn.parameters(&block, allocator);
     defer allocator.free(params);
     const before = nn.inspectParameterInit(params);
     try std.testing.expectEqual(@as(usize, 3), before.weight_tensors); // fc.weight, lora_a, lora_b

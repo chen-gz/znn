@@ -3,6 +3,20 @@ const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
+const module = @import("module.zig");
+pub const walk = module.walk;
+pub const deinitModel = module.deinitModel;
+pub const zeroGradModel = module.zeroGradModel;
+pub const parameters = module.parameters;
+pub const NamedParameter = module.NamedParameter;
+pub const NamedParameterList = module.NamedParameterList;
+pub const namedParameters = module.namedParameters;
+pub const numParameters = module.numParameters;
+pub const setRequiresGrad = module.setRequiresGrad;
+pub const setTrainingModel = module.setTrainingModel;
+pub const trainModel = module.trainModel;
+pub const evalModel = module.evalModel;
+const applyCustomInit = module.applyCustomInit;
 
 // ============================================================================
 // 底层权重初始化与持久化张量内存辅助
@@ -37,9 +51,7 @@ pub fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: u
 
 pub fn freePersistentTensor(allocator: std.mem.Allocator, t: *Tensor) void {
     allocator.free(t.data);
-    if (t.requires_grad) {
-        allocator.free(t.grad);
-    }
+    if (t.grad.len > 0) allocator.free(t.grad);
     allocator.destroy(t);
 }
 
@@ -126,7 +138,7 @@ pub const Linear = struct {
         }
     }
 
-    pub fn forward(self: Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -234,7 +246,7 @@ pub const Conv2D = struct {
         }
     }
 
-    pub fn forward(self: Conv2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const Conv2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -336,7 +348,7 @@ pub const ConvTranspose2D = struct {
         if (self.bias) |b| b.zeroGrad();
     }
 
-    pub fn forward(self: ConvTranspose2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const ConvTranspose2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         return try graph.convTranspose2D(x, self.weight, self.bias, self.stride, self.padding);
@@ -346,97 +358,6 @@ pub const ConvTranspose2D = struct {
 // ============================================================================
 // 泛型模型元编程与参数搜集
 // ============================================================================
-
-pub fn deinitModel(model: anytype, allocator: std.mem.Allocator) void {
-    const T = @TypeOf(model.*);
-    const info = @typeInfo(T);
-    inline for (info.@"struct".fields) |field| {
-        const FieldType = field.type;
-        const field_info = @typeInfo(FieldType);
-        if (FieldType == *Tensor) {
-            freePersistentTensor(allocator, @field(model, field.name));
-        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
-            if (@field(model, field.name)) |t| {
-                freePersistentTensor(allocator, t);
-            }
-        } else if (FieldType == []f32) {
-            allocator.free(@field(model, field.name));
-        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
-            const ElemT = field_info.pointer.child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name)) |t| {
-                    freePersistentTensor(allocator, t);
-                }
-                allocator.free(@field(model, field.name));
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (@field(model, field.name)) |*item| {
-                    deinitModel(item, allocator);
-                }
-                allocator.free(@field(model, field.name));
-            }
-        } else if (field_info == .@"struct") {
-            deinitModel(&@field(model, field.name), allocator);
-        } else if (field_info == .@"array") {
-            const ElemT = field_info.@"array".child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name)) |t| {
-                    freePersistentTensor(allocator, t);
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (&@field(model, field.name)) |*item| {
-                    deinitModel(item, allocator);
-                }
-            }
-        }
-    }
-}
-
-pub fn zeroGradModel(model: anytype) void {
-    const T = @TypeOf(model.*);
-    const info = @typeInfo(T);
-    inline for (info.@"struct".fields) |field| {
-        const FieldType = field.type;
-        const field_info = @typeInfo(FieldType);
-        if (FieldType == *Tensor) {
-            @field(model, field.name).zeroGrad();
-        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
-            if (@field(model, field.name)) |t| {
-                t.zeroGrad();
-            }
-        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
-            const ElemT = field_info.pointer.child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name)) |t| {
-                    t.zeroGrad();
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (@field(model, field.name)) |*item| {
-                    zeroGradModel(item);
-                }
-            }
-        } else if (field_info == .@"struct") {
-            zeroGradModel(&@field(model, field.name));
-        } else if (field_info == .@"array") {
-            const ElemT = field_info.@"array".child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name)) |t| {
-                    t.zeroGrad();
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (&@field(model, field.name)) |*item| {
-                    zeroGradModel(item);
-                }
-            }
-        }
-    }
-}
-
-pub fn collectParameters(model: anytype, allocator: std.mem.Allocator) ![]*Tensor {
-    var list: std.ArrayList(*Tensor) = .empty;
-    errdefer list.deinit(allocator);
-    try collectParametersInternal(model, &list, allocator);
-    return list.toOwnedSlice(allocator);
-}
 
 /// 参数初始化状态统计：只统计可训练的权重矩阵。
 /// 向量形参数 (除最后一维外各维均为 1，如 [n] / [1, n] 的偏置与归一化 γ / β) 可能按设计为常量或全零，不作为判据；
@@ -489,98 +410,6 @@ pub fn warnIfParametersUninitialized(params: []const *Tensor) void {
     }
 }
 
-fn collectParametersInternal(model: anytype, list: *std.ArrayList(*Tensor), allocator: std.mem.Allocator) !void {
-    const T = @TypeOf(model.*);
-    const info = @typeInfo(T);
-    if (@hasField(T, "lora_a") and @hasField(T, "lora_b") and @hasField(T, "weight")) {
-        model.weight.requires_grad = false;
-    }
-    inline for (info.@"struct".fields) |field| {
-        const FieldType = field.type;
-        if (field.is_comptime or @sizeOf(FieldType) == 0) continue;
-        const field_info = @typeInfo(FieldType);
-        if (FieldType == *Tensor) {
-            const tensor_ptr = @field(model, field.name);
-            if (tensor_ptr.requires_grad) {
-                try list.append(allocator, tensor_ptr);
-            }
-        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
-            if (@field(model, field.name)) |tensor_ptr| {
-                if (tensor_ptr.requires_grad) {
-                    try list.append(allocator, tensor_ptr);
-                }
-            }
-        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
-            const ElemT = field_info.pointer.child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name)) |tensor_ptr| {
-                    if (tensor_ptr.requires_grad) {
-                        try list.append(allocator, tensor_ptr);
-                    }
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (@field(model, field.name)) |*item| {
-                    try collectParametersInternal(item, list, allocator);
-                }
-            }
-        } else if (field_info == .@"struct") {
-            try collectParametersInternal(&@field(model, field.name), list, allocator);
-        } else if (field_info == .@"array") {
-            const ElemT = field_info.@"array".child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name)) |tensor_ptr| {
-                    if (tensor_ptr.requires_grad) {
-                        try list.append(allocator, tensor_ptr);
-                    }
-                }
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (&@field(model, field.name)) |*item| {
-                    try collectParametersInternal(item, list, allocator);
-                }
-            }
-        }
-    }
-}
-
-pub fn setTrainingModel(model: anytype, is_training: bool) void {
-    const T = @TypeOf(model.*);
-    const info = @typeInfo(T);
-    if (info != .@"struct") return;
-    if (@hasField(T, "training") and @TypeOf(@field(model, "training")) == bool) {
-        @field(model, "training") = is_training;
-    }
-    inline for (info.@"struct".fields) |field| {
-        const FieldType = field.type;
-        if (@sizeOf(FieldType) == 0) continue;
-        const field_info = @typeInfo(FieldType);
-        if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
-            const ElemT = field_info.pointer.child;
-            if (@typeInfo(ElemT) == .@"struct") {
-                for (@field(model, field.name)) |*item| {
-                    setTrainingModel(item, is_training);
-                }
-            }
-        } else if (field_info == .@"struct") {
-            setTrainingModel(&@field(model, field.name), is_training);
-        } else if (field_info == .@"array") {
-            const ElemT = field_info.@"array".child;
-            if (@typeInfo(ElemT) == .@"struct") {
-                for (&@field(model, field.name)) |*item| {
-                    setTrainingModel(item, is_training);
-                }
-            }
-        }
-    }
-}
-
-pub fn trainModel(model: anytype) void {
-    setTrainingModel(model, true);
-}
-
-pub fn evalModel(model: anytype) void {
-    setTrainingModel(model, false);
-}
-
 /// 模型参数初始化入口：必须在前向计算图建立之后调用。库内所有层的 `init` 只分配内存，参数数值统一在此设置：
 /// 1. 外部指定：递归遍历模型，模块类型定义了 `customInit` (由库外用户模块定义) 时调用之，并将该模块内所有
 ///    可训练参数标记为 `is_custom_initialized = true`。支持两种签名：
@@ -599,57 +428,53 @@ pub fn initModel(model: anytype, graph: *autodiff.Graph, random: std.Random) !vo
 }
 
 /// 便捷入口：用样本输入建立一次前向计算图，再调用 `initModel` 完成依据计算图的参数初始化。
-/// `sample_args` 为传给 `model.forward(graph, ...)` 的除计算图外的参数元组，例如 `.{x}` 或 `.{ids}`。
+/// `sample_args` 为传给 `model.forward(graph, ...)` 的除计算图外的参数：单个值 (如 `x`) 或元组 (如 `.{ x, h_0 }`)。
 pub fn initModelWithSample(model: anytype, allocator: std.mem.Allocator, random: std.Random, sample_args: anytype) !void {
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
     const T = @TypeOf(model.*);
-    const forward_fn = T.forward;
-    const SelfParam = @typeInfo(@TypeOf(forward_fn)).@"fn".params[0].type.?;
-    const self_arg = if (@typeInfo(SelfParam) == .pointer) model else model.*;
-    const result = @call(.auto, forward_fn, .{ self_arg, &graph } ++ sample_args);
+    const result = @call(.auto, T.forward, .{ forwardSelf(model), &graph } ++ forwardArgs(sample_args));
     if (@typeInfo(@TypeOf(result)) == .error_union) _ = try result;
     try initModel(model, &graph, random);
 }
 
-/// 递归调用模型中所有定义了 customInit 的模块，并标记其参数为自定义初始化
-fn applyCustomInit(model: anytype, random: std.Random) void {
-    const T = @TypeOf(model.*);
-    if (@typeInfo(T) != .@"struct") return;
+/// 以参数 `Args` (单个值或元组，见 `callForward`) 调用 `T.forward` 时的返回类型
+pub fn ForwardResult(comptime T: type, comptime Args: type) type {
+    return @TypeOf(@call(.auto, T.forward, .{ @as(ForwardSelf(T), undefined), @as(*autodiff.Graph, undefined) } ++ @as(ForwardArgs(Args), undefined)));
+}
 
-    if (@hasDecl(T, "customInit")) {
-        const params = @typeInfo(@TypeOf(T.customInit)).@"fn".params;
-        switch (params.len) {
-            1 => model.customInit(),
-            2 => model.customInit(random),
-            else => @compileError(@typeName(T) ++ ".customInit must be fn(self: *Self) void or fn(self: *Self, random: std.Random) void"),
-        }
-        markCustomInitializedModel(model);
-        return;
-    }
+/// 以 `args` 调用 `model.forward(graph, ...)`，等价于 PyTorch 的 `module(*args)`：
+/// `args` 为元组时展开为多个参数 (如 `.{ x, h_0 }`)，否则作为单个参数 (如 `x`)；
+/// 自动适配 `forward` 按指针或按值接收 `self`
+pub fn callForward(model: anytype, graph: *autodiff.Graph, args: anytype) ForwardResult(@TypeOf(model.*), @TypeOf(args)) {
+    return @call(.auto, @TypeOf(model.*).forward, .{ forwardSelf(model), graph } ++ forwardArgs(args));
+}
 
-    inline for (@typeInfo(T).@"struct".fields) |field| {
-        const FieldType = field.type;
-        if (field.is_comptime or @sizeOf(FieldType) == 0) continue;
-        const field_info = @typeInfo(FieldType);
-        if (field_info == .@"struct") {
-            applyCustomInit(&@field(model, field.name), random);
-        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
-            if (@typeInfo(field_info.pointer.child) == .@"struct") {
-                for (@field(model, field.name)) |*item| applyCustomInit(item, random);
-            }
-        } else if (field_info == .@"array") {
-            if (@typeInfo(field_info.@"array".child) == .@"struct") {
-                for (&@field(model, field.name)) |*item| applyCustomInit(item, random);
-            }
-        }
-    }
+fn ForwardSelf(comptime T: type) type {
+    return @typeInfo(@TypeOf(T.forward)).@"fn".params[0].type.?;
+}
+
+fn forwardSelf(model: anytype) ForwardSelf(@TypeOf(model.*)) {
+    return if (comptime @typeInfo(ForwardSelf(@TypeOf(model.*))) == .pointer) model else model.*;
+}
+
+fn isTuple(comptime A: type) bool {
+    const info = @typeInfo(A);
+    return info == .@"struct" and info.@"struct".is_tuple;
+}
+
+fn ForwardArgs(comptime A: type) type {
+    return if (isTuple(A)) A else std.meta.Tuple(&.{A});
+}
+
+fn forwardArgs(args: anytype) ForwardArgs(@TypeOf(args)) {
+    return if (comptime isTuple(@TypeOf(args))) args else .{args};
 }
 
 /// Debug 构建下统计未出现在计算图中、且未经 customInit 初始化的可训练参数并输出警告
 fn warnParametersOutsideGraph(model: anytype, graph: *autodiff.Graph) !void {
     const allocator = graph.arenaAllocator();
-    const params = try collectParameters(model, allocator);
+    const params = try parameters(model, allocator);
     var reached = std.AutoHashMap(*const Tensor, void).init(allocator);
     for (graph.ops.items) |op| {
         for (op.inputs) |inp| try reached.put(inp, {});
@@ -667,43 +492,6 @@ fn warnParametersOutsideGraph(model: anytype, graph: *autodiff.Graph) !void {
             .{ missing, params.len },
         );
     }
-}
-
-/// 将模型内所有可训练参数标记为自定义初始化 (由 `initModel` 在调用外部模块的 `customInit` 后执行)
-fn markCustomInitializedModel(model: anytype) void {
-    const T = @TypeOf(model.*);
-    const info = @typeInfo(T);
-    if (info != .@"struct") return;
-    inline for (info.@"struct".fields) |field| {
-        const FieldType = field.type;
-        if (field.is_comptime or @sizeOf(FieldType) == 0) continue;
-        const field_info = @typeInfo(FieldType);
-        if (FieldType == *Tensor) {
-            markTensorCustomInitialized(@field(model, field.name));
-        } else if (field_info == .optional and field_info.optional.child == *Tensor) {
-            if (@field(model, field.name)) |t| markTensorCustomInitialized(t);
-        } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
-            const ElemT = field_info.pointer.child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name)) |t| markTensorCustomInitialized(t);
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (@field(model, field.name)) |*item| markCustomInitializedModel(item);
-            }
-        } else if (field_info == .@"struct") {
-            markCustomInitializedModel(&@field(model, field.name));
-        } else if (field_info == .@"array") {
-            const ElemT = field_info.@"array".child;
-            if (ElemT == *Tensor) {
-                for (@field(model, field.name)) |t| markTensorCustomInitialized(t);
-            } else if (@typeInfo(ElemT) == .@"struct") {
-                for (&@field(model, field.name)) |*item| markCustomInitializedModel(item);
-            }
-        }
-    }
-}
-
-fn markTensorCustomInitialized(t: *Tensor) void {
-    if (t.requires_grad) t.is_custom_initialized = true;
 }
 
 pub fn Module(comptime T: type) type {
@@ -760,8 +548,30 @@ pub fn Module(comptime T: type) type {
             try serialization.loadModel(&self.inner, io, file_path, self.allocator);
         }
 
-        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-            return try self.inner.forward(graph, x);
+        /// 前向计算，等价于 PyTorch 的 `module(*args)`：单个输入直接传入 (`m.forward(&g, x)`)，
+        /// 多个输入以元组传入 (如 `gru.forward(&g, .{ inputs, h_0 })`)，返回类型与内部模型的 `forward` 相同
+        pub fn forward(self: *Self, graph: *autodiff.Graph, args: anytype) ForwardResult(T, @TypeOf(args)) {
+            return callForward(&self.inner, graph, args);
+        }
+
+        /// 可训练参数列表 (PyTorch `parameters()`)，返回的切片由调用方释放
+        pub fn parameters(self: *Self, allocator: std.mem.Allocator) ![]*Tensor {
+            return module.parameters(&self.inner, allocator);
+        }
+
+        /// 带字段路径名称的可训练参数列表 (PyTorch `named_parameters()`)，调用 `deinit` 释放
+        pub fn namedParameters(self: *Self, allocator: std.mem.Allocator) !NamedParameterList {
+            return module.namedParameters(&self.inner, allocator);
+        }
+
+        /// 可训练参数的元素总数
+        pub fn numParameters(self: *const Self) usize {
+            return module.numParameters(&self.inner);
+        }
+
+        /// 冻结 / 解冻全部参数 (PyTorch `requires_grad_()`)；冻结子模块时对 `&module.inner.<field>` 调用 `nn.setRequiresGrad`
+        pub fn setRequiresGrad(self: *Self, requires_grad: bool) !void {
+            try module.setRequiresGrad(&self.inner, self.allocator, requires_grad);
         }
     };
 }

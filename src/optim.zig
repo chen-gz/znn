@@ -79,7 +79,7 @@ pub const SGDOptimizer = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, model: anytype, config: SGDConfig) !SGDOptimizer {
-        const params = try nn.collectParameters(model, allocator);
+        const params = try nn.parameters(model, allocator);
         nn.warnIfParametersUninitialized(params);
         errdefer allocator.free(params);
 
@@ -258,7 +258,7 @@ pub const AdamOptimizer = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, model: anytype, config: AdamConfig) !AdamOptimizer {
-        const params = try nn.collectParameters(model, allocator);
+        const params = try nn.parameters(model, allocator);
         nn.warnIfParametersUninitialized(params);
         errdefer allocator.free(params);
 
@@ -424,7 +424,7 @@ pub const AdamWOptimizer = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, model: anytype, config: AdamWConfig) !AdamWOptimizer {
-        const params = try nn.collectParameters(model, allocator);
+        const params = try nn.parameters(model, allocator);
         nn.warnIfParametersUninitialized(params);
         errdefer allocator.free(params);
 

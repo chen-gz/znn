@@ -168,16 +168,28 @@ flowchart LR
 
 ## 4. 神经网络子系统架构 (Neural Network Modules Zoo)
 
-### 4.1 模块解耦、编译期参数反射与训练模式切换 (`collectParameters` & `setTrainingModel`)
-神经网络模块设计遵循“**数据与逻辑分离、状态外置**”的标准：
-* 模块内部仅持有自身的参数张量与超参数配置；
-* 模块无需知晓优化器的存在；
-* **编译期反射遍历 (`src/nn/core.zig`, `src/nn/serialization.zig`)**：`nn.collectParameters`、`nn.deinitModel`、`nn.zeroGradModel` 以及 Safetensors 序列化 (`saveSafetensors` / `loadSafetensors`) 借助 Zig 的编译期类型反射 (`@typeInfo`)，自动递归遍历模型结构体中的所有字段，完整支持：
-  - 直接参数指针 (`*Tensor`) 与可选参数指针 (`?*Tensor`，如 `ConvTranspose2D.bias`、`LoRALinear.bias`)；
-  - 动态张量切片 (`[]*Tensor`) 与动态子模块切片 (`[]ChildStruct`，如 `MoELayer.experts`、`StackedLSTM.cells`)；
-  - 定长张量数组 (`[N]*Tensor`) 与定长子模块数组 (`[N]ChildStruct`，如 `GPT.layers`)；
-  - 嵌套子模块结构体 (`ChildStruct`)，并自动过滤 `requires_grad == false` 的冻结权重（如 `LoRALinear.weight`）或运行统计量；
-* **全模型训练/评估模式切换 (`setTrainingModel` / `trainModel` / `evalModel`)**：通过编译期反射递归遍历复合模型中的所有子模块，一键更新含 `training: bool` 字段的模块（如 `BatchNorm2d`、`Dropout`）的训练或推理状态。
+### 4.1 模块协议与编译期反射遍历 (`nn/module.zig`)
+模块就是普通 struct，遵循“**数据与逻辑分离、状态外置**”的标准，与 PyTorch `nn.Module` 一样通过字段自动注册参数与子模块：
+* 模块内部仅持有自身的参数张量与超参数配置，无需知晓优化器的存在；
+* **统一遍历 `nn.walk(model, visitor)`**：编译期展开字段，按字段路径（如 `cell.w_ih_r.weight`、`layers.0.attn.q_attn.bias`）访问全部张量与子模块，支持：
+  - 张量指针 (`*Tensor`) 与可选张量指针 (`?*Tensor`，如 `ConvTranspose2D.bias`、`LoRALinear.bias`)；
+  - 动态张量切片 (`[]*Tensor`)、动态子模块切片 (`[]ChildStruct`，如 `MoELayer` 专家、`StackedLSTM` 各层) 与 `[]f32` 缓存；
+  - 定长张量数组 (`[N]*Tensor`)、定长子模块数组 (`[N]ChildStruct`) 与嵌套子模块；
+  - 自动跳过编译期字段（如 `nn.sequential(.{ ..., nn.ReLU{} })` 元组中的激活层字面量）与零大小字段。
+  访问者可声明 `visitTensor`（必需）、`enterModule`（进入子模块前调用，可返回 `false` 剪枝）、`visitOwnedSlice`（释放切片）与 `wants_path`（需要字段路径时声明）。
+* **构建在 `walk` 之上的模块操作**（与 PyTorch 对应）：
+  | znn | PyTorch |
+  |---|---|
+  | `nn.parameters(&m, alloc)` | `m.parameters()` |
+  | `nn.namedParameters(&m, alloc)`（键与 Safetensors 序列化一致） | `m.named_parameters()` |
+  | `nn.numParameters(&m)` | `sum(p.numel() for p in m.parameters())` |
+  | `nn.setRequiresGrad(&m.sub, alloc, false)`（冻结时释放梯度缓冲，解冻时重新分配） | `m.sub.requires_grad_(False)` |
+  | `nn.zeroGradModel(&m)` / `nn.deinitModel(&m, alloc)` | `m.zero_grad()` / 析构 |
+  | `nn.trainModel(&m)` / `nn.evalModel(&m)`（更新含 `training: bool` 字段的模块，如 `BatchNorm2d`、`Dropout`） | `m.train()` / `m.eval()` |
+  | `nn.callForward(&m, &g, x)` / `nn.callForward(&m, &g, .{ x, h_0 })` | `m(x)` / `m(x, h_0)` |
+  `customInit` 分派、Safetensors 读写 (`saveModel` / `loadModel`) 也都基于同一遍历；`parameters` 只收集 `requires_grad == true` 的张量，冻结权重（如 `LoRALinear.weight`）与缓冲区不在其中。
+* **`nn.Module(T)` 包装器**：持有 `allocator` 与内部模型，提供 `forward`（单个输入直接传入，多个输入以元组传入，如 `gru.forward(&g, .{ inputs, h_0 })`，返回类型与内部模型的 `forward` 相同）、`parameters` / `namedParameters` / `numParameters` / `setRequiresGrad`、`initParameters` / `initParametersWithSample`、`zeroGrad` / `train` / `eval` / `save` / `load` / `deinit`。
+* 所有库层的 `forward` 统一以 `self: *const Self` 接收自身，避免按值复制整个模块。
 
 ### 4.2 权重初始化与增益管理 (`nn/init.zig`)
 根据网络激活函数的不同数学曲率，系统提供完备的方差缩放初始化策略：

@@ -150,7 +150,7 @@ pub const LoRALinear = struct {
     }
 
     /// 前向传播：Y = X * W_0 + (X * A) * B * scaling (+ bias)
-    pub fn forward(self: LoRALinear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const LoRALinear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);

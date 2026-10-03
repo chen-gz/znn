@@ -125,7 +125,7 @@ pub const ScaledDotProductAttention = struct {
     }
 
     /// 开启注意力核心子作用域 ("core" 或显式模块名) 并执行缩放点积注意力前向传播
-    pub fn forward(self: ScaledDotProductAttention, graph: *autodiff.Graph, q: *Tensor, k: *Tensor, v: *Tensor) !*Tensor {
+    pub fn forward(self: *const ScaledDotProductAttention, graph: *autodiff.Graph, q: *Tensor, k: *Tensor, v: *Tensor) !*Tensor {
         const core_scope = if (self.name) |n|
             try graph.enterModule(n, self.module_type)
         else
@@ -137,7 +137,7 @@ pub const ScaledDotProductAttention = struct {
 
     /// 在当前计算图作用域内直接执行四维 (4-Dimensional, 4D) 缩放点积注意力计算：
     /// K^T -> Q * K^T -> 1/sqrt(d_k) 缩放 -> 可选因果掩码 (Causal Mask) -> 归一化指数函数 (Softmax) -> 乘 V
-    pub fn forwardCore(self: ScaledDotProductAttention, graph: *autodiff.Graph, q: *Tensor, k: *Tensor, v: *Tensor) !*Tensor {
+    pub fn forwardCore(self: *const ScaledDotProductAttention, graph: *autodiff.Graph, q: *Tensor, k: *Tensor, v: *Tensor) !*Tensor {
         const T = q.shape.dims[2];
         const d_k = q.shape.dims[3];
 
@@ -302,7 +302,7 @@ pub const CausalSelfAttention = struct {
     /// 前向注意力计算流程
     /// 输入 x 的形状必须为三维张量 (3-Dimensional Tensor, 3D): [B, T, C]
     /// 其中 B 为批次大小 (Batch Size, B)，T 为时间步序列长度 (Sequence Length, T)，C 为通道特征维数 (Embedding Dimension, C / n_embd)
-    pub fn forward(self: CausalSelfAttention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const CausalSelfAttention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         try self.registerFormula(graph);
@@ -373,7 +373,7 @@ pub const CausalSelfAttention = struct {
 
     /// 基于键值缓存 (Key-Value Cache, KVCache) 的单步增量自回归推理 (O(1) 增量键值计算，O(T) 点积注意力)
     /// 输入 x 的形状为 [B, 1, C] 或 [B, C]
-    pub fn forwardInference(self: CausalSelfAttention, allocator: std.mem.Allocator, x: *Tensor, cache: *KVCache) !*Tensor {
+    pub fn forwardInference(self: *const CausalSelfAttention, allocator: std.mem.Allocator, x: *Tensor, cache: *KVCache) !*Tensor {
         const B = x.shape.dims[0];
         const C = self.n_embd;
         const nh = self.n_head;
@@ -647,7 +647,7 @@ pub const MLALayer = struct {
     }
 
     /// 全序列前向传播 (经由计算图执行，支持自动微分 (Automatic Differentiation, Autograd) 梯度回传)
-    pub fn forward(self: MLALayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const MLALayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try graph.enterModule(self.name, self.module_type);
         defer module_scope.exit();
         if (self.name) |n| try graph.setModuleFormula(n, formula);
@@ -715,7 +715,7 @@ pub const MLALayer = struct {
 
     /// 多头潜在注意力 (Multi-Head Latent Attention, MLA) 推理期权重矩阵吸收 (Weight Matrix Absorption) 单步自回归生成
     /// 完全在低维潜在空间进行注意力计算与累加，绝不展开高维键值 (Key-Value, KV) 张量
-    pub fn forwardInference(self: MLALayer, allocator: std.mem.Allocator, x: *Tensor, cache: *MLACache) !*Tensor {
+    pub fn forwardInference(self: *const MLALayer, allocator: std.mem.Allocator, x: *Tensor, cache: *MLACache) !*Tensor {
         const B = if (x.shape.len == 3) x.shape.dims[0] else 1;
         const C = self.dim;
         const nh = self.n_head;
