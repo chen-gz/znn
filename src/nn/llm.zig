@@ -126,13 +126,13 @@ pub const LoRALinear = struct {
             .r = r,
             .scaling = lora_alpha / @as(f32, @floatFromInt(r)),
         };
-        layer.reinit(random, core.InitOptions.default);
+        layer.resetParameters(random, core.InitOptions.default);
         return layer;
     }
 
     /// 库内标准参数重初始化 (冻结的基础权重保持不变)：
     /// 低秩旁路 A 按 options 的权重策略初始化；旁路 B 全 0 以保证初始状态等价于基座 (Base) 模型；偏置按 options.bias_init 初始化
-    pub fn reinit(self: *LoRALinear, random: std.Random, options: core.InitOptions) void {
+    pub fn resetParameters(self: *LoRALinear, random: std.Random, options: core.InitOptions) void {
         initWeights(random, self.lora_a.data, self.in_features, self.r, options.resolveWeightInit());
         @memset(self.lora_b.data, 0.0);
         if (self.bias) |b| {

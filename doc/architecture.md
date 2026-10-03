@@ -189,7 +189,7 @@ flowchart LR
   - **He (Kaiming) Normal / Uniform**：针对深层 ReLU / GELU 网络的方差平衡；
   - **Xavier (Glorot) Normal / Uniform**：针对 Sigmoid / Tanh 的对称双端收敛；
   - **LeCun Normal**：自归一化神经网络推荐；
-  - **外部自定义初始化与 `nn.initModel` 分派**：内置库层（`Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、`LoRALinear` 等）不定义 `customInit`，只通过 `init` / `reinit(random, options)` / `AUTO_GRAPH` 进行标准初始化。`customInit(self: *Self, random: std.Random) void` 仅由库外用户模块定义；`nn.initModel(&model, random)`（或 `Module(T).initParameters`）在模块类型定义了 `customInit` 时调用它，并将该模块全部可训练参数标记为 `is_custom_initialized = true`（`CUSTOM_INIT`），使其在 `Graph.initWeights` 全局初始化时不会被覆盖；未定义 `customInit` 时依次回退到内置 `reinit(random, .{})`、`autoInit(random)`，或递归初始化子字段。
+  - **外部自定义初始化与 `nn.initModel` 分派**：内置库层（`Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、`LoRALinear` 等）不定义 `customInit`，只通过 `init` / `resetParameters(random, options)` / `AUTO_GRAPH` 进行标准初始化。`customInit(self: *Self, random: std.Random) void` 仅由库外用户模块定义；`nn.initModel(&model, random)`（或 `Module(T).initParameters`）在模块类型定义了 `customInit` 时调用它，并将该模块全部可训练参数标记为 `is_custom_initialized = true`（`CUSTOM_INIT`），使其在 `Graph.initWeights` 全局初始化时不会被覆盖；未定义 `customInit` 时依次回退到内置 `resetParameters(random, .{})`、`autoInit(random)`，或递归初始化子字段。
 
 ### 4.3 现代大模型架构核心 (`nn/attention.zig`, `nn/transformer.zig`, `nn/llm.zig`)
 1. **因果多头自注意力 (`CausalSelfAttention`, `nn/attention.zig`)**：
