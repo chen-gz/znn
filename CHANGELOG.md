@@ -45,8 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 为 `RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`MoELayer`、`MLALayer`、`LoRALinear` 补齐 `setName` / `setNameFormatted` / `getName` / `formula` / `registerFormula` 与 `Graph.enterModule` 作用域追踪。
 
 ### Changed
-- **内置库层初始化与外部 `customInit` 职责解耦 (`src/nn/core.zig`, `src/nn/transformer.zig`, `src/nn/llm.zig`, `src/nn/recurrent.zig`, `src/autodiff/graph_init.zig`, `src/nn/visualization.zig`, `src/nn/tests_init.zig`, `src/nn/tests_vis.zig`)**:
-  - `Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding` 的 `init` 与 `reinit`（含 `Sequential.autoInit`），以及 `LoRALinear.initWithBias` 与 `LSTMCell.init` 在库内初始化时不再调用 `customInit` 或设置 `is_custom_initialized = true`；`customInit` 与 `CUSTOM_INIT` 状态严格保留给库外用户代码显式调用。
+- **内置库层移除 `customInit`，新增 `nn.initModel` 初始化分派 (`src/nn/core.zig`, `src/nn/transformer.zig`, `src/nn/llm.zig`, `src/nn/recurrent.zig`, `src/nn.zig`, `src/root.zig`, `src/autodiff/graph_init.zig`, `src/nn/visualization.zig`, `src/nn/tests_init.zig`, `src/nn/tests_vis.zig`)**:
+  - `Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、`LoRALinear` 不再定义 `customInit`；库层只提供 `init` / `reinit(random, options)` 内置初始化，且不会设置 `is_custom_initialized`。
+  - 新增 `nn.initModel(model, random)`（`root.zig` 同步导出）与 `Module(T).initParameters(random)`：若模块类型定义了 `customInit`，则调用该函数并将其全部可训练参数标记为 `CUSTOM_INIT`；否则依次回退到内置 `reinit(random, .{})`、`autoInit(random)`，或递归初始化结构体字段、结构体切片与数组。
+  - `Sequential.autoInit` 对定义了 `customInit` 的子层走 `initModel` 分派，其余 `Linear` / `Conv2D` / `ConvTranspose2D` 子层仍按下游激活函数推导增益后调用 `reinit`。
+  - 新增 `LoRALinear.reinit`（重置 `lora_a` / `lora_b` / 偏置，保持冻结基础权重不变）与 `LSTMCell.reinit`（重置全部门控 `Linear` 并将遗忘门偏置置 1.0）。
   - `Graph.initSingleTensor` 与 `Graph.describeAutoGraphParam` 统一覆盖归一化缩放参数 (`ones (1.0)`)、LSTM 遗忘门偏置 (`ones (1.0)`)、`Embedding` 词表 (`Normal (mean=0.0, std=0.02)`)、`LoRALinear` 旁路矩阵 $B$ (`zeros (0.0)`) 及下游激活函数增益推导，并同步更新 `examples/` 与可视化器下的全部模型图 JSON。
 - **全库超长模块解耦重构（单实现文件 `< 60 KB`）(`src/tensor/`, `src/autodiff/`, `src/nn/`, `src/bench/`)**:
   - 将 `src/tensor/core.zig` (84.7 KB) 按职责拆分为 `core.zig`、`nn_kernels.zig` 与 `reductions.zig`；

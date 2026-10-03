@@ -225,7 +225,7 @@ All 25 configuration, options, scheduler, and estimator structs across `src/` we
 | # | File Path | Struct / Union Name | `.{}` Valid? | `default` Const? | `defaultOptions()` / `defaultConfig()`? | Consumer `initDefault(...)` | Status |
 | :--- | :--- | :--- | :---: | :---: | :---: | :--- | :--- |
 | 1 | `src/tensor/types.zig` | `SliceRange` | ✅ | ✅ | ✅ `defaultOptions()` | N/A (value descriptor) | **Compliant** |
-| 2 | `src/nn/init.zig` | `InitOptions` | ✅ | ✅ | ✅ `defaultOptions()` | N/A (passed to `customInit`) | **Compliant** |
+| 2 | `src/nn/init.zig` | `InitOptions` | ✅ | ✅ | ✅ `defaultOptions()` | N/A (passed to `reinit`) | **Compliant** |
 | 3 | `src/nn/init.zig` | `Nonlinearity` (`union(enum)`) | N/A | ✅ | ✅ `defaultOptions()` | N/A | **Upgraded & Compliant** |
 | 4 | `src/nn/init.zig` | `InitMethod` (`union(enum)`) | N/A | ✅ | ✅ `defaultOptions()` | N/A | **Upgraded & Compliant** |
 | 5 | `src/nn/activations.zig` | `LeakyReLU` | ✅ (`alpha = 0.2`) | ✅ | ✅ `defaultOptions()` | ✅ `LeakyReLU.initDefault()` | **Upgraded & Compliant** |

@@ -49,6 +49,7 @@ pub const ConvTranspose2D = core.ConvTranspose2D;
 pub const Module = core.Module;
 pub const deinitModel = core.deinitModel;
 pub const zeroGradModel = core.zeroGradModel;
+pub const initModel = core.initModel;
 pub const setTrainingModel = core.setTrainingModel;
 pub const trainModel = core.trainModel;
 pub const evalModel = core.evalModel;

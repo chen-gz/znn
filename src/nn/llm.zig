@@ -106,24 +106,17 @@ pub const LoRALinear = struct {
 
         var bias: ?*Tensor = null;
         if (use_bias) {
-            const b = try createPersistentTensor(allocator, 1, out_features, true);
-            errdefer freePersistentTensor(allocator, b);
-            @memset(b.data, 0.0);
-            bias = b;
+            bias = try createPersistentTensor(allocator, 1, out_features, true);
         }
         errdefer if (bias) |b| freePersistentTensor(allocator, b);
 
-        // 可微调低秩旁路 A：高斯初始化
         const lora_a = try createPersistentTensor(allocator, in_features, r, true);
         errdefer freePersistentTensor(allocator, lora_a);
-        initWeights(random, lora_a.data, in_features, r, .{ .he_normal = .{} });
 
-        // 可微调低秩旁路 B：全 0 初始化以保证初始状态等价于基座 (Base) 模型
         const lora_b = try createPersistentTensor(allocator, r, out_features, true);
         errdefer freePersistentTensor(allocator, lora_b);
-        @memset(lora_b.data, 0.0);
 
-        return LoRALinear{
+        var layer = LoRALinear{
             .weight = weight,
             .bias = bias,
             .lora_a = lora_a,
@@ -133,19 +126,17 @@ pub const LoRALinear = struct {
             .r = r,
             .scaling = lora_alpha / @as(f32, @floatFromInt(r)),
         };
+        layer.reinit(random, core.InitOptions.default);
+        return layer;
     }
 
-    /// 显式自定义初始化（仅限库外用户代码调用）：
-    /// 执行后标记 is_custom_initialized = true，Graph.initWeights 遍历时将绝对跳过，不会被重写！
-    pub fn customInit(self: *LoRALinear, random: std.Random, options: core.InitOptions) void {
-        const w_init = options.resolveWeightInit();
-        initWeights(random, self.lora_a.data, self.in_features, self.r, w_init);
+    /// 库内标准参数重初始化 (冻结的基础权重保持不变)：
+    /// 低秩旁路 A 按 options 的权重策略初始化；旁路 B 全 0 以保证初始状态等价于基座 (Base) 模型；偏置按 options.bias_init 初始化
+    pub fn reinit(self: *LoRALinear, random: std.Random, options: core.InitOptions) void {
+        initWeights(random, self.lora_a.data, self.in_features, self.r, options.resolveWeightInit());
         @memset(self.lora_b.data, 0.0);
-        self.lora_a.is_custom_initialized = true;
-        self.lora_b.is_custom_initialized = true;
         if (self.bias) |b| {
             initWeights(random, b.data, self.in_features, self.out_features, options.bias_init);
-            b.is_custom_initialized = true;
         }
     }
 
