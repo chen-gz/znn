@@ -30,7 +30,6 @@ pub fn main() !void {
     // Config: n_embd = 8, n_head = 2
     // We will test with batch = 1, seq_len = 3.
     var block = try nn.TransformerBlock.init(allocator, 8, 2);
-    nn.initModel(&block, random);
     defer block.deinit(allocator);
 
     // Input: Shape [1, 3, 8]
@@ -53,6 +52,9 @@ pub fn main() !void {
         val.* = @as(f32, @floatFromInt(i)) * 0.1;
     }
     x.print();
+
+    // 用样本输入建立一次前向计算图，依据计算图与下游激活函数初始化参数
+    try nn.initModelWithSample(&block, allocator, random, .{x});
 
     std.debug.print("\n--- Graph Mode Forward ---\n", .{});
     var graph = autodiff.Graph.init(allocator);

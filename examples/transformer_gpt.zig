@@ -33,8 +33,11 @@ pub fn main() !void {
     // Wrap GPT in Module for easy training
     const GPTModel = nn.Module(nn.GPT(config));
     var model = GPTModel.init(allocator, try nn.GPT(config).init(allocator));
-    model.initParameters(random);
     defer model.deinit();
+    // 用一条长度为 block_size 的样本 token 序列建立前向计算图，依据计算图初始化参数
+    const init_ids = try tensor.zeros(allocator, &.{ 1, block_size });
+    defer tensor.free(allocator, init_ids);
+    try model.initParametersWithSample(random, .{init_ids});
 
     const lr: f32 = 0.01;
 

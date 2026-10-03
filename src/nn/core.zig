@@ -483,7 +483,7 @@ pub fn warnIfParametersUninitialized(params: []const *Tensor) void {
     if (report.looksUninitialized()) {
         std.log.warn(
             "all {d} trainable weight matrices are zero before training; layer init only allocates memory, " ++
-                "call nn.initModel(&model, random) / Module.initParameters(random) or Graph.initWeights first",
+                "build a forward graph and call nn.initModel(&model, &graph, random) or nn.initModelWithSample first",
             .{report.weight_tensors},
         );
     }
@@ -497,7 +497,7 @@ fn collectParametersInternal(model: anytype, list: *std.ArrayList(*Tensor), allo
     }
     inline for (info.@"struct".fields) |field| {
         const FieldType = field.type;
-        if (@sizeOf(FieldType) == 0) continue;
+        if (field.is_comptime or @sizeOf(FieldType) == 0) continue;
         const field_info = @typeInfo(FieldType);
         if (FieldType == *Tensor) {
             const tensor_ptr = @field(model, field.name);
@@ -581,15 +581,39 @@ pub fn evalModel(model: anytype) void {
     setTrainingModel(model, false);
 }
 
-/// 模型参数初始化入口 (编译期反射分派)。库内所有层的 `init` 只分配内存，参数数值统一在此设置：
-/// 1. 若模块类型定义了 `customInit` (由库外用户模块定义)，则调用该函数，并将该模块内所有可训练参数
-///    标记为 `is_custom_initialized = true` (`Graph.initWeights` 不再覆盖，模型图导出为 `CUSTOM_INIT`)。
-///    支持两种签名：
+/// 模型参数初始化入口：必须在前向计算图建立之后调用。库内所有层的 `init` 只分配内存，参数数值统一在此设置：
+/// 1. 外部指定：递归遍历模型，模块类型定义了 `customInit` (由库外用户模块定义) 时调用之，并将该模块内所有
+///    可训练参数标记为 `is_custom_initialized = true`。支持两种签名：
 ///    - `pub fn customInit(self: *Self) void`：确定性初始化 (常量、预设矩阵等)，不消耗随机数；
 ///    - `pub fn customInit(self: *Self, random: std.Random) void`：需要随机数的自定义初始化；
-/// 2. 否则使用库内置初始化：模块定义了 `resetParameters(self, random, options)` 时以默认选项调用，
-///    `Sequential` 调用 `autoInit`；其余结构体递归处理各字段 (子模块字段同样遵循本规则，可在任意层级定义 customInit)。
-pub fn initModel(model: anytype, random: std.Random) void {
+/// 2. 外部未指定：其余参数由 `graph.initWeights` 依据计算图中各参数的下游激活函数推导初始化策略
+///    (ReLU / GELU / SiLU -> He、Tanh / Sigmoid -> Xavier、归一化 γ -> 1、偏置 -> 0、Embedding -> Normal(0, 0.02) 等)，
+///    已被 customInit 初始化的参数不会被覆盖。
+/// `graph` 必须是开启梯度记录 (`Graph.init`) 并已对该模型执行过一次前向计算的计算图；
+/// Debug 构建下若有未出现在计算图中的参数 (前向未经过的分支)，输出警告，这些参数保持 `init` 分配时的默认值。
+pub fn initModel(model: anytype, graph: *autodiff.Graph, random: std.Random) !void {
+    if (!graph.enable_grad) return error.GraphNotRecordingOps;
+    applyCustomInit(model, random);
+    graph.initWeights(random);
+    if (@import("builtin").mode == .Debug) try warnParametersOutsideGraph(model, graph);
+}
+
+/// 便捷入口：用样本输入建立一次前向计算图，再调用 `initModel` 完成依据计算图的参数初始化。
+/// `sample_args` 为传给 `model.forward(graph, ...)` 的除计算图外的参数元组，例如 `.{x}` 或 `.{ids}`。
+pub fn initModelWithSample(model: anytype, allocator: std.mem.Allocator, random: std.Random, sample_args: anytype) !void {
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+    const T = @TypeOf(model.*);
+    const forward_fn = T.forward;
+    const SelfParam = @typeInfo(@TypeOf(forward_fn)).@"fn".params[0].type.?;
+    const self_arg = if (@typeInfo(SelfParam) == .pointer) model else model.*;
+    const result = @call(.auto, forward_fn, .{ self_arg, &graph } ++ sample_args);
+    if (@typeInfo(@TypeOf(result)) == .error_union) _ = try result;
+    try initModel(model, &graph, random);
+}
+
+/// 递归调用模型中所有定义了 customInit 的模块，并标记其参数为自定义初始化
+fn applyCustomInit(model: anytype, random: std.Random) void {
     const T = @TypeOf(model.*);
     if (@typeInfo(T) != .@"struct") return;
 
@@ -603,30 +627,45 @@ pub fn initModel(model: anytype, random: std.Random) void {
         markCustomInitializedModel(model);
         return;
     }
-    if (@hasDecl(T, "resetParameters")) {
-        model.resetParameters(random, .{});
-        return;
-    }
-    if (@hasDecl(T, "autoInit")) {
-        model.autoInit(random);
-        return;
-    }
 
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const FieldType = field.type;
         if (field.is_comptime or @sizeOf(FieldType) == 0) continue;
         const field_info = @typeInfo(FieldType);
         if (field_info == .@"struct") {
-            initModel(&@field(model, field.name), random);
+            applyCustomInit(&@field(model, field.name), random);
         } else if (field_info == .pointer and field_info.pointer.size == .slice and !field_info.pointer.is_const) {
             if (@typeInfo(field_info.pointer.child) == .@"struct") {
-                for (@field(model, field.name)) |*item| initModel(item, random);
+                for (@field(model, field.name)) |*item| applyCustomInit(item, random);
             }
         } else if (field_info == .@"array") {
             if (@typeInfo(field_info.@"array".child) == .@"struct") {
-                for (&@field(model, field.name)) |*item| initModel(item, random);
+                for (&@field(model, field.name)) |*item| applyCustomInit(item, random);
             }
         }
+    }
+}
+
+/// Debug 构建下统计未出现在计算图中、且未经 customInit 初始化的可训练参数并输出警告
+fn warnParametersOutsideGraph(model: anytype, graph: *autodiff.Graph) !void {
+    const allocator = graph.arenaAllocator();
+    const params = try collectParameters(model, allocator);
+    var reached = std.AutoHashMap(*const Tensor, void).init(allocator);
+    for (graph.ops.items) |op| {
+        for (op.inputs) |inp| try reached.put(inp, {});
+    }
+    for (graph.tensors.items) |gt| try reached.put(gt, {});
+    var missing: usize = 0;
+    for (params) |p| {
+        if (p.is_custom_initialized or reached.contains(p)) continue;
+        missing += 1;
+    }
+    if (missing > 0) {
+        std.log.warn(
+            "{d} of {d} trainable parameters were not reached by the forward graph and keep their allocation defaults; " ++
+                "run a forward pass that exercises every module before nn.initModel, or initialize them in customInit",
+            .{ missing, params.len },
+        );
     }
 }
 
@@ -681,9 +720,14 @@ pub fn Module(comptime T: type) type {
             };
         }
 
-        /// 初始化内部模型参数：内部模型定义了 customInit 时调用之，否则使用库内置初始化 (见 `initModel`)
-        pub fn initParameters(self: *Self, random: std.Random) void {
-            initModel(&self.inner, random);
+        /// 依据前向计算图初始化内部模型参数 (见 `initModel`)：graph 需已对本模块执行过一次前向计算
+        pub fn initParameters(self: *Self, graph: *autodiff.Graph, random: std.Random) !void {
+            try initModel(&self.inner, graph, random);
+        }
+
+        /// 用样本输入建立前向计算图后初始化内部模型参数 (见 `initModelWithSample`)
+        pub fn initParametersWithSample(self: *Self, random: std.Random, sample_args: anytype) !void {
+            try initModelWithSample(&self.inner, self.allocator, random, sample_args);
         }
 
         pub fn deinit(self: *Self) void {
@@ -764,24 +808,6 @@ pub fn Sequential(comptime LayersTuple: type) type {
             evalModel(&self.layers);
         }
 
-        /// 按层初始化：外部层定义了 customInit 时调用之 (经 `initModel`)；
-        /// Linear / Conv2D / ConvTranspose2D 依据其后的激活函数选择内置初始化；其余层使用库内置初始化
-        pub fn autoInit(self: *Self, random: std.Random) void {
-            const fields = @typeInfo(LayersTuple).@"struct".fields;
-            inline for (fields, 0..) |field, i| {
-                const LayerT = field.type;
-                if (field.is_comptime or @sizeOf(LayerT) == 0) continue;
-                if (@hasDecl(LayerT, "customInit")) {
-                    initModel(&@field(self.layers, field.name), random);
-                } else if (LayerT == Linear or LayerT == Conv2D or LayerT == ConvTranspose2D) {
-                    const act = comptime detectNextActivation(LayersTuple, i);
-                    @field(self.layers, field.name).resetParameters(random, .{ .nonlinearity = act });
-                } else {
-                    initModel(&@field(self.layers, field.name), random);
-                }
-            }
-        }
-
         pub fn forward(self: *const Self, graph: *autodiff.Graph, input: *Tensor) !*Tensor {
             var current = input;
             inline for (@typeInfo(LayersTuple).@"struct".fields) |field| {
@@ -793,37 +819,6 @@ pub fn Sequential(comptime LayersTuple: type) type {
     };
 }
 
-/// 编译期静态检测 Sequential 元组中第 i 个层之后的首个有效激活函数
-pub fn detectNextActivation(comptime LayersTuple: type, comptime current_idx: usize) Nonlinearity {
-    const fields = @typeInfo(LayersTuple).@"struct".fields;
-    const activations = @import("activations.zig");
-
-    inline for (current_idx + 1..fields.len) |next_idx| {
-        const NextT = fields[next_idx].type;
-
-        if (NextT == activations.ReLU) return .relu;
-        if (NextT == activations.Tanh) return .tanh;
-        if (NextT == activations.Sigmoid) return .sigmoid;
-        if (NextT == activations.GELU) return .gelu;
-        if (NextT == activations.SiLU) return .silu;
-        if (NextT == activations.LeakyReLU) return .{ .leaky_relu = 0.2 };
-
-        // 如果又遇到了另一个参数层 (例如 Linear 或 Conv2D)，说明当前层后续没有激活函数 (如多层特征变换或网络出口 Logits)
-        if (NextT == Linear or NextT == Conv2D or NextT == ConvTranspose2D) {
-            return .linear;
-        }
-    }
-    // 直到末尾都未遇到激活函数，说明是网络输出层 (Logits)
-    return .linear;
-}
-
 pub fn sequential(layers: anytype) Sequential(@TypeOf(layers)) {
     return Sequential(@TypeOf(layers)).init(layers);
-}
-
-/// 构造并自动根据各层后续激活函数自适应初始化权重的 Sequential 模型
-pub fn autoSequential(layers: anytype, random: std.Random) Sequential(@TypeOf(layers)) {
-    var seq = Sequential(@TypeOf(layers)).init(layers);
-    seq.autoInit(random);
-    return seq;
 }

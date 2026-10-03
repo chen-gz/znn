@@ -13,13 +13,11 @@ const ThreeLayerMLP = struct {
     name: ?[]const u8 = "mlp",
     module_type: []const u8 = "MLP",
 
-    pub fn init(allocator: std.mem.Allocator, random: std.Random) !ThreeLayerMLP {
-        var fc1 = try nn.Linear.init(allocator, 16, 32);
-        nn.initModel(&fc1, random);
-        var fc2 = try nn.Linear.init(allocator, 32, 16);
-        nn.initModel(&fc2, random);
-        var fc3 = try nn.Linear.init(allocator, 16, 10);
-        nn.initModel(&fc3, random);
+    /// 只分配各层参数内存；参数数值在建立前向计算图后由 nn.initModel 依据计算图初始化
+    pub fn init(allocator: std.mem.Allocator) !ThreeLayerMLP {
+        const fc1 = try nn.Linear.init(allocator, 16, 32);
+        const fc2 = try nn.Linear.init(allocator, 32, 16);
+        const fc3 = try nn.Linear.init(allocator, 16, 10);
         var mlp = ThreeLayerMLP{ .fc1 = fc1, .fc2 = fc2, .fc3 = fc3 };
         mlp.setName("mlp");
         return mlp;
@@ -53,18 +51,17 @@ const ThreeLayerMLP = struct {
 fn exportModel(
     allocator: std.mem.Allocator,
     name: []const u8,
-    buildAndForwardFn: *const fn (allocator: std.mem.Allocator, random: std.Random, graph: *autodiff.Graph) anyerror!void,
+    buildAndExportFn: *const fn (allocator: std.mem.Allocator, random: std.Random, graph: *autodiff.Graph, file_path: []const u8) anyerror!void,
     random: std.Random,
     output_dir: []const u8,
 ) !void {
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
 
-    try buildAndForwardFn(allocator, random, &graph);
-
     var path_buf: [256]u8 = undefined;
     const file_path = try std.fmt.bufPrint(&path_buf, "{s}/{s}.json", .{ output_dir, name });
-    try graph.exportJson(file_path);
+    // 计算图引用模型参数张量，因此必须在模型释放之前 (即构建函数内部) 完成导出
+    try buildAndExportFn(allocator, random, &graph, file_path);
     std.debug.print("  [✓] Exported {s} -> {s}\n", .{ name, file_path });
 }
 
@@ -96,9 +93,8 @@ pub fn main(init: std.process.Init) !void {
 
         // 1. linear
         try exportModel(allocator, "linear", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var linear = try nn.Linear.init(alloc, 16, 8);
-                nn.initModel(&linear, rnd);
                 defer linear.deinit(alloc);
                 linear.setName("linear");
 
@@ -106,13 +102,16 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const y = try linear.forward(g, x);
                 y.setName("outputs.y");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&linear, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 2. mlp
         try exportModel(allocator, "mlp", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
-                var model = try ThreeLayerMLP.init(alloc, rnd);
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
+                var model = try ThreeLayerMLP.init(alloc);
                 defer model.deinit(alloc);
                 model.setName("mlp");
 
@@ -120,14 +119,16 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const y = try model.forward(g, x);
                 y.setName("outputs.logits");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&model, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 3. rnn
         try exportModel(allocator, "rnn", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var rnn = try nn.RNN.init(alloc, 16, 32);
-                nn.initModel(&rnn, rnd);
                 defer rnn.deinit(alloc);
                 rnn.setName("rnn");
 
@@ -138,14 +139,16 @@ pub fn main(init: std.process.Init) !void {
                 }
                 const res = try rnn.forward(g, &inputs, null);
                 res.h_n.setName("outputs.h_n");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&rnn, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 4. lstm
         try exportModel(allocator, "lstm", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var lstm = try nn.LSTM.init(alloc, 16, 32);
-                nn.initModel(&lstm, rnd);
                 defer lstm.deinit(alloc);
                 lstm.setName("lstm");
 
@@ -157,14 +160,16 @@ pub fn main(init: std.process.Init) !void {
                 const res = try lstm.forward(g, &inputs, null, null);
                 res.h_n.setName("outputs.h_n");
                 res.c_n.setName("outputs.c_n");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&lstm, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 5. stacked_lstm
         try exportModel(allocator, "stacked_lstm", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var slstm = try nn.StackedLSTM.init(alloc, 16, 32, 2);
-                nn.initModel(&slstm, rnd);
                 defer slstm.deinit(alloc);
                 slstm.setName("stacked_lstm");
 
@@ -177,14 +182,16 @@ pub fn main(init: std.process.Init) !void {
                 for (res.h_n, 0..) |h, l| {
                     h.setNameFormatted("outputs.h_l{d}", .{l});
                 }
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&slstm, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 6. gru
         try exportModel(allocator, "gru", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var gru = try nn.GRU.init(alloc, 16, 32);
-                nn.initModel(&gru, rnd);
                 defer gru.deinit(alloc);
                 gru.setName("gru");
 
@@ -195,14 +202,16 @@ pub fn main(init: std.process.Init) !void {
                 }
                 const res = try gru.forward(g, &inputs, null);
                 res.h_n.setName("outputs.h_n");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&gru, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 7. embedding
         try exportModel(allocator, "embedding", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var emb = try nn.Embedding.init(alloc, 128, 32);
-                nn.initModel(&emb, rnd);
                 defer emb.deinit(alloc);
                 emb.setName("embedding");
 
@@ -211,14 +220,16 @@ pub fn main(init: std.process.Init) !void {
                 for (tokens.data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 16));
                 const out = try emb.forward(g, tokens);
                 out.setName("outputs.embeddings");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&emb, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 8. attention
         try exportModel(allocator, "attention", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var attn = try nn.CausalSelfAttention.init(alloc, 32, 4);
-                nn.initModel(&attn, rnd);
                 defer attn.deinit(alloc);
                 attn.setName("causal_self_attention");
 
@@ -226,14 +237,16 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const out = try attn.forward(g, x);
                 out.setName("outputs.context");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&attn, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 9. transformer_block
         try exportModel(allocator, "transformer_block", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var block = try nn.TransformerBlock.init(alloc, 32, 4);
-                nn.initModel(&block, rnd);
                 defer block.deinit(alloc);
                 block.setName("transformer_block");
 
@@ -241,12 +254,15 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const out = try block.forward(g, x);
                 out.setName("outputs.block_out");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&block, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 10. gpt
         try exportModel(allocator, "gpt", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 const cfg = nn.GPTConfig{
                     .vocab_size = 256,
                     .block_size = 32,
@@ -255,7 +271,6 @@ pub fn main(init: std.process.Init) !void {
                     .n_layer = 2,
                 };
                 var gpt = try nn.GPT(cfg).init(alloc);
-                nn.initModel(&gpt, rnd);
                 defer gpt.deinit(alloc);
                 gpt.setName("gpt");
 
@@ -264,14 +279,16 @@ pub fn main(init: std.process.Init) !void {
                 for (tokens.data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
                 const logits = try gpt.forward(g, tokens);
                 logits.setName("outputs.logits");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&gpt, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 11. swiglu
         try exportModel(allocator, "swiglu", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var swiglu = try nn.SwiGLU.init(alloc, 32, 64);
-                nn.initModel(&swiglu, rnd);
                 defer swiglu.deinit(alloc);
                 swiglu.setName("swiglu");
 
@@ -279,14 +296,16 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const out = try swiglu.forward(g, x);
                 out.setName("outputs.swiglu_out");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&swiglu, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 12. lora_linear
         try exportModel(allocator, "lora_linear", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var lora = try nn.LoRALinear.init(alloc, 32, 32, 4, 8.0);
-                nn.initModel(&lora, rnd);
                 defer lora.deinit(alloc);
                 lora.setName("lora_linear");
 
@@ -294,12 +313,15 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const out = try lora.forward(g, x);
                 out.setName("outputs.adapted_out");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&lora, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 13. layernorm
         try exportModel(allocator, "layernorm", struct {
-            fn run(alloc: std.mem.Allocator, _: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, _: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var ln = try nn.LayerNorm.init(alloc, 32, 1e-5);
                 defer ln.deinit(alloc);
                 ln.setName("layernorm");
@@ -308,14 +330,14 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const out = try ln.forward(g, x);
                 out.setName("outputs.normed");
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 14. mla
         try exportModel(allocator, "mla", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var mla = try nn.MLALayer.init(alloc, 32, 4, 8, 16, 8);
-                nn.initModel(&mla, rnd);
                 defer mla.deinit(alloc);
                 mla.setName("mla");
 
@@ -323,14 +345,16 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const out = try mla.forward(g, x);
                 out.setName("outputs.mla_out");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&mla, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 15. deepseek_moe
         try exportModel(allocator, "deepseek_moe", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var moe = try nn.MoELayer.init(alloc, 32, 64, 4, 1, 2);
-                nn.initModel(&moe, rnd);
                 defer moe.deinit(alloc);
                 moe.setName("deepseek_moe");
 
@@ -338,20 +362,20 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const out = try moe.forward(g, x);
                 out.setName("outputs.moe_out");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&moe, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 16. gan_generator
         try exportModel(allocator, "gan_generator", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var l1 = try nn.Linear.init(alloc, 2, 16);
-                nn.initModel(&l1, rnd);
                 l1.setName("generator.fc1");
                 var l2 = try nn.Linear.init(alloc, 16, 16);
-                nn.initModel(&l2, rnd);
                 l2.setName("generator.fc2");
                 var l3 = try nn.Linear.init(alloc, 16, 2);
-                nn.initModel(&l3, rnd);
                 l3.setName("generator.fc3");
 
                 var net_g = nn.sequential(.{
@@ -369,20 +393,20 @@ pub fn main(init: std.process.Init) !void {
                 defer scope.exit();
                 const fake_x = try net_g.forward(g, z);
                 fake_x.setName("outputs.fake_x");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&net_g, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 17. gan_discriminator
         try exportModel(allocator, "gan_discriminator", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var d1 = try nn.Linear.init(alloc, 2, 16);
-                nn.initModel(&d1, rnd);
                 d1.setName("discriminator.fc1");
                 var d2 = try nn.Linear.init(alloc, 16, 16);
-                nn.initModel(&d2, rnd);
                 d2.setName("discriminator.fc2");
                 var d3 = try nn.Linear.init(alloc, 16, 1);
-                nn.initModel(&d3, rnd);
                 d3.setName("discriminator.fc3");
 
                 var net_d = nn.sequential(.{
@@ -400,14 +424,16 @@ pub fn main(init: std.process.Init) !void {
                 defer scope.exit();
                 const logits = try net_d.forward(g, x);
                 logits.setName("outputs.logits");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&net_d, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 
         // 18. conv2d
         try exportModel(allocator, "conv2d", struct {
-            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph) !void {
+            fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
                 var conv = try nn.Conv2D.init(alloc, 1, 4, 3);
-                nn.initModel(&conv, rnd);
                 defer conv.deinit(alloc);
                 conv.setName("conv2d");
 
@@ -415,6 +441,9 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const out = try conv.forward(g, x);
                 out.setName("outputs.feature_map");
+                // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+                try nn.initModel(&conv, g, rnd);
+                try g.exportJson(file_path);
             }
         }.run, random, dir);
 

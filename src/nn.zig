@@ -50,6 +50,7 @@ pub const Module = core.Module;
 pub const deinitModel = core.deinitModel;
 pub const zeroGradModel = core.zeroGradModel;
 pub const initModel = core.initModel;
+pub const initModelWithSample = core.initModelWithSample;
 pub const setTrainingModel = core.setTrainingModel;
 pub const trainModel = core.trainModel;
 pub const evalModel = core.evalModel;
@@ -59,8 +60,6 @@ pub const inspectParameterInit = core.inspectParameterInit;
 pub const warnIfParametersUninitialized = core.warnIfParametersUninitialized;
 pub const Sequential = core.Sequential;
 pub const sequential = core.sequential;
-pub const autoSequential = core.autoSequential;
-pub const detectNextActivation = core.detectNextActivation;
 
 // 2. 激活函数 (Activations)
 pub const ReLU = activations.ReLU;

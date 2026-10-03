@@ -46,8 +46,13 @@ pub fn main() !void {
     const dim: usize = 16;
     const hidden_dim: usize = 32;
     var swiglu = try nn.SwiGLU.init(allocator, dim, hidden_dim);
-    nn.initModel(&swiglu, random);
     defer swiglu.deinit(allocator);
+    {
+        // 用样本输入建立一次前向计算图，依据计算图与下游激活函数初始化参数
+        const init_x = try zig_ml.tensor.ones(allocator, &.{ 1, 1, dim });
+        defer zig_ml.tensor.free(allocator, init_x);
+        try nn.initModelWithSample(&swiglu, allocator, random, .{init_x});
+    }
 
     const adamw_cfg = optim.AdamWConfig{
         .lr = 1e-2,
@@ -110,7 +115,8 @@ pub fn main() !void {
     // ---------------------------------------------------------------
     std.debug.print("[Stage 3] Injecting LoRA Adapters (r=4, alpha=8)...\n", .{});
     var lora_layer = try nn.LoRALinear.init(allocator, 16, 16, 4, 8.0);
-    nn.initModel(&lora_layer, random);
+    // 外部显式指定库内标准初始化：模拟加载预训练的冻结基座权重，并按 LoRA 约定初始化 A (随机) 与 B (全 0)
+    lora_layer.resetParameters(random, .{});
     defer lora_layer.deinit(allocator);
 
     var lora_graph = autodiff.Graph.init(allocator);

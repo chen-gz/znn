@@ -16,7 +16,7 @@ pub const MLP = struct {
     fc2: nn.Linear,
     fc3: nn.Linear,
 
-    // 定义模型结构：init 只负责分配各层参数内存，参数数值由 nn.initModel / Module.initParameters 统一初始化
+    // 定义模型结构：init 只负责分配各层参数内存，参数数值在建立前向计算图后由 nn.initModel / Module.initParameters 统一初始化
     pub fn init(allocator: std.mem.Allocator) !MLP {
         return .{
             .fc1 = try nn.Linear.init(allocator, 784, 128),
@@ -74,9 +74,11 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("Initializing Standard Model (3-layer MLP: 784 -> 128 -> 64 -> 10)...\n", .{});
     var model = NeuralNetwork.init(arena, try MLP.init(arena));
-    var prng = std.Random.DefaultPrng.init(42);
-    model.initParameters(prng.random());
     defer model.deinit();
+    // 用一个样本批次建立前向计算图，依据计算图与激活函数初始化参数
+    var prng = std.Random.DefaultPrng.init(42);
+    const init_sample = try tensor.ones(arena, &.{ 1, 784 });
+    try model.initParametersWithSample(prng.random(), .{init_sample});
     try runTraining(&model, io, arena, train_dataset, test_dataset);
     try printPredictions(&model, arena, test_dataset, 5);
 }
@@ -235,13 +237,16 @@ test "MLP model initialization and forward passes (no-grad & gradient graphs)" {
     const allocator = std.testing.allocator;
 
     var model = NeuralNetwork.init(allocator, try MLP.init(allocator));
-    var prng = std.Random.DefaultPrng.init(42);
-    model.initParameters(prng.random());
     defer model.deinit();
 
     const x_data = try allocator.alloc(f32, 2 * 784);
     defer allocator.free(x_data);
     @memset(x_data, 0.1);
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const init_sample = try tensor.array(allocator, &.{ 2, 784 }, x_data);
+    defer init_sample.deinit(allocator);
+    try model.initParametersWithSample(prng.random(), .{init_sample});
 
     // Inference mode (no-grad graph)
     {

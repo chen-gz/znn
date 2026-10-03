@@ -29,11 +29,7 @@ pub fn main() !void {
     std.debug.print("We will initialize an Embedding layer with vocab_size = 10, embedding_dim = 4.\n\n", .{});
 
     var emb = try nn.Embedding.init(allocator, 10, 4);
-    nn.initModel(&emb, random);
     defer emb.deinit(allocator);
-
-    std.debug.print("Initial Embedding Weights (Shape: [10, 4]):\n", .{});
-    emb.weight.print();
 
     // Input: Batch = 2, SeqLen = 3
     std.debug.print("\nInput Token IDs (Shape: [2, 3]):\n", .{});
@@ -54,6 +50,11 @@ pub fn main() !void {
     x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
     x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
     x.print();
+
+    // 用样本输入建立一次前向计算图，依据计算图与下游激活函数初始化参数
+    try nn.initModelWithSample(&emb, allocator, random, .{x});
+    std.debug.print("\nInitial Embedding Weights (Shape: [10, 4]):\n", .{});
+    emb.weight.print();
 
     std.debug.print("\n--- 1. Inference Forward (no-grad graph) ---\n", .{});
     var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
