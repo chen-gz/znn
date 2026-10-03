@@ -1425,6 +1425,8 @@ test "Config defaults and initDefault ergonomics across modules" {
 
     try std.testing.expect(Nonlinearity.defaultOptions() == .relu);
     try std.testing.expect(InitMethod.defaultOptions() == .he_normal);
+    try std.testing.expectEqual(@as(usize, 1), nn.Conv2D.Options.defaultOptions().stride);
+    try std.testing.expectEqual(@as(usize, 0), nn.Conv2D.Options.defaultOptions().padding);
     try std.testing.expect(@TypeOf(root.DefaultGPT) == type);
 }
 

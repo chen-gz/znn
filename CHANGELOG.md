@@ -48,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 为 `RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`MoELayer`、`MLALayer`、`LoRALinear` 补齐 `formula` 与 `Graph.enterModule` 作用域追踪。
 
 ### Changed
+- **合并 `Conv2D.init` 与 `Conv2D.initWithConfig` (`src/nn/core.zig`, `src/nn/tests*.zig`, `src/bench/suites.zig`, `examples/`)**:
+  - `Conv2D` 新增带默认值的 `Options` 结构体（`stride: usize = 1`、`padding: usize = 0`、`default`、`defaultOptions()`），将 `Conv2D.initWithConfig` 合并入 `Conv2D.init(allocator, in_channels, out_channels, kernel_size, options: Options)`。
 - **按字段路径自动命名，移除逐层样板代码 (`src/nn/module.zig`, `src/nn/core.zig`, `src/nn/recurrent.zig`, `src/nn/attention.zig`, `src/nn/transformer.zig`, `src/nn/normalization.zig`, `src/nn/llm.zig`, `src/nn/graph_ir.zig`, `src/nn.zig`, `examples/`)** (不兼容变更):
   - 新增 `nn.nameModules(&model, arena, root)`：基于 `walk` 按字段路径为子模块（含 `name` 字段的 struct）与张量命名，如 `gpt.decoder.h.0.attn.c_attn.weight`、`deep_lstm.layers.1`、`ffn_moe.routed_experts.0`；名称字符串分配在调用方 arena 中，模型按值移动后不再出现悬挂名称。
   - 新增 `nn.enterModuleScope(graph, self)`：进入模块作用域并登记 `pub const formula`，替代各层 `forward` 中重复的作用域与公式登记代码。
@@ -73,7 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 新增 `LoRALinear.resetParameters` 与 `LSTMCell.resetParameters`（重置全部门控 `Linear` 并将遗忘门偏置置 1.0）。
   - 库层参数重填函数 `reinit` 统一更名为 `resetParameters`，明确其只在已分配张量上重新填充数值、不分配内存。
   - 移除冗余构造函数 `initClean`、`initUninitialized`、`Conv2D.initCleanWithConfig` 与 `Conv2D.initUninitializedWithConfig`。
-  - **两阶段构造**：所有库层的 `init` 不再接收随机数参数，只分配参数内存（全零）并设置与随机无关的结构默认值（归一化层 γ / β、LSTM 遗忘门偏置 1.0）；涉及 `Linear`、`Conv2D`（含 `initWithConfig`）、`ConvTranspose2D`、`Embedding`、`RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`CausalSelfAttention`（含 `initGQA`）、`MLALayer`、`MLP`、`SwiGLU`、`MoELayer`、`TransformerBlock`、`TransformerDecoder`、`GPT`（含 `initDefault`）与 `LoRALinear`（含 `initDefault` / `initWithBias`）。参数数值在前向计算图建立后统一由 `nn.initModel` / `Module.initParameters` 设置，或由库外代码显式调用 `resetParameters`；全部示例改为 `init` → 前向建图 → `nn.initModel`（或 `initModelWithSample`）。
+  - **两阶段构造**：所有库层的 `init` 不再接收随机数参数，只分配参数内存（全零）并设置与随机无关的结构默认值（归一化层 γ / β、LSTM 遗忘门偏置 1.0）；涉及 `Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、`RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`CausalSelfAttention`（含 `initGQA`）、`MLALayer`、`MLP`、`SwiGLU`、`MoELayer`、`TransformerBlock`、`TransformerDecoder`、`GPT`（含 `initDefault`）与 `LoRALinear`（含 `initDefault` / `initWithBias`）。参数数值在前向计算图建立后统一由 `nn.initModel` / `Module.initParameters` 设置，或由库外代码显式调用 `resetParameters`；全部示例改为 `init` → 前向建图 → `nn.initModel`（或 `initModelWithSample`）。
   - `nn.initModel` 支持确定性 `customInit(self: *Self) void`（不消耗随机数）与随机 `customInit(self: *Self, random: std.Random) void` 两种签名，签名不符时编译期报错。
   - `LoRALinear.resetParameters` 同时初始化冻结基础权重（He Normal），使 `init` 只分配内存；加载预训练权重时由 `loadModel` 覆盖。
   - `Graph.initSingleTensor` 与 `Graph.describeAutoGraphParam` 统一覆盖归一化缩放参数 (`ones (1.0)`)、LSTM 遗忘门偏置 (`ones (1.0)`)、`Embedding` 词表 (`Normal (mean=0.0, std=0.02)`)、`LoRALinear` 旁路矩阵 $B$ (`zeros (0.0)`) 及下游激活函数增益推导，并同步更新 `examples/` 与可视化器下的全部模型图 JSON。

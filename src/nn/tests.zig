@@ -1233,7 +1233,7 @@ test "Conv2D with stride and padding forward and backward (im2col + sgemm)" {
     var prng = std.Random.DefaultPrng.init(2026);
     const random = prng.random();
 
-    var conv = try Conv2D.initWithConfig(allocator, 1, 2, 3, 2, 1);
+    var conv = try Conv2D.init(allocator, 1, 2, 3, .{ .stride = 2, .padding = 1 });
     conv.resetParameters(random, .{});
     defer nn.deinitModel(&conv, allocator);
     @memset(conv.weight.data[0..9], 1.0);

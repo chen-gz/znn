@@ -141,7 +141,7 @@ test "Graph.computeParamFans derives fan_in and fan_out from the consuming op" {
 
     var linear = try Linear.init(allocator, 5, 7);
     defer nn.deinitModel(&linear, allocator);
-    var conv = try nn.Conv2D.init(allocator, 3, 8, 3);
+    var conv = try nn.Conv2D.init(allocator, 3, 8, 3, .{});
     defer nn.deinitModel(&conv, allocator);
     var deconv = try nn.ConvTranspose2D.init(allocator, 6, 2, 3, 1, 0, true);
     defer nn.deinitModel(&deconv, allocator);
@@ -410,7 +410,7 @@ test "Built-in library initialization never marks is_custom_initialized" {
     try std.testing.expect(!lin.weight.is_custom_initialized);
     try std.testing.expect(!lin.bias.is_custom_initialized);
 
-    var conv = try nn.Conv2D.init(allocator, 3, 4, 3);
+    var conv = try nn.Conv2D.init(allocator, 3, 4, 3, .{});
     defer nn.deinitModel(&conv, allocator);
     conv.resetParameters(random, .{});
     try std.testing.expect(!conv.weight.is_custom_initialized);
