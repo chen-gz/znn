@@ -134,7 +134,7 @@ In Zig, `pub fn foo(self: *Tensor, ...)` inside `struct Tensor` is identical in 
 | **`src/bench/`** | `src/bench.zig` (62,889 B / 61.42 KiB) | `src/bench.zig` | 29,856 B (29.16 KiB, 856 lines) | `BenchmarkStats`, `getTimeNs`, `BenchmarkConfig`, `BenchmarkRunner`, `runGemmBenchmarks`, `runTensorOpBenchmarks`, `runActivationBenchmarks`, `runAllBenchmarks`, unit test, and re-exports of `bench/suites.zig`. |
 | | | `src/bench/suites.zig` | 33,645 B (32.86 KiB, 891 lines) | Domain benchmark suites: `runLayerBenchmarks`, `runModelBenchmarks`, `runOptimizerBenchmarks`, `runTokenizerBenchmarks`. |
 | **`src/nn/tests*`** | `src/nn/tests.zig` (113,206 B / 110.55 KiB) | `src/nn/tests.zig` | 48,722 B (47.58 KiB, 1,331 lines) | Core layers, normalization, recurrent, Transformer/GPT/MoE/MLA/LoRA, alignment losses, sampling, reflection, and Safetensors tests; imports `tests_init.zig` and `tests_vis.zig`. |
-| | | `src/nn/tests_init.zig` | 14,327 B (13.99 KiB, 322 lines) | Weight initialization strategies, `Sequential.autoInit`, `detectNextActivation`, and `Graph.initWeights` unit tests. |
+| | | `src/nn/tests_init.zig` | 14,327 B (13.99 KiB, 322 lines) | Weight initialization strategies, graph-based `nn.initModel` (external `customInit` first, then `Graph.initWeights`), and `Graph.initWeights` unit tests. |
 | | | `src/nn/tests_vis.zig` | 51,368 B (50.16 KiB, 1,191 lines) | Visualization, explicit module scopes, golden edge sets (Schema 2.0), JSON Schema conformance, enum parity, and 18 canonical book models export validation. |
 
 ---

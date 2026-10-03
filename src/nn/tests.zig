@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_init = @import("testing_init.zig");
 const autodiff = @import("../autodiff.zig");
 const tensor = @import("../tensor.zig");
 const engine = @import("../engine.zig");
@@ -41,8 +42,6 @@ const zeroGradModel = nn.zeroGradModel;
 const collectParameters = nn.collectParameters;
 const Sequential = nn.Sequential;
 const sequential = nn.sequential;
-const autoSequential = nn.autoSequential;
-const detectNextActivation = nn.detectNextActivation;
 
 const ReLU = nn.ReLU;
 const GELU = nn.GELU;
@@ -123,7 +122,7 @@ test "Embedding Module" {
     const random = prng.random();
 
     var emb = try Embedding.init(arena, 10, 4);
-    nn.initModel(&emb, random);
+    emb.resetParameters(random, .{});
     defer emb.deinit(arena);
 
     var x = try createPersistentTensor(arena, 2, 3, false);
@@ -143,7 +142,7 @@ test "Embedding Module Graph Mode" {
     const random = prng.random();
 
     var emb = try Embedding.init(arena, 10, 4);
-    nn.initModel(&emb, random);
+    emb.resetParameters(random, .{});
     defer emb.deinit(arena);
 
     var graph = autodiff.Graph.init(arena);
@@ -213,7 +212,7 @@ test "MLP Module" {
     const random = prng.random();
 
     var mlp = try MLP.init(arena, 4, 8);
-    nn.initModel(&mlp, random);
+    try testing_init.initFromOnes(&mlp, arena, random, &.{ 2, 4 });
     defer mlp.deinit(arena);
 
     const x_3d = try arena.create(Tensor);
@@ -262,7 +261,7 @@ test "CausalSelfAttention Module" {
     const random = prng.random();
 
     var attn = try CausalSelfAttention.init(arena, 8, 2);
-    nn.initModel(&attn, random);
+    try testing_init.initFromOnes(&attn, arena, random, &.{ 1, 2, 8 });
     defer attn.deinit(arena);
 
     const x_3d = try arena.create(Tensor);
@@ -319,7 +318,7 @@ test "GPT Module" {
     };
 
     var gpt = try GPT(config).init(arena);
-    nn.initModel(&gpt, random);
+    try testing_init.initFromOnes(&gpt, arena, random, &.{ 1, 2 });
     defer deinitModel(&gpt, arena);
 
     const x = try arena.create(Tensor);
@@ -375,7 +374,7 @@ test "GPT Module Save and Load" {
     };
 
     var gpt = try GPT(config).init(arena);
-    nn.initModel(&gpt, random);
+    try testing_init.initFromOnes(&gpt, arena, random, &.{ 1, 2 });
     defer deinitModel(&gpt, arena);
 
     try saveModel(&gpt, std.testing.io, "test_gpt_model.safetensors", arena);
@@ -384,7 +383,7 @@ test "GPT Module Save and Load" {
     }
 
     var gpt2 = try GPT(config).init(arena);
-    nn.initModel(&gpt2, random);
+    try testing_init.initFromOnes(&gpt2, arena, random, &.{ 1, 2 });
     defer deinitModel(&gpt2, arena);
 
     try loadModel(&gpt2, std.testing.io, "test_gpt_model.safetensors", arena);
@@ -405,7 +404,7 @@ test "Sequential container chaining" {
         try Linear.init(allocator, 20, 5),
     });
     defer seq.deinit(allocator);
-    nn.initModel(&seq, random);
+    try testing_init.initFromOnes(&seq, allocator, random, &.{ 2, 10 });
 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
@@ -446,7 +445,7 @@ test "SwiGLU forward and backward autograd" {
     const random = prng.random();
 
     var swiglu = try SwiGLU.init(allocator, 4, 8);
-    nn.initModel(&swiglu, random);
+    try testing_init.initFromOnes(&swiglu, allocator, random, &.{ 2, 4 });
     defer swiglu.deinit(allocator);
 
     var graph = autodiff.Graph.init(allocator);
@@ -480,7 +479,7 @@ test "LoRALinear forward and fuse" {
     const random = prng.random();
 
     var lora = try LoRALinear.init(allocator, 4, 4, 2, 4.0);
-    nn.initModel(&lora, random);
+    lora.resetParameters(random, .{});
     defer lora.deinit(allocator);
 
     var graph = autodiff.Graph.init(allocator);
@@ -736,7 +735,7 @@ test "RNNCell and RNN forward and backward autograd" {
 
     // 1. RNNCell test
     var cell = try RNNCell.init(allocator, 4, 3);
-    nn.initModel(&cell, random);
+    try testing_init.initRecurrent(&cell, allocator, random);
     defer cell.deinit(allocator);
 
     var graph = autodiff.Graph.init(allocator);
@@ -758,7 +757,7 @@ test "RNNCell and RNN forward and backward autograd" {
 
     // 2. RNN sequence container test
     var rnn = try RNN.init(allocator, 4, 3);
-    nn.initModel(&rnn, random);
+    try testing_init.initRecurrent(&rnn, allocator, random);
     defer rnn.deinit(allocator);
 
     var graph_seq = autodiff.Graph.init(allocator);
@@ -791,7 +790,7 @@ test "LSTMCell and LSTM forward and backward autograd" {
 
     // 1. LSTMCell test
     var cell = try LSTMCell.init(allocator, 4, 3);
-    nn.initModel(&cell, random);
+    cell.resetParameters(random, .{});
     defer cell.deinit(allocator);
 
     // Verify forget gate bias is initialized to 1.0
@@ -820,7 +819,7 @@ test "LSTMCell and LSTM forward and backward autograd" {
 
     // 2. LSTM sequence container test
     var lstm = try LSTM.init(allocator, 4, 3);
-    nn.initModel(&lstm, random);
+    try testing_init.initRecurrent(&lstm, allocator, random);
     defer lstm.deinit(allocator);
 
     var graph_seq = autodiff.Graph.init(allocator);
@@ -853,7 +852,7 @@ test "StackedLSTM forward and backward autograd" {
     const random = prng.random();
 
     var stacked = try StackedLSTM.init(allocator, 4, 3, 2);
-    nn.initModel(&stacked, random);
+    try testing_init.initRecurrent(&stacked, allocator, random);
     defer stacked.deinit(allocator);
 
     try std.testing.expectEqual(2, stacked.num_layers);
@@ -889,7 +888,7 @@ test "GRUCell and GRU forward and backward autograd" {
 
     // 1. GRUCell test
     var cell = try GRUCell.init(allocator, 4, 3);
-    nn.initModel(&cell, random);
+    try testing_init.initRecurrent(&cell, allocator, random);
     defer cell.deinit(allocator);
 
     var graph = autodiff.Graph.init(allocator);
@@ -911,7 +910,7 @@ test "GRUCell and GRU forward and backward autograd" {
 
     // 2. GRU sequence container test
     var gru = try GRU.init(allocator, 4, 3);
-    nn.initModel(&gru, random);
+    try testing_init.initRecurrent(&gru, allocator, random);
     defer gru.deinit(allocator);
 
     var graph_seq = autodiff.Graph.init(allocator);
@@ -1055,7 +1054,7 @@ test "Comptime reflection supports slice modules, optional bias, and frozen LoRA
 
     // 1. MoELayer ([]MLP fields: routed_experts and shared_experts)
     var moe = try MoELayer.init(allocator, 4, 8, 3, 1, 2);
-    nn.initModel(&moe, random);
+    try testing_init.initFromOnes(&moe, allocator, random, &.{ 2, 4 });
     defer deinitModel(&moe, allocator);
     const moe_params = try collectParameters(&moe, allocator);
     defer allocator.free(moe_params);
@@ -1067,7 +1066,7 @@ test "Comptime reflection supports slice modules, optional bias, and frozen LoRA
 
     // 2. StackedLSTM ([]LSTMCell field: layers)
     var stacked_lstm = try StackedLSTM.init(allocator, 4, 6, 2);
-    nn.initModel(&stacked_lstm, random);
+    try testing_init.initRecurrent(&stacked_lstm, allocator, random);
     defer deinitModel(&stacked_lstm, allocator);
     const lstm_params = try collectParameters(&stacked_lstm, allocator);
     defer allocator.free(lstm_params);
@@ -1076,7 +1075,7 @@ test "Comptime reflection supports slice modules, optional bias, and frozen LoRA
 
     // 3. ConvTranspose2D (?*Tensor field: bias)
     var deconv = try ConvTranspose2D.init(allocator, 2, 3, 2, 1, 0, true);
-    nn.initModel(&deconv, random);
+    deconv.resetParameters(random, .{});
     defer deinitModel(&deconv, allocator);
     const deconv_params = try collectParameters(&deconv, allocator);
     defer allocator.free(deconv_params);
@@ -1084,7 +1083,7 @@ test "Comptime reflection supports slice modules, optional bias, and frozen LoRA
 
     // 4. LoRALinear (frozen weight, trainable lora_a, lora_b, and optional bias)
     var lora = try LoRALinear.initWithBias(allocator, 4, 3, 2, 4.0, true);
-    nn.initModel(&lora, random);
+    lora.resetParameters(random, .{});
     defer deinitModel(&lora, allocator);
     const lora_params = try collectParameters(&lora, allocator);
     defer allocator.free(lora_params);
@@ -1111,7 +1110,9 @@ test "Safetensors serialization supports slice modules, optional bias, and out-o
         .lora = try LoRALinear.initWithBias(allocator, 4, 3, 2, 2.0, true),
     };
     defer deinitModel(&m1, allocator);
-    nn.initModel(&m1, random);
+    try testing_init.initFromOnes(&m1.moe, allocator, random, &.{ 2, 4 });
+    m1.deconv.resetParameters(random, .{});
+    m1.lora.resetParameters(random, .{});
     m1.deconv.bias.?.data[0] = 7.25;
     m1.lora.bias.?.data[1] = -3.5;
     m1.moe.routed_experts[1].c_fc.weight.data[0] = 42.0;
@@ -1137,7 +1138,7 @@ test "Safetensors serialization supports slice modules, optional bias, and out-o
 
     // 2. Out-of-order physical offsets (bias stored before weight in file) + __metadata__
     var lin = try Linear.init(allocator, 2, 2);
-    nn.initModel(&lin, random);
+    lin.resetParameters(random, .{});
     defer lin.deinit(allocator);
 
     const header_json =
@@ -1174,45 +1175,45 @@ test "Recurrent and Transformer modules naming and Graph scope registration" {
     defer graph.deinit();
 
     var rnn = try RNN.init(allocator, 4, 4);
-    nn.initModel(&rnn, random);
+    try testing_init.initRecurrent(&rnn, allocator, random);
     defer rnn.deinit(allocator);
     rnn.setName("enc_rnn");
     try std.testing.expectEqualStrings("enc_rnn", rnn.getName().?);
     try std.testing.expectEqualStrings("enc_rnn.cell", rnn.cell.getName().?);
 
     var lstm = try LSTM.init(allocator, 4, 4);
-    nn.initModel(&lstm, random);
+    try testing_init.initRecurrent(&lstm, allocator, random);
     defer lstm.deinit(allocator);
     lstm.setName("enc_lstm");
     try std.testing.expectEqualStrings("enc_lstm", lstm.getName().?);
 
     var slstm = try StackedLSTM.init(allocator, 4, 4, 2);
-    nn.initModel(&slstm, random);
+    try testing_init.initRecurrent(&slstm, allocator, random);
     defer slstm.deinit(allocator);
     slstm.setName("deep_lstm");
     try std.testing.expectEqualStrings("deep_lstm.layer_0", slstm.layers[0].getName().?);
 
     var gru = try GRU.init(allocator, 4, 4);
-    nn.initModel(&gru, random);
+    try testing_init.initRecurrent(&gru, allocator, random);
     defer gru.deinit(allocator);
     gru.setName("enc_gru");
     try std.testing.expectEqualStrings("enc_gru", gru.getName().?);
 
     var moe = try MoELayer.init(allocator, 4, 8, 2, 1, 1);
-    nn.initModel(&moe, random);
+    try testing_init.initFromOnes(&moe, allocator, random, &.{ 2, 4 });
     defer moe.deinit(allocator);
     moe.setName("ffn_moe");
     try std.testing.expectEqualStrings("ffn_moe.gate", moe.gate.getName().?);
     try std.testing.expectEqualStrings("ffn_moe.routed_0", moe.routed_experts[0].getName().?);
 
     var mla = try MLALayer.init(allocator, 8, 2, 4, 4, 2);
-    nn.initModel(&mla, random);
+    try testing_init.initFromOnes(&mla, allocator, random, &.{ 1, 2, 8 });
     defer mla.deinit(allocator);
     mla.setName("attn_mla");
     try std.testing.expectEqualStrings("attn_mla.q_proj", mla.q_proj.getName().?);
 
     var lora = try LoRALinear.initWithBias(allocator, 4, 4, 2, 4.0, true);
-    nn.initModel(&lora, random);
+    lora.resetParameters(random, .{});
     defer lora.deinit(allocator);
     lora.setName("proj_lora");
     try std.testing.expectEqualStrings("proj_lora.lora_a", lora.lora_a.getName().?);
@@ -1230,7 +1231,7 @@ test "Conv2D with stride and padding forward and backward (im2col + sgemm)" {
     const random = prng.random();
 
     var conv = try Conv2D.initWithConfig(allocator, 1, 2, 3, 2, 1);
-    nn.initModel(&conv, random);
+    conv.resetParameters(random, .{});
     defer conv.deinit(allocator);
     @memset(conv.weight.data[0..9], 1.0);
     @memset(conv.weight.data[9..18], 2.0);
@@ -1275,7 +1276,7 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
 
     // 3 routed experts, 0 shared experts, top_k = 1
     var moe = try MoELayer.init(allocator, 4, 8, 3, 0, 1);
-    nn.initModel(&moe, random);
+    try testing_init.initFromOnes(&moe, allocator, random, &.{ 2, 4 });
     defer moe.deinit(allocator);
 
     // Force gate weights so expert 0 always wins for positive inputs
@@ -1338,7 +1339,7 @@ test "Recurrent zero initial states are named module buffers" {
 
     {
         var m = try LSTM.init(allocator, 4, 3);
-        nn.initModel(&m, random);
+        try testing_init.initRecurrent(&m, allocator, random);
         defer m.deinit(allocator);
         m.setName("lstm");
         var g = autodiff.Graph.init(allocator);
@@ -1351,7 +1352,7 @@ test "Recurrent zero initial states are named module buffers" {
 
     {
         var m = try StackedLSTM.init(allocator, 4, 3, 2);
-        nn.initModel(&m, random);
+        try testing_init.initRecurrent(&m, allocator, random);
         defer m.deinit(allocator);
         m.setName("stacked_lstm");
         var g = autodiff.Graph.init(allocator);

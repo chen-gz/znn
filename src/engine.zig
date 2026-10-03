@@ -246,7 +246,12 @@ test "engine trainClassificationStep and evalClassificationStep" {
 
     const Model = nn.Module(SimpleMLP);
     var model = Model.init(arena, try SimpleMLP.init(arena));
-    model.initParameters(random);
+    {
+        var init_graph = autodiff.Graph.init(arena);
+        defer init_graph.deinit();
+        _ = try model.forward(&init_graph, try init_graph.ones(&.{ 1, 4 }, false));
+        try model.initParameters(&init_graph, random);
+    }
     defer model.deinit();
 
     var optim = try @import("optim.zig").SGDOptimizer.init(arena, &model, .{ .lr = 0.1 });
@@ -314,7 +319,12 @@ test "engine trainClassificationEpoch and evaluateClassification with DataLoader
 
     const Model = nn.Module(SimpleMLP);
     var model = Model.init(arena, try SimpleMLP.init(arena));
-    model.initParameters(random);
+    {
+        var init_graph = autodiff.Graph.init(arena);
+        defer init_graph.deinit();
+        _ = try model.forward(&init_graph, try init_graph.ones(&.{ 1, 4 }, false));
+        try model.initParameters(&init_graph, random);
+    }
     defer model.deinit();
 
     var optim = try @import("optim.zig").AdamOptimizer.init(arena, &model, .{ .lr = 0.01 });

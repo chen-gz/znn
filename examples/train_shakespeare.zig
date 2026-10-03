@@ -71,8 +71,11 @@ pub fn main(init: std.process.Init) !void {
 
     const GPTModule = nn.Module(nn.GPT(gpt_config));
     var model = GPTModule.init(allocator, try nn.GPT(gpt_config).init(allocator));
-    model.initParameters(random);
     defer model.deinit();
+    // 用一条长度为 block_size 的样本 token 序列建立前向计算图，依据计算图初始化参数
+    const init_ids = try zig_ml.tensor.zeros(allocator, &.{ 1, block_size });
+    defer zig_ml.tensor.free(allocator, init_ids);
+    try model.initParametersWithSample(random, .{init_ids});
 
     // 4. 优化器与学习率调度器
     var optimizer = try optim.AdamWOptimizer.init(allocator, &model, .{

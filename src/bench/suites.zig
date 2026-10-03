@@ -1,4 +1,5 @@
 const std = @import("std");
+const testing_init = @import("../nn/testing_init.zig");
 const bench = @import("../bench.zig");
 const BenchmarkRunner = bench.BenchmarkRunner;
 const tensor = @import("../tensor.zig");
@@ -22,7 +23,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var linear = try nn.Linear.init(alloc, 784, 128);
-                nn.initModel(&linear, rnd);
+                linear.resetParameters(rnd, .{});
                 const x = try tensor.zeros(alloc, &.{ 64, 784 });
                 @memset(x.data, 0.1);
                 return .{
@@ -64,7 +65,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var linear = try nn.Linear.init(alloc, 784, 128);
-                nn.initModel(&linear, rnd);
+                linear.resetParameters(rnd, .{});
                 const x_data = try alloc.alloc(f32, 64 * 784);
                 @memset(x_data, 0.1);
                 return .{
@@ -113,7 +114,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var conv = try nn.Conv2D.init(alloc, 1, 16, 3);
-                nn.initModel(&conv, rnd);
+                conv.resetParameters(rnd, .{});
                 const x = try tensor.zeros(alloc, &.{ 32, 1, 28, 28 });
                 @memset(x.data, 0.1);
                 return .{
@@ -157,7 +158,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var conv = try nn.Conv2D.init(alloc, 1, 16, 3);
-                nn.initModel(&conv, rnd);
+                conv.resetParameters(rnd, .{});
                 const x_data = try alloc.alloc(f32, 32 * 1 * 28 * 28);
                 @memset(x_data, 0.1);
                 return .{
@@ -247,7 +248,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var swiglu = try nn.SwiGLU.init(alloc, 128, 256);
-                nn.initModel(&swiglu, rnd);
+                try testing_init.initFromOnes(&swiglu, alloc, rnd, &.{ 2, 128 });
                 const x_data = try alloc.alloc(f32, 4 * 64 * 128);
                 @memset(x_data, 0.2);
                 return .{
@@ -295,7 +296,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var attn = try nn.CausalSelfAttention.init(alloc, 128, 4);
-                nn.initModel(&attn, rnd);
+                try testing_init.initFromOnes(&attn, alloc, rnd, &.{ 1, 2, 128 });
                 const x = try tensor.zeros(alloc, &.{ 4, 64, 128 });
                 @memset(x.data, 0.1);
                 return .{
@@ -337,7 +338,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var attn = try nn.CausalSelfAttention.init(alloc, 128, 4);
-                nn.initModel(&attn, rnd);
+                try testing_init.initFromOnes(&attn, alloc, rnd, &.{ 1, 2, 128 });
                 const x_data = try alloc.alloc(f32, 4 * 64 * 128);
                 @memset(x_data, 0.1);
                 return .{
@@ -385,7 +386,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var block = try nn.TransformerBlock.init(alloc, 128, 4);
-                nn.initModel(&block, rnd);
+                try testing_init.initFromOnes(&block, alloc, rnd, &.{ 1, 2, 128 });
                 const x_data = try alloc.alloc(f32, 4 * 64 * 128);
                 @memset(x_data, 0.1);
                 return .{
@@ -445,13 +446,13 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var fc1 = try nn.Linear.init(alloc, 784, 128);
-                nn.initModel(&fc1, rnd);
+                fc1.resetParameters(rnd, .{});
                 errdefer fc1.deinit(alloc);
                 var fc2 = try nn.Linear.init(alloc, 128, 64);
-                nn.initModel(&fc2, rnd);
+                fc2.resetParameters(rnd, .{});
                 errdefer fc2.deinit(alloc);
                 var fc3 = try nn.Linear.init(alloc, 64, 10);
-                nn.initModel(&fc3, rnd);
+                fc3.resetParameters(rnd, .{});
                 errdefer fc3.deinit(alloc);
 
                 const ModelWrap = struct {
@@ -541,16 +542,16 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var conv1 = try nn.Conv2D.init(alloc, 1, 4, 3);
-                nn.initModel(&conv1, rnd);
+                conv1.resetParameters(rnd, .{});
                 errdefer conv1.deinit(alloc);
                 var conv2 = try nn.Conv2D.init(alloc, 4, 8, 3);
-                nn.initModel(&conv2, rnd);
+                conv2.resetParameters(rnd, .{});
                 errdefer conv2.deinit(alloc);
                 var conv3 = try nn.Conv2D.init(alloc, 8, 16, 3);
-                nn.initModel(&conv3, rnd);
+                conv3.resetParameters(rnd, .{});
                 errdefer conv3.deinit(alloc);
                 var fc1 = try nn.Linear.init(alloc, 144, 10);
-                nn.initModel(&fc1, rnd);
+                fc1.resetParameters(rnd, .{});
                 errdefer fc1.deinit(alloc);
 
                 const ModelWrap = struct {
@@ -653,7 +654,7 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
                 var block = try nn.TransformerBlock.init(alloc, 128, 4);
-                nn.initModel(&block, rnd);
+                try testing_init.initFromOnes(&block, alloc, rnd, &.{ 1, 2, 128 });
                 errdefer block.deinit(alloc);
 
                 const ModelWrap = struct {
@@ -720,7 +721,7 @@ pub fn runOptimizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
             pub fn init(alloc: std.mem.Allocator) !@This() {
                 var prng = std.Random.DefaultPrng.init(42);
                 var linear = try nn.Linear.init(alloc, 1000, 1000);
-                nn.initModel(&linear, prng.random());
+                linear.resetParameters(prng.random(), .{});
                 errdefer linear.deinit(alloc);
 
                 @memset(linear.weight.grad, 0.05);
@@ -766,7 +767,7 @@ pub fn runOptimizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
             pub fn init(alloc: std.mem.Allocator) !@This() {
                 var prng = std.Random.DefaultPrng.init(42);
                 var linear = try nn.Linear.init(alloc, 1000, 1000);
-                nn.initModel(&linear, prng.random());
+                linear.resetParameters(prng.random(), .{});
                 errdefer linear.deinit(alloc);
 
                 @memset(linear.weight.grad, 0.05);

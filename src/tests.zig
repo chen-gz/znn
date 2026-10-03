@@ -1,4 +1,5 @@
 const root = @import("root.zig");
+const testing_init = @import("nn/testing_init.zig");
 const VERSION = root.VERSION;
 const version = root.version;
 const tensor = root.tensor;
@@ -20,7 +21,6 @@ const calculateGain = root.calculateGain;
 const InitMethod = root.InitMethod;
 const InitOptions = root.InitOptions;
 const initWeights = root.initWeights;
-const autoSequential = root.autoSequential;
 const GenericTensor = root.GenericTensor;
 const TensorOf = root.TensorOf;
 const FloatTensor = root.FloatTensor;
@@ -376,7 +376,7 @@ test "AdamOptimizer model parameter updates" {
 
     var prng = std.Random.DefaultPrng.init(42);
     var linear = try nn.Linear.init(allocator, 2, 2);
-    nn.initModel(&linear, prng.random());
+    linear.resetParameters(prng.random(), .{});
     defer linear.deinit(allocator);
 
     var opt = try optim.AdamOptimizer.init(allocator, &linear, .{
@@ -626,7 +626,7 @@ test "End-to-End LLM Pipeline integration demo" {
 
     // 2. SwiGLU MLP
     var swiglu = try nn.SwiGLU.init(allocator, 8, 16);
-    nn.initModel(&swiglu, random);
+    try testing_init.initFromOnes(&swiglu, allocator, random, &.{ 2, 8 });
     defer swiglu.deinit(allocator);
 
     // 3. AdamW Optimizer with Cosine Scheduler
@@ -754,7 +754,7 @@ test "GQA CausalSelfAttention and KVCache forwardInference" {
     const head_dim = n_embd / n_head; // 4
 
     var gqa_attn = try nn.CausalSelfAttention.initGQA(allocator, n_embd, n_head, num_kv_heads);
-    nn.initModel(&gqa_attn, random);
+    try testing_init.initFromOnes(&gqa_attn, allocator, random, &.{ 1, 2, n_embd });
     defer gqa_attn.deinit(allocator);
 
     // 1. Test Autograd Forward and Backward with GQA
@@ -910,7 +910,7 @@ test "MoELayer Top-K routing and autograd" {
         num_shared_experts,
         top_k,
     );
-    nn.initModel(&moe, random);
+    try testing_init.initFromOnes(&moe, allocator, random, &.{ 2, dim });
     defer moe.deinit(allocator);
 
     // 1. Eager mode test on 3D input [2, 3, 8]
@@ -975,7 +975,7 @@ test "MLALayer with MLACache matrix absorption inference" {
     const d_r: usize = 4;
 
     var mla = try nn.MLALayer.init(allocator, dim, n_head, head_dim, d_c, d_r);
-    nn.initModel(&mla, random);
+    try testing_init.initFromOnes(&mla, allocator, random, &.{ 1, 2, dim });
     defer mla.deinit(allocator);
 
     // 1. Eager mode full forward
@@ -1082,7 +1082,7 @@ test "ConvTranspose2D eager and autograd backward" {
         padding,
         true,
     );
-    nn.initModel(&conv_t, random);
+    conv_t.resetParameters(random, .{});
     defer conv_t.deinit(allocator);
 
     // 1. Eager mode on input [1, 1, 2, 2] -> expected [1, 2, 4, 4]
@@ -1139,7 +1139,7 @@ test "ConvTranspose2D eager and autograd backward" {
         1,
         false,
     );
-    nn.initModel(&upsample_conv, random);
+    upsample_conv.resetParameters(random, .{});
     defer upsample_conv.deinit(allocator);
 
     const x_up = try tensor.zeros(allocator, &.{ 1, 1, 3, 3 });
@@ -1216,11 +1216,11 @@ test "GAN adversarial training step" {
     };
 
     var gen = try TinyGenerator.init(allocator);
-    nn.initModel(&gen, random);
+    try testing_init.initFromOnes(&gen, allocator, random, &.{ 2, 2 });
     defer gen.deinit(allocator);
 
     var disc = try TinyDiscriminator.init(allocator);
-    nn.initModel(&disc, random);
+    try testing_init.initFromOnes(&disc, allocator, random, &.{ 2, 2 });
     defer disc.deinit(allocator);
 
     var opt_g = try optim.AdamOptimizer.init(allocator, &gen, .{ .lr = 0.01, .beta1 = 0.5, .beta2 = 0.999 });

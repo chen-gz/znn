@@ -111,18 +111,6 @@ pub fn isNormScaleParam(self: *const Graph, t: *const Tensor) bool {
     return false;
 }
 
-pub fn isForgetGateBiasParam(self: *const Graph, t: *const Tensor) bool {
-    if (t.name) |n| {
-        if (std.mem.endsWith(u8, n, "w_ih_f.bias")) return true;
-    }
-    for (self.ops.items) |op| {
-        for (op.inputs) |inp| {
-            if (inp == t and std.mem.endsWith(u8, op.scope, "w_ih_f")) return true;
-        }
-    }
-    return false;
-}
-
 pub fn isEmbeddingParam(self: *const Graph, t: *const Tensor) bool {
     for (self.ops.items) |op| {
         if (op.op_type == .Embedding and op.inputs.len >= 1 and op.inputs[0] == t) return true;
@@ -160,8 +148,10 @@ pub fn describeAutoGraphParam(self: *Graph, t: *Tensor, strat_buf: *[64]u8) Auto
         if (isNormScaleParam(self, t)) {
             return .{ .act_name = "scale", .strategy = "ones (1.0)" };
         }
-        if (isForgetGateBiasParam(self, t)) {
-            return .{ .act_name = "bias", .strategy = "ones (1.0)" };
+        if (t.init_constant) |value| {
+            if (value == 1.0) return .{ .act_name = "bias", .strategy = "ones (1.0)" };
+            const strat = std.fmt.bufPrint(strat_buf, "constant ({d})", .{value}) catch "constant";
+            return .{ .act_name = "bias", .strategy = strat };
         }
         return .{ .act_name = "bias", .strategy = "zeros (0.0)" };
     }
@@ -201,9 +191,14 @@ pub fn initSingleTensor(self: *Graph, t: *Tensor, random: std.Random, comptime i
     // 如果已经被库外用户代码的 customInit 初始化过，则坚决跳过，绝不覆盖！
     if (!t.requires_grad or t.is_custom_initialized or t.creator != null) return;
 
-    // 1. 如果是 1D 参数向量 (归一化缩放因子 gamma 与 LSTM 遗忘门偏置初始化为 1.0，其余偏置向量初始化为 0.0)
+    // 1. 如果是 1D 参数向量 (带结构性常量的参数按常量填充，如 LSTM 遗忘门偏置 1.0；
+    //    归一化缩放因子 gamma 初始化为 1.0；其余偏置向量初始化为 0.0)
     if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
-        if (isNormScaleParam(self, t) or isForgetGateBiasParam(self, t)) {
+        if (t.init_constant) |value| {
+            @memset(t.data, value);
+            return;
+        }
+        if (isNormScaleParam(self, t)) {
             @memset(t.data, 1.0);
             return;
         }

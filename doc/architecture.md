@@ -189,41 +189,56 @@ flowchart LR
   - **He (Kaiming) Normal / Uniform**：针对深层 ReLU / GELU 网络的方差平衡；
   - **Xavier (Glorot) Normal / Uniform**：针对 Sigmoid / Tanh 的对称双端收敛；
   - **LeCun Normal**：自归一化神经网络推荐；
-  - **两阶段构造：`init` 只分配，`nn.initModel` 统一初始化**：所有库层（`Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、RNN / LSTM / GRU 系列、`CausalSelfAttention`、`MLP`、`SwiGLU`、`MoELayer`、`MLALayer`、`TransformerBlock`、`GPT`、`LoRALinear` 等）的 `init` 不接收也不消耗随机数，只分配参数内存（全零）并设置与随机无关的结构默认值（归一化层 γ = 1 / β = 0、LSTM 遗忘门偏置 1.0）。参数数值统一由以下入口设置：
-    - `nn.initModel(&model, random)`（或 `Module(T).initParameters(random)`）：编译期反射逐模块分派。模块类型定义了 `customInit` 时调用它，并将该模块全部可训练参数标记为 `is_custom_initialized = true`（`CUSTOM_INIT`），使其在 `Graph.initWeights` 全局初始化时不会被覆盖；`customInit` 支持确定性签名 `fn(self: *Self) void`（常量、预设矩阵等，不消耗随机数）与随机签名 `fn(self: *Self, random: std.Random) void`。未定义 `customInit` 时依次回退到内置 `resetParameters(random, .{})`、`autoInit(random)`，或递归初始化各字段（子模块可在任意层级定义 `customInit`）。
-    - `Layer.resetParameters(random, options)`：在已分配张量上按 `InitOptions` 重新填充，可在 `customInit` 中复用库内初始化算法。
-    - `Graph.initWeights`：前向图构建后按下游激活函数推导增益（`AUTO_GRAPH`），跳过 `CUSTOM_INIT` 参数。
+  - **两阶段构造：`init` 只分配，前向计算图建立后由 `nn.initModel` 统一初始化**：所有库层（`Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、RNN / LSTM / GRU 系列、`CausalSelfAttention`、`MLP`、`SwiGLU`、`MoELayer`、`MLALayer`、`TransformerBlock`、`GPT`、`LoRALinear` 等）的 `init` 不接收也不消耗随机数，只分配参数内存（全零）并设置与随机无关的结构默认值（归一化层 γ = 1 / β = 0、LSTM 遗忘门偏置 1.0，后者同时记录在 `Tensor.init_constant` 中）。参数数值的初始化依赖网络拓扑与激活函数，因此必须在前向计算图建立之后进行：
+    - `nn.initModel(&model, &graph, random)`（或 `Module(T).initParameters(&graph, random)`）：`graph` 是用样本输入执行过一次 `model.forward` 的可记录计算图（`Graph.init`；`Graph.initNoGrad` 不记录算子，返回 `error.GraphNotRecordingOps`）。第一步，编译期反射递归查找定义了 `customInit` 的库外模块并调用，将其全部可训练参数标记为 `is_custom_initialized = true`（`CUSTOM_INIT`）；`customInit` 支持确定性签名 `fn(self: *Self) void`（常量、预设矩阵等，不消耗随机数）与随机签名 `fn(self: *Self, random: std.Random) void`。第二步，调用 `Graph.initWeights(random)`，对其余参数沿计算图探测下游消费算子与激活函数推导初始化策略（`AUTO_GRAPH`）：ReLU / GELU / SiLU / LeakyReLU → He Normal（按增益缩放）、Tanh / Sigmoid → Xavier Normal、SELU → LeCun Normal、Embedding → Normal(0, 0.02)、LoRA B → 0、归一化 γ → 1、带 `init_constant` 的参数 → 该常量、其余偏置 → 0。Debug 构建下，未被计算图触达且未自定义初始化的可训练参数会通过 `std.log.warn` 报告（例如样本未路由到的 MoE 专家）。
+    - `nn.initModelWithSample(&model, allocator, random, .{x})`（或 `Module(T).initParametersWithSample(random, .{x})`）：便捷入口，内部用样本参数元组建立一次前向计算图后调用 `nn.initModel`。
+    - `Layer.resetParameters(random, options)`：库层在已分配张量上按 `InitOptions` 重新填充的标准算法，供库外代码显式指定初始化（例如在 `customInit` 中复用，或单独初始化不经过计算图的冻结参数）。
     - 内置库层不定义 `customInit`；`customInit` 仅由库外用户模块定义。
 
     ```zig
-    const MyModel = struct {
+    // 库外用户模块：通过 customInit 指定确定性初始化
+    const Head = struct {
         fc: nn.Linear,
-        head: nn.Linear,
 
-        pub fn init(allocator: std.mem.Allocator) !MyModel {
-            return .{ .fc = try nn.Linear.init(allocator, 16, 32), .head = try nn.Linear.init(allocator, 32, 4) };
+        pub fn forward(self: *const Head, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+            return self.fc.forward(graph, x);
         }
 
-        // 确定性自定义初始化：不使用随机数
-        pub fn customInit(self: *MyModel) void {
-            @memset(self.fc.weight.data, 0.01);
+        pub fn customInit(self: *Head) void {
+            @memset(self.fc.weight.data, 0.0);
             @memset(self.fc.bias.data, 0.0);
-            @memset(self.head.weight.data, 0.0);
-            @memset(self.head.bias.data, 0.0);
+        }
+    };
+
+    const MyModel = struct {
+        fc: nn.Linear, // 未自定义：依据计算图中下游的 ReLU 采用 He Normal
+        head: Head,    // 自定义：customInit 设置的数值不会被覆盖
+
+        pub fn init(allocator: std.mem.Allocator) !MyModel {
+            return .{ .fc = try nn.Linear.init(allocator, 16, 32), .head = .{ .fc = try nn.Linear.init(allocator, 32, 4) } };
+        }
+
+        pub fn forward(self: *const MyModel, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+            return self.head.forward(graph, try graph.relu(try self.fc.forward(graph, x)));
         }
     };
 
     // 方式一：直接使用模型结构体
     var model = try MyModel.init(allocator); // 只分配内存
     defer nn.deinitModel(&model, allocator);
-    nn.initModel(&model, prng.random());     // 调用 customInit 并标记 CUSTOM_INIT
+    {
+        var graph = autodiff.Graph.init(allocator);
+        defer graph.deinit();
+        _ = try model.forward(&graph, try graph.ones(&.{ 1, 16 }, false)); // 建立前向计算图
+        try nn.initModel(&model, &graph, prng.random()); // customInit → Graph.initWeights
+    }
 
-    // 方式二：使用 nn.Module 包装 (统一提供 deinit / zeroGrad / train / eval / save / load / forward)
+    // 方式二：使用 nn.Module 包装，并以真实样本批次建立计算图
     var module = nn.Module(MyModel).init(allocator, try MyModel.init(allocator));
     defer module.deinit();
-    module.initParameters(prng.random());    // 等价于 nn.initModel(&module.inner, random)
+    try module.initParametersWithSample(prng.random(), .{sample_batch});
     ```
-    - **调试构建下的未初始化检查**：优化器 (`SGDOptimizer` / `AdamOptimizer` / `AdamWOptimizer`) 构造时调用 `nn.warnIfParametersUninitialized`，在 Debug 构建下若所有可训练权重矩阵都全为 0 (偏置、归一化 γ / β 等向量形参数不参与判断) 则输出 `std.log.warn` 提示调用 `nn.initModel` / `Graph.initWeights`；非 Debug 构建下为空操作。统计逻辑通过 `nn.inspectParameterInit` 返回 `ParameterInitReport`，可在自定义训练循环中直接使用。
+    - **调试构建下的未初始化检查**：优化器 (`SGDOptimizer` / `AdamOptimizer` / `AdamWOptimizer`) 构造时调用 `nn.warnIfParametersUninitialized`，在 Debug 构建下若所有可训练权重矩阵都全为 0 (偏置、归一化 γ / β 等向量形参数不参与判断) 则输出 `std.log.warn` 提示先建立前向计算图再调用 `nn.initModel` / `nn.initModelWithSample`；非 Debug 构建下为空操作。统计逻辑通过 `nn.inspectParameterInit` 返回 `ParameterInitReport`，可在自定义训练循环中直接使用。
 
 ### 4.3 现代大模型架构核心 (`nn/attention.zig`, `nn/transformer.zig`, `nn/llm.zig`)
 1. **因果多头自注意力 (`CausalSelfAttention`, `nn/attention.zig`)**：

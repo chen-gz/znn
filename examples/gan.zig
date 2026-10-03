@@ -118,12 +118,16 @@ pub fn main() !void {
 
     // 初始化 G 与 D
     var net_g = try Generator.init(allocator);
-    nn.initModel(&net_g, random);
     defer net_g.deinit(allocator);
 
     var net_d = try Discriminator.init(allocator);
-    nn.initModel(&net_d, random);
     defer net_d.deinit(allocator);
+
+    // 用一个 2 维样本建立前向计算图，依据计算图中的 LeakyReLU 等下游激活函数初始化 G 与 D 的参数
+    const init_sample = try tensor.ones(allocator, &.{ 1, 2 });
+    defer tensor.free(allocator, init_sample);
+    try nn.initModelWithSample(&net_g, allocator, random, .{init_sample});
+    try nn.initModelWithSample(&net_d, allocator, random, .{init_sample});
 
     // 初始化 Adam 优化器 (GAN 推荐参数 lr=0.005, beta1=0.5, beta2=0.999)
     var opt_g = try optim.AdamOptimizer.init(allocator, &net_g, .{

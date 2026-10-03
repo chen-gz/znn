@@ -33,7 +33,6 @@ pub fn main() !void {
     std.debug.print("  * Decoder Layers:  {d}\n\n", .{config.n_layer});
 
     var gpt = try nn.GPT(config).init(allocator);
-    nn.initModel(&gpt, random);
     defer gpt.deinit(allocator);
 
     // 2. 赋予顶级层次化模块命名 (自动递归设置至所有子模块与参数)
@@ -59,6 +58,8 @@ pub fn main() !void {
     const logits = try gpt.forward(&graph, input_tokens);
     logits.setName("outputs.logits");
 
+    // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
+    try nn.initModel(&gpt, &graph, random);
 
     std.debug.print("  * Input shape:       [{d}, {d}]\n", .{ batch_size, seq_len });
     std.debug.print("  * Output shape:      [{d}, {d}, {d}]\n", .{ logits.shape.dims[0], logits.shape.dims[1], logits.shape.dims[2] });
@@ -73,7 +74,6 @@ pub fn main() !void {
     // 5. 导出单个 Linear 层的最小参考 JSON (可视化器 JSON 格式指南中的模板)
     std.debug.print("[Step 4/4] Exporting minimal single-Linear reference JSON...\n", .{});
     var linear = try nn.Linear.init(allocator, 8, 4);
-    nn.initModel(&linear, random);
     defer linear.deinit(allocator);
     linear.setName("linear");
 
@@ -85,6 +85,7 @@ pub fn main() !void {
     x.setName("inputs.x");
     const y = try linear.forward(&min_graph, x);
     y.setName("outputs.y");
+    try nn.initModel(&linear, &min_graph, random);
 
     const minimal_path = "examples/minimal_model_graph.json";
     try min_graph.exportJson(minimal_path);

@@ -1,4 +1,6 @@
 const std = @import("std");
+const testing_init = @import("testing_init.zig");
+const Tensor = @import("../tensor.zig").Tensor;
 const autodiff = @import("../autodiff.zig");
 const nn = @import("../nn.zig");
 
@@ -7,8 +9,7 @@ const initWeights = nn.initWeights;
 const Linear = nn.Linear;
 const ReLU = nn.ReLU;
 const Tanh = nn.Tanh;
-const autoSequential = nn.autoSequential;
-const detectNextActivation = nn.detectNextActivation;
+const sequential = nn.sequential;
 
 test "Weight initialization methods and Linear initWithOptions" {
     const allocator = std.testing.allocator;
@@ -84,23 +85,28 @@ test "Weight initialization methods and Linear initWithOptions" {
     try std.testing.expect(!lin_tanh.bias.is_custom_initialized);
 }
 
-test "Sequential autoInit and detectNextActivation" {
+test "initModel infers per-layer initialization from the forward graph" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(1234);
     const random = prng.random();
 
-    // 自动检测网络：
-    // fc1 -> ReLU (自动探测为 .relu -> He Normal, gain=sqrt(2))
-    // fc2 -> Tanh (自动探测为 .tanh -> Xavier Normal, gain=5/3)
-    // fc3 -> 无激活函数 (自动探测为 .linear, gain=1.0)
-    var model = autoSequential(.{
+    // 依据前向计算图自动推导：
+    // fc1 -> ReLU (下游为 ReLU -> He Normal, gain=sqrt(2))
+    // fc2 -> Tanh (下游为 Tanh -> Xavier Normal, gain=5/3)
+    // fc3 -> 无激活函数 (Linear, gain=1.0)
+    var model = sequential(.{
         try Linear.init(allocator, 100, 100),
         ReLU{},
         try Linear.init(allocator, 100, 100),
         Tanh{},
         try Linear.init(allocator, 100, 10),
-    }, random);
+    });
     defer model.deinit(allocator);
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+    _ = try model.forward(&graph, try graph.ones(&.{ 2, 100 }, false));
+    try nn.initModel(&model, &graph, random);
 
     const calcVar = struct {
         fn run(slice: []const f32) f32 {
@@ -116,13 +122,7 @@ test "Sequential autoInit and detectNextActivation" {
         }
     }.run;
 
-    // 1. 验证编译期类型推导
-    const TupleT = @TypeOf(model.layers);
-    try std.testing.expectEqual(Nonlinearity.relu, detectNextActivation(TupleT, 0));
-    try std.testing.expectEqual(Nonlinearity.tanh, detectNextActivation(TupleT, 2));
-    try std.testing.expectEqual(Nonlinearity.linear, detectNextActivation(TupleT, 4));
-
-    // 2. 统计方差验证
+    // 统计方差验证
     // fc1 (ReLU): Var = 2 / 100 = 0.02
     const var_fc1 = calcVar(model.layers.@"0".weight.data);
     try std.testing.expectApproxEqAbs(@as(f32, 0.02), var_fc1, 0.003);
@@ -170,14 +170,7 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     special.head.setName("special_head");
     const fc_custom = &special.head;
 
-    // 2. 外部模块定义了 customInit -> initModel 调用之并标记其参数
-    nn.initModel(&special, random);
-    try std.testing.expect(fc_custom.weight.is_custom_initialized);
-    try std.testing.expect(fc_custom.bias.is_custom_initialized);
-    // 记录 custom 权重切片的一个样本以验证后续不被 Graph 篡改重写
-    const custom_weight_sample = fc_custom.weight.data[0];
-
-    // 3. 在构造/连接期通过各类 Operation 将图自然动态串联起来
+    // 2. 在构造/连接期通过各类 Operation 将图自然动态串联起来
     const x = try graph.zeros(&.{ 2, 100 }, false);
     x.setName("features_input");
 
@@ -198,7 +191,12 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     const final_out = try graph.addBias(try graph.matmul(logits, fc_out.weight), fc_out.bias);
     final_out.setName("network_final_out");
 
-    // 4. 一键初始化全图！
+    // 3. 图建立之后初始化：外部模块定义了 customInit -> initModel 调用之并标记其参数；
+    //    其余参数由 graph.initWeights 依据下游激活函数推导初始化，不覆盖 customInit 的结果
+    try nn.initModel(&special, &graph, random);
+    try std.testing.expect(fc_custom.weight.is_custom_initialized);
+    try std.testing.expect(fc_custom.bias.is_custom_initialized);
+    const custom_weight_sample = fc_custom.weight.data[0];
     graph.initWeights(random);
 
     const calcVar = struct {
@@ -334,50 +332,51 @@ test "Comprehensive coverage of all InitMethod strategies" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.01), lu_stats.variance, 0.002);
 }
 
-test "Built-in library layers do not mark is_custom_initialized unless customInit is called externally" {
+test "Built-in library initialization never marks is_custom_initialized" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(2026);
     const random = prng.random();
 
     var lin = try Linear.init(allocator, 8, 4);
-    nn.initModel(&lin, random);
     defer lin.deinit(allocator);
+    lin.resetParameters(random, .{});
     try std.testing.expect(!lin.weight.is_custom_initialized);
     try std.testing.expect(!lin.bias.is_custom_initialized);
 
     var conv = try nn.Conv2D.init(allocator, 3, 4, 3);
-    nn.initModel(&conv, random);
     defer conv.deinit(allocator);
+    conv.resetParameters(random, .{});
     try std.testing.expect(!conv.weight.is_custom_initialized);
     try std.testing.expect(!conv.bias.is_custom_initialized);
 
     var deconv = try nn.ConvTranspose2D.init(allocator, 4, 3, 3, 1, 0, true);
-    nn.initModel(&deconv, random);
     defer deconv.deinit(allocator);
+    deconv.resetParameters(random, .{});
     try std.testing.expect(!deconv.weight.is_custom_initialized);
     try std.testing.expect(!deconv.bias.?.is_custom_initialized);
 
     var emb = try nn.Embedding.init(allocator, 32, 8);
-    nn.initModel(&emb, random);
     defer emb.deinit(allocator);
+    emb.resetParameters(random, .{});
     try std.testing.expect(!emb.weight.is_custom_initialized);
 
     var lora = try nn.LoRALinear.initWithBias(allocator, 8, 4, 2, 4.0, true);
-    nn.initModel(&lora, random);
     defer lora.deinit(allocator);
+    lora.resetParameters(random, .{});
     try std.testing.expect(!lora.weight.is_custom_initialized);
     try std.testing.expect(!lora.lora_a.is_custom_initialized);
     try std.testing.expect(!lora.lora_b.is_custom_initialized);
     try std.testing.expect(!lora.bias.?.is_custom_initialized);
 
+    // 依据计算图的默认初始化同样不标记
     var lstm = try nn.LSTM.init(allocator, 8, 8);
-    nn.initModel(&lstm, random);
     defer lstm.deinit(allocator);
+    try testing_init.initRecurrent(&lstm, allocator, random);
     try std.testing.expect(!lstm.cell.w_ih_f.weight.is_custom_initialized);
     try std.testing.expect(!lstm.cell.w_ih_f.bias.is_custom_initialized);
 }
 
-test "initModel calls external customInit when defined and falls back to built-in init otherwise" {
+test "initModel runs external customInit first and initializes the rest from the forward graph" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(31415);
     const random = prng.random();
@@ -388,7 +387,7 @@ test "initModel calls external customInit when defined and falls back to built-i
     for (bare.weight.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
     for (bare.bias.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
 
-    // 1. 外部模块定义确定性 customInit(self)：initModel 调用之 (不消耗随机数)，并标记其全部可训练参数为自定义初始化
+    // 1. 全部参数由确定性 customInit(self) 指定：不依赖计算图内容 (空图即可)，不消耗随机数，参数被标记为自定义初始化
     const CustomBlock = struct {
         fc: Linear,
         norm: nn.LayerNorm,
@@ -404,26 +403,38 @@ test "initModel calls external customInit when defined and falls back to built-i
     };
     defer custom.fc.deinit(allocator);
     defer custom.norm.deinit(allocator);
-    nn.initModel(&custom, random);
+    {
+        var empty_graph = autodiff.Graph.init(allocator);
+        defer empty_graph.deinit();
+        try nn.initModel(&custom, &empty_graph, random);
+    }
     for (custom.fc.weight.data) |v| try std.testing.expectEqual(@as(f32, 0.25), v);
     for (custom.fc.bias.data) |v| try std.testing.expectEqual(@as(f32, -1.0), v);
     try std.testing.expect(custom.fc.weight.is_custom_initialized);
-    try std.testing.expect(custom.fc.bias.is_custom_initialized);
     try std.testing.expect(custom.norm.weight.is_custom_initialized);
     try std.testing.expect(custom.norm.bias.is_custom_initialized);
 
-    // 2. 外部模块未定义 customInit：initModel 递归使用子层的库内置初始化，不标记自定义初始化
+    // 2. 外部未指定：依据计算图初始化 (Linear 下游为 Tanh -> Xavier；LSTM 遗忘门偏置 -> 1.0)，不标记自定义初始化
     const PlainBlock = struct {
         fc: Linear,
         cell: nn.LSTMCell,
     };
     var plain = PlainBlock{
-        .fc = try Linear.init(allocator, 4, 3),
+        .fc = try Linear.init(allocator, 4, 4),
         .cell = try nn.LSTMCell.init(allocator, 4, 4),
     };
     defer plain.fc.deinit(allocator);
     defer plain.cell.deinit(allocator);
-    nn.initModel(&plain, random);
+    {
+        var graph = autodiff.Graph.init(allocator);
+        defer graph.deinit();
+        const x = try graph.ones(&.{ 1, 4 }, false);
+        const h0 = try graph.zeros(&.{ 1, 4 }, false);
+        const c0 = try graph.zeros(&.{ 1, 4 }, false);
+        const feat = try graph.tanh(try plain.fc.forward(&graph, x));
+        _ = try plain.cell.forward(&graph, feat, h0, c0);
+        try nn.initModel(&plain, &graph, random);
+    }
     var nonzero = false;
     for (plain.fc.weight.data) |v| {
         if (v != 0.0) nonzero = true;
@@ -433,7 +444,7 @@ test "initModel calls external customInit when defined and falls back to built-i
     try std.testing.expect(!plain.fc.weight.is_custom_initialized);
     try std.testing.expect(!plain.cell.w_ih_f.bias.is_custom_initialized);
 
-    // 3. Sequential.autoInit：定义了 customInit 的外部层被调用并标记，库层按后续激活函数内置初始化
+    // 3. Sequential：定义了 customInit 的外部层被调用并标记，库层依据计算图中的下游激活函数初始化
     const ConstLayer = struct {
         fc: Linear,
 
@@ -442,7 +453,7 @@ test "initModel calls external customInit when defined and falls back to built-i
             @memset(self.fc.bias.data, 0.0);
         }
 
-        pub fn forward(self: @This(), graph: *autodiff.Graph, x: *nn.Tensor) !*nn.Tensor {
+        pub fn forward(self: @This(), graph: *autodiff.Graph, x: *Tensor) !*Tensor {
             return self.fc.forward(graph, x);
         }
 
@@ -450,18 +461,20 @@ test "initModel calls external customInit when defined and falls back to built-i
             self.fc.deinit(alloc);
         }
     };
-    var model = autoSequential(.{
+    var model = sequential(.{
         try Linear.init(allocator, 4, 4),
         ReLU{},
         ConstLayer{ .fc = try Linear.init(allocator, 4, 2) },
-    }, random);
+    });
     defer model.deinit(allocator);
+    try testing_init.initFromOnes(&model, allocator, random, &.{ 2, 4 });
     try std.testing.expect(!model.layers.@"0".weight.is_custom_initialized);
+    try std.testing.expect(model.layers.@"0".weight.data[0] != 0.0 or model.layers.@"0".weight.data[1] != 0.0);
     for (model.layers.@"2".fc.weight.data) |v| try std.testing.expectEqual(@as(f32, 0.5), v);
     try std.testing.expect(model.layers.@"2".fc.weight.is_custom_initialized);
     try std.testing.expect(model.layers.@"2".fc.bias.is_custom_initialized);
 
-    // 4. 嵌套：未定义 customInit 的父模块递归初始化各字段，子模块的 customInit (含随机数签名) 在任意层级被调用
+    // 4. 嵌套：未定义 customInit 的父模块递归查找，子模块的 customInit (含随机数签名) 在任意层级被调用
     const RandomHead = struct {
         fc: Linear,
 
@@ -480,10 +493,23 @@ test "initModel calls external customInit when defined and falls back to built-i
     };
     defer outer.backbone.deinit(allocator);
     defer outer.head.fc.deinit(allocator);
-    nn.initModel(&outer, random);
+    {
+        var graph = autodiff.Graph.init(allocator);
+        defer graph.deinit();
+        const x = try graph.ones(&.{ 1, 4 }, false);
+        _ = try outer.head.fc.forward(&graph, try graph.relu(try outer.backbone.forward(&graph, x)));
+        try nn.initModel(&outer, &graph, random);
+    }
     try std.testing.expect(!outer.backbone.weight.is_custom_initialized);
     for (outer.head.fc.weight.data) |v| try std.testing.expect(v >= 2.0 and v < 3.0);
     try std.testing.expect(outer.head.fc.weight.is_custom_initialized);
+
+    // 5. 未开启梯度记录的计算图不记录算子，无法据此推导初始化
+    {
+        var no_grad = autodiff.Graph.initNoGrad(allocator);
+        defer no_grad.deinit();
+        try std.testing.expectError(error.GraphNotRecordingOps, nn.initModel(&outer, &no_grad, random));
+    }
 }
 
 test "inspectParameterInit detects models whose weight matrices were never initialized" {
@@ -511,8 +537,9 @@ test "inspectParameterInit detects models whose weight matrices were never initi
     try std.testing.expectEqual(@as(usize, 3), before.zero_weight_tensors);
     try std.testing.expect(before.looksUninitialized());
 
-    // 2. initModel 之后：LoRA 旁路 B 按设计仍为 0，但其余权重矩阵非 0 -> 不判定为未初始化
-    nn.initModel(&block, random);
+    // 2. 初始化之后：LoRA 旁路 B 按设计仍为 0，但其余权重矩阵非 0 -> 不判定为未初始化
+    block.fc.resetParameters(random, .{});
+    block.lora.resetParameters(random, .{});
     const after = nn.inspectParameterInit(params);
     try std.testing.expectEqual(@as(usize, 1), after.zero_weight_tensors);
     try std.testing.expect(!after.looksUninitialized());
