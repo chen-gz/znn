@@ -54,39 +54,25 @@ pub const Linear = struct {
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Linear",
 
-    /// 构造线性层：默认分配张量形状与内存；若传入可选的 random: ?std.Random 则按库默认策略初始化权重（不标记 customInit）
-    pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize, random_opt: anytype) !Linear {
-        var l = try initUninitialized(allocator, in_features, out_features);
-        const ArgT = @TypeOf(random_opt);
-        if (ArgT == std.Random) {
-            l.reinit(random_opt, InitOptions.default);
-        } else if (ArgT == ?std.Random) {
-            if (random_opt) |rnd| {
-                l.reinit(rnd, InitOptions.default);
-            }
-        }
-        return l;
-    }
-
-    /// 纯结构与内存初始化 (无随机数，交由 Graph.initWeights 自动探查推导)
-    pub fn initClean(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !Linear {
-        return initUninitialized(allocator, in_features, out_features);
-    }
-
-    pub fn initUninitialized(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !Linear {
+    /// 构造线性层并分配参数内存。
+    /// random 非 null 时按库默认策略调用 resetParameters 填充参数；
+    /// 为 null 时参数保持全零，交由 nn.initModel / Graph.initWeights 在模型组装后统一初始化。
+    pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize, random: ?std.Random) !Linear {
         const weight = try createPersistentTensor(allocator, in_features, out_features, true);
         errdefer freePersistentTensor(allocator, weight);
         const bias = try createPersistentTensor(allocator, 1, out_features, true);
         errdefer freePersistentTensor(allocator, bias);
 
-        return Linear{
+        var l = Linear{
             .weight = weight,
             .bias = bias,
         };
+        if (random) |rnd| l.resetParameters(rnd, InitOptions.default);
+        return l;
     }
 
-    /// 库内标准权重重初始化：按指定选项初始化权重与偏置，不设置 is_custom_initialized 标记
-    pub fn reinit(self: *Linear, random: std.Random, options: InitOptions) void {
+    /// 库内标准参数初始化：在已分配的张量上按 options 重新填充权重与偏置，不分配内存，也不设置 is_custom_initialized 标记
+    pub fn resetParameters(self: *Linear, random: std.Random, options: InitOptions) void {
         const in_features = self.weight.shape.dims[0];
         const out_features = self.weight.shape.dims[1];
         const w_init = options.resolveWeightInit();
@@ -161,12 +147,13 @@ pub const Conv2D = struct {
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "Conv2D",
 
-    /// 构造卷积层：默认分配张量形状与内存；若传入可选的 random: ?std.Random 则按库默认策略初始化权重（不标记 customInit）
-    pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random_opt: anytype) !Conv2D {
-        return initWithConfig(allocator, in_channels, out_channels, kernel_size, 1, 0, random_opt);
+    /// 构造 stride = 1、padding = 0 的卷积层；random 语义同 Linear.init
+    pub fn init(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize, random: ?std.Random) !Conv2D {
+        return initWithConfig(allocator, in_channels, out_channels, kernel_size, 1, 0, random);
     }
 
-    /// 构造支持自定义 stride 与 padding 的卷积层
+    /// 构造支持自定义 stride 与 padding 的卷积层并分配参数内存。
+    /// random 非 null 时按库默认策略调用 resetParameters 填充参数；为 null 时参数保持全零，留待模型组装后统一初始化。
     pub fn initWithConfig(
         allocator: std.mem.Allocator,
         in_channels: usize,
@@ -174,47 +161,7 @@ pub const Conv2D = struct {
         kernel_size: usize,
         stride: usize,
         padding: usize,
-        random_opt: anytype,
-    ) !Conv2D {
-        var c = try initUninitializedWithConfig(allocator, in_channels, out_channels, kernel_size, stride, padding);
-        const ArgT = @TypeOf(random_opt);
-        if (ArgT == std.Random) {
-            c.reinit(random_opt, InitOptions.default);
-        } else if (ArgT == ?std.Random) {
-            if (random_opt) |rnd| {
-                c.reinit(rnd, InitOptions.default);
-            }
-        }
-        return c;
-    }
-
-    /// 纯结构与内存初始化 (无随机数，交由 Graph.initWeights 自动探查推导)
-    pub fn initClean(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize) !Conv2D {
-        return initUninitializedWithConfig(allocator, in_channels, out_channels, kernel_size, 1, 0);
-    }
-
-    pub fn initCleanWithConfig(
-        allocator: std.mem.Allocator,
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: usize,
-        stride: usize,
-        padding: usize,
-    ) !Conv2D {
-        return initUninitializedWithConfig(allocator, in_channels, out_channels, kernel_size, stride, padding);
-    }
-
-    pub fn initUninitialized(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize) !Conv2D {
-        return initUninitializedWithConfig(allocator, in_channels, out_channels, kernel_size, 1, 0);
-    }
-
-    pub fn initUninitializedWithConfig(
-        allocator: std.mem.Allocator,
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: usize,
-        stride: usize,
-        padding: usize,
+        random: ?std.Random,
     ) !Conv2D {
         if (stride == 0) return error.InvalidStride;
         const weight = try createPersistentTensor(allocator, out_channels, in_channels * kernel_size * kernel_size, true);
@@ -227,16 +174,18 @@ pub const Conv2D = struct {
         bias.shape = Shape.init(&.{out_channels});
         bias.strides = tensor.computeContiguousStrides(bias.shape);
 
-        return Conv2D{
+        var c = Conv2D{
             .weight = weight,
             .bias = bias,
             .stride = stride,
             .padding = padding,
         };
+        if (random) |rnd| c.resetParameters(rnd, InitOptions.default);
+        return c;
     }
 
-    /// 库内标准权重重初始化：按指定选项初始化卷积核与偏置，不设置 is_custom_initialized 标记
-    pub fn reinit(self: *Conv2D, random: std.Random, options: InitOptions) void {
+    /// 库内标准参数初始化：在已分配的张量上按 options 重新填充卷积核与偏置，不分配内存，也不设置 is_custom_initialized 标记
+    pub fn resetParameters(self: *Conv2D, random: std.Random, options: InitOptions) void {
         const out_channels = self.weight.shape.dims[0];
         const in_channels = self.weight.shape.dims[1];
         const kernel_size = self.weight.shape.dims[2];
@@ -312,7 +261,7 @@ pub const ConvTranspose2D = struct {
     name_buf: [64]u8 = undefined,
     module_type: []const u8 = "ConvTranspose2D",
 
-    /// 构造反卷积层：默认分配张量形状与内存；若传入可选的 random: ?std.Random 则按库默认策略初始化权重（不标记 customInit）
+    /// 构造反卷积层并分配参数内存；random 语义同 Linear.init
     pub fn init(
         allocator: std.mem.Allocator,
         in_channels: usize,
@@ -321,41 +270,7 @@ pub const ConvTranspose2D = struct {
         stride: usize,
         padding: usize,
         use_bias: bool,
-        random_opt: anytype,
-    ) !ConvTranspose2D {
-        var c = try initUninitialized(allocator, in_channels, out_channels, kernel_size, stride, padding, use_bias);
-        const ArgT = @TypeOf(random_opt);
-        if (ArgT == std.Random) {
-            c.reinit(random_opt, InitOptions.default);
-        } else if (ArgT == ?std.Random) {
-            if (random_opt) |rnd| {
-                c.reinit(rnd, InitOptions.default);
-            }
-        }
-        return c;
-    }
-
-    /// 纯结构与内存初始化 (无随机数，交由 Graph.initWeights 自动探查推导)
-    pub fn initClean(
-        allocator: std.mem.Allocator,
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: usize,
-        stride: usize,
-        padding: usize,
-        use_bias: bool,
-    ) !ConvTranspose2D {
-        return initUninitialized(allocator, in_channels, out_channels, kernel_size, stride, padding, use_bias);
-    }
-
-    pub fn initUninitialized(
-        allocator: std.mem.Allocator,
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: usize,
-        stride: usize,
-        padding: usize,
-        use_bias: bool,
+        random: ?std.Random,
     ) !ConvTranspose2D {
         const weight = try createPersistentTensor(allocator, 1, in_channels * out_channels * kernel_size * kernel_size, true);
         errdefer freePersistentTensor(allocator, weight);
@@ -371,7 +286,7 @@ pub const ConvTranspose2D = struct {
             bias = b;
         }
 
-        return ConvTranspose2D{
+        var c = ConvTranspose2D{
             .in_channels = in_channels,
             .out_channels = out_channels,
             .kernel_size = kernel_size,
@@ -380,10 +295,12 @@ pub const ConvTranspose2D = struct {
             .weight = weight,
             .bias = bias,
         };
+        if (random) |rnd| c.resetParameters(rnd, InitOptions.default);
+        return c;
     }
 
-    /// 库内标准权重重初始化：按指定选项初始化反卷积核与偏置，不设置 is_custom_initialized 标记
-    pub fn reinit(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
+    /// 库内标准参数初始化：在已分配的张量上按 options 重新填充反卷积核与偏置，不分配内存，也不设置 is_custom_initialized 标记
+    pub fn resetParameters(self: *ConvTranspose2D, random: std.Random, options: InitOptions) void {
         const fan_in = self.in_channels * self.kernel_size * self.kernel_size;
         const fan_out = self.out_channels * self.kernel_size * self.kernel_size;
         const w_init = options.resolveWeightInit();
@@ -627,7 +544,7 @@ pub fn evalModel(model: anytype) void {
 /// 1. 若模块类型定义了 `pub fn customInit(self: *Self, random: std.Random) void` (由库外用户模块定义)，
 ///    则调用该函数，并将该模块内所有可训练参数标记为 `is_custom_initialized = true`
 ///    (`Graph.initWeights` 不再覆盖，模型图导出为 `CUSTOM_INIT`)；
-/// 2. 否则使用库内置初始化：模块定义了 `reinit(self, random, options)` 时以默认选项调用，
+/// 2. 否则使用库内置初始化：模块定义了 `resetParameters(self, random, options)` 时以默认选项调用，
 ///    `Sequential` 调用 `autoInit`；其余结构体递归处理各子模块字段。
 pub fn initModel(model: anytype, random: std.Random) void {
     const T = @TypeOf(model.*);
@@ -638,8 +555,8 @@ pub fn initModel(model: anytype, random: std.Random) void {
         markCustomInitializedModel(model);
         return;
     }
-    if (@hasDecl(T, "reinit")) {
-        model.reinit(random, .{});
+    if (@hasDecl(T, "resetParameters")) {
+        model.resetParameters(random, .{});
         return;
     }
     if (@hasDecl(T, "autoInit")) {
@@ -810,7 +727,7 @@ pub fn Sequential(comptime LayersTuple: type) type {
                     initModel(&@field(self.layers, field.name), random);
                 } else if (LayerT == Linear or LayerT == Conv2D or LayerT == ConvTranspose2D) {
                     const act = comptime detectNextActivation(LayersTuple, i);
-                    @field(self.layers, field.name).reinit(random, .{ .nonlinearity = act });
+                    @field(self.layers, field.name).resetParameters(random, .{ .nonlinearity = act });
                 } else {
                     initModel(&@field(self.layers, field.name), random);
                 }

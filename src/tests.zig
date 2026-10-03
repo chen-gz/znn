@@ -1369,7 +1369,7 @@ test "Linear.setName copies stack buffer into internal storage" {
     const std = @import("std");
     const allocator = std.testing.allocator;
 
-    var lin = try nn.Linear.initClean(allocator, 4, 2);
+    var lin = try nn.Linear.init(allocator, 4, 2, null);
     defer lin.deinit(allocator);
 
     {

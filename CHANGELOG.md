@@ -46,10 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **内置库层移除 `customInit`，新增 `nn.initModel` 初始化分派 (`src/nn/core.zig`, `src/nn/transformer.zig`, `src/nn/llm.zig`, `src/nn/recurrent.zig`, `src/nn.zig`, `src/root.zig`, `src/autodiff/graph_init.zig`, `src/nn/visualization.zig`, `src/nn/tests_init.zig`, `src/nn/tests_vis.zig`)**:
-  - `Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、`LoRALinear` 不再定义 `customInit`；库层只提供 `init` / `reinit(random, options)` 内置初始化，且不会设置 `is_custom_initialized`。
-  - 新增 `nn.initModel(model, random)`（`root.zig` 同步导出）与 `Module(T).initParameters(random)`：若模块类型定义了 `customInit`，则调用该函数并将其全部可训练参数标记为 `CUSTOM_INIT`；否则依次回退到内置 `reinit(random, .{})`、`autoInit(random)`，或递归初始化结构体字段、结构体切片与数组。
-  - `Sequential.autoInit` 对定义了 `customInit` 的子层走 `initModel` 分派，其余 `Linear` / `Conv2D` / `ConvTranspose2D` 子层仍按下游激活函数推导增益后调用 `reinit`。
-  - 新增 `LoRALinear.reinit`（重置 `lora_a` / `lora_b` / 偏置，保持冻结基础权重不变）与 `LSTMCell.reinit`（重置全部门控 `Linear` 并将遗忘门偏置置 1.0）。
+  - `Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、`LoRALinear` 不再定义 `customInit`；库层只提供 `init` / `resetParameters(random, options)` 内置初始化，且不会设置 `is_custom_initialized`。
+  - 新增 `nn.initModel(model, random)`（`root.zig` 同步导出）与 `Module(T).initParameters(random)`：若模块类型定义了 `customInit`，则调用该函数并将其全部可训练参数标记为 `CUSTOM_INIT`；否则依次回退到内置 `resetParameters(random, .{})`、`autoInit(random)`，或递归初始化结构体字段、结构体切片与数组。
+  - `Sequential.autoInit` 对定义了 `customInit` 的子层走 `initModel` 分派，其余 `Linear` / `Conv2D` / `ConvTranspose2D` 子层仍按下游激活函数推导增益后调用 `resetParameters`。
+  - 新增 `LoRALinear.resetParameters`（重置 `lora_a` / `lora_b` / 偏置，保持冻结基础权重不变）与 `LSTMCell.resetParameters`（重置全部门控 `Linear` 并将遗忘门偏置置 1.0）。
+  - 库层参数重填函数 `reinit` 统一更名为 `resetParameters`，明确其只在已分配张量上重新填充数值、不分配内存。
+  - `Linear`、`Conv2D`（含 `initWithConfig`）、`ConvTranspose2D`、`Embedding` 以及 `RNNCell` / `RNN` / `LSTMCell` / `LSTM` / `StackedLSTM` / `GRUCell` / `GRU` 的 `init` 随机数参数由 `random_opt: anytype` 改为强类型 `random: ?std.Random`：传入错误类型（如未调用 `.random()` 的 PRNG）在编译期报错，不再静默得到全零参数；传 `null` 只分配内存，参数留待 `nn.initModel` / `Graph.initWeights` 统一初始化。
+  - 移除与 `init(..., null)` 完全等价的冗余构造函数 `initClean`、`initUninitialized`、`Conv2D.initCleanWithConfig` 与 `Conv2D.initUninitializedWithConfig`。
   - `Graph.initSingleTensor` 与 `Graph.describeAutoGraphParam` 统一覆盖归一化缩放参数 (`ones (1.0)`)、LSTM 遗忘门偏置 (`ones (1.0)`)、`Embedding` 词表 (`Normal (mean=0.0, std=0.02)`)、`LoRALinear` 旁路矩阵 $B$ (`zeros (0.0)`) 及下游激活函数增益推导，并同步更新 `examples/` 与可视化器下的全部模型图 JSON。
 - **全库超长模块解耦重构（单实现文件 `< 60 KB`）(`src/tensor/`, `src/autodiff/`, `src/nn/`, `src/bench/`)**:
   - 将 `src/tensor/core.zig` (84.7 KB) 按职责拆分为 `core.zig`、`nn_kernels.zig` 与 `reductions.zig`；

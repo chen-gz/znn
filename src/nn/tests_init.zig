@@ -65,10 +65,10 @@ test "Weight initialization methods and Linear initWithOptions" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), lecun_stats.mean, 0.015);
     try std.testing.expectApproxEqAbs(@as(f32, 0.01), lecun_stats.variance, 0.002);
 
-    // 7. Linear built-in reinit specifying nonlinearity
-    var lin_tanh = try Linear.initClean(allocator, 100, 100);
+    // 7. Linear built-in resetParameters specifying nonlinearity
+    var lin_tanh = try Linear.init(allocator, 100, 100, null);
     defer lin_tanh.deinit(allocator);
-    lin_tanh.reinit(random, .{
+    lin_tanh.resetParameters(random, .{
         .nonlinearity = .tanh, // Gain = 5/3 ~ 1.6667 -> Xavier Normal with Gain
         .bias_init = .{ .constant = 0.5 },
     });
@@ -94,11 +94,11 @@ test "Sequential autoInit and detectNextActivation" {
     // fc2 -> Tanh (自动探测为 .tanh -> Xavier Normal, gain=5/3)
     // fc3 -> 无激活函数 (自动探测为 .linear, gain=1.0)
     var model = autoSequential(.{
-        try Linear.initUninitialized(allocator, 100, 100),
+        try Linear.init(allocator, 100, 100, null),
         ReLU{},
-        try Linear.initUninitialized(allocator, 100, 100),
+        try Linear.init(allocator, 100, 100, null),
         Tanh{},
-        try Linear.initUninitialized(allocator, 100, 10),
+        try Linear.init(allocator, 100, 10, null),
     }, random);
     defer model.deinit(allocator);
 
@@ -144,12 +144,12 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     var graph = autodiff.Graph.init(allocator);
     defer graph.deinit();
 
-    // 1. 各层通过干净的 initClean 创建（无随机数，只分配内存）并设置人类可读名字
-    var fc_relu = try Linear.initClean(allocator, 100, 100);
+    // 1. 各层通过 init(..., null) 创建（只分配内存，参数保持全零）并设置人类可读名字
+    var fc_relu = try Linear.init(allocator, 100, 100, null);
     defer fc_relu.deinit(allocator);
     fc_relu.setName("dense_relu_1");
 
-    var fc_tanh = try Linear.initClean(allocator, 100, 100);
+    var fc_tanh = try Linear.init(allocator, 100, 100, null);
     defer fc_tanh.deinit(allocator);
     fc_tanh.setName("dense_tanh_2");
 
@@ -158,14 +158,14 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
         head: Linear,
 
         pub fn customInit(self: *@This(), rnd: std.Random) void {
-            self.head.reinit(rnd, .{
+            self.head.resetParameters(rnd, .{
                 .nonlinearity = .linear,
                 .bias_init = .{ .constant = 3.14 },
             });
         }
     };
 
-    var special = SpecialHead{ .head = try Linear.initClean(allocator, 100, 10) };
+    var special = SpecialHead{ .head = try Linear.init(allocator, 100, 10, null) };
     defer special.head.deinit(allocator);
     special.head.setName("special_head");
     const fc_custom = &special.head;
@@ -188,7 +188,7 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     const z2 = try graph.addBias(try graph.matmul(a1, fc_tanh.weight), fc_tanh.bias);
     const a2 = try graph.tanh(z2); // 后续接 Tanh
 
-    var fc_out = try Linear.initClean(allocator, 10, 2);
+    var fc_out = try Linear.init(allocator, 10, 2, null);
     defer fc_out.deinit(allocator);
     fc_out.setName("logits_out");
 
@@ -388,7 +388,7 @@ test "initModel calls external customInit when defined and falls back to built-i
         }
     };
     var custom = CustomBlock{
-        .fc = try Linear.initClean(allocator, 4, 3),
+        .fc = try Linear.init(allocator, 4, 3, null),
         .norm = try nn.LayerNorm.init(allocator, 3, 1e-5),
     };
     defer custom.fc.deinit(allocator);
@@ -407,7 +407,7 @@ test "initModel calls external customInit when defined and falls back to built-i
         cell: nn.LSTMCell,
     };
     var plain = PlainBlock{
-        .fc = try Linear.initClean(allocator, 4, 3),
+        .fc = try Linear.init(allocator, 4, 3, null),
         .cell = try nn.LSTMCell.init(allocator, 4, 4, @as(?std.Random, null)),
     };
     defer plain.fc.deinit(allocator);
@@ -441,9 +441,9 @@ test "initModel calls external customInit when defined and falls back to built-i
         }
     };
     var model = autoSequential(.{
-        try Linear.initClean(allocator, 4, 4),
+        try Linear.init(allocator, 4, 4, null),
         ReLU{},
-        ConstLayer{ .fc = try Linear.initClean(allocator, 4, 2) },
+        ConstLayer{ .fc = try Linear.init(allocator, 4, 2, null) },
     }, random);
     defer model.deinit(allocator);
     try std.testing.expect(!model.layers.@"0".weight.is_custom_initialized);

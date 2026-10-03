@@ -61,30 +61,19 @@ pub const Embedding = struct {
         }
     };
 
-    /// 构造嵌入层：默认分配词表张量形状与内存；若传入可选的 random: ?std.Random 则按库默认策略初始化权重（不标记 customInit）
-    pub fn init(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize, random_opt: anytype) !Embedding {
-        var emb = try initClean(allocator, vocab_size, embedding_dim);
-        const ArgT = @TypeOf(random_opt);
-        if (ArgT == std.Random) {
-            emb.reinit(random_opt, Options.default);
-        } else if (ArgT == ?std.Random) {
-            if (random_opt) |rnd| {
-                emb.reinit(rnd, Options.default);
-            }
-        }
+    /// 构造嵌入层并分配词表内存。
+    /// random 非 null 时按库默认策略调用 resetParameters 填充词表；为 null 时词表保持全零，留待模型组装后统一初始化。
+    pub fn init(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize, random: ?std.Random) !Embedding {
+        const weight = try createPersistentTensor(allocator, vocab_size, embedding_dim, true);
+        var emb = Embedding{
+            .weight = weight,
+        };
+        if (random) |rnd| emb.resetParameters(rnd, Options.default);
         return emb;
     }
 
-    /// 纯结构与内存初始化 (无随机数，交由 Graph.initWeights 自动探查推导)
-    pub fn initClean(allocator: std.mem.Allocator, vocab_size: usize, embedding_dim: usize) !Embedding {
-        const weight = try createPersistentTensor(allocator, vocab_size, embedding_dim, true);
-        return Embedding{
-            .weight = weight,
-        };
-    }
-
-    /// 库内标准权重重初始化：按指定选项初始化词嵌入表，不设置 is_custom_initialized 标记
-    pub fn reinit(self: *Embedding, random: std.Random, options: Options) void {
+    /// 库内标准参数初始化：在已分配的词表上按 options 重新填充，不分配内存，也不设置 is_custom_initialized 标记
+    pub fn resetParameters(self: *Embedding, random: std.Random, options: Options) void {
         const vocab_size = self.weight.shape.dims[0];
         const embedding_dim = self.weight.shape.dims[1];
         initWeights(random, self.weight.data, vocab_size, embedding_dim, options.init_method);
