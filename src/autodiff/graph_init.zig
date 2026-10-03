@@ -220,24 +220,7 @@ pub fn initSingleTensor(self: *Graph, t: *Tensor, random: std.Random, comptime i
     // 沿计算图中的 Ops 向后探测第一个下游消费算子 (Consumer Op)
     const nonlinearity = detectConsumerActivation(self, t);
     const gain = init_mod.calculateGain(nonlinearity);
-
-    var fan_in: usize = 1;
-    var fan_out: usize = 1;
-    if (t.shape.len == 2) {
-        fan_in = t.shape.dims[0];
-        fan_out = t.shape.dims[1];
-    } else if (t.shape.len == 4) {
-        // Conv2D: [out_channels, in_channels, kh, kw]
-        const out_c = t.shape.dims[0];
-        const in_c = t.shape.dims[1];
-        const kh = t.shape.dims[2];
-        const kw = t.shape.dims[3];
-        fan_in = in_c * kh * kw;
-        fan_out = out_c * kh * kw;
-    } else {
-        for (t.shape.dims[0 .. t.shape.len - 1]) |d| fan_in *= d;
-        fan_out = t.shape.dims[t.shape.len - 1];
-    }
+    const fans = computeParamFans(self, t);
 
     const method: init_mod.InitMethod = switch (nonlinearity) {
         .tanh, .sigmoid => .{ .xavier_normal = .{ .gain = gain } },
@@ -245,7 +228,66 @@ pub fn initSingleTensor(self: *Graph, t: *Tensor, random: std.Random, comptime i
         else => .{ .he_normal = .{ .gain = gain } },
     };
 
-    init_mod.initWeights(random, t.data, fan_in, fan_out, method);
+    init_mod.initWeights(random, t.data, fans.fan_in, fans.fan_out, method);
+}
+
+/// 参数张量的扇入 (每个输出元素累加的输入元素个数) 与扇出
+pub const ParamFans = struct {
+    fan_in: usize,
+    fan_out: usize,
+};
+
+/// 依据计算图中直接消费该参数的算子确定 fan_in / fan_out：
+/// - `MatMul` / `BatchMatMul` 右操作数 (`y = x W`，W 为 `[..., in, out]`)：fan_in = 倒数第二维，fan_out = 最后一维；
+///   左操作数 (`y = W x`，W 为 `[..., out, in]`)：fan_in = 最后一维，fan_out = 倒数第二维；
+/// - `Conv2D` 卷积核 `[out_c, in_c, kh, kw]`：fan_in = in_c·kh·kw，fan_out = out_c·kh·kw；
+/// - `ConvTranspose2D` 卷积核 `[in_c, out_c, kh, kw]`：fan_in = in_c·kh·kw，fan_out = out_c·kh·kw；
+/// - 参数先经 `Transpose` 再参与投影 (如 `y = x W^T`) 时，按转置后的张量及其消费算子确定；
+/// - 计算图中没有上述消费算子时，按形状推断 (`shapeParamFans`)。
+pub fn computeParamFans(self: *const Graph, t: *const Tensor) ParamFans {
+    const dims = t.shape.dims[0..t.shape.len];
+    for (self.ops.items) |op| {
+        switch (op.op_type) {
+            .MatMul, .BatchMatMul => {
+                if (dims.len < 2 or op.inputs.len < 2) continue;
+                const rows = dims[dims.len - 2];
+                const cols = dims[dims.len - 1];
+                if (op.inputs[1] == t) return .{ .fan_in = rows, .fan_out = cols };
+                if (op.inputs[0] == t) return .{ .fan_in = cols, .fan_out = rows };
+            },
+            .Conv2D => {
+                if (dims.len != 4 or op.inputs.len < 2 or op.inputs[1] != t) continue;
+                const receptive = dims[2] * dims[3];
+                return .{ .fan_in = dims[1] * receptive, .fan_out = dims[0] * receptive };
+            },
+            .ConvTranspose2D => {
+                if (dims.len != 4 or op.inputs.len < 2 or op.inputs[1] != t) continue;
+                const receptive = dims[2] * dims[3];
+                return .{ .fan_in = dims[0] * receptive, .fan_out = dims[1] * receptive };
+            },
+            .Transpose => {
+                if (op.inputs.len < 1 or op.inputs[0] != t or op.outputs.len < 1) continue;
+                return computeParamFans(self, op.outputs[0]);
+            },
+            else => {},
+        }
+    }
+    return shapeParamFans(t);
+}
+
+/// 仅依据形状推断 fan：2 维视为 `[in, out]`，4 维视为卷积核 `[out_c, in_c, kh, kw]`，
+/// 其余维数以除最后一维外各维之积为 fan_in、最后一维为 fan_out
+pub fn shapeParamFans(t: *const Tensor) ParamFans {
+    const dims = t.shape.dims[0..t.shape.len];
+    if (dims.len == 2) return .{ .fan_in = dims[0], .fan_out = dims[1] };
+    if (dims.len == 4) {
+        const receptive = dims[2] * dims[3];
+        return .{ .fan_in = dims[1] * receptive, .fan_out = dims[0] * receptive };
+    }
+    if (dims.len == 0) return .{ .fan_in = 1, .fan_out = 1 };
+    var fan_in: usize = 1;
+    for (dims[0 .. dims.len - 1]) |d| fan_in *= d;
+    return .{ .fan_in = fan_in, .fan_out = dims[dims.len - 1] };
 }
 
 /// 格式化全图各节点（包括输入数据、模型参数及中间算子输出）的详情与初始化报告为分配的字符串
