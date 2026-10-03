@@ -213,9 +213,17 @@ flowchart LR
         }
     };
 
+    // 方式一：直接使用模型结构体
     var model = try MyModel.init(allocator); // 只分配内存
+    defer nn.deinitModel(&model, allocator);
     nn.initModel(&model, prng.random());     // 调用 customInit 并标记 CUSTOM_INIT
+
+    // 方式二：使用 nn.Module 包装 (统一提供 deinit / zeroGrad / train / eval / save / load / forward)
+    var module = nn.Module(MyModel).init(allocator, try MyModel.init(allocator));
+    defer module.deinit();
+    module.initParameters(prng.random());    // 等价于 nn.initModel(&module.inner, random)
     ```
+    - **调试构建下的未初始化检查**：优化器 (`SGDOptimizer` / `AdamOptimizer` / `AdamWOptimizer`) 构造时调用 `nn.warnIfParametersUninitialized`，在 Debug 构建下若所有可训练权重矩阵都全为 0 (偏置、归一化 γ / β 等向量形参数不参与判断) 则输出 `std.log.warn` 提示调用 `nn.initModel` / `Graph.initWeights`；非 Debug 构建下为空操作。统计逻辑通过 `nn.inspectParameterInit` 返回 `ParameterInitReport`，可在自定义训练循环中直接使用。
 
 ### 4.3 现代大模型架构核心 (`nn/attention.zig`, `nn/transformer.zig`, `nn/llm.zig`)
 1. **因果多头自注意力 (`CausalSelfAttention`, `nn/attention.zig`)**：

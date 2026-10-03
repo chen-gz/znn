@@ -486,3 +486,34 @@ test "initModel calls external customInit when defined and falls back to built-i
     try std.testing.expect(outer.head.fc.weight.is_custom_initialized);
 }
 
+test "inspectParameterInit detects models whose weight matrices were never initialized" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+
+    const Block = struct {
+        fc: Linear,
+        norm: nn.LayerNorm,
+        lora: nn.LoRALinear,
+    };
+    var block = Block{
+        .fc = try Linear.init(allocator, 4, 4),
+        .norm = try nn.LayerNorm.init(allocator, 4, 1e-5),
+        .lora = try nn.LoRALinear.initWithBias(allocator, 4, 4, 2, 4.0, true),
+    };
+    defer nn.deinitModel(&block, allocator);
+
+    // 1. 只调用 init：LayerNorm γ = 1 与偏置等向量形参数不参与判断，全部权重矩阵为 0 -> 判定为未初始化
+    const params = try nn.collectParameters(&block, allocator);
+    defer allocator.free(params);
+    const before = nn.inspectParameterInit(params);
+    try std.testing.expectEqual(@as(usize, 3), before.weight_tensors); // fc.weight, lora_a, lora_b
+    try std.testing.expectEqual(@as(usize, 3), before.zero_weight_tensors);
+    try std.testing.expect(before.looksUninitialized());
+
+    // 2. initModel 之后：LoRA 旁路 B 按设计仍为 0，但其余权重矩阵非 0 -> 不判定为未初始化
+    nn.initModel(&block, random);
+    const after = nn.inspectParameterInit(params);
+    try std.testing.expectEqual(@as(usize, 1), after.zero_weight_tensors);
+    try std.testing.expect(!after.looksUninitialized());
+}

@@ -80,6 +80,7 @@ pub const SGDOptimizer = struct {
 
     pub fn init(allocator: std.mem.Allocator, model: anytype, config: SGDConfig) !SGDOptimizer {
         const params = try nn.collectParameters(model, allocator);
+        nn.warnIfParametersUninitialized(params);
         errdefer allocator.free(params);
 
         var velocities: ?[][]f32 = null;
@@ -258,6 +259,7 @@ pub const AdamOptimizer = struct {
 
     pub fn init(allocator: std.mem.Allocator, model: anytype, config: AdamConfig) !AdamOptimizer {
         const params = try nn.collectParameters(model, allocator);
+        nn.warnIfParametersUninitialized(params);
         errdefer allocator.free(params);
 
         const m = try allocator.alloc([]f32, params.len);
@@ -423,6 +425,7 @@ pub const AdamWOptimizer = struct {
 
     pub fn init(allocator: std.mem.Allocator, model: anytype, config: AdamWConfig) !AdamWOptimizer {
         const params = try nn.collectParameters(model, allocator);
+        nn.warnIfParametersUninitialized(params);
         errdefer allocator.free(params);
 
         const m = try allocator.alloc([]f32, params.len);
@@ -1102,6 +1105,7 @@ test "Optimizer checkpoint error conditions and corruption resilience" {
             try nn.Linear.init(allocator, 2, 2),
         });
         defer seq.deinit(allocator);
+        nn.initModel(&seq, prng.random());
 
         var opt_diff = try SGDOptimizer.init(allocator, &seq, .{ .lr = 0.01 });
         defer opt_diff.deinit();
