@@ -38,6 +38,16 @@ venv/
 *.tar.gz
 *.zip
 
+# Large model weights, checkpoints, and tokenizers
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.onnx
+tokenizer.json
+gemma-*/model.safetensors
+gemma-*/tokenizer.json
+
 # Devenv
 .devenv*
 devenv.local.nix

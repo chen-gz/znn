@@ -1443,3 +1443,188 @@ test "ScaledDotProductAttention standalone causal and non-causal forward and bac
     try std.testing.expect(v.grad[0] > 0.0);
 }
 
+test "Gemma 4 GemmaRMSNorm, Gemma4MLP, Gemma4Attention and Gemma4ForCausalLM forward" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    // 1. GemmaRMSNorm 单元测试
+    {
+        var norm = try nn.GemmaRMSNorm.init(allocator, 4, 1e-6);
+        defer nn.deinitModel(&norm, allocator);
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+
+        const x = try g.tensorNDWithData(&.{ 1, 4 }, &.{ 2.0, 2.0, 2.0, 2.0 }, false);
+        const y = try norm.forward(&g, x);
+        // x rms = 2.0, x / rms = 1.0, (1.0 + weight(0)) = 1.0, 结果为 1.0
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), y.data[0], 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), y.data[3], 1e-4);
+    }
+
+    // 2. Gemma4MLP 单元测试
+    {
+        var mlp = try nn.Gemma4MLP.init(allocator, 8, 16);
+        mlp.gate_proj.resetParameters(random, .{});
+        mlp.up_proj.resetParameters(random, .{});
+        mlp.down_proj.resetParameters(random, .{});
+        defer nn.deinitModel(&mlp, allocator);
+
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 2, 8 }, false);
+        const out = try mlp.forward(&g, x);
+        try std.testing.expectEqual(@as(usize, 2), out.shape.len);
+        try std.testing.expectEqual(@as(usize, 2), out.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 8), out.shape.dims[1]);
+    }
+
+    // 3. Gemma4Attention 单元测试 (含 Q/K-Norm 与 GQA)
+    {
+        var attn = try nn.Gemma4Attention.init(
+            allocator,
+            .sliding_attention,
+            16, // hidden_size
+            4,  // num_heads
+            2,  // num_kv_heads
+            4,  // head_dim
+            2,  // sliding_window
+            1e-6,
+        );
+        attn.q_proj.resetParameters(random, .{});
+        attn.k_proj.resetParameters(random, .{});
+        if (attn.v_proj) |*vp| vp.resetParameters(random, .{});
+        attn.o_proj.resetParameters(random, .{});
+        defer nn.deinitModel(&attn, allocator);
+
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+        const x = try g.ones(&.{ 1, 3, 16 }, false);
+        const y = try attn.forward(&g, x);
+        try std.testing.expectEqual(@as(usize, 3), y.shape.len);
+        try std.testing.expectEqual(@as(usize, 1), y.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 3), y.shape.dims[1]);
+        try std.testing.expectEqual(@as(usize, 16), y.shape.dims[2]);
+    }
+
+    // 4. 端到端 TinyGemma4 模型测试
+    {
+        var model = try nn.TinyGemma4.init(allocator);
+        defer nn.deinitModel(&model, allocator);
+
+        var names = std.heap.ArenaAllocator.init(allocator);
+        defer names.deinit();
+        try nn.nameModules(&model, names.allocator(), "gemma4");
+
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+
+        const token_ids = try g.zeros(&.{ 2, 4 }, false);
+        for (token_ids.data, 0..) |*val, idx| {
+            val.* = @as(f32, @floatFromInt(idx % 10));
+        }
+
+        const logits = try model.forward(&g, token_ids);
+        try std.testing.expectEqual(@as(usize, 3), logits.shape.len);
+        try std.testing.expectEqual(@as(usize, 2), logits.shape.dims[0]); // B
+        try std.testing.expectEqual(@as(usize, 4), logits.shape.dims[1]); // T
+        try std.testing.expectEqual(@as(usize, 128), logits.shape.dims[2]); // V (vocab_size)
+
+        // 验证 Logit softcapping 幅度不超过 30.0
+        for (logits.data) |v| {
+            try std.testing.expect(v >= -30.01 and v <= 30.01);
+        }
+    }
+
+    // 5. Safetensors BF16 反序列化测试
+    {
+        const tmp_file = "test_bf16_roundtrip.safetensors";
+        defer std.Io.Dir.cwd().deleteFile(std.testing.io, tmp_file) catch {};
+
+        // 手工写一个标准 Safetensors BF16 文件
+        const cwd = std.Io.Dir.cwd();
+        var file = try cwd.createFile(std.testing.io, tmp_file, .{});
+        defer file.close(std.testing.io);
+
+        const header_json = "{\"weight\":{\"dtype\":\"BF16\",\"shape\":[2,2],\"data_offsets\":[0,8]}}";
+        const padding = (8 - (header_json.len % 8)) % 8;
+        const total_header_len = header_json.len + padding;
+
+        var buf: [1024]u8 = undefined;
+        var file_writer = file.writer(std.testing.io, &buf);
+        const writer = &file_writer.interface;
+
+        const len_u64 = @as(u64, total_header_len);
+        try writer.writeAll(std.mem.asBytes(&len_u64));
+        try writer.writeAll(header_json);
+        for (0..padding) |_| try writer.writeByte(' ');
+
+        // 写入 4 个 BF16 数值: 1.0, 2.0, -1.5, 0.5
+        const bf16_vals: [4]u16 = .{
+            tensor.bf16.fromF32(1.0).bits,
+            tensor.bf16.fromF32(2.0).bits,
+            tensor.bf16.fromF32(-1.5).bits,
+            tensor.bf16.fromF32(0.5).bits,
+        };
+        try writer.writeAll(std.mem.sliceAsBytes(&bf16_vals));
+        try writer.flush();
+
+        const DummyModule = struct {
+            weight: *Tensor,
+        };
+        const w = try core.createPersistentTensor(allocator, 2, 2, false);
+        defer core.freePersistentTensor(allocator, w);
+        var dummy = DummyModule{ .weight = w };
+
+        try serialization.loadModel(&dummy, std.testing.io, tmp_file, allocator);
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), w.data[0], 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.0), w.data[1], 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, -1.5), w.data[2], 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.5), w.data[3], 1e-4);
+    }
+
+    // 6. 4-bit (Q4) 分块量化与 Q4Linear 推理测试
+    {
+        var q4_layer = try nn.Q4Linear.init(allocator, 32, 64);
+        defer q4_layer.deinit(allocator);
+
+        // 构造浮点权重并量化
+        const weights = try allocator.alloc(f32, 32 * 64);
+        defer allocator.free(weights);
+        for (weights, 0..) |*w_val, i| {
+            w_val.* = @as(f32, @floatFromInt(i % 10)) * 0.1 - 0.5;
+        }
+        q4_layer.quantizeFromF32(weights);
+
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+
+        const x = try g.ones(&.{ 1, 32 }, false);
+        const y = try q4_layer.forward(&g, x);
+        try std.testing.expectEqual(@as(usize, 2), y.shape.len);
+        try std.testing.expectEqual(@as(usize, 1), y.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 64), y.shape.dims[1]);
+    }
+
+    // 7. 端到端 TinyQ4Gemma4 模型推理测试
+    {
+        var model = try nn.TinyQ4Gemma4.init(allocator);
+        defer model.deinit(allocator);
+
+        var g = autodiff.Graph.init(allocator);
+        defer g.deinit();
+
+        const token_ids = try g.zeros(&.{ 1, 4 }, false);
+        for (token_ids.data, 0..) |*val, idx| {
+            val.* = @as(f32, @floatFromInt(idx % 10));
+        }
+
+        const logits = try model.forward(&g, token_ids);
+        try std.testing.expectEqual(@as(usize, 3), logits.shape.len);
+        try std.testing.expectEqual(@as(usize, 1), logits.shape.dims[0]); // B
+        try std.testing.expectEqual(@as(usize, 4), logits.shape.dims[1]); // T
+        try std.testing.expectEqual(@as(usize, 128), logits.shape.dims[2]); // V (vocab_size)
+    }
+}
+
+

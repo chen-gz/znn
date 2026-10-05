@@ -114,11 +114,17 @@ pub fn loadTensorData(
     if (tensor_meta_val != .object) return error.InvalidSafetensorsHeader;
     const tensor_meta = tensor_meta_val.object;
 
-    // 校验数据类型
+    // 校验数据类型并确定单个元素字节宽度
     const dtype_val = tensor_meta.get("dtype") orelse return error.InvalidSafetensorsHeader;
-    if (dtype_val != .string or !std.mem.eql(u8, dtype_val.string, "F32")) {
+    if (dtype_val != .string) return error.InvalidSafetensorsHeader;
+    const dtype_str = dtype_val.string;
+
+    const elem_size: usize = if (std.mem.eql(u8, dtype_str, "F32"))
+        4
+    else if (std.mem.eql(u8, dtype_str, "BF16") or std.mem.eql(u8, dtype_str, "F16"))
+        2
+    else
         return error.UnsupportedDtype;
-    }
 
     // 校验逻辑形状
     const shape_val = tensor_meta.get("shape") orelse return error.InvalidSafetensorsHeader;
@@ -144,7 +150,7 @@ pub fn loadTensorData(
     const start_offset = @as(usize, @intCast(offsets_val.array.items[0].integer));
     const end_offset = @as(usize, @intCast(offsets_val.array.items[1].integer));
 
-    const expected_len_bytes = dest.data.len * 4;
+    const expected_len_bytes = dest.data.len * elem_size;
     if (end_offset - start_offset != expected_len_bytes) {
         return error.SizeMismatch;
     }
@@ -152,7 +158,21 @@ pub fn loadTensorData(
         return error.UnexpectedEndOfStream;
     }
 
-    @memcpy(std.mem.sliceAsBytes(dest.data), data_payload[start_offset..end_offset]);
+    const raw_slice = data_payload[start_offset..end_offset];
+    if (std.mem.eql(u8, dtype_str, "F32")) {
+        @memcpy(std.mem.sliceAsBytes(dest.data), raw_slice);
+    } else if (std.mem.eql(u8, dtype_str, "BF16")) {
+        const u16_slice: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, raw_slice));
+        for (dest.data, u16_slice) |*d, b_bits| {
+            const val: tensor.bf16 = .{ .bits = b_bits };
+            d.* = val.toF32();
+        }
+    } else if (std.mem.eql(u8, dtype_str, "F16")) {
+        const f16_slice: []const f16 = @alignCast(std.mem.bytesAsSlice(f16, raw_slice));
+        for (dest.data, f16_slice) |*d, f_val| {
+            d.* = @floatCast(f_val);
+        }
+    }
 }
 
 pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8, allocator: std.mem.Allocator) !void {
