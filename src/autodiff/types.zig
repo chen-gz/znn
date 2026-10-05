@@ -278,7 +278,8 @@ pub const OpContext = union(enum) {
     },
     RoPE: struct {
         start_pos: usize,
-        rotary_offset: usize,
+        rotary_offset: usize = 0,
+        base: f32 = 10000.0,
     },
     Embedding: void,
 

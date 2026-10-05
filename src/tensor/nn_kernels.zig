@@ -4,6 +4,9 @@ const core = @import("core.zig");
 const types = @import("types.zig");
 const conv_pool = @import("conv_pool.zig");
 const Tensor = core.Tensor;
+const ConvOptions = types.ConvOptions;
+const PoolOptions = types.PoolOptions;
+const RopeOptions = types.RopeOptions;
 const ops_mod = @import("ops.zig");
 const zeros = ops_mod.zeros;
 const free = ops_mod.free;
@@ -359,11 +362,10 @@ pub fn applyDropoutMask(self: *Tensor, mask: []const f32, allocator: std.mem.All
     return Y;
 }
 
-pub fn rope(self: *Tensor, start_pos: usize, allocator: std.mem.Allocator) !*Tensor {
-    return self.ropeOffset(start_pos, 0, allocator);
-}
-
-pub fn ropeOffset(self: *Tensor, start_pos: usize, rotary_offset: usize, allocator: std.mem.Allocator) !*Tensor {
+/// 旋转位置编码前向核函数 (Rotary Position Embedding, RoPE)
+pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: std.mem.Allocator) !*Tensor {
+    const rotary_offset = options.rotary_offset;
+    const base = options.base;
     const D = self.shape.dims[self.shape.len - 1];
     if (rotary_offset > D) return error.DimensionOutOfBounds;
     const T = if (self.shape.len >= 2) self.shape.dims[self.shape.len - 2] else 1;
@@ -382,7 +384,7 @@ pub fn ropeOffset(self: *Tensor, start_pos: usize, rotary_offset: usize, allocat
             }
             const pos_f = @as(f32, @floatFromInt(start_pos + t));
             for (0..half) |i| {
-                const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
+                const freq = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
                 const theta = pos_f * freq;
                 const cos_t = @cos(theta);
                 const sin_t = @sin(theta);

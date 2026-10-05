@@ -642,18 +642,14 @@ pub fn dropout(self: *Graph, X: *Tensor, p: f32, random: std.Random) !*Tensor {
     );
 }
 
-pub fn rope(self: *Graph, X: *Tensor, start_pos: usize) !*Tensor {
-    return self.ropeOffset(X, start_pos, 0);
-}
-
-pub fn ropeOffset(self: *Graph, X: *Tensor, start_pos: usize, rotary_offset: usize) !*Tensor {
+pub fn rope(self: *Graph, X: *Tensor, start_pos: usize, options: tensor_mod.RopeOptions) !*Tensor {
     const allocator = self.arena.allocator();
-    const Y = try X.ropeOffset(start_pos, rotary_offset, allocator);
+    const Y = try X.rope(start_pos, options, allocator);
     return self.registerSingleOutputOp(
         Y,
         &.{X},
         .RoPE,
-        .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = rotary_offset } },
+        .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = options.rotary_offset, .base = options.base } },
         self.enable_grad and X.requires_grad,
     );
 }

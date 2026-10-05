@@ -1106,6 +1106,7 @@ pub fn backwardNN(self: *Op) !void {
             if (X.requires_grad) {
                 const start_pos = self.context.RoPE.start_pos;
                 const rotary_offset = self.context.RoPE.rotary_offset;
+                const base = self.context.RoPE.base;
                 const D = X.shape.dims[X.shape.len - 1];
                 const T = if (X.shape.len >= 2) X.shape.dims[X.shape.len - 2] else 1;
                 const outer = X.data.len / (T * D);
@@ -1122,7 +1123,7 @@ pub fn backwardNN(self: *Op) !void {
                         }
                         const pos_f = @as(f32, @floatFromInt(start_pos + t));
                         for (0..half) |i| {
-                            const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
+                            const freq = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
                             const theta = pos_f * freq;
                             const cos_t = @cos(theta);
                             const sin_t = @sin(theta);
