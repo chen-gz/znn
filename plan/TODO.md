@@ -164,6 +164,10 @@
 - [ ] **3.1 注意力机制升级 (Memory-Efficient & FlashAttention)**
   - [ ] 实现基于 Tiling 分块与在线 Softmax 统计更新的 **FlashAttention** 前向与反向算子（避免显式存储 $O(T^2)$ 注意力分数矩阵）。
   - [x] 实现通用 **RoPE** 旋转位置编码的前向与反向 Autograd 算子（[`OpType.RoPE`](../src/autodiff/types.zig)、[`Graph.rope`](../src/autodiff/graph_nn.zig)、[`Tensor.rope`](../src/tensor/nn_kernels.zig) 统一接收 [`RopeOptions`](../src/tensor/types.zig)）并接入 [`MLALayer.forward`](../src/nn/attention.zig)。
+  - [ ] **补全 Split-Half 与 Partial Rotary RoPE（`ropeSplitHalf`）的静态图重演与反向传播支持 (`graph_nn.zig`, `op.zig`, `backward_nn.zig`)**：
+    - [ ] **修复 `requires_grad` 硬编码为 `false` 导致的训练梯度断流**：在 [`src/autodiff/graph_nn.zig`](../src/autodiff/graph_nn.zig) 中，`ropeSplitHalf` 将输出节点的 `requires_grad` 设为了 `false`（而标准 `Graph.rope` 是继承 `X.requires_grad`）。这会导致一旦对使用 `ropeSplitHalf` 的模型（如 Gemma 4）调用 `graph.backward()`，$Q$ 和 $K$ 分支的梯度在 RoPE 处直接截断归零，$W_Q$ 和 $W_K$ 完全无法训练。
+    - [ ] **修复 `op.zig` 中 `.RoPE` 静态图重演（`graph.forward()`）结果错误**：[`OpContext.RoPE`](../src/autodiff/types.zig) 没有保存 `split_half` 和 `partial_rotary_factor`，导致 [`Op.forward(.RoPE)`](../src/autodiff/op.zig) 重演时只能按默认的相邻配对且全维度旋转来计算，与首次 eager 执行的 `ropeSplitHalf` 数值完全不一致。
+    - [ ] **补全 `backward_nn.zig` 中 `.RoPE` 反向传播对 `split_half` 与 `partial_rotary_factor` 的区分**：[`src/autodiff/backward_nn.zig`](../src/autodiff/backward_nn.zig) 中反向传播目前只按相邻配对 `(2i, 2i+1)` 逆旋转了 `[rotary_offset, head_dim)`，如果直接打开 `requires_grad = X.requires_grad`，算出来的 Split-Half 梯度配对位置和旋转维度范围也是错的。
   - [ ] 为 [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`GPTConfig`](../src/nn/transformer.zig) 增加可选 RoPE 位置编码开关，并将单层 `KVCache` 串联至 `TransformerBlock` / `GPT.forwardInference` 实现端到端 $O(T)$ 增量生成。
   - [ ] `KVCache` 支持动态扩容与分页块分配（Paged KV Cache），提升自回归解码吞吐。
   - [x] 在 [`CausalSelfAttention`](../src/nn/attention.zig) 中支持 **Grouped-Query Attention (GQA)** 与 **Multi-Query Attention (MQA)**。
