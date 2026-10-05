@@ -227,13 +227,21 @@ pub const Op = struct {
                 const ctx = self.context.ConvTranspose2D;
                 copyFromEager(self.outputs[0], try self.inputs[0].convTranspose2d(self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
             },
+            .MaxPool1D => {
+                const ctx = self.context.MaxPool1D;
+                copyFromEager(self.outputs[0], try self.inputs[0].maxpool1d(ctx.pool_size, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            },
             .MaxPool2D => {
                 const ctx = self.context.MaxPool2D;
-                copyFromEager(self.outputs[0], try self.inputs[0].maxpool2d(ctx.pool_size, ctx.stride, allocator), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].maxpool2d(ctx.pool_size, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            },
+            .AvgPool1D => {
+                const ctx = self.context.AvgPool1D;
+                copyFromEager(self.outputs[0], try self.inputs[0].avgpool1d(ctx.kernel_size, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
             },
             .AvgPool2D => {
                 const ctx = self.context.AvgPool2D;
-                copyFromEager(self.outputs[0], try self.inputs[0].avgpool2d(ctx.kernel_size, ctx.stride, allocator), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].avgpool2d(ctx.kernel_size, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
             },
             .Softmax => {
                 copyFromEager(self.outputs[0], try self.inputs[0].softmax(allocator), allocator);
@@ -423,7 +431,9 @@ pub const Op = struct {
             .Conv2D,
             .ConvTranspose1D,
             .ConvTranspose2D,
+            .MaxPool1D,
             .MaxPool2D,
+            .AvgPool1D,
             .AvgPool2D,
             .Softmax,
             .RmsNorm,

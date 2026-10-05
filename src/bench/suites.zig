@@ -225,7 +225,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 32, 16, 26, 26 }, self.x_data, true);
-                const out = try graph.maxpool2d(x, 2, 2);
+                const out = try graph.maxpool2d(x, 2, .{});
                 @memset(out.grad, 1.0);
                 try graph.backward(out);
                 std.mem.doNotOptimizeAway(x.grad.ptr);

@@ -35,12 +35,12 @@ pub const CNN = struct {
         // Layer 1: Conv -> ReLU -> MaxPool
         const x1 = try self.conv1.forward(graph, x_reshaped);
         const a1 = try graph.relu(x1);
-        const p1 = try graph.maxpool2d(a1, 2, 2);
+        const p1 = try graph.maxpool2d(a1, 2, .{});
 
         // Layer 2: Conv -> ReLU -> MaxPool
         const x2 = try self.conv2.forward(graph, p1);
         const a2 = try graph.relu(x2);
-        const p2 = try graph.maxpool2d(a2, 2, 2);
+        const p2 = try graph.maxpool2d(a2, 2, .{});
 
         // Layer 3: Conv -> ReLU
         const x3 = try self.conv3.forward(graph, p2);

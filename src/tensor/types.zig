@@ -75,6 +75,22 @@ pub const ConvOptions = struct {
     }
 };
 
+/// 池化算子可选参数配置 (Pooling Operator Options, PoolOptions)
+pub const PoolOptions = struct {
+    stride: ?usize = null, // 池化滑动步幅，为 null 时默认等于池化窗口大小 (pool_size / kernel_size)
+    padding: usize = 0, // 边缘填充大小，默认为 0
+
+    pub const default: PoolOptions = .{};
+
+    pub fn defaultOptions() PoolOptions {
+        return .{};
+    }
+
+    pub fn resolveStride(self: PoolOptions, pool_size: usize) usize {
+        return self.stride orelse pool_size;
+    }
+};
+
 /// 将任意张量标量元素安全转换为非负索引 (`usize`)，并对越界或非有限值返回 `IndexOutOfBounds`
 pub inline fn indexScalarToUsize(comptime IdxT: type, raw: IdxT, bound: usize) !usize {
     const idx: usize = switch (@typeInfo(IdxT)) {

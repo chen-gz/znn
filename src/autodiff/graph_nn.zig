@@ -353,26 +353,66 @@ pub fn convTranspose2d(
 
 pub const convTranspose2D = convTranspose2d;
 
-pub fn maxpool2d(self: *Graph, A: *Tensor, pool_size: usize, stride: usize) !*Tensor {
+pub fn maxpool1d(self: *Graph, A: *Tensor, pool_size: usize, options: tensor_mod.PoolOptions) !*Tensor {
     const allocator = self.arena.allocator();
-    const C = try A.maxpool2d(pool_size, stride, allocator);
+    const C = try A.maxpool1d(pool_size, options, allocator);
     return self.registerSingleOutputOp(
         C,
         &.{A},
-        .MaxPool2D,
-        .{ .MaxPool2D = .{ .pool_size = pool_size, .stride = stride } },
+        .MaxPool1D,
+        .{ .MaxPool1D = .{
+            .pool_size = pool_size,
+            .stride = options.resolveStride(pool_size),
+            .padding = options.padding,
+        } },
         self.enable_grad and A.requires_grad,
     );
 }
 
-pub fn avgpool2d(self: *Graph, A: *Tensor, kernel_size: usize, stride: usize) !*Tensor {
+pub fn maxpool2d(self: *Graph, A: *Tensor, pool_size: usize, options: tensor_mod.PoolOptions) !*Tensor {
     const allocator = self.arena.allocator();
-    const C = try A.avgpool2d(kernel_size, stride, allocator);
+    const C = try A.maxpool2d(pool_size, options, allocator);
+    return self.registerSingleOutputOp(
+        C,
+        &.{A},
+        .MaxPool2D,
+        .{ .MaxPool2D = .{
+            .pool_size = pool_size,
+            .stride = options.resolveStride(pool_size),
+            .padding = options.padding,
+        } },
+        self.enable_grad and A.requires_grad,
+    );
+}
+
+pub fn avgpool1d(self: *Graph, A: *Tensor, kernel_size: usize, options: tensor_mod.PoolOptions) !*Tensor {
+    const allocator = self.arena.allocator();
+    const C = try A.avgpool1d(kernel_size, options, allocator);
+    return self.registerSingleOutputOp(
+        C,
+        &.{A},
+        .AvgPool1D,
+        .{ .AvgPool1D = .{
+            .kernel_size = kernel_size,
+            .stride = options.resolveStride(kernel_size),
+            .padding = options.padding,
+        } },
+        self.enable_grad and A.requires_grad,
+    );
+}
+
+pub fn avgpool2d(self: *Graph, A: *Tensor, kernel_size: usize, options: tensor_mod.PoolOptions) !*Tensor {
+    const allocator = self.arena.allocator();
+    const C = try A.avgpool2d(kernel_size, options, allocator);
     return self.registerSingleOutputOp(
         C,
         &.{A},
         .AvgPool2D,
-        .{ .AvgPool2D = .{ .kernel_size = kernel_size, .stride = stride } },
+        .{ .AvgPool2D = .{
+            .kernel_size = kernel_size,
+            .stride = options.resolveStride(kernel_size),
+            .padding = options.padding,
+        } },
         self.enable_grad and A.requires_grad,
     );
 }

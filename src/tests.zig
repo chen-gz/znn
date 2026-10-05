@@ -291,7 +291,7 @@ test "MaxPool2D autograd" {
         6.0, 5.0, 3.0, 4.0,
     }, true);
 
-    const C = try graph.maxpool2d(A, 2, 2);
+    const C = try graph.maxpool2d(A, 2, .{});
     try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2, 2 }, C.shape.dims[0..C.shape.len]);
 
     try std.testing.expectApproxEqAbs(@as(f32, 4.0), C.data[0], 1e-5);
@@ -307,6 +307,38 @@ test "MaxPool2D autograd" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[8], 1e-5); // A[2,0] (8.0)
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[15], 1e-5); // A[3,3] (4.0)
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), A.grad[0], 1e-5);  // A[0,0]
+}
+
+test "MaxPool1D and AvgPool1D autograd" {
+    const std = @import("std");
+    const arena = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const A = try graph.array(&.{ 1, 1, 4 }, &[_]f32{ 1.0, 4.0, 2.0, 6.0 }, true);
+    const mp = try graph.maxpool1d(A, 2, .{});
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2 }, mp.shape.dims[0..mp.shape.len]);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), mp.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), mp.data[1], 1e-5);
+
+    @memset(mp.grad, 1.0);
+    try graph.backward(mp);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), A.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), A.grad[2], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[3], 1e-5);
+
+    const B = try graph.array(&.{ 1, 1, 4 }, &[_]f32{ 1.0, 3.0, 2.0, 6.0 }, true);
+    const ap = try graph.avgpool1d(B, 2, .{});
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2 }, ap.shape.dims[0..ap.shape.len]);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), ap.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), ap.data[1], 1e-5);
+
+    @memset(ap.grad, 1.0);
+    try graph.backward(ap);
+    for (B.grad) |g| {
+        try std.testing.expectApproxEqAbs(@as(f32, 0.5), g, 1e-5);
+    }
 }
 
 test "Sigmoid and Tanh autograd" {

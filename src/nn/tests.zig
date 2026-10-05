@@ -686,7 +686,7 @@ test "Dropout and AvgPool2D forward and backward passes" {
     const y_drop = try drop.forward(&y_drop_graph, x, rand);
     try std.testing.expectEqual(10, y_drop.data.len);
 
-    const pool = AvgPool2D.init(2, 2);
+    const pool = AvgPool2D.init(2, .{});
     const img = try tensor.zeros(allocator, &.{ 1, 1, 4, 4 });
     defer tensor.free(allocator, img);
     @memset(img.data, 4.0);
@@ -718,6 +718,18 @@ test "Dropout and AvgPool2D forward and backward passes" {
     var img_grad_sum: f32 = 0.0;
     for (g_img.grad) |g| img_grad_sum += g;
     try std.testing.expect(img_grad_sum > 0.0);
+
+    // Test MaxPool1D, AvgPool1D, and MaxPool2D modules
+    const mp1d = nn.MaxPool1D.init(2, .{});
+    const ap1d = nn.AvgPool1D.init(2, .{});
+    const mp2d = nn.MaxPool2D.init(2, .{});
+    const seq1d = try graph.array(&.{ 1, 1, 4 }, &[_]f32{ 1.0, 5.0, 3.0, 7.0 }, true);
+    const out_mp1d = try mp1d.forward(&graph, seq1d);
+    const out_ap1d = try ap1d.forward(&graph, seq1d);
+    const out_mp2d = try mp2d.forward(&graph, g_img);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2 }, out_mp1d.shape.dims[0..3]);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2 }, out_ap1d.shape.dims[0..3]);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2, 2 }, out_mp2d.shape.dims[0..4]);
 }
 
 test "KVCache initialization and reset" {
