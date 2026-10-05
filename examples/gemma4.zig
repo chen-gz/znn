@@ -88,9 +88,17 @@ pub fn main(init: std.process.Init) !void {
     defer file.close(io);
 
     const stat = try file.stat(io);
+    const expected_bytes: u64 = 8146026088; // 完整 48 层量化模型确切大小 (~7.59 GB)
     const file_size_gb = @as(f64, @floatFromInt(stat.size)) / (1024.0 * 1024.0 * 1024.0);
     std.debug.print("1. [模型准备已就绪]:\n", .{});
     std.debug.print("   - 4-bit 量化权重文件: {s} ({d:.2} GB)\n", .{ q4_model_path, file_size_gb });
+
+    if (stat.size < expected_bytes) {
+        std.debug.print("\n❌ 错误: 模型权重文件不完整 (当前大小: {d:.2} GB, 期望: 7.59 GB)！\n", .{file_size_gb});
+        std.debug.print("👉 原因: 上次量化任务被提前中断，导致只写入了部分层。\n", .{});
+        std.debug.print("👉 解决方式: 请运行 `zig build quantize-gemma4` 重新生成完整的 7.59 GB 量化权重文件后再执行推理。\n\n", .{});
+        return;
+    }
     std.debug.print("   - 内存效率: 相比原版 22.3 GB BF16，成功压缩 3 倍以上，使 12B 完整模型可在 16GB Mac 上无 OOM 运行！\n\n", .{});
 
     // 2. 映射文件并验证魔数与元数据
@@ -121,7 +129,7 @@ pub fn main(init: std.process.Init) !void {
         Gemma4ChatTokenizer.SOT, // <|turn>
         Gemma4ChatTokenizer.USER, // user
         Gemma4ChatTokenizer.NL, // \n
-        23391, // hello
+        29104, //  hello
         1902, //  world
         Gemma4ChatTokenizer.EOT, // <turn|>
         Gemma4ChatTokenizer.NL, // \n

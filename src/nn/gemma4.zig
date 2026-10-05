@@ -70,8 +70,7 @@ pub const Gemma4Config = struct {
     };
 };
 
-/// 带有 Gemma 规范缩放的均方根层归一化 (GemmaRMSNorm)
-/// 数学公式：y = RMSNorm(x, eps) * (1.0 + weight)
+/// Gemma RMSNorm (with learnable scale)
 pub const GemmaRMSNorm = struct {
     weight: *Tensor, // [dim]
     eps: f32,
@@ -94,6 +93,42 @@ pub const GemmaRMSNorm = struct {
     pub const formula = "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot w";
 
     pub fn forward(self: *const GemmaRMSNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+
+        return try graph.rmsNorm(x, self.weight, self.eps);
+    }
+};
+
+/// Gemma 无权重缩放均方根层归一化 (GemmaUnscaledRMSNorm)
+/// 数学公式：y = RMSNorm(x, eps) = x / sqrt(mean(x^2) + eps)
+/// 专用于 Gemma 4 的 Value states 预注意力归一化 (v_norm, with_scale=False)
+pub const GemmaUnscaledRMSNorm = struct {
+    weight: *Tensor,
+    eps: f32,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "GemmaUnscaledRMSNorm",
+
+    pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !GemmaUnscaledRMSNorm {
+        const weight = try createPersistentTensor(allocator, 1, dim, false);
+        errdefer freePersistentTensor(allocator, weight);
+        @memset(weight.data, 1.0);
+        weight.shape = Shape.init(&.{dim});
+        weight.strides = tensor.computeContiguousStrides(weight.shape);
+
+        return GemmaUnscaledRMSNorm{
+            .weight = weight,
+            .eps = eps,
+        };
+    }
+
+    pub fn deinit(self: *GemmaUnscaledRMSNorm, allocator: std.mem.Allocator) void {
+        freePersistentTensor(allocator, self.weight);
+    }
+
+    pub const formula = "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}}";
+
+    pub fn forward(self: *const GemmaUnscaledRMSNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
@@ -165,6 +200,7 @@ pub const Gemma4Attention = struct {
     o_proj: Linear,
     q_norm: GemmaRMSNorm,
     k_norm: GemmaRMSNorm,
+    v_norm: GemmaUnscaledRMSNorm,
 
     attn_type: Gemma4AttentionType,
     hidden_size: usize,
@@ -204,6 +240,8 @@ pub const Gemma4Attention = struct {
         errdefer deinitModel(&q_norm, allocator);
         const k_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
         errdefer deinitModel(&k_norm, allocator);
+        const v_norm = try GemmaUnscaledRMSNorm.init(allocator, head_dim, rms_norm_eps);
+        errdefer deinitModel(&v_norm, allocator);
 
         const rope_theta: f32 = switch (attn_type) {
             .sliding_attention => 10000.0,
@@ -221,6 +259,7 @@ pub const Gemma4Attention = struct {
             .o_proj = o_proj,
             .q_norm = q_norm,
             .k_norm = k_norm,
+            .v_norm = v_norm,
             .attn_type = attn_type,
             .hidden_size = hidden_size,
             .num_heads = num_heads,
@@ -232,7 +271,7 @@ pub const Gemma4Attention = struct {
         };
     }
 
-    pub const formula = "\\text{Attn}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V W_o";
+    pub const formula = "\\text{Attn}(Q, K, V) = \\text{softmax}\\left(Q K^T + M\\right) V W_o";
 
     pub fn forward(self: *const Gemma4Attention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
@@ -253,32 +292,26 @@ pub const Gemma4Attention = struct {
         const k_raw = try self.k_proj.forward(graph, x_2d); // [B*T, n_kv * hd]
         const v_raw = if (self.v_proj) |*vp| try vp.forward(graph, x_2d) else k_raw;
 
-        // 2. 对每个头应用 Q-Norm 与 K-Norm: 展开为 [B*T*nh, hd] 并通过 GemmaRMSNorm
+        // 2. 对每个头应用 Q-Norm 与 K-Norm，以及无参数 v_norm
         const q_heads = try graph.reshape(q_raw, &.{ B * T * nh, hd });
         const q_normed = try self.q_norm.forward(graph, q_heads);
         const k_heads = try graph.reshape(k_raw, &.{ B * T * n_kv, hd });
         const k_normed = try self.k_norm.forward(graph, k_heads);
+        const v_heads = try graph.reshape(v_raw, &.{ B * T * n_kv, hd });
+        const v_normed = try self.v_norm.forward(graph, v_heads);
 
         // 3. 转置为四维头张量: [B, nh, T, hd] 与 [B, n_kv, T, hd]
         const q_4d = try graph.reshape(q_normed, &.{ B, T, nh, hd });
         const k_4d = try graph.reshape(k_normed, &.{ B, T, n_kv, hd });
-        const v_4d = try graph.reshape(v_raw, &.{ B, T, n_kv, hd });
+        const v_4d = try graph.reshape(v_normed, &.{ B, T, n_kv, hd });
 
         const q = try graph.transposeND(q_4d, 1, 2);
         const k_t_unrot = try graph.transposeND(k_4d, 1, 2);
         const v = try graph.transposeND(v_4d, 1, 2);
 
-        // 4. 施加 RoPE 旋转位置编码
-        const rot_dim = @as(usize, @intFromFloat(@as(f32, @floatFromInt(hd)) * self.partial_rotary_factor));
-        const q_rot = if (rot_dim == hd)
-            try graph.rope(q, 0)
-        else
-            try graph.ropeOffset(q, 0, hd - rot_dim);
-
-        const k_rot = if (rot_dim == hd)
-            try graph.rope(k_t_unrot, 0)
-        else
-            try graph.ropeOffset(k_t_unrot, 0, hd - rot_dim);
+        // 4. 施加半切分 RoPE 旋转位置编码 (Split-Half RoPE, Gemma 官方标准)
+        const q_rot = try graph.ropeSplitHalf(q, 0, self.partial_rotary_factor, self.rope_theta);
+        const k_rot = try graph.ropeSplitHalf(k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
 
         // 5. GQA 广播扩展至 nh 个头
         var k = k_rot;
@@ -288,11 +321,9 @@ pub const Gemma4Attention = struct {
             v_final = try graph.repeatKV(v, groups);
         }
 
-        // 6. 注意力得分与因果 / 滑动窗口掩码计算
+        // 6. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0)
         const k_trans = try graph.transposeND(k, 2, 3);
-        const att = try graph.batchMatMul(q_rot, k_trans);
-        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hd)));
-        var scores = try graph.mulScalar(att, scale);
+        var scores = try graph.batchMatMul(q_rot, k_trans);
 
         // 构造因果掩码 / 滑动窗口掩码
         const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
@@ -808,6 +839,7 @@ pub const Gemma4Q4Attention = struct {
     o_proj: Q4Linear,
     q_norm: GemmaRMSNorm,
     k_norm: GemmaRMSNorm,
+    v_norm: GemmaUnscaledRMSNorm,
 
     attn_type: Gemma4AttentionType,
     hidden_size: usize,
@@ -841,6 +873,7 @@ pub const Gemma4Q4Attention = struct {
 
         const q_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
         const k_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
+        const v_norm = try GemmaUnscaledRMSNorm.init(allocator, head_dim, rms_norm_eps);
 
         const rope_theta: f32 = switch (attn_type) {
             .sliding_attention => 10000.0,
@@ -858,6 +891,7 @@ pub const Gemma4Q4Attention = struct {
             .o_proj = o_proj,
             .q_norm = q_norm,
             .k_norm = k_norm,
+            .v_norm = v_norm,
             .attn_type = attn_type,
             .hidden_size = hidden_size,
             .num_heads = num_heads,
@@ -876,6 +910,7 @@ pub const Gemma4Q4Attention = struct {
         self.o_proj.deinit(allocator);
         deinitModel(&self.q_norm, allocator);
         deinitModel(&self.k_norm, allocator);
+        self.v_norm.deinit(allocator);
     }
 
     pub fn forward(self: *const Gemma4Q4Attention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
@@ -897,32 +932,26 @@ pub const Gemma4Q4Attention = struct {
         const k_raw = try self.k_proj.forward(graph, x_2d);
         const v_raw = if (self.v_proj) |*vp| try vp.forward(graph, x_2d) else k_raw;
 
-        // 2. Q-Norm 与 K-Norm
+        // 2. Q-Norm 与 K-Norm，以及无参数 v_norm
         const q_heads = try graph.reshape(q_raw, &.{ B * T * nh, hd });
         const q_normed = try self.q_norm.forward(graph, q_heads);
         const k_heads = try graph.reshape(k_raw, &.{ B * T * n_kv, hd });
         const k_normed = try self.k_norm.forward(graph, k_heads);
+        const v_heads = try graph.reshape(v_raw, &.{ B * T * n_kv, hd });
+        const v_normed = try self.v_norm.forward(graph, v_heads);
 
         // 3. 转置为四维头张量
         const q_4d = try graph.reshape(q_normed, &.{ B, T, nh, hd });
         const k_4d = try graph.reshape(k_normed, &.{ B, T, n_kv, hd });
-        const v_4d = try graph.reshape(v_raw, &.{ B, T, n_kv, hd });
+        const v_4d = try graph.reshape(v_normed, &.{ B, T, n_kv, hd });
 
         const q = try graph.transposeND(q_4d, 1, 2);
         const k_t_unrot = try graph.transposeND(k_4d, 1, 2);
         const v = try graph.transposeND(v_4d, 1, 2);
 
-        // 4. RoPE
-        const rot_dim = @as(usize, @intFromFloat(@as(f32, @floatFromInt(hd)) * self.partial_rotary_factor));
-        const q_rot = if (rot_dim == hd)
-            try graph.rope(q, 0)
-        else
-            try graph.ropeOffset(q, 0, hd - rot_dim);
-
-        const k_rot = if (rot_dim == hd)
-            try graph.rope(k_t_unrot, 0)
-        else
-            try graph.ropeOffset(k_t_unrot, 0, hd - rot_dim);
+        // 4. 施加半切分 RoPE 旋转位置编码 (Split-Half RoPE, Gemma 官方标准)
+        const q_rot = try graph.ropeSplitHalf(q, 0, self.partial_rotary_factor, self.rope_theta);
+        const k_rot = try graph.ropeSplitHalf(k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
 
         // 5. GQA 广播
         var k = k_rot;
@@ -932,11 +961,9 @@ pub const Gemma4Q4Attention = struct {
             v_final = try graph.repeatKV(v, groups);
         }
 
-        // 6. 注意力计算
+        // 6. 注意力计算 (官方实现中 scaling = 1.0)
         const k_trans = try graph.transposeND(k, 2, 3);
-        const att = try graph.batchMatMul(q_rot, k_trans);
-        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(hd)));
-        var scores = try graph.mulScalar(att, scale);
+        var scores = try graph.batchMatMul(q_rot, k_trans);
 
         const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
         mask_node.is_buffer = true;
@@ -1127,10 +1154,43 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             return try graph.reshape(capped_logits_2d, &.{ B, T, config.vocab_size });
         }
 
+        /// 计算该模型配置下 4-bit 量化二进制文件的理论确切字节大小
+        pub fn computeExpectedFileSize() usize {
+            const magic_bytes = 8;
+            const norm_bytes = config.hidden_size * 2;
+            const embed_bytes = config.vocab_size * config.hidden_size * 2;
+
+            var layers_total: usize = 0;
+            for (0..config.num_hidden_layers) |i| {
+                const is_full = ((i + 1) % 6 == 0);
+                const head_dim = if (is_full) config.global_head_dim else config.head_dim;
+                const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
+
+                // 7 个 BF16 张量
+                const norms_bytes = (config.hidden_size * 4 + head_dim * 2 + 1) * 2;
+
+                const q_blocks = (config.hidden_size * config.num_attention_heads * head_dim) / Q4Block.QK;
+                const k_blocks = (config.hidden_size * num_kv * head_dim) / Q4Block.QK;
+                const v_blocks = if (is_full) 0 else (config.hidden_size * num_kv * head_dim) / Q4Block.QK;
+                const o_blocks = (config.num_attention_heads * head_dim * config.hidden_size) / Q4Block.QK;
+                const mlp_blocks = (config.hidden_size * config.intermediate_size * 3) / Q4Block.QK;
+
+                const total_blocks = q_blocks + k_blocks + v_blocks + o_blocks + mlp_blocks;
+                layers_total += norms_bytes + total_blocks * @sizeOf(Q4Block);
+            }
+
+            return magic_bytes + norm_bytes + embed_bytes + layers_total;
+        }
+
         /// 从 4-bit 量化二进制映射切片 (mmap_bytes) 零拷贝加载全部 48 层权重与层归一化参数
         pub fn loadFromMmap(allocator: std.mem.Allocator, mmap_bytes: []const u8) !Self {
             if (mmap_bytes.len < 8 or !std.mem.eql(u8, mmap_bytes[0..8], "ZNNQ4G01")) {
                 return error.InvalidModelSignature;
+            }
+
+            const expected_len = computeExpectedFileSize();
+            if (mmap_bytes.len < expected_len) {
+                return error.IncompleteModelFile;
             }
 
             var cursor: usize = 8;
@@ -1280,6 +1340,9 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const hidden = ctx.hidden_size;
 
             for (ctx.start_v..ctx.end_v) |v| {
+                // 抑制特殊系统/多模态控制符 (0: <pad>, 258880-258884: image/audio/video 标记)
+                if (v == 0 or (v >= 258880 and v <= 258884)) continue;
+
                 const row = ctx.embed_u16[v * hidden .. (v + 1) * hidden];
                 var dot: f32 = 0.0;
                 for (0..hidden) |d| {

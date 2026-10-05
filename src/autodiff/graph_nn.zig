@@ -654,6 +654,18 @@ pub fn rope(self: *Graph, X: *Tensor, start_pos: usize, options: tensor_mod.Rope
     );
 }
 
+pub fn ropeSplitHalf(self: *Graph, X: *Tensor, start_pos: usize, partial_rotary_factor: f32, rope_theta: f32) !*Tensor {
+    const allocator = self.arena.allocator();
+    const Y = try X.ropeSplitHalf(start_pos, partial_rotary_factor, rope_theta, allocator);
+    return self.registerSingleOutputOp(
+        Y,
+        &.{X},
+        .RoPE,
+        .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = 0, .base = rope_theta } },
+        false,
+    );
+}
+
 pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
     const allocator = self.arena.allocator();
     const C = try A.batchMatMul(B, allocator);

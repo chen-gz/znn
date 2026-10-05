@@ -750,6 +750,7 @@ pub const Tensor = struct {
     pub const groupNorm = nn_kernels.groupNorm;
     pub const applyDropoutMask = nn_kernels.applyDropoutMask;
     pub const rope = nn_kernels.rope;
+    pub const ropeSplitHalf = nn_kernels.ropeSplitHalf;
     pub const repeatKV = nn_kernels.repeatKV;
     pub const batchMatMul = nn_kernels.batchMatMul;
     pub const embedding = nn_kernels.embedding;
