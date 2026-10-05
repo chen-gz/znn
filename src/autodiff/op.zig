@@ -243,6 +243,14 @@ pub const Op = struct {
                 const ctx = self.context.AvgPool2D;
                 copyFromEager(self.outputs[0], try self.inputs[0].avgpool2d(ctx.kernel_size, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
             },
+            .AdaptiveAvgPool1D => {
+                const ctx = self.context.AdaptiveAvgPool1D;
+                copyFromEager(self.outputs[0], try self.inputs[0].adaptiveAvgPool1d(ctx.output_size, allocator), allocator);
+            },
+            .AdaptiveAvgPool2D => {
+                const ctx = self.context.AdaptiveAvgPool2D;
+                copyFromEager(self.outputs[0], try self.inputs[0].adaptiveAvgPool2d(ctx.output_size, allocator), allocator);
+            },
             .Softmax => {
                 copyFromEager(self.outputs[0], try self.inputs[0].softmax(allocator), allocator);
             },
@@ -435,6 +443,8 @@ pub const Op = struct {
             .MaxPool2D,
             .AvgPool1D,
             .AvgPool2D,
+            .AdaptiveAvgPool1D,
+            .AdaptiveAvgPool2D,
             .Softmax,
             .RmsNorm,
             .LayerNorm,

@@ -730,6 +730,13 @@ test "Dropout and AvgPool2D forward and backward passes" {
     try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2 }, out_mp1d.shape.dims[0..3]);
     try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2 }, out_ap1d.shape.dims[0..3]);
     try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2, 2 }, out_mp2d.shape.dims[0..4]);
+
+    const aap1d = nn.AdaptiveAvgPool1D.init(1);
+    const aap2d = nn.AdaptiveAvgPool2D.initSquare(1);
+    const out_aap1d = try aap1d.forward(&graph, seq1d);
+    const out_aap2d = try aap2d.forward(&graph, g_img);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 1 }, out_aap1d.shape.dims[0..3]);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 1, 1 }, out_aap2d.shape.dims[0..4]);
 }
 
 test "KVCache initialization and reset" {

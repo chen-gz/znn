@@ -688,3 +688,102 @@ pub fn avgpool2d(
     return out;
 }
 
+/// 一维自适应平均池化前向计算 (1-Dimensional Adaptive Average Pooling, AdaptiveAvgPool1D)
+/// 输入形状: `[N, C, L]`，输出形状: `[N, C, output_size]`
+/// 第 `i` 个输出位置对应区间 `[floor(i * L / output_size), ceil((i + 1) * L / output_size))`
+pub fn adaptiveAvgPool1d(
+    self: *Tensor,
+    output_size: usize,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len != 3) return error.IncompatibleDimensions;
+    if (output_size == 0) return error.InvalidDimension;
+
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const L = self.shape.dims[2];
+    if (L == 0) return error.InvalidDimension;
+
+    const out = try zeros(allocator, &.{ N, C, output_size });
+    errdefer out.deinit(allocator);
+
+    const s_n = self.strides.dims[0];
+    const s_c = self.strides.dims[1];
+    const s_l = self.strides.dims[2];
+
+    const o_n = out.strides.dims[0];
+    const o_c = out.strides.dims[1];
+    const o_l = out.strides.dims[2];
+
+    for (0..N) |n| {
+        for (0..C) |c_| {
+            for (0..output_size) |ol| {
+                const l_start = (ol * L) / output_size;
+                const l_end = ((ol + 1) * L + output_size - 1) / output_size;
+                const count = l_end - l_start;
+                var sum_val: f32 = 0.0;
+                for (l_start..l_end) |il| {
+                    sum_val += self.data[n * s_n + c_ * s_c + il * s_l];
+                }
+                out.data[n * o_n + c_ * o_c + ol * o_l] = sum_val / @as(f32, @floatFromInt(count));
+            }
+        }
+    }
+    return out;
+}
+
+/// 二维自适应平均池化前向计算 (2-Dimensional Adaptive Average Pooling, AdaptiveAvgPool2D)
+/// 输入形状: `[N, C, H, W]`，输出形状: `[N, C, output_size[0], output_size[1]]`
+pub fn adaptiveAvgPool2d(
+    self: *Tensor,
+    output_size: [2]usize,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len != 4) return error.IncompatibleDimensions;
+    const out_h = output_size[0];
+    const out_w = output_size[1];
+    if (out_h == 0 or out_w == 0) return error.InvalidDimension;
+
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const H = self.shape.dims[2];
+    const W = self.shape.dims[3];
+    if (H == 0 or W == 0) return error.InvalidDimension;
+
+    const out = try zeros(allocator, &.{ N, C, out_h, out_w });
+    errdefer out.deinit(allocator);
+
+    const s_n = self.strides.dims[0];
+    const s_c = self.strides.dims[1];
+    const s_h = self.strides.dims[2];
+    const s_w = self.strides.dims[3];
+
+    const o_n = out.strides.dims[0];
+    const o_c = out.strides.dims[1];
+    const o_h = out.strides.dims[2];
+    const o_w = out.strides.dims[3];
+
+    for (0..N) |n| {
+        for (0..C) |c_| {
+            for (0..out_h) |oh| {
+                const h_start = (oh * H) / out_h;
+                const h_end = ((oh + 1) * H + out_h - 1) / out_h;
+                for (0..out_w) |ow| {
+                    const w_start = (ow * W) / out_w;
+                    const w_end = ((ow + 1) * W + out_w - 1) / out_w;
+                    const area = (h_end - h_start) * (w_end - w_start);
+                    var sum_val: f32 = 0.0;
+                    for (h_start..h_end) |ih| {
+                        for (w_start..w_end) |iw| {
+                            sum_val += self.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
+                        }
+                    }
+                    out.data[n * o_n + c_ * o_c + oh * o_h + ow * o_w] = sum_val / @as(f32, @floatFromInt(area));
+                }
+            }
+        }
+    }
+    return out;
+}
+
+

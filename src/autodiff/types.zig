@@ -47,6 +47,8 @@ pub const OpType = enum {
     MaxPool2D, // 二维最大池化 (2D Max Pooling, MaxPool2D)
     AvgPool1D, // 一维平均池化 (1D Average Pooling, AvgPool1D)
     AvgPool2D, // 二维平均池化 (2D Average Pooling, AvgPool2D)
+    AdaptiveAvgPool1D, // 一维自适应平均池化 (1D Adaptive Average Pooling, AdaptiveAvgPool1D)
+    AdaptiveAvgPool2D, // 二维自适应平均池化 (2D Adaptive Average Pooling, AdaptiveAvgPool2D)
     RmsNorm, // 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)
     LayerNorm, // 层归一化 (Layer Normalization, LayerNorm)
     BatchNorm2d, // 二维批量归一化 (2D Batch Normalization, BatchNorm2d)
@@ -106,6 +108,8 @@ pub const OpType = enum {
             .MaxPool2D => "y = \\max_{k \\times k}(x)",
             .AvgPool1D => "y = \\frac{1}{k} \\sum_{k} x",
             .AvgPool2D => "y = \\frac{1}{k^2} \\sum_{k \\times k} x",
+            .AdaptiveAvgPool1D => "y = \\text{AdaptiveAvgPool1D}(x; L_{\\text{out}})",
+            .AdaptiveAvgPool2D => "y = \\text{AdaptiveAvgPool2D}(x; H_{\\text{out}}, W_{\\text{out}})",
             .RmsNorm => "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
             .LayerNorm => "y = \\frac{x - \\mu}{\\sqrt{\\sigma^2 + \\epsilon}} \\odot \\gamma + \\beta",
             .BatchNorm2d => "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta",
@@ -235,6 +239,12 @@ pub const OpContext = union(enum) {
         kernel_size: usize,
         stride: usize,
         padding: usize = 0,
+    },
+    AdaptiveAvgPool1D: struct {
+        output_size: usize,
+    },
+    AdaptiveAvgPool2D: struct {
+        output_size: [2]usize,
     },
     RmsNorm: struct {
         eps: f32,
