@@ -163,7 +163,7 @@
 
 - [ ] **3.1 注意力机制升级 (Memory-Efficient & FlashAttention)**
   - [ ] 实现基于 Tiling 分块与在线 Softmax 统计更新的 **FlashAttention** 前向与反向算子（避免显式存储 $O(T^2)$ 注意力分数矩阵）。
-  - [x] 实现通用 **RoPE** 旋转位置编码的前向与反向 Autograd 算子（[`OpType.RoPE`](../src/autodiff/types.zig)、[`Graph.rope`](../src/autodiff/graph_nn.zig)、[`Graph.ropeOffset`](../src/autodiff/graph_nn.zig)、[`Tensor.ropeOffset`](../src/tensor/nn_kernels.zig)）并接入 [`MLALayer.forward`](../src/nn/attention.zig)。
+  - [x] 实现通用 **RoPE** 旋转位置编码的前向与反向 Autograd 算子（[`OpType.RoPE`](../src/autodiff/types.zig)、[`Graph.rope`](../src/autodiff/graph_nn.zig)、[`Tensor.rope`](../src/tensor/nn_kernels.zig) 统一接收 [`RopeOptions`](../src/tensor/types.zig)）并接入 [`MLALayer.forward`](../src/nn/attention.zig)。
   - [ ] 为 [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`GPTConfig`](../src/nn/transformer.zig) 增加可选 RoPE 位置编码开关，并将单层 `KVCache` 串联至 `TransformerBlock` / `GPT.forwardInference` 实现端到端 $O(T)$ 增量生成。
   - [ ] `KVCache` 支持动态扩容与分页块分配（Paged KV Cache），提升自回归解码吞吐。
   - [x] 在 [`CausalSelfAttention`](../src/nn/attention.zig) 中支持 **Grouped-Query Attention (GQA)** 与 **Multi-Query Attention (MQA)**。
@@ -182,11 +182,11 @@
 
 - [x] **3.3 经典网络与视觉算子扩展**
   - [x] 实现多维张量拼接与切分算子 `concat` 与 `split` 及 Autograd 反向梯度回传。
-  - [x] 实现 `ConvTranspose2D`（转置卷积/反卷积）及其 Autograd 自动求导。
-  - [x] 实现 `BatchNorm2d`, `Dropout`, `AvgPool2D`, `RMSNorm`, `LayerNorm`。
+  - [x] 实现一维与二维卷积及转置卷积 `Conv1D`、`Conv2D`、`ConvTranspose1D`、`ConvTranspose2D`（统一基于 `ConvOptions`）及其 Autograd 自动求导与 `computeParamFans` 扇入/扇出推导。
+  - [x] 实现一维、二维与自适应池化层 `MaxPool1D`、`AvgPool1D`、`MaxPool2D`、`AvgPool2D`（统一基于 `PoolOptions`）以及 `AdaptiveAvgPool1D`、`AdaptiveAvgPool2D`。
+  - [x] 实现归一化层 `BatchNorm1d`（支持 `[N, C]` 与 `[N, C, L]`）、`BatchNorm2d`、`GroupNorm`（支持 `[N, C, ...]`）、`RMSNorm`、`LayerNorm` 与 `Dropout`。
   - [x] 实现 `RNN`, `LSTM`, `StackedLSTM`, `GRU` 循环神经网络及 GAN 对抗训练网络。
-  - [ ] 实现 `Conv1D`、`Conv3D`。
-  - [ ] 实现 `AdaptiveAvgPool2D`、`AdaptiveMaxPool2D`、`GroupNorm`、`PixelShuffle`。
+  - [ ] 按需扩展 `Conv3D`、`AdaptiveMaxPool2D`、`PixelShuffle`。
 
 - [ ] **3.4 计算图执行与内存优化 (Graph Execution & Memory)**
   - [ ] 激活重计算（Activation / Gradient Checkpointing）：前向释放中间激活，反向时重算，以计算换显存。

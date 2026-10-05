@@ -14,19 +14,20 @@ src/
 ├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, ops)
 ├── tensor/
 │   ├── shape.zig                 # 8D Shape 维度系统、跨步推导与 NumPy 广播规则
-│   ├── types.zig                 # DType、原生 bf16、SliceRange 与 GenericTensor(T)
+│   ├── types.zig                 # DType、原生 bf16、SliceRange、ConvOptions、PoolOptions、RopeOptions 与 GenericTensor(T)
 │   ├── static.zig                # 编译期静态形状校验张量包装器 StaticTensor(T, dims)
 │   ├── core.zig                  # f32 自动微分张量核心、索引、基础算术、激活与 SVD/QR/Symeig
-│   ├── nn_kernels.zig            # 神经网络数值内核 (im2col Conv2D, ConvTranspose2D, Pooling, Norm, RoPE)
+│   ├── conv_pool.zig             # 1D/2D 卷积、转置卷积、最大/平均池化与自适应平均池化数值内核
+│   ├── nn_kernels.zig            # 归一化 (RMSNorm, LayerNorm, BatchNorm1d/2d, GroupNorm)、Dropout、RoPE 与 BatchMatMul
 │   ├── reductions.zig            # 多轴归约 (sum, mean, var, std)、条件掩码、跨步切片与排序检索
 │   ├── ops.zig                   # 张量创建工厂、拼接切分 (concat/split/stack) 与线性方程组求解
 │   └── tests.zig                 # 张量与线性代数单元测试集
 ├── autodiff.zig                  # 自动微分门面 (导出 Graph, Op, OpType, OpContext)
 ├── autodiff/
-│   ├── types.zig                 # 38 种算子枚举 OpType 与算子上下文联合体 OpContext
-│   ├── op.zig                    # Op 节点定义、前向分发与反向传播总控调度
+│   ├── types.zig                 # 算子枚举 OpType 与算子上下文联合体 OpContext
+│   ├── op.zig                    # Op 节点定义、单源前向分发与反向传播总控调度
 │   ├── backward_core.zig         # 核心算子反向传播 (MatMul, 激活, 损失函数, 形状/视图, 广播四则运算)
-│   ├── backward_nn.zig           # 神经网络算子反向传播 (Conv2D col2im, Pooling, Norm, RoPE, Attention)
+│   ├── backward_nn.zig           # 神经网络算子反向传播 (1D/2D Conv/Deconv, Pooling, Norm, RoPE, Attention)
 │   ├── backward_math.zig         # 初等数学、正则化、按轴归约与条件切片算子反向传播
 │   ├── graph.zig                 # Graph 核心容器、Arena 内存池、模块作用域栈与基础算子构建器
 │   ├── graph_nn.zig              # 神经网络、损失函数与正则化计算图算子构建器
@@ -34,9 +35,10 @@ src/
 │   └── tests.zig                 # 自动微分与计算图单元测试集
 ├── nn.zig                        # 神经网络门面 (导出所有网络层、损失、序列化、可视化与反射工具)
 ├── nn/
-│   ├── core.zig                  # Linear, Conv1D, Conv2D, ConvTranspose2D, MaxPool2D, Module, Sequential 与反射遍历
+│   ├── core.zig                  # Linear, Conv1D, Conv2D, ConvTranspose1D, ConvTranspose2D, Module, Sequential
+│   ├── module.zig                # Module(T) 包装器与基于 nn.walk 的编译期结构反射协议
 │   ├── activations.zig           # ReLU, LeakyReLU, Sigmoid, Tanh, GELU, SiLU 激活层
-│   ├── normalization.zig         # RMSNorm, LayerNorm, BatchNorm2d, AvgPool2D, Dropout
+│   ├── normalization.zig         # RMSNorm, LayerNorm, BatchNorm1d, BatchNorm2d, GroupNorm, Dropout 与 1D/2D/自适应池化层
 │   ├── recurrent.zig             # RNNCell, RNN, LSTMCell, LSTM, StackedLSTM, GRUCell, GRU 与命名返回结构体
 │   ├── attention.zig             # KVCache, CausalSelfAttention (MHA/GQA/MQA), MLACache, MLALayer
 │   ├── transformer.zig           # Embedding, MLP, SwiGLU, MoELayer, TransformerBlock, TransformerDecoder, GPT
@@ -66,11 +68,11 @@ src/
 flowchart TD
     Dataset["数据与分词层 (src/dataset.zig)\n• MNIST/Fashion-MNIST IDX 解析器\n• BPETokenizer & BinaryMmapDataset\n• DataLoader (批次切片、打乱、丢弃余数)"]
     
-    TensorCore["张量底座 (src/tensor/{shape,types,static,core,nn_kernels,reductions,ops}.zig)\n• Shape 维度系统与物理 Strides 步长映射\n• GenericTensor(T) 泛型系统与编译期 StaticTensor(T, dims)\n• 广播机制 (broadcastShapes / computeBroadcastStrides)\n• 跨步切片视图 (SliceRange) 与 原地/连续化转换"]
+    TensorCore["张量底座 (src/tensor/{shape,types,static,core,conv_pool,nn_kernels,reductions,ops}.zig)\n• Shape 维度系统与物理 Strides 步长映射\n• GenericTensor(T) 泛型系统与编译期 StaticTensor(T, dims)\n• 统一算子配置 (ConvOptions, PoolOptions, RopeOptions)\n• 广播机制、跨步切片视图 (SliceRange) 与 1D/2D 卷积池化内核"]
     
-    Autodiff["动态自动微分引擎 (src/autodiff/{types,op,backward_*,graph*}.zig)\n• Graph 计算图容器 (Arena 生命周期管理)\n• 节点与算子追踪 (Tensor.creator / Op / OpContext)\n• 反向拓扑排序调度与分域反向内核 (backward_core/nn/math)\n• 模块作用域跟踪栈 (enterModule / enterChildScope)"]
+    Autodiff["动态自动微分引擎 (src/autodiff/{types,op,backward_*,graph*}.zig)\n• Graph 计算图容器 (Arena 生命周期管理)\n• 节点与算子追踪 (Tensor.creator / Op / OpContext) 与单源前向内核复用\n• 反向拓扑排序调度与分域反向内核 (backward_core/nn/math)\n• 模块作用域跟踪栈 (enterModule / enterChildScope)"]
     
-    NNModules["神经网络模块族 (src/nn/)\n• 核心层 (nn/core.zig): Linear, Conv2D, ConvTranspose2D, MaxPool2D\n• 激活与归一化 (nn/activations.zig, nn/normalization.zig)\n• 循环网络 (nn/recurrent.zig): RNN, LSTM, StackedLSTM, GRU\n• 注意力与大模型 (nn/attention.zig, nn/transformer.zig, nn/llm.zig)\n• 权重初始化 (nn/init.zig): He, Xavier, LeCun, Normal, 激活增益自动推导"]
+    NNModules["神经网络模块族 (src/nn/)\n• 核心层 (nn/core.zig): Linear, Conv1D/2D, ConvTranspose1D/2D\n• 激活、归一化与池化 (nn/activations.zig, nn/normalization.zig): RMSNorm, LayerNorm, BatchNorm1d/2d, GroupNorm, 1D/2D/自适应池化\n• 循环网络 (nn/recurrent.zig): RNN, LSTM, StackedLSTM, GRU\n• 注意力与大模型 (nn/attention.zig, nn/transformer.zig, nn/llm.zig)\n• 权重初始化 (nn/init.zig): He, Xavier, LeCun, Normal, 激活增益自动推导"]
     
     Engine["执行引擎与统计学习 (src/engine.zig, src/regression.zig)\n• trainClassificationStepWithClip / evalClassificationStep\n• 经典回归: OLS 闭式解, Ridge, Lasso, ElasticNet\n• K-Fold 交叉验证与网格超参数搜索 (src/cross_validation.zig)\n• t-SNE 高维流形降维 (src/manifold.zig)"]
     
@@ -121,6 +123,11 @@ flowchart TD
 * **`GenericTensor(T)` (`src/tensor/types.zig`)**：基于 Zig `comptime` 特性构建的多精度张量模板，统一支持 `f32`、`f64`、`bf16`（标准 Brain Floating Point 16-bit 格式）、`i32`、`i64`、`usize` 和 `bool`；
 * **`StaticTensor(T, dims)` (`src/tensor/static.zig`)**：将张量维度编码进类型系统的编译期形状校验包装器，在编译期通过 `@compileError` 拦截矩阵乘法内维不匹配、逐元素加法维度不一致或非法 `reshape`；
 * **`SliceRange` 跨步切片**：提供带 `step` 步长的任意子区间索引能力，支持无拷贝切片视图与原地连续化重排 (`contiguous`)。
+
+### 2.4 统一算子配置结构体 (`ConvOptions`, `PoolOptions` & `RopeOptions`)
+* **`ConvOptions` (`src/tensor/types.zig`)**：`stride: usize = 1, padding: usize = 0`，统一用于 `conv1d`、`conv2d`、`convTranspose1d`、`convTranspose2d`；
+* **`PoolOptions` (`src/tensor/types.zig`)**：`stride: ?usize = null, padding: usize = 0`（提供 `resolveStride(pool_size)`，当 `stride == null` 时默认等于 `pool_size`），统一用于 `maxpool1d`、`avgpool1d`、`maxpool2d`、`avgpool2d`；
+* **`RopeOptions` / `RoPEOptions` (`src/tensor/types.zig`)**：`rotary_offset: usize = 0, base: f32 = 10000.0`，统一用于 `Tensor.rope(start_pos, options, alloc)` 与 `Graph.rope(x, start_pos, options)`。
 
 ---
 
@@ -263,14 +270,25 @@ flowchart LR
     ```
     - **调试构建下的未初始化检查**：优化器 (`SGDOptimizer` / `AdamOptimizer` / `AdamWOptimizer`) 构造时调用 `nn.warnIfParametersUninitialized`，在 Debug 构建下若所有可训练权重矩阵都全为 0 (偏置、归一化 γ / β 等向量形参数不参与判断) 则输出 `std.log.warn` 提示先建立前向计算图再调用 `nn.initModel` / `nn.initModelWithSample`；非 Debug 构建下为空操作。统计逻辑通过 `nn.inspectParameterInit` 返回 `ParameterInitReport`，可在自定义训练循环中直接使用。
 
-### 4.3 现代大模型架构核心 (`nn/attention.zig`, `nn/transformer.zig`, `nn/llm.zig`)
+### 4.3 一维/二维卷积、自适应池化与归一化层 (`nn/core.zig`, `nn/normalization.zig`)
+1. **一维与二维卷积及转置卷积 (`Conv1D`, `Conv2D`, `ConvTranspose1D`, `ConvTranspose2D`, `nn/core.zig`)**：
+   - 正向卷积 `Conv1D` (`[B, C_in, L]` → `[B, C_out, L_out]`) 与 `Conv2D` (`[B, C_in, H, W]` → `[B, C_out, H_out, W_out]`) 接收 `tensor.ConvOptions`；
+   - 转置卷积 `ConvTranspose1D` 与 `ConvTranspose2D` 统一采用 `Options = struct { stride: usize = 1, padding: usize = 0, use_bias: bool = true }`（提供 `default` 与 `defaultOptions()`），完整支持前向与反向传播及 `computeParamFans` 扇入/扇出推导。
+2. **一维/二维池化与自适应平均池化 (`nn/normalization.zig`)**：
+   - `MaxPool1D`、`AvgPool1D`、`MaxPool2D`、`AvgPool2D` 统一接收 `tensor.PoolOptions = struct { stride: ?usize = null, padding: usize = 0 }`（`stride` 为 `null` 时通过 `resolveStride` 自动默认等于窗口大小）；
+   - `AdaptiveAvgPool1D` (`[B, C, L_in]` → `[B, C, L_out]`) 与 `AdaptiveAvgPool2D` (`[B, C, H_in, W_in]` → `[B, C, H_out, W_out]`) 采用标准起止窗口映射 $s_i = \lfloor i \cdot L_{\text{in}} / L_{\text{out}} \rfloor$、$e_i = \lceil (i + 1) \cdot L_{\text{in}} / L_{\text{out}} \rceil$，并在反向传播中将上游梯度精确均分回传至对应感受野。
+3. **归一化层体系 (`RMSNorm`, `LayerNorm`, `BatchNorm1d`, `BatchNorm2d`, `GroupNorm`, `nn/normalization.zig`)**：
+   - `BatchNorm1d`（支持 `[N, C]` 与 `[N, C, L]` 输入）与 `BatchNorm2d`（支持 `[N, C, H, W]` 输入）在训练模式下更新 `running_mean` / `running_var`，评估模式下使用运行统计量归一化；
+   - `GroupNorm` 支持 3D `[N, C, L]` 与 4D `[N, C, H, W]` 等 `[N, C, ...]` 输入，校验 `num_channels % num_groups == 0`。
+
+### 4.4 现代大模型架构核心 (`nn/attention.zig`, `nn/transformer.zig`, `nn/llm.zig`)
 1. **因果多头自注意力 (`CausalSelfAttention`, `nn/attention.zig`)**：
    - 包含 $Q, K, V$ 投影矩阵与输出投影 $O$，原生支持标准 MHA、分组查询注意力 (GQA) 与多查询注意力 (MQA)；
    - 内置 `[1, 1, T, T]` 广播因果下三角掩码，杜绝未来信息泄漏；
    - 支持动态 `KVCache` 键值缓存，单步自回归解码从 $O(N^2)$ 降低至 $O(N)$。
-2. **多头潜在注意力 (`MLALayer` / DeepSeek MLA, `nn/attention.zig`)**：
-   - 引入低秩键值压缩机制（$d_c$ 潜变量投影）与解耦的旋转位置编码（RoPE $d_r$ 向量）；
-   - 大幅缩减推理时 `MLACache` 的显存占用。
+2. **多头潜在注意力与统一旋转位置编码 (`MLALayer` & `RopeOptions`, `nn/attention.zig`)**：
+   - 引入低秩键值压缩机制（$d_c$ 潜变量投影）与解耦的旋转位置编码（RoPE $d_r$ 向量），大幅缩减推理时 `MLACache` 的显存占用；
+   - `Tensor.rope` 与 `Graph.rope` 统一接收 `(start_pos: usize, options: RopeOptions)`，其中 `RopeOptions = struct { rotary_offset: usize = 0, base: f32 = 10000.0 }`。
 3. **SwiGLU 门控前馈网络 (`SwiGLU`, `nn/transformer.zig`)**：
    - 采用双路投影结构：$\text{SwiGLU}(x) = (\text{SiLU}(x W_{\text{gate}}) \odot (x W_{\text{up}})) W_{\text{down}}$；
    - 相比传统两层 MLP 具备更优秀的表征容量与训练稳定性。
