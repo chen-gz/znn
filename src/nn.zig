@@ -84,10 +84,14 @@ pub const SiLU = activations.SiLU;
 pub const Swish = activations.Swish;
 
 // 3. 归一化与池化 (Normalization & Pooling)
+pub const PoolOptions = tensor.PoolOptions;
 pub const RMSNorm = normalization.RMSNorm;
 pub const LayerNorm = normalization.LayerNorm;
 pub const BatchNorm2d = normalization.BatchNorm2d;
 pub const Dropout = normalization.Dropout;
+pub const MaxPool1D = normalization.MaxPool1D;
+pub const MaxPool2D = normalization.MaxPool2D;
+pub const AvgPool1D = normalization.AvgPool1D;
 pub const AvgPool2D = normalization.AvgPool2D;
 
 // 4. 循环神经网络 (Recurrent Neural Networks, RNN)

@@ -4,6 +4,7 @@ const core = @import("core.zig");
 const types = @import("types.zig");
 const Tensor = core.Tensor;
 const ConvOptions = types.ConvOptions;
+const PoolOptions = types.PoolOptions;
 const ops_mod = @import("ops.zig");
 const zeros = ops_mod.zeros;
 
@@ -452,19 +453,88 @@ pub fn convTranspose2d(
     return out;
 }
 
-/// 二维最大池化前向计算 (2-Dimensional Max Pooling, MaxPool2D)
-pub fn maxpool2d(self: *Tensor, pool_size: usize, stride: usize, allocator: std.mem.Allocator) !*Tensor {
-    if (self.shape.len != 4) return error.IncompatibleDimensions;
+/// 一维最大池化前向计算 (1-Dimensional Max Pooling, MaxPool1D)
+/// 输入形状: `[N, C, L]`，输出长度: `L_out = (L + 2 * padding - pool_size) / stride + 1`
+pub fn maxpool1d(
+    self: *Tensor,
+    pool_size: usize,
+    options: PoolOptions,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len != 3) return error.IncompatibleDimensions;
+    const stride = options.resolveStride(pool_size);
+    const padding = options.padding;
     if (stride == 0 or pool_size == 0) return error.InvalidStride;
+
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const L = self.shape.dims[2];
+
+    const L_padded = L + 2 * padding;
+    if (L_padded < pool_size) return error.KernelBiggerThanInput;
+
+    const L_out = (L_padded - pool_size) / stride + 1;
+    const out = try zeros(allocator, &.{ N, C, L_out });
+    errdefer out.deinit(allocator);
+
+    const s_n = self.strides.dims[0];
+    const s_c = self.strides.dims[1];
+    const s_l = self.strides.dims[2];
+
+    const o_n = out.strides.dims[0];
+    const o_c = out.strides.dims[1];
+    const o_l = out.strides.dims[2];
+
+    for (0..N) |n| {
+        for (0..C) |c_| {
+            for (0..L_out) |ol| {
+                var max_val: f32 = -std.math.inf(f32);
+                var found = false;
+                for (0..pool_size) |pl| {
+                    const il_signed: isize = @as(isize, @intCast(ol * stride + pl)) - @as(isize, @intCast(padding));
+                    if (il_signed >= 0 and il_signed < @as(isize, @intCast(L))) {
+                        const il: usize = @intCast(il_signed);
+                        const val = self.data[n * s_n + c_ * s_c + il * s_l];
+                        if (!found or val > max_val) {
+                            max_val = val;
+                            found = true;
+                        }
+                    }
+                }
+                out.data[n * o_n + c_ * o_c + ol * o_l] = if (found) max_val else 0.0;
+            }
+        }
+    }
+    return out;
+}
+
+/// 二维最大池化前向计算 (2-Dimensional Max Pooling, MaxPool2D)
+/// 输入形状: `[N, C, H, W]`，输出高宽: `H_out = (H + 2 * padding - pool_size) / stride + 1`
+pub fn maxpool2d(
+    self: *Tensor,
+    pool_size: usize,
+    options: PoolOptions,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len != 4) return error.IncompatibleDimensions;
+    const stride = options.resolveStride(pool_size);
+    const padding = options.padding;
+    if (stride == 0 or pool_size == 0) return error.InvalidStride;
+
     const N = self.shape.dims[0];
     const C = self.shape.dims[1];
     const H = self.shape.dims[2];
     const W = self.shape.dims[3];
 
-    const H_out = H / stride;
-    const W_out = W / stride;
+    const H_padded = H + 2 * padding;
+    const W_padded = W + 2 * padding;
+    if (H_padded < pool_size or W_padded < pool_size) return error.KernelBiggerThanInput;
+
+    const H_out = (H_padded - pool_size) / stride + 1;
+    const W_out = (W_padded - pool_size) / stride + 1;
 
     const out = try zeros(allocator, &.{ N, C, H_out, W_out });
+    errdefer out.deinit(allocator);
 
     const s_n = self.strides.dims[0];
     const s_c = self.strides.dims[1];
@@ -480,20 +550,24 @@ pub fn maxpool2d(self: *Tensor, pool_size: usize, stride: usize, allocator: std.
         for (0..C) |c_| {
             for (0..H_out) |h| {
                 for (0..W_out) |w| {
-                    var max_val = self.data[n * s_n + c_ * s_c + (h * stride) * s_h + (w * stride) * s_w];
+                    var max_val: f32 = -std.math.inf(f32);
+                    var found = false;
                     for (0..pool_size) |ph| {
+                        const ih_signed: isize = @as(isize, @intCast(h * stride + ph)) - @as(isize, @intCast(padding));
+                        if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
+                        const ih: usize = @intCast(ih_signed);
                         for (0..pool_size) |pw| {
-                            const ih = h * stride + ph;
-                            const iw = w * stride + pw;
-                            if (ih < H and iw < W) {
-                                const val = self.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
-                                if (val > max_val) {
-                                    max_val = val;
-                                }
+                            const iw_signed: isize = @as(isize, @intCast(w * stride + pw)) - @as(isize, @intCast(padding));
+                            if (iw_signed < 0 or iw_signed >= @as(isize, @intCast(W))) continue;
+                            const iw: usize = @intCast(iw_signed);
+                            const val = self.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
+                            if (!found or val > max_val) {
+                                max_val = val;
+                                found = true;
                             }
                         }
                     }
-                    out.data[n * o_n + c_ * o_c + h * o_h + w * o_w] = max_val;
+                    out.data[n * o_n + c_ * o_c + h * o_h + w * o_w] = if (found) max_val else 0.0;
                 }
             }
         }
@@ -501,19 +575,83 @@ pub fn maxpool2d(self: *Tensor, pool_size: usize, stride: usize, allocator: std.
     return out;
 }
 
-/// 二维平均池化前向计算 (2-Dimensional Average Pooling, AvgPool2D)
-pub fn avgpool2d(self: *Tensor, kernel_size: usize, stride: usize, allocator: std.mem.Allocator) !*Tensor {
-    if (self.shape.len != 4) return error.IncompatibleDimensions;
+/// 一维平均池化前向计算 (1-Dimensional Average Pooling, AvgPool1D)
+/// 输入形状: `[N, C, L]`，输出长度: `L_out = (L + 2 * padding - kernel_size) / stride + 1`
+pub fn avgpool1d(
+    self: *Tensor,
+    kernel_size: usize,
+    options: PoolOptions,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len != 3) return error.IncompatibleDimensions;
+    const stride = options.resolveStride(kernel_size);
+    const padding = options.padding;
     if (stride == 0 or kernel_size == 0) return error.InvalidStride;
+
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const L = self.shape.dims[2];
+
+    const L_padded = L + 2 * padding;
+    if (L_padded < kernel_size) return error.KernelBiggerThanInput;
+
+    const out_l = (L_padded - kernel_size) / stride + 1;
+    const out = try zeros(allocator, &.{ N, C, out_l });
+    errdefer out.deinit(allocator);
+    const pool_len = @as(f32, @floatFromInt(kernel_size));
+
+    const s_n = self.strides.dims[0];
+    const s_c = self.strides.dims[1];
+    const s_l = self.strides.dims[2];
+
+    const o_n = out.strides.dims[0];
+    const o_c = out.strides.dims[1];
+    const o_l = out.strides.dims[2];
+
+    for (0..N) |n| {
+        for (0..C) |c_| {
+            for (0..out_l) |ol| {
+                var sum_val: f32 = 0.0;
+                for (0..kernel_size) |kl| {
+                    const il_signed: isize = @as(isize, @intCast(ol * stride + kl)) - @as(isize, @intCast(padding));
+                    if (il_signed >= 0 and il_signed < @as(isize, @intCast(L))) {
+                        const il: usize = @intCast(il_signed);
+                        sum_val += self.data[n * s_n + c_ * s_c + il * s_l];
+                    }
+                }
+                out.data[n * o_n + c_ * o_c + ol * o_l] = sum_val / pool_len;
+            }
+        }
+    }
+    return out;
+}
+
+/// 二维平均池化前向计算 (2-Dimensional Average Pooling, AvgPool2D)
+/// 输入形状: `[N, C, H, W]`，输出高宽: `H_out = (H + 2 * padding - kernel_size) / stride + 1`
+pub fn avgpool2d(
+    self: *Tensor,
+    kernel_size: usize,
+    options: PoolOptions,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len != 4) return error.IncompatibleDimensions;
+    const stride = options.resolveStride(kernel_size);
+    const padding = options.padding;
+    if (stride == 0 or kernel_size == 0) return error.InvalidStride;
+
     const N = self.shape.dims[0];
     const C = self.shape.dims[1];
     const H = self.shape.dims[2];
     const W = self.shape.dims[3];
-    if (kernel_size > H or kernel_size > W) return error.KernelBiggerThanInput;
 
-    const out_h = (H - kernel_size) / stride + 1;
-    const out_w = (W - kernel_size) / stride + 1;
+    const H_padded = H + 2 * padding;
+    const W_padded = W + 2 * padding;
+    if (H_padded < kernel_size or W_padded < kernel_size) return error.KernelBiggerThanInput;
+
+    const out_h = (H_padded - kernel_size) / stride + 1;
+    const out_w = (W_padded - kernel_size) / stride + 1;
     const out = try zeros(allocator, &.{ N, C, out_h, out_w });
+    errdefer out.deinit(allocator);
     const pool_area = @as(f32, @floatFromInt(kernel_size * kernel_size));
 
     const s_n = self.strides.dims[0];
@@ -530,14 +668,15 @@ pub fn avgpool2d(self: *Tensor, kernel_size: usize, stride: usize, allocator: st
         for (0..C) |c_| {
             for (0..out_h) |oh| {
                 for (0..out_w) |ow| {
-                    const ih_start = oh * stride;
-                    const iw_start = ow * stride;
                     var sum_val: f32 = 0.0;
-
                     for (0..kernel_size) |kh| {
+                        const ih_signed: isize = @as(isize, @intCast(oh * stride + kh)) - @as(isize, @intCast(padding));
+                        if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
+                        const ih: usize = @intCast(ih_signed);
                         for (0..kernel_size) |kw| {
-                            const ih = ih_start + kh;
-                            const iw = iw_start + kw;
+                            const iw_signed: isize = @as(isize, @intCast(ow * stride + kw)) - @as(isize, @intCast(padding));
+                            if (iw_signed < 0 or iw_signed >= @as(isize, @intCast(W))) continue;
+                            const iw: usize = @intCast(iw_signed);
                             sum_val += self.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
                         }
                     }
@@ -548,3 +687,4 @@ pub fn avgpool2d(self: *Tensor, kernel_size: usize, stride: usize, allocator: st
     }
     return out;
 }
+

@@ -501,6 +501,57 @@ pub fn backwardNN(self: *Op) !void {
                 }
             }
         },
+        .MaxPool1D => {
+            const A = self.inputs[0];
+            const C = self.outputs[0];
+            const N = A.shape.dims[0];
+            const C_ch = A.shape.dims[1];
+            const L = A.shape.dims[2];
+            const L_out = C.shape.dims[2];
+
+            const pool_size = self.context.MaxPool1D.pool_size;
+            const stride = self.context.MaxPool1D.stride;
+            const padding = self.context.MaxPool1D.padding;
+
+            const s_n = A.strides.dims[0];
+            const s_c = A.strides.dims[1];
+            const s_l = A.strides.dims[2];
+
+            const o_n = C.strides.dims[0];
+            const o_c = C.strides.dims[1];
+            const o_l = C.strides.dims[2];
+
+            if (A.requires_grad) {
+                for (0..N) |n| {
+                    for (0..C_ch) |c_| {
+                        for (0..L_out) |ol| {
+                            const grad_val = C.grad[n * o_n + c_ * o_c + ol * o_l];
+                            if (grad_val == 0.0) continue;
+
+                            var max_val: f32 = -std.math.inf(f32);
+                            var max_l: usize = 0;
+                            var found = false;
+
+                            for (0..pool_size) |pl| {
+                                const il_signed: isize = @as(isize, @intCast(ol * stride + pl)) - @as(isize, @intCast(padding));
+                                if (il_signed >= 0 and il_signed < @as(isize, @intCast(L))) {
+                                    const il: usize = @intCast(il_signed);
+                                    const val = A.data[n * s_n + c_ * s_c + il * s_l];
+                                    if (!found or val > max_val) {
+                                        max_val = val;
+                                        max_l = il;
+                                        found = true;
+                                    }
+                                }
+                            }
+                            if (found) {
+                                A.grad[n * s_n + c_ * s_c + max_l * s_l] += grad_val;
+                            }
+                        }
+                    }
+                }
+            }
+        },
         .MaxPool2D => {
             const A = self.inputs[0];
             const C = self.outputs[0];
@@ -513,6 +564,7 @@ pub fn backwardNN(self: *Op) !void {
 
             const pool_size = self.context.MaxPool2D.pool_size;
             const stride = self.context.MaxPool2D.stride;
+            const padding = self.context.MaxPool2D.padding;
 
             const s_n = A.strides.dims[0];
             const s_c = A.strides.dims[1];
@@ -532,27 +584,72 @@ pub fn backwardNN(self: *Op) !void {
                                 const grad_val = C.grad[n * o_n + c_ * o_c + h * o_h + w * o_w];
                                 if (grad_val == 0.0) continue;
 
-                                // Find where the max was
-                                var max_val = A.data[n * s_n + c_ * s_c + (h * stride) * s_h + (w * stride) * s_w];
-                                var max_h = h * stride;
-                                var max_w = w * stride;
+                                var max_val: f32 = -std.math.inf(f32);
+                                var max_h: usize = 0;
+                                var max_w: usize = 0;
+                                var found = false;
 
                                 for (0..pool_size) |ph| {
+                                    const ih_signed: isize = @as(isize, @intCast(h * stride + ph)) - @as(isize, @intCast(padding));
+                                    if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
+                                    const ih: usize = @intCast(ih_signed);
                                     for (0..pool_size) |pw| {
-                                        const ih = h * stride + ph;
-                                        const iw = w * stride + pw;
-                                        if (ih < H and iw < W) {
-                                            const val = A.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
-                                            if (val > max_val) {
-                                                max_val = val;
-                                                max_h = ih;
-                                                max_w = iw;
-                                            }
+                                        const iw_signed: isize = @as(isize, @intCast(w * stride + pw)) - @as(isize, @intCast(padding));
+                                        if (iw_signed < 0 or iw_signed >= @as(isize, @intCast(W))) continue;
+                                        const iw: usize = @intCast(iw_signed);
+                                        const val = A.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
+                                        if (!found or val > max_val) {
+                                            max_val = val;
+                                            max_h = ih;
+                                            max_w = iw;
+                                            found = true;
                                         }
                                     }
                                 }
-                                // Route gradient to max_h, max_w
-                                A.grad[n * s_n + c_ * s_c + max_h * s_h + max_w * s_w] += grad_val;
+                                if (found) {
+                                    A.grad[n * s_n + c_ * s_c + max_h * s_h + max_w * s_w] += grad_val;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        .AvgPool1D => {
+            const A = self.inputs[0];
+            const C = self.outputs[0];
+            const N = A.shape.dims[0];
+            const C_ch = A.shape.dims[1];
+            const L = A.shape.dims[2];
+            const L_out = C.shape.dims[2];
+
+            const kernel_size = self.context.AvgPool1D.kernel_size;
+            const stride = self.context.AvgPool1D.stride;
+            const padding = self.context.AvgPool1D.padding;
+            const pool_len = @as(f32, @floatFromInt(kernel_size));
+
+            const s_n = A.strides.dims[0];
+            const s_c = A.strides.dims[1];
+            const s_l = A.strides.dims[2];
+
+            const o_n = C.strides.dims[0];
+            const o_c = C.strides.dims[1];
+            const o_l = C.strides.dims[2];
+
+            if (A.requires_grad) {
+                for (0..N) |n| {
+                    for (0..C_ch) |c_| {
+                        for (0..L_out) |ol| {
+                            const grad_val = C.grad[n * o_n + c_ * o_c + ol * o_l];
+                            if (grad_val == 0.0) continue;
+                            const distributed_grad = grad_val / pool_len;
+
+                            for (0..kernel_size) |kl| {
+                                const il_signed: isize = @as(isize, @intCast(ol * stride + kl)) - @as(isize, @intCast(padding));
+                                if (il_signed >= 0 and il_signed < @as(isize, @intCast(L))) {
+                                    const il: usize = @intCast(il_signed);
+                                    A.grad[n * s_n + c_ * s_c + il * s_l] += distributed_grad;
+                                }
                             }
                         }
                     }
@@ -571,6 +668,7 @@ pub fn backwardNN(self: *Op) !void {
 
             const kernel_size = self.context.AvgPool2D.kernel_size;
             const stride = self.context.AvgPool2D.stride;
+            const padding = self.context.AvgPool2D.padding;
             const pool_area = @as(f32, @floatFromInt(kernel_size * kernel_size));
 
             const s_n = A.strides.dims[0];
@@ -593,12 +691,14 @@ pub fn backwardNN(self: *Op) !void {
                                 const distributed_grad = grad_val / pool_area;
 
                                 for (0..kernel_size) |kh| {
+                                    const ih_signed: isize = @as(isize, @intCast(oh * stride + kh)) - @as(isize, @intCast(padding));
+                                    if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
+                                    const ih: usize = @intCast(ih_signed);
                                     for (0..kernel_size) |kw| {
-                                        const ih = oh * stride + kh;
-                                        const iw = ow * stride + kw;
-                                        if (ih < H and iw < W) {
-                                            A.grad[n * s_n + c_ * s_c + ih * s_h + iw * s_w] += distributed_grad;
-                                        }
+                                        const iw_signed: isize = @as(isize, @intCast(ow * stride + kw)) - @as(isize, @intCast(padding));
+                                        if (iw_signed < 0 or iw_signed >= @as(isize, @intCast(W))) continue;
+                                        const iw: usize = @intCast(iw_signed);
+                                        A.grad[n * s_n + c_ * s_c + ih * s_h + iw * s_w] += distributed_grad;
                                     }
                                 }
                             }

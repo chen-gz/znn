@@ -179,22 +179,122 @@ pub const Dropout = struct {
     }
 };
 
+/// 一维最大池化 (1-Dimensional Max Pooling, MaxPool1D)
+pub const MaxPool1D = struct {
+    pool_size: usize,
+    stride: usize,
+    padding: usize = 0,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "MaxPool1D",
+
+    pub const Options = tensor.PoolOptions;
+    pub const formula = "y = \\max_{k}(x)";
+
+    pub fn defaultOptions() Options {
+        return Options.defaultOptions();
+    }
+
+    pub fn init(pool_size: usize, options: Options) MaxPool1D {
+        return .{
+            .pool_size = pool_size,
+            .stride = options.resolveStride(pool_size),
+            .padding = options.padding,
+        };
+    }
+
+    pub fn forward(self: *const MaxPool1D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+        return try graph.maxpool1d(x, self.pool_size, .{ .stride = self.stride, .padding = self.padding });
+    }
+};
+
+/// 二维最大池化 (2-Dimensional Max Pooling, MaxPool2D)
+pub const MaxPool2D = struct {
+    pool_size: usize,
+    stride: usize,
+    padding: usize = 0,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "MaxPool2D",
+
+    pub const Options = tensor.PoolOptions;
+    pub const formula = "y = \\max_{k \\times k}(x)";
+
+    pub fn defaultOptions() Options {
+        return Options.defaultOptions();
+    }
+
+    pub fn init(pool_size: usize, options: Options) MaxPool2D {
+        return .{
+            .pool_size = pool_size,
+            .stride = options.resolveStride(pool_size),
+            .padding = options.padding,
+        };
+    }
+
+    pub fn forward(self: *const MaxPool2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+        return try graph.maxpool2d(x, self.pool_size, .{ .stride = self.stride, .padding = self.padding });
+    }
+};
+
+/// 一维平均池化 (1-Dimensional Average Pooling, AvgPool1D)
+pub const AvgPool1D = struct {
+    kernel_size: usize,
+    stride: usize,
+    padding: usize = 0,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "AvgPool1D",
+
+    pub const Options = tensor.PoolOptions;
+    pub const formula = "y = \\frac{1}{k} \\sum_{k} x";
+
+    pub fn defaultOptions() Options {
+        return Options.defaultOptions();
+    }
+
+    pub fn init(kernel_size: usize, options: Options) AvgPool1D {
+        return .{
+            .kernel_size = kernel_size,
+            .stride = options.resolveStride(kernel_size),
+            .padding = options.padding,
+        };
+    }
+
+    pub fn forward(self: *const AvgPool1D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+        return try graph.avgpool1d(x, self.kernel_size, .{ .stride = self.stride, .padding = self.padding });
+    }
+};
+
 /// 二维平均池化 (2-Dimensional Average Pooling, AvgPool2D)
 pub const AvgPool2D = struct {
     kernel_size: usize,
     stride: usize,
+    padding: usize = 0,
     name: ?[]const u8 = null,
     module_type: []const u8 = "AvgPool2D",
 
+    pub const Options = tensor.PoolOptions;
     pub const formula = "y = \\frac{1}{k^2} \\sum_{k \\times k} x";
 
-    pub fn init(kernel_size: usize, stride: usize) AvgPool2D {
-        return .{ .kernel_size = kernel_size, .stride = stride };
+    pub fn defaultOptions() Options {
+        return Options.defaultOptions();
+    }
+
+    pub fn init(kernel_size: usize, options: Options) AvgPool2D {
+        return .{
+            .kernel_size = kernel_size,
+            .stride = options.resolveStride(kernel_size),
+            .padding = options.padding,
+        };
     }
 
     pub fn forward(self: *const AvgPool2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        return try graph.avgpool2d(x, self.kernel_size, self.stride);
+        return try graph.avgpool2d(x, self.kernel_size, .{ .stride = self.stride, .padding = self.padding });
     }
 };

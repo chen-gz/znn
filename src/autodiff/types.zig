@@ -43,7 +43,9 @@ pub const OpType = enum {
     Conv2D, // 二维卷积 (2D Convolution, Conv2D)
     ConvTranspose1D, // 一维转置卷积 / 反卷积 (1D Transposed Convolution, ConvTranspose1D)
     ConvTranspose2D, // 二维转置卷积 / 反卷积 (2D Transposed Convolution, ConvTranspose2D)
+    MaxPool1D, // 一维最大池化 (1D Max Pooling, MaxPool1D)
     MaxPool2D, // 二维最大池化 (2D Max Pooling, MaxPool2D)
+    AvgPool1D, // 一维平均池化 (1D Average Pooling, AvgPool1D)
     AvgPool2D, // 二维平均池化 (2D Average Pooling, AvgPool2D)
     RmsNorm, // 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)
     LayerNorm, // 层归一化 (Layer Normalization, LayerNorm)
@@ -100,7 +102,9 @@ pub const OpType = enum {
             .Softmax => "P_i = \\frac{e^{z_i - \\max(z)}}{\\sum_j e^{z_j - \\max(z)}}",
             .Conv1D, .Conv2D => "y = x \\ast W + b",
             .ConvTranspose1D, .ConvTranspose2D => "y = x \\ast_{\\text{deconv}} W + b",
+            .MaxPool1D => "y = \\max_{k}(x)",
             .MaxPool2D => "y = \\max_{k \\times k}(x)",
+            .AvgPool1D => "y = \\frac{1}{k} \\sum_{k} x",
             .AvgPool2D => "y = \\frac{1}{k^2} \\sum_{k \\times k} x",
             .RmsNorm => "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
             .LayerNorm => "y = \\frac{x - \\mu}{\\sqrt{\\sigma^2 + \\epsilon}} \\odot \\gamma + \\beta",
@@ -212,13 +216,25 @@ pub const OpContext = union(enum) {
         stride: usize = 1,
         padding: usize = 0,
     },
+    MaxPool1D: struct {
+        pool_size: usize,
+        stride: usize,
+        padding: usize = 0,
+    },
     MaxPool2D: struct {
         pool_size: usize,
         stride: usize,
+        padding: usize = 0,
+    },
+    AvgPool1D: struct {
+        kernel_size: usize,
+        stride: usize,
+        padding: usize = 0,
     },
     AvgPool2D: struct {
         kernel_size: usize,
         stride: usize,
+        padding: usize = 0,
     },
     RmsNorm: struct {
         eps: f32,

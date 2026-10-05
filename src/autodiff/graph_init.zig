@@ -49,6 +49,10 @@ pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u
         if (std.mem.eql(u8, m_type, "Conv2D")) return "y = \\text{Conv2D}(x; W, b)";
         if (std.mem.eql(u8, m_type, "ConvTranspose1D")) return "y = \\text{ConvTranspose1D}(x; W, b)";
         if (std.mem.eql(u8, m_type, "ConvTranspose2D")) return "y = \\text{ConvTranspose2D}(x; W, b)";
+        if (std.mem.eql(u8, m_type, "MaxPool1D")) return "y = \\max_{k}(x)";
+        if (std.mem.eql(u8, m_type, "MaxPool2D")) return "y = \\max_{k \\times k}(x)";
+        if (std.mem.eql(u8, m_type, "AvgPool1D")) return "y = \\frac{1}{k} \\sum_{k} x";
+        if (std.mem.eql(u8, m_type, "AvgPool2D")) return "y = \\frac{1}{k^2} \\sum_{k \\times k} x";
         if (std.mem.eql(u8, m_type, "RMSNorm")) return "y = \\text{RMSNorm}(x; \\gamma, \\epsilon)";
         if (std.mem.eql(u8, m_type, "LayerNorm")) return "y = \\text{LayerNorm}(x; \\gamma, \\beta)";
         if (std.mem.eql(u8, m_type, "BatchNorm2d")) return "y = \\text{BatchNorm2d}(x; \\gamma, \\beta)";
