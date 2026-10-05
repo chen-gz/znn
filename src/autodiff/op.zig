@@ -261,40 +261,26 @@ pub const Op = struct {
                 copyFromEager(self.outputs[0], try self.inputs[0].layerNorm(self.inputs[1], self.inputs[2], self.context.LayerNorm.eps, allocator), allocator);
             },
             .BatchNorm2d => {
-                const X = self.inputs[0];
-                const G = self.inputs[1];
-                const B = self.inputs[2];
-                const Y = self.outputs[0];
                 const ctx = self.context.BatchNorm2d;
-
-                const N = X.shape.dims[0];
-                const C = X.shape.dims[1];
-                const H = X.shape.dims[2];
-                const W = X.shape.dims[3];
-                const spatial_size = H * W;
-
-                for (0..C) |c_| {
-                    const mean_val = ctx.save_mean[c_];
-                    const inv_std = ctx.save_inv_std[c_];
-                    const g_val = G.data[c_];
-                    const b_val = B.data[c_];
-
-                    for (0..N) |n| {
-                        const in_slice = X.data[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
-                        const out_slice = Y.data[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
-                        for (in_slice, out_slice) |val, *o| {
-                            o.* = (val - mean_val) * inv_std * g_val + b_val;
-                        }
-                    }
-                }
+                copyFromEager(
+                    self.outputs[0],
+                    try self.inputs[0].batchNorm2d(
+                        self.inputs[1],
+                        self.inputs[2],
+                        null,
+                        null,
+                        false,
+                        ctx.eps,
+                        0.0,
+                        ctx.save_mean,
+                        ctx.save_inv_std,
+                        allocator,
+                    ),
+                    allocator,
+                );
             },
             .Dropout => {
-                const X = self.inputs[0];
-                const Y = self.outputs[0];
-                const mask_scale = self.context.Dropout.mask_scale;
-                for (X.data, Y.data, mask_scale) |val, *o, m| {
-                    o.* = val * m;
-                }
+                copyFromEager(self.outputs[0], try self.inputs[0].applyDropoutMask(self.context.Dropout.mask_scale, allocator), allocator);
             },
             .RoPE => {
                 const ctx = self.context.RoPE;
