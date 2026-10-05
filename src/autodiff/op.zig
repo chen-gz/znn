@@ -277,7 +277,7 @@ pub const Op = struct {
             },
             .RoPE => {
                 const ctx = self.context.RoPE;
-                copyFromEager(self.outputs[0], try self.inputs[0].ropeOffset(ctx.start_pos, ctx.rotary_offset, allocator), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].ropeOffsetWithTheta(ctx.start_pos, ctx.rotary_offset, ctx.rope_theta, allocator), allocator);
             },
             .BatchMatMul => {
                 copyFromEager(self.outputs[0], try self.inputs[0].batchMatMul(self.inputs[1], allocator), allocator);

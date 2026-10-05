@@ -669,7 +669,10 @@ pub const Graph = struct {
     pub const batchNorm2d = graph_nn.batchNorm2d;
     pub const dropout = graph_nn.dropout;
     pub const rope = graph_nn.rope;
+    pub const ropeWithTheta = graph_nn.ropeWithTheta;
     pub const ropeOffset = graph_nn.ropeOffset;
+    pub const ropeOffsetWithTheta = graph_nn.ropeOffsetWithTheta;
+    pub const ropeSplitHalf = graph_nn.ropeSplitHalf;
     pub const batchMatMul = graph_nn.batchMatMul;
     pub const embedding = graph_nn.embedding;
 

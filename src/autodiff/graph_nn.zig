@@ -535,18 +535,38 @@ pub fn dropout(self: *Graph, X: *Tensor, p: f32, random: std.Random) !*Tensor {
 }
 
 pub fn rope(self: *Graph, X: *Tensor, start_pos: usize) !*Tensor {
-    return self.ropeOffset(X, start_pos, 0);
+    return self.ropeOffsetWithTheta(X, start_pos, 0, 10000.0);
+}
+
+pub fn ropeWithTheta(self: *Graph, X: *Tensor, start_pos: usize, rope_theta: f32) !*Tensor {
+    return self.ropeOffsetWithTheta(X, start_pos, 0, rope_theta);
 }
 
 pub fn ropeOffset(self: *Graph, X: *Tensor, start_pos: usize, rotary_offset: usize) !*Tensor {
+    return self.ropeOffsetWithTheta(X, start_pos, rotary_offset, 10000.0);
+}
+
+pub fn ropeOffsetWithTheta(self: *Graph, X: *Tensor, start_pos: usize, rotary_offset: usize, rope_theta: f32) !*Tensor {
     const allocator = self.arena.allocator();
-    const Y = try X.ropeOffset(start_pos, rotary_offset, allocator);
+    const Y = try X.ropeOffsetWithTheta(start_pos, rotary_offset, rope_theta, allocator);
     return self.registerSingleOutputOp(
         Y,
         &.{X},
         .RoPE,
-        .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = rotary_offset } },
+        .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = rotary_offset, .rope_theta = rope_theta } },
         self.enable_grad and X.requires_grad,
+    );
+}
+
+pub fn ropeSplitHalf(self: *Graph, X: *Tensor, start_pos: usize, partial_rotary_factor: f32, rope_theta: f32) !*Tensor {
+    const allocator = self.arena.allocator();
+    const Y = try X.ropeSplitHalf(start_pos, partial_rotary_factor, rope_theta, allocator);
+    return self.registerSingleOutputOp(
+        Y,
+        &.{X},
+        .RoPE,
+        .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = 0, .rope_theta = rope_theta } },
+        false,
     );
 }
 
