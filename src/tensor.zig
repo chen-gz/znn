@@ -3,6 +3,7 @@ const std = @import("std");
 pub const shape = @import("tensor/shape.zig");
 pub const types = @import("tensor/types.zig");
 pub const core = @import("tensor/core.zig");
+pub const conv_pool = @import("tensor/conv_pool.zig");
 pub const nn_kernels = @import("tensor/nn_kernels.zig");
 pub const reductions = @import("tensor/reductions.zig");
 pub const ops = @import("tensor/ops.zig");
