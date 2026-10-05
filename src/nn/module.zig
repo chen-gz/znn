@@ -95,6 +95,8 @@ fn walkField(field_ptr: anytype, visitor: anytype, path: *Path) !void {
         try visitor.visitTensor(path.slice(), field_ptr.*);
     } else if (info == .optional and info.optional.child == *Tensor) {
         if (field_ptr.*) |t| try visitor.visitTensor(path.slice(), t);
+    } else if (info == .optional and @typeInfo(info.optional.child) == .@"struct") {
+        if (field_ptr.*) |*s| try walkStruct(s, visitor, path);
     } else if (info == .pointer and info.pointer.size == .slice and !info.pointer.is_const) {
         const E = info.pointer.child;
         if (E == f32) {
