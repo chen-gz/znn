@@ -16,6 +16,8 @@ pub const maxpool1d = conv_pool.maxpool1d;
 pub const maxpool2d = conv_pool.maxpool2d;
 pub const avgpool1d = conv_pool.avgpool1d;
 pub const avgpool2d = conv_pool.avgpool2d;
+pub const adaptiveAvgPool1d = conv_pool.adaptiveAvgPool1d;
+pub const adaptiveAvgPool2d = conv_pool.adaptiveAvgPool2d;
 
 pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
     const D = self.shape.dims[self.shape.len - 1];

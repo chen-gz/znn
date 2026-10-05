@@ -341,6 +341,41 @@ test "MaxPool1D and AvgPool1D autograd" {
     }
 }
 
+test "AdaptiveAvgPool1D and AdaptiveAvgPool2D autograd" {
+    const std = @import("std");
+    const arena = std.testing.allocator;
+    var graph = autodiff.Graph.init(arena);
+    defer graph.deinit();
+
+    const A = try graph.array(&.{ 1, 1, 4 }, &[_]f32{ 1.0, 3.0, 2.0, 6.0 }, true);
+    const aap1 = try graph.adaptiveAvgPool1d(A, 2);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2 }, aap1.shape.dims[0..aap1.shape.len]);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), aap1.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), aap1.data[1], 1e-5);
+
+    @memset(aap1.grad, 1.0);
+    try graph.backward(aap1);
+    for (A.grad) |g| {
+        try std.testing.expectApproxEqAbs(@as(f32, 0.5), g, 1e-5);
+    }
+
+    const B = try graph.array(&.{ 1, 1, 4, 4 }, &[_]f32{
+        1.0, 2.0, 3.0, 4.0,
+        5.0, 6.0, 7.0, 8.0,
+        9.0, 10.0, 11.0, 12.0,
+        13.0, 14.0, 15.0, 16.0,
+    }, true);
+    const aap2 = try graph.adaptiveAvgPool2d(B, .{ 1, 1 });
+    try std.testing.expectEqualSlices(usize, &.{ 1, 1, 1, 1 }, aap2.shape.dims[0..aap2.shape.len]);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.5), aap2.data[0], 1e-5);
+
+    @memset(aap2.grad, 1.0);
+    try graph.backward(aap2);
+    for (B.grad) |g| {
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0 / 16.0), g, 1e-5);
+    }
+}
+
 test "Sigmoid and Tanh autograd" {
     const std = @import("std");
     const arena = std.testing.allocator;

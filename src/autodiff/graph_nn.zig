@@ -417,6 +417,30 @@ pub fn avgpool2d(self: *Graph, A: *Tensor, kernel_size: usize, options: tensor_m
     );
 }
 
+pub fn adaptiveAvgPool1d(self: *Graph, A: *Tensor, output_size: usize) !*Tensor {
+    const allocator = self.arena.allocator();
+    const C = try A.adaptiveAvgPool1d(output_size, allocator);
+    return self.registerSingleOutputOp(
+        C,
+        &.{A},
+        .AdaptiveAvgPool1D,
+        .{ .AdaptiveAvgPool1D = .{ .output_size = output_size } },
+        self.enable_grad and A.requires_grad,
+    );
+}
+
+pub fn adaptiveAvgPool2d(self: *Graph, A: *Tensor, output_size: [2]usize) !*Tensor {
+    const allocator = self.arena.allocator();
+    const C = try A.adaptiveAvgPool2d(output_size, allocator);
+    return self.registerSingleOutputOp(
+        C,
+        &.{A},
+        .AdaptiveAvgPool2D,
+        .{ .AdaptiveAvgPool2D = .{ .output_size = output_size } },
+        self.enable_grad and A.requires_grad,
+    );
+}
+
 pub fn softmax(self: *Graph, A: *Tensor) !*Tensor {
     const allocator = self.arena.allocator();
     const C = try A.softmax(allocator);

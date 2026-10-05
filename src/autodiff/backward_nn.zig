@@ -707,6 +707,84 @@ pub fn backwardNN(self: *Op) !void {
                 }
             }
         },
+        .AdaptiveAvgPool1D => {
+            const A = self.inputs[0];
+            const C = self.outputs[0];
+            const N = A.shape.dims[0];
+            const C_ch = A.shape.dims[1];
+            const L = A.shape.dims[2];
+            const output_size = self.context.AdaptiveAvgPool1D.output_size;
+
+            const s_n = A.strides.dims[0];
+            const s_c = A.strides.dims[1];
+            const s_l = A.strides.dims[2];
+
+            const o_n = C.strides.dims[0];
+            const o_c = C.strides.dims[1];
+            const o_l = C.strides.dims[2];
+
+            if (A.requires_grad) {
+                for (0..N) |n| {
+                    for (0..C_ch) |c_| {
+                        for (0..output_size) |ol| {
+                            const grad_val = C.grad[n * o_n + c_ * o_c + ol * o_l];
+                            if (grad_val == 0.0) continue;
+                            const l_start = (ol * L) / output_size;
+                            const l_end = ((ol + 1) * L + output_size - 1) / output_size;
+                            const count = l_end - l_start;
+                            const distributed_grad = grad_val / @as(f32, @floatFromInt(count));
+                            for (l_start..l_end) |il| {
+                                A.grad[n * s_n + c_ * s_c + il * s_l] += distributed_grad;
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        .AdaptiveAvgPool2D => {
+            const A = self.inputs[0];
+            const C = self.outputs[0];
+            const N = A.shape.dims[0];
+            const C_ch = A.shape.dims[1];
+            const H = A.shape.dims[2];
+            const W = A.shape.dims[3];
+            const out_h = self.context.AdaptiveAvgPool2D.output_size[0];
+            const out_w = self.context.AdaptiveAvgPool2D.output_size[1];
+
+            const s_n = A.strides.dims[0];
+            const s_c = A.strides.dims[1];
+            const s_h = A.strides.dims[2];
+            const s_w = A.strides.dims[3];
+
+            const o_n = C.strides.dims[0];
+            const o_c = C.strides.dims[1];
+            const o_h = C.strides.dims[2];
+            const o_w = C.strides.dims[3];
+
+            if (A.requires_grad) {
+                for (0..N) |n| {
+                    for (0..C_ch) |c_| {
+                        for (0..out_h) |oh| {
+                            const h_start = (oh * H) / out_h;
+                            const h_end = ((oh + 1) * H + out_h - 1) / out_h;
+                            for (0..out_w) |ow| {
+                                const grad_val = C.grad[n * o_n + c_ * o_c + oh * o_h + ow * o_w];
+                                if (grad_val == 0.0) continue;
+                                const w_start = (ow * W) / out_w;
+                                const w_end = ((ow + 1) * W + out_w - 1) / out_w;
+                                const area = (h_end - h_start) * (w_end - w_start);
+                                const distributed_grad = grad_val / @as(f32, @floatFromInt(area));
+                                for (h_start..h_end) |ih| {
+                                    for (w_start..w_end) |iw| {
+                                        A.grad[n * s_n + c_ * s_c + ih * s_h + iw * s_w] += distributed_grad;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
         .Softmax => {
             const A = self.inputs[0];
             const C = self.outputs[0];

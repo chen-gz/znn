@@ -298,3 +298,45 @@ pub const AvgPool2D = struct {
         return try graph.avgpool2d(x, self.kernel_size, .{ .stride = self.stride, .padding = self.padding });
     }
 };
+
+/// 一维自适应平均池化 (1-Dimensional Adaptive Average Pooling, AdaptiveAvgPool1D)
+pub const AdaptiveAvgPool1D = struct {
+    output_size: usize,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "AdaptiveAvgPool1D",
+
+    pub const formula = "y = \\text{AdaptiveAvgPool1D}(x; L_{\\text{out}})";
+
+    pub fn init(output_size: usize) AdaptiveAvgPool1D {
+        return .{ .output_size = output_size };
+    }
+
+    pub fn forward(self: *const AdaptiveAvgPool1D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+        return try graph.adaptiveAvgPool1d(x, self.output_size);
+    }
+};
+
+/// 二维自适应平均池化 (2-Dimensional Adaptive Average Pooling, AdaptiveAvgPool2D)
+pub const AdaptiveAvgPool2D = struct {
+    output_size: [2]usize,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "AdaptiveAvgPool2D",
+
+    pub const formula = "y = \\text{AdaptiveAvgPool2D}(x; H_{\\text{out}}, W_{\\text{out}})";
+
+    pub fn init(output_size: [2]usize) AdaptiveAvgPool2D {
+        return .{ .output_size = output_size };
+    }
+
+    pub fn initSquare(size: usize) AdaptiveAvgPool2D {
+        return .{ .output_size = .{ size, size } };
+    }
+
+    pub fn forward(self: *const AdaptiveAvgPool2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+        return try graph.adaptiveAvgPool2d(x, self.output_size);
+    }
+};
