@@ -124,9 +124,16 @@ const examples = [_]ExampleTarget{
         .run_step = "run-bench",
         .run_desc = "Run the znn performance benchmark suite",
         .alias_step = "bench",
-        .alias_desc = "Run the znn performance benchmark suite (alias for run-bench)",
         .forward_args = true,
         .test_name = "bench_tests",
+    },
+    .{
+        .name = "gemma4",
+        .src = "examples/gemma4.zig",
+        .run_step = "run-gemma4",
+        .run_desc = "Run the Gemma 4 architecture and 4-bit (Q4) quantized inference example",
+        .alias_step = "gemma4",
+        .alias_desc = "Run the Gemma 4 architecture and 4-bit (Q4) quantized inference example (alias for run-gemma4)",
     },
 };
 
@@ -236,4 +243,27 @@ pub fn build(b: *std.Build) void {
 
     const download_data_step = b.step("download-data", "Alias for download-dataset");
     download_data_step.dependOn(&download_cmd.step);
+
+    // Gemma 4 Quantizer Tool Step (zig build quantize-gemma4)
+    const exe_quantize = b.addExecutable(.{
+        .name = "quantize_gemma4",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/quantize_gemma4.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    if (target.result.os.tag == .macos) {
+        exe_quantize.root_module.linkFramework("Accelerate", .{});
+    }
+    const quantize_cmd = b.addRunArtifact(exe_quantize);
+    if (b.args) |args| {
+        quantize_cmd.addArgs(args);
+    }
+    const quantize_step = b.step("quantize-gemma4", "Quantize Gemma 4 12B model.safetensors to 4-bit Q4 binary");
+    quantize_step.dependOn(&quantize_cmd.step);
 }
