@@ -64,7 +64,7 @@ pub const SliceRange = struct {
     }
 };
 
-/// 卷积步长与填充配置 (Convolution Options)
+/// 卷积步长与填充配置 (Convolution Options, ConvOptions)
 pub const ConvOptions = struct {
     stride: usize = 1,
     padding: usize = 0,
@@ -74,6 +74,25 @@ pub const ConvOptions = struct {
         return .{};
     }
 };
+
+/// 将任意张量标量元素安全转换为非负索引 (`usize`)，并对越界或非有限值返回 `IndexOutOfBounds`
+pub inline fn indexScalarToUsize(comptime IdxT: type, raw: IdxT, bound: usize) !usize {
+    const idx: usize = switch (@typeInfo(IdxT)) {
+        .float => blk: {
+            if (!std.math.isFinite(raw) or raw < 0.0) return error.IndexOutOfBounds;
+            const u: usize = @intFromFloat(raw);
+            if (@as(IdxT, @floatFromInt(u)) != raw) return error.IndexOutOfBounds;
+            break :blk u;
+        },
+        .int, .comptime_int => blk: {
+            if (raw < 0) return error.IndexOutOfBounds;
+            break :blk @intCast(raw);
+        },
+        else => @compileError("Index tensor must have numeric element type"),
+    };
+    if (idx >= bound) return error.IndexOutOfBounds;
+    return idx;
+}
 
 /// 通用标量类型转换函数
 pub fn convertScalar(comptime DestT: type, comptime SrcT: type, val: SrcT) DestT {
