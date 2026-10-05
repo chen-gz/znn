@@ -100,6 +100,110 @@ pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std
     return Y;
 }
 
+/// 二维批量归一化统一前向核函数 (2-Dimensional Batch Normalization, BatchNorm2d)
+/// 输入形状: `[N, C, H, W]`
+pub fn batchNorm2d(
+    self: *Tensor,
+    gamma: *Tensor,
+    beta: *Tensor,
+    running_mean: ?*Tensor,
+    running_var: ?*Tensor,
+    training: bool,
+    eps: f32,
+    momentum: f32,
+    saved_mean_out: ?[]f32,
+    saved_inv_std_out: ?[]f32,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len != 4) return error.IncompatibleDimensions;
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const H = self.shape.dims[2];
+    const W = self.shape.dims[3];
+    if (gamma.data.len != C or beta.data.len != C) return error.ShapeMismatch;
+    if (running_mean) |rm| {
+        if (rm.data.len != C) return error.ShapeMismatch;
+    }
+    if (running_var) |rv| {
+        if (rv.data.len != C) return error.ShapeMismatch;
+    }
+
+    const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (!self.isContiguous()) x_contig.deinit(allocator);
+
+    const Y = try zeros(allocator, &.{ N, C, H, W });
+    errdefer Y.deinit(allocator);
+
+    const spatial_size = H * W;
+    const m = N * spatial_size;
+    const m_f = @as(f32, @floatFromInt(m));
+
+    for (0..C) |c_| {
+        var mean_val: f32 = 0.0;
+        var inv_std: f32 = 1.0;
+
+        if (training) {
+            var sum_x: f32 = 0.0;
+            for (0..N) |n| {
+                const start_idx = (n * C + c_) * spatial_size;
+                for (x_contig.data[start_idx .. start_idx + spatial_size]) |val| {
+                    sum_x += val;
+                }
+            }
+            mean_val = sum_x / m_f;
+
+            var var_sum: f32 = 0.0;
+            for (0..N) |n| {
+                const start_idx = (n * C + c_) * spatial_size;
+                for (x_contig.data[start_idx .. start_idx + spatial_size]) |val| {
+                    const diff = val - mean_val;
+                    var_sum += diff * diff;
+                }
+            }
+            const var_val = var_sum / m_f;
+            inv_std = 1.0 / @sqrt(var_val + eps);
+
+            if (running_mean) |rm| {
+                rm.data[c_] = (1.0 - momentum) * rm.data[c_] + momentum * mean_val;
+            }
+            if (running_var) |rv| {
+                const unbiased_var = if (m > 1) var_sum / @as(f32, @floatFromInt(m - 1)) else var_val;
+                rv.data[c_] = (1.0 - momentum) * rv.data[c_] + momentum * unbiased_var;
+            }
+        } else {
+            mean_val = if (running_mean) |rm| rm.data[c_] else if (saved_mean_out) |sm| sm[c_] else 0.0;
+            const var_val = if (running_var) |rv| rv.data[c_] else 1.0;
+            inv_std = if (running_var != null) 1.0 / @sqrt(var_val + eps) else if (saved_inv_std_out) |si| si[c_] else 1.0 / @sqrt(1.0 + eps);
+        }
+
+        if (saved_mean_out) |sm| sm[c_] = mean_val;
+        if (saved_inv_std_out) |si| si[c_] = inv_std;
+
+        const g = gamma.data[c_];
+        const b = beta.data[c_];
+        for (0..N) |n| {
+            const start_idx = (n * C + c_) * spatial_size;
+            for (0..spatial_size) |i| {
+                Y.data[start_idx + i] = (x_contig.data[start_idx + i] - mean_val) * inv_std * g + b;
+            }
+        }
+    }
+    return Y;
+}
+
+/// 随机失活掩码前向核函数 (Dropout Mask Application)
+pub fn applyDropoutMask(self: *Tensor, mask: []const f32, allocator: std.mem.Allocator) !*Tensor {
+    const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (!self.isContiguous()) x_contig.deinit(allocator);
+
+    if (mask.len != x_contig.data.len) return error.ShapeMismatch;
+    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    for (x_contig.data, Y.data, mask) |x_val, *y_val, m_val| {
+        y_val.* = x_val * m_val;
+    }
+    return Y;
+}
+
 pub fn rope(self: *Tensor, start_pos: usize, allocator: std.mem.Allocator) !*Tensor {
     return self.ropeOffset(start_pos, 0, allocator);
 }
