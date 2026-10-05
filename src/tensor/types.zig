@@ -95,6 +95,13 @@ pub const PoolOptions = struct {
 pub const RopeOptions = struct {
     rotary_offset: usize = 0, // 旋转子空间起始偏移量，默认为 0 (对全部维度应用旋转位置编码 (Rotary Position Embedding, RoPE))
     base: f32 = 10000.0, // 频率基数，默认为 10000.0
+    mode: Mode = .interleaved, // 旋转配对拓扑模式：相邻配对 (interleaved) 或半切分配对 (split_half)
+    partial_rotary_factor: f32 = 1.0, // 部分旋转因子 (0.0 < factor <= 1.0)，仅对前该比例的角度进行旋转，其余保持恒等
+
+    pub const Mode = enum {
+        interleaved, // 传统 RoPE 相邻配对拓扑 (2i, 2i+1)
+        split_half, // 现代 GPT-NeoX / LLaMA / Gemma 规范的半切分配对拓扑 (i, i + D/2)
+    };
 
     pub const default: RopeOptions = .{};
 

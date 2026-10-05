@@ -319,7 +319,12 @@ pub const Op = struct {
             },
             .RoPE => {
                 const ctx = self.context.RoPE;
-                copyFromEager(self.outputs[0], try self.inputs[0].rope(ctx.start_pos, .{ .rotary_offset = ctx.rotary_offset, .base = ctx.base }, allocator), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].rope(ctx.start_pos, .{
+                    .rotary_offset = ctx.rotary_offset,
+                    .base = ctx.base,
+                    .mode = ctx.mode,
+                    .partial_rotary_factor = ctx.partial_rotary_factor,
+                }, allocator), allocator);
             },
             .BatchMatMul => {
                 copyFromEager(self.outputs[0], try self.inputs[0].batchMatMul(self.inputs[1], allocator), allocator);

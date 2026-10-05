@@ -1,3 +1,5 @@
+const tensor_mod = @import("../tensor.zig");
+
 // 支持的算子类型枚举
 pub const OpType = enum {
     // --- 基础数学与张量逐元素运算 (Basic Math & Element-wise Ops) ---
@@ -280,6 +282,8 @@ pub const OpContext = union(enum) {
         start_pos: usize,
         rotary_offset: usize = 0,
         base: f32 = 10000.0,
+        mode: tensor_mod.RopeOptions.Mode = .interleaved,
+        partial_rotary_factor: f32 = 1.0,
     },
     Embedding: void,
 

@@ -362,7 +362,9 @@ pub fn applyDropoutMask(self: *Tensor, mask: []const f32, allocator: std.mem.All
     return Y;
 }
 
-/// 旋转位置编码前向核函数 (Rotary Position Embedding, RoPE)
+/// 旋转位置编码统一前向核函数 (Rotary Position Embedding, RoPE)
+/// 支持经典相邻配对 (Interleaved) 与主流半切分配对 (Split-Half) 两种拓扑，
+/// 以及任意频率基数 (base)、旋转子空间偏移 (rotary_offset) 与部分旋转因子 (partial_rotary_factor)。
 pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: std.mem.Allocator) !*Tensor {
     const rotary_offset = options.rotary_offset;
     const base = options.base;
@@ -374,27 +376,44 @@ pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: st
     const half = rot_dim / 2;
     const rot_dim_f = @as(f32, @floatFromInt(rot_dim));
 
+    const factor = std.math.clamp(options.partial_rotary_factor, 0.0, 1.0);
+    const num_angles = @as(usize, @intFromFloat(@as(f32, @floatFromInt(half)) * factor));
+
     const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
     for (0..outer) |o| {
         for (0..T) |t| {
             const row_in = self.data[(o * T + t) * D .. (o * T + t + 1) * D];
             const row_out = Y.data[(o * T + t) * D .. (o * T + t + 1) * D];
-            if (rotary_offset > 0) {
-                @memcpy(row_out[0..rotary_offset], row_in[0..rotary_offset]);
-            }
+
+            // 先复制整行，后续仅更新参与旋转的维度
+            @memcpy(row_out, row_in);
+
             const pos_f = @as(f32, @floatFromInt(start_pos + t));
-            for (0..half) |i| {
-                const freq = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
-                const theta = pos_f * freq;
-                const cos_t = @cos(theta);
-                const sin_t = @sin(theta);
-                const x0 = row_in[rotary_offset + 2 * i];
-                const x1 = row_in[rotary_offset + 2 * i + 1];
-                row_out[rotary_offset + 2 * i] = x0 * cos_t - x1 * sin_t;
-                row_out[rotary_offset + 2 * i + 1] = x0 * sin_t + x1 * cos_t;
-            }
-            if (2 * half < rot_dim) {
-                row_out[D - 1] = row_in[D - 1];
+            switch (options.mode) {
+                .interleaved => {
+                    for (0..num_angles) |i| {
+                        const freq = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
+                        const theta = pos_f * freq;
+                        const cos_t = @cos(theta);
+                        const sin_t = @sin(theta);
+                        const x0 = row_in[rotary_offset + 2 * i];
+                        const x1 = row_in[rotary_offset + 2 * i + 1];
+                        row_out[rotary_offset + 2 * i] = x0 * cos_t - x1 * sin_t;
+                        row_out[rotary_offset + 2 * i + 1] = x0 * sin_t + x1 * cos_t;
+                    }
+                },
+                .split_half => {
+                    for (0..num_angles) |i| {
+                        const freq = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
+                        const theta = pos_f * freq;
+                        const cos_t = @cos(theta);
+                        const sin_t = @sin(theta);
+                        const x0 = row_in[rotary_offset + i];
+                        const x1 = row_in[rotary_offset + i + half];
+                        row_out[rotary_offset + i] = x0 * cos_t - x1 * sin_t;
+                        row_out[rotary_offset + i + half] = x1 * cos_t + x0 * sin_t;
+                    }
+                },
             }
         }
     }
