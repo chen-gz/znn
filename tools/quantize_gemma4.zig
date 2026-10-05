@@ -1,7 +1,7 @@
 const std = @import("std");
 const znn = @import("zig_ml");
 
-const Q4Block = znn.Q4Block;
+const Q4Block = znn.models.gemma4.Q4Block;
 const bf16 = znn.tensor.bf16;
 
 const MAGIC = "ZNNQ4G01"; // 8 bytes magic header

@@ -401,55 +401,6 @@ pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: st
     return Y;
 }
 
-/// 标准 GPT-NeoX / LLaMA / Gemma 规范的半切分旋转位置编码 (Split-Half RoPE)
-/// 算法原理：将输入维度分为前半段 x1 与后半段 x2，rotate_half(x) = [-x2, x1]
-/// 对于每个旋转角 i (0 <= i < num_angles):
-/// out[i] = x[i] * cos(theta_i) - x[i + half] * sin(theta_i)
-/// out[i + half] = x[i + half] * cos(theta_i) + x[i] * sin(theta_i)
-/// 当 partial_rotary_factor < 1.0 (例如 Gemma 4 的 proportional RoPE) 时，
-/// 仅前 num_angles = int(partial_rotary_factor * D / 2) 个分量参与旋转，其余分量保持原始值 (cos=1, sin=0)。
-pub fn ropeSplitHalf(
-    self: *Tensor,
-    start_pos: usize,
-    partial_rotary_factor: f32,
-    rope_theta: f32,
-    allocator: std.mem.Allocator,
-) !*Tensor {
-    const D = self.shape.dims[self.shape.len - 1];
-    const half = D / 2;
-    const T = if (self.shape.len >= 2) self.shape.dims[self.shape.len - 2] else 1;
-    const outer = self.data.len / (T * D);
-    const d_f = @as(f32, @floatFromInt(D));
-
-    const num_angles = @as(usize, @intFromFloat(@as(f32, @floatFromInt(half)) * partial_rotary_factor));
-
-    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-    for (0..outer) |o| {
-        for (0..T) |t| {
-            const row_in = self.data[(o * T + t) * D .. (o * T + t + 1) * D];
-            const row_out = Y.data[(o * T + t) * D .. (o * T + t + 1) * D];
-
-            // 默认复制全部，后续对旋转维度进行覆盖更新
-            @memcpy(row_out, row_in);
-
-            const pos_f = @as(f32, @floatFromInt(start_pos + t));
-            for (0..num_angles) |i| {
-                const freq = 1.0 / std.math.pow(f32, rope_theta, @as(f32, @floatFromInt(2 * i)) / d_f);
-                const theta = pos_f * freq;
-                const cos_t = @cos(theta);
-                const sin_t = @sin(theta);
-
-                const x1 = row_in[i];
-                const x2 = row_in[i + half];
-
-                row_out[i] = x1 * cos_t - x2 * sin_t;
-                row_out[i + half] = x2 * cos_t + x1 * sin_t;
-            }
-        }
-    }
-    return Y;
-}
-
 pub fn repeatKV(self: *Tensor, groups: usize, allocator: std.mem.Allocator) !*Tensor {
     if (self.shape.len != 4) return error.IncompatibleDimensions;
     const B = self.shape.dims[0];
