@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Gemma 4 架构全套实现与导出 (`src/nn/gemma4.zig`, `src/nn.zig`, `src/root.zig`, `src/nn/tests.zig`)**:
+  - 新增 Gemma 4 专有模块：`GemmaRMSNorm` (支持 $1 + w$ 仿射缩放)、`Gemma4MLP` (门控 GeLU_tanh 投影)、`Gemma4Attention` (支持混合滑动窗口与全局注意力、头部 Q/K-Norm、分组查询注意力 GQA、RoPE 旋转位置编码与局部窗口掩码) 与 `Gemma4DecoderLayer` (前置与后置双 RMSNorm)。
+  - 新增支持 `Gemma4ForCausalLM` 模型定义、`DefaultGemma4` 与 `TinyGemma4`，支持词嵌入缩放 $\sqrt{d_{\text{hidden}}}$、词表权重共享投影 (Tie Word Embeddings) 以及最终 Logit 软截断平滑 (Logit Softcapping: $c \tanh(\text{logits}/c)$)。
+  - 在 `src/nn.zig` 与 `src/root.zig` 门面层完整导出全部 Gemma 4 结构体与类型别名，并添加了单测覆盖。
+- **Safetensors 权重格式反序列化增强 (`src/nn/serialization.zig`, `src/nn/tests.zig`)**:
+  - `serialization.loadTensorData` 与 `loadModel` 新增对 `BF16` (BFloat16) 与 `F16` (Float16) 浮点数据格式的原生读取与转换解析支持，能够直接从现代大模型 Safetensors 权重文件中还原载入参数。
 - **调试构建下的参数未初始化检查 (`src/nn/core.zig`, `src/nn.zig`, `src/optim.zig`, `src/nn/tests_init.zig`)**:
   - 新增 `nn.inspectParameterInit(params) ParameterInitReport` 与 `nn.warnIfParametersUninitialized(params)`：只统计可训练权重矩阵（向量形参数如偏置、归一化 γ / β 不参与判断），所有权重矩阵都全为 0 时判定为未初始化。
   - `SGDOptimizer`、`AdamOptimizer`、`AdamWOptimizer` 构造时调用该检查，Debug 构建下输出 `std.log.warn` 提示先调用 `nn.initModel` / `Module.initParameters` / `Graph.initWeights`；非 Debug 构建下为空操作。

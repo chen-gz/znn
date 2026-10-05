@@ -205,11 +205,14 @@
   - [ ] 支持加载业界主流 `tokenizer.json` / TikToken 词表文件。
   - [ ] 多线程并行语料分词，加速 GB 级文本预处理。
 
-- [ ] **4.2 工业级模型格式导入导出 (Model Formats & Interoperability)**
+- [ ] **4.2 工业级模型格式导入导出与推理加载 (Model Formats, Interoperability & LLM Loading)**
   - [x] 实现原生纯 Zig 零依赖 `SafeTensors` 模型权重读取与持久化存储。
+  - [x] Safetensors 支持读取 `BF16` / `F16` 格式权重并自动转换为 `F32`，直接兼容 HuggingFace 预训练模型权重。
+  - [x] 实现 Gemma 4 架构全套算子与 4-bit (Q4_0 Block) 量化前向推理 (`Q4Linear`, `Gemma4Q4ForCausalLM`)，支持低内存高效推理。
+  - [ ] **单层/分块切片权重对齐与验证 (Layer/Block Slice Weight Verification)**：编写针对 Gemma 4 单层 DecoderLayer / Attention / MLP 的 Safetensors 权重切片加载与数值误差对齐验证工具，避免整模全量加载带来的内存压力。
+  - [ ] **内存映射懒加载流式权重加载器 (`mmap` Lazy Streaming Weight Loader)**：基于 `posix.mmap` 零拷贝映射 20GB+ Safetensors 权重文件，在推理时按需分页调入各层权重，或流式量化为 Q4 格式，支持在 16GB 消费级内存下运行 12B/27B 级别大模型。
   - [ ] 编写 **GGUF / GGML** 格式解析器与权重加载器（支持直接读取 LLaMA / Qwen 等开源模型权重）。
   - [ ] 提供 Python 脚本工具将 PyTorch `.pt` / `.safetensors` 权重无缝转换为 `znn` 二进制结构。
-  - [ ] Safetensors 读取 BF16 / F16 权重并转换为 F32，直接加载 Hugging Face 预训练模型。
   - [ ] 导出 ONNX 计算图与权重。
 
 - [ ] **4.3 异构硬件与 GPU 计算后端探索 (GPU Acceleration)**
