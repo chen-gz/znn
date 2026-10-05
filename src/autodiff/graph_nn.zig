@@ -477,6 +477,56 @@ pub fn layerNorm(self: *Graph, X: *Tensor, G: *Tensor, B: *Tensor, eps: f32) !*T
     );
 }
 
+/// 一维批量归一化节点 (1-Dimensional Batch Normalization, BatchNorm1d)
+/// 支持二维 `[N, C]` 与三维 `[N, C, L]` 输入张量
+pub fn batchNorm1d(
+    self: *Graph,
+    X: *Tensor,
+    G: *Tensor,
+    B: *Tensor,
+    running_mean: *Tensor,
+    running_var: *Tensor,
+    eps: f32,
+    momentum: f32,
+    training: bool,
+) !*Tensor {
+    if (X.shape.len != 2 and X.shape.len != 3) return error.IncompatibleDimensions;
+    const C = X.shape.dims[1];
+    if (G.data.len != C or B.data.len != C or running_mean.data.len != C or running_var.data.len != C) {
+        return error.ShapeMismatch;
+    }
+
+    const allocator = self.arena.allocator();
+    const save_mean = try allocator.alloc(f32, C);
+    const save_inv_std = try allocator.alloc(f32, C);
+
+    const Y = try X.batchNorm1d(
+        G,
+        B,
+        running_mean,
+        running_var,
+        training,
+        eps,
+        momentum,
+        save_mean,
+        save_inv_std,
+        allocator,
+    );
+    const req_grad = self.enable_grad and (X.requires_grad or G.requires_grad or B.requires_grad);
+    return self.registerSingleOutputOp(
+        Y,
+        &.{ X, G, B },
+        .BatchNorm1d,
+        .{ .BatchNorm1d = .{
+            .eps = eps,
+            .training = training,
+            .save_mean = save_mean,
+            .save_inv_std = save_inv_std,
+        } },
+        req_grad,
+    );
+}
+
 pub fn batchNorm2d(
     self: *Graph,
     X: *Tensor,
@@ -518,6 +568,50 @@ pub fn batchNorm2d(
         .{ .BatchNorm2d = .{
             .eps = eps,
             .training = training,
+            .save_mean = save_mean,
+            .save_inv_std = save_inv_std,
+        } },
+        req_grad,
+    );
+}
+
+/// 分组归一化节点 (Group Normalization, GroupNorm)
+/// 支持任意维度 `>= 2` 的输入张量 `[N, C, ...]`，要求 `C % num_groups == 0`
+pub fn groupNorm(
+    self: *Graph,
+    X: *Tensor,
+    G: *Tensor,
+    B: *Tensor,
+    num_groups: usize,
+    eps: f32,
+) !*Tensor {
+    if (X.shape.len < 2) return error.IncompatibleDimensions;
+    const N = X.shape.dims[0];
+    const C = X.shape.dims[1];
+    if (num_groups == 0 or C == 0 or C % num_groups != 0) return error.ShapeMismatch;
+    if (G.data.len != C or B.data.len != C) return error.ShapeMismatch;
+
+    const allocator = self.arena.allocator();
+    const save_mean = try allocator.alloc(f32, N * num_groups);
+    const save_inv_std = try allocator.alloc(f32, N * num_groups);
+
+    const Y = try X.groupNorm(
+        G,
+        B,
+        num_groups,
+        eps,
+        save_mean,
+        save_inv_std,
+        allocator,
+    );
+    const req_grad = self.enable_grad and (X.requires_grad or G.requires_grad or B.requires_grad);
+    return self.registerSingleOutputOp(
+        Y,
+        &.{ X, G, B },
+        .GroupNorm,
+        .{ .GroupNorm = .{
+            .num_groups = num_groups,
+            .eps = eps,
             .save_mean = save_mean,
             .save_inv_std = save_inv_std,
         } },

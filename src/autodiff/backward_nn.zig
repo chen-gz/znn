@@ -904,6 +904,67 @@ pub fn backwardNN(self: *Op) !void {
                 }
             }
         },
+        .BatchNorm1d => {
+            const X = self.inputs[0];
+            const G = self.inputs[1];
+            const B = self.inputs[2];
+            const Y = self.outputs[0];
+            const ctx = self.context.BatchNorm1d;
+
+            const N = X.shape.dims[0];
+            const C = X.shape.dims[1];
+            const L = if (X.shape.len == 3) X.shape.dims[2] else 1;
+            const m_f = @as(f32, @floatFromInt(N * L));
+
+            for (0..C) |c_| {
+                const mean_val = ctx.save_mean[c_];
+                const inv_std = ctx.save_inv_std[c_];
+                const g_val = G.data[c_];
+
+                var dbeta: f32 = 0.0;
+                var dgamma: f32 = 0.0;
+                for (0..N) |n| {
+                    const in_slice = X.data[(n * C + c_) * L .. (n * C + c_ + 1) * L];
+                    const dy_slice = Y.grad[(n * C + c_) * L .. (n * C + c_ + 1) * L];
+                    for (in_slice, dy_slice) |x_val, dy_val| {
+                        const x_hat = (x_val - mean_val) * inv_std;
+                        dbeta += dy_val;
+                        dgamma += dy_val * x_hat;
+                    }
+                }
+
+                if (B.requires_grad) {
+                    B.grad[c_] += dbeta;
+                }
+                if (G.requires_grad) {
+                    G.grad[c_] += dgamma;
+                }
+
+                if (X.requires_grad) {
+                    if (ctx.training) {
+                        const factor = (g_val * inv_std) / m_f;
+                        for (0..N) |n| {
+                            const in_slice = X.data[(n * C + c_) * L .. (n * C + c_ + 1) * L];
+                            const dy_slice = Y.grad[(n * C + c_) * L .. (n * C + c_ + 1) * L];
+                            const dx_slice = X.grad[(n * C + c_) * L .. (n * C + c_ + 1) * L];
+                            for (in_slice, dy_slice, dx_slice) |x_val, dy_val, *dx_val| {
+                                const x_hat = (x_val - mean_val) * inv_std;
+                                dx_val.* += factor * (m_f * dy_val - dbeta - x_hat * dgamma);
+                            }
+                        }
+                    } else {
+                        const factor = g_val * inv_std;
+                        for (0..N) |n| {
+                            const dy_slice = Y.grad[(n * C + c_) * L .. (n * C + c_ + 1) * L];
+                            const dx_slice = X.grad[(n * C + c_) * L .. (n * C + c_ + 1) * L];
+                            for (dy_slice, dx_slice) |dy_val, *dx_val| {
+                                dx_val.* += factor * dy_val;
+                            }
+                        }
+                    }
+                }
+            }
+        },
         .BatchNorm2d => {
             const X = self.inputs[0];
             const G = self.inputs[1];
@@ -961,6 +1022,68 @@ pub fn backwardNN(self: *Op) !void {
                             const dx_slice = X.grad[(n * C + c_) * spatial_size .. (n * C + c_ + 1) * spatial_size];
                             for (dy_slice, dx_slice) |dy_val, *dx_val| {
                                 dx_val.* += factor * dy_val;
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        .GroupNorm => {
+            const X = self.inputs[0];
+            const G = self.inputs[1];
+            const B = self.inputs[2];
+            const Y = self.outputs[0];
+            const ctx = self.context.GroupNorm;
+
+            const N = X.shape.dims[0];
+            const C = X.shape.dims[1];
+            var spatial_size: usize = 1;
+            for (2..X.shape.len) |d| {
+                spatial_size *= X.shape.dims[d];
+            }
+            const c_per_g = C / ctx.num_groups;
+            const group_elems = c_per_g * spatial_size;
+            const m_f = @as(f32, @floatFromInt(group_elems));
+
+            for (0..N) |n| {
+                for (0..ctx.num_groups) |g| {
+                    const ng_idx = n * ctx.num_groups + g;
+                    const mean_val = ctx.save_mean[ng_idx];
+                    const inv_std = ctx.save_inv_std[ng_idx];
+
+                    var sum_dx_hat: f32 = 0.0;
+                    var sum_dx_hat_x_hat: f32 = 0.0;
+
+                    for (0..c_per_g) |cg| {
+                        const c_idx = g * c_per_g + cg;
+                        const g_val = G.data[c_idx];
+                        const ch_offset = (n * C + c_idx) * spatial_size;
+
+                        var dbeta: f32 = 0.0;
+                        var dgamma: f32 = 0.0;
+                        for (0..spatial_size) |s| {
+                            const x_hat = (X.data[ch_offset + s] - mean_val) * inv_std;
+                            const dy_val = Y.grad[ch_offset + s];
+                            const dx_hat = dy_val * g_val;
+                            sum_dx_hat += dx_hat;
+                            sum_dx_hat_x_hat += dx_hat * x_hat;
+                            dbeta += dy_val;
+                            dgamma += dy_val * x_hat;
+                        }
+                        if (B.requires_grad) B.grad[c_idx] += dbeta;
+                        if (G.requires_grad) G.grad[c_idx] += dgamma;
+                    }
+
+                    if (X.requires_grad) {
+                        const factor = inv_std / m_f;
+                        for (0..c_per_g) |cg| {
+                            const c_idx = g * c_per_g + cg;
+                            const g_val = G.data[c_idx];
+                            const ch_offset = (n * C + c_idx) * spatial_size;
+                            for (0..spatial_size) |s| {
+                                const x_hat = (X.data[ch_offset + s] - mean_val) * inv_std;
+                                const dx_hat = Y.grad[ch_offset + s] * g_val;
+                                X.grad[ch_offset + s] += factor * (m_f * dx_hat - sum_dx_hat - x_hat * sum_dx_hat_x_hat);
                             }
                         }
                     }

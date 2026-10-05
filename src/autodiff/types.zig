@@ -51,7 +51,9 @@ pub const OpType = enum {
     AdaptiveAvgPool2D, // 二维自适应平均池化 (2D Adaptive Average Pooling, AdaptiveAvgPool2D)
     RmsNorm, // 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)
     LayerNorm, // 层归一化 (Layer Normalization, LayerNorm)
+    BatchNorm1d, // 一维批量归一化 (1D Batch Normalization, BatchNorm1d)
     BatchNorm2d, // 二维批量归一化 (2D Batch Normalization, BatchNorm2d)
+    GroupNorm, // 分组归一化 (Group Normalization, GroupNorm)
     Dropout, // 随机丢弃正则化
     RoPE, // 旋转位置编码 (Rotary Position Embedding, RoPE)
     Embedding, // 嵌入查找 (Embedding Lookup)
@@ -112,7 +114,8 @@ pub const OpType = enum {
             .AdaptiveAvgPool2D => "y = \\text{AdaptiveAvgPool2D}(x; H_{\\text{out}}, W_{\\text{out}})",
             .RmsNorm => "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
             .LayerNorm => "y = \\frac{x - \\mu}{\\sqrt{\\sigma^2 + \\epsilon}} \\odot \\gamma + \\beta",
-            .BatchNorm2d => "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta",
+            .BatchNorm1d, .BatchNorm2d => "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta",
+            .GroupNorm => "y = \\frac{x - \\mu_g}{\\sqrt{\\sigma_g^2 + \\epsilon}} \\odot \\gamma + \\beta",
             .Dropout => "y = \\frac{m \\odot x}{1 - p}",
             .RoPE => "y_t = R_{\\Theta, t} x_t",
             .Embedding => "y = W_e[\\text{indices}]",
@@ -252,9 +255,21 @@ pub const OpContext = union(enum) {
     LayerNorm: struct {
         eps: f32,
     },
+    BatchNorm1d: struct {
+        eps: f32,
+        training: bool,
+        save_mean: []f32,
+        save_inv_std: []f32,
+    },
     BatchNorm2d: struct {
         eps: f32,
         training: bool,
+        save_mean: []f32,
+        save_inv_std: []f32,
+    },
+    GroupNorm: struct {
+        num_groups: usize,
+        eps: f32,
         save_mean: []f32,
         save_inv_std: []f32,
     },

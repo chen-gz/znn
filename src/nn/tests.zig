@@ -671,6 +671,46 @@ test "BatchNorm2d forward and backward autograd" {
     try std.testing.expect(beta_grad_norm > 1e-4);
 }
 
+test "BatchNorm1d and GroupNorm forward and backward autograd" {
+    const allocator = std.testing.allocator;
+    var bn1 = try nn.BatchNorm1d.init(allocator, 2, .{});
+    defer nn.deinitModel(&bn1, allocator);
+
+    var gn = try nn.GroupNorm.init(allocator, 2, 4, .{});
+    defer nn.deinitModel(&gn, allocator);
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    const gx1 = try graph.tensorND(&.{ 2, 2, 3 }, true);
+    for (gx1.data, 0..) |*p, i| {
+        const fi = @as(f32, @floatFromInt(i));
+        p.* = @sin(fi * 1.1) + 0.3 * fi;
+    }
+    const gy1 = try bn1.forward(&graph, gx1);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2, 3 }, gy1.shape.dims[0..3]);
+    try std.testing.expectEqual(autodiff.OpType.BatchNorm1d, gy1.creator.?.op_type);
+    for (gy1.grad, 0..) |*g, i| g.* = @as(f32, @floatFromInt(i + 1)) * 0.1;
+    try graph.backwardWithGrad(gy1);
+    try std.testing.expect(@abs(gx1.grad[0]) + @abs(gx1.grad[1]) > 1e-5);
+    try std.testing.expect(@abs(bn1.gamma.grad[0]) > 1e-5);
+    try std.testing.expect(@abs(bn1.beta.grad[0]) > 1e-5);
+
+    const gx2 = try graph.tensorND(&.{ 2, 4, 2, 2 }, true);
+    for (gx2.data, 0..) |*p, i| {
+        const fi = @as(f32, @floatFromInt(i));
+        p.* = @cos(fi * 0.9) - 0.15 * fi;
+    }
+    const gy2 = try gn.forward(&graph, gx2);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 4, 2, 2 }, gy2.shape.dims[0..4]);
+    try std.testing.expectEqual(autodiff.OpType.GroupNorm, gy2.creator.?.op_type);
+    for (gy2.grad, 0..) |*g, i| g.* = @as(f32, @floatFromInt(i + 1)) * 0.05;
+    try graph.backwardWithGrad(gy2);
+    try std.testing.expect(@abs(gx2.grad[0]) + @abs(gx2.grad[1]) > 1e-5);
+    try std.testing.expect(@abs(gn.weight.grad[0]) > 1e-5);
+    try std.testing.expect(@abs(gn.bias.grad[0]) > 1e-5);
+}
+
 test "Dropout and AvgPool2D forward and backward passes" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(42);

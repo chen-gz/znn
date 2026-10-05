@@ -260,6 +260,25 @@ pub const Op = struct {
             .LayerNorm => {
                 copyFromEager(self.outputs[0], try self.inputs[0].layerNorm(self.inputs[1], self.inputs[2], self.context.LayerNorm.eps, allocator), allocator);
             },
+            .BatchNorm1d => {
+                const ctx = self.context.BatchNorm1d;
+                copyFromEager(
+                    self.outputs[0],
+                    try self.inputs[0].batchNorm1d(
+                        self.inputs[1],
+                        self.inputs[2],
+                        null,
+                        null,
+                        false,
+                        ctx.eps,
+                        0.0,
+                        ctx.save_mean,
+                        ctx.save_inv_std,
+                        allocator,
+                    ),
+                    allocator,
+                );
+            },
             .BatchNorm2d => {
                 const ctx = self.context.BatchNorm2d;
                 copyFromEager(
@@ -272,6 +291,22 @@ pub const Op = struct {
                         false,
                         ctx.eps,
                         0.0,
+                        ctx.save_mean,
+                        ctx.save_inv_std,
+                        allocator,
+                    ),
+                    allocator,
+                );
+            },
+            .GroupNorm => {
+                const ctx = self.context.GroupNorm;
+                copyFromEager(
+                    self.outputs[0],
+                    try self.inputs[0].groupNorm(
+                        self.inputs[1],
+                        self.inputs[2],
+                        ctx.num_groups,
+                        ctx.eps,
                         ctx.save_mean,
                         ctx.save_inv_std,
                         allocator,
@@ -434,7 +469,9 @@ pub const Op = struct {
             .Softmax,
             .RmsNorm,
             .LayerNorm,
+            .BatchNorm1d,
             .BatchNorm2d,
+            .GroupNorm,
             .Dropout,
             .RoPE,
             .BatchMatMul,
