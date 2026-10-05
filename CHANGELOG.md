@@ -10,10 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Gemma 4 架构全套实现与导出 (`src/nn/gemma4.zig`, `src/nn.zig`, `src/root.zig`, `src/nn/tests.zig`)**:
-  - 新增 Gemma 4 专有模块：`GemmaRMSNorm` (支持 $1 + w$ 仿射缩放)、`Gemma4MLP` (门控 GeLU_tanh 投影)、`Gemma4Attention` (支持混合滑动窗口与全局注意力、头部 Q/K-Norm、分组查询注意力 GQA、RoPE 旋转位置编码与局部窗口掩码) 与 `Gemma4DecoderLayer` (前置与后置双 RMSNorm)。
-  - 新增支持 `Gemma4ForCausalLM` 模型定义、`DefaultGemma4` 与 `TinyGemma4`，支持词嵌入缩放 $\sqrt{d_{\text{hidden}}}$、词表权重共享投影 (Tie Word Embeddings) 以及最终 Logit 软截断平滑 (Logit Softcapping: $c \tanh(\text{logits}/c)$)。
-  - 在 `src/nn.zig` 与 `src/root.zig` 门面层完整导出全部 Gemma 4 结构体与类型别名，并添加了单测覆盖。
+- **专用模型库与 Gemma 4 架构实现 (`src/models/gemma4.zig`, `src/models.zig`, `src/root.zig`, `src/models/tests.zig`)**:
+  - 新增顶层 `models` 模块与 Gemma 4 专有架构：`GemmaRMSNorm` (支持 $1 + w$ 仿射缩放)、`GemmaUnscaledRMSNorm` (无权重 RMSNorm)、`Gemma4MLP` (门控 GeLU_tanh 投影)、`Gemma4Attention` (支持混合滑动窗口与全局注意力、头部 Q/K-Norm、分组查询注意力 GQA、专用 Split-Half RoPE 旋转位置编码与局部窗口掩码) 与 `Gemma4DecoderLayer` (前置与后置双 RMSNorm)。
+  - 新增支持 `Gemma4ForCausalLM` 模型定义、`DefaultGemma4` 与 `TinyGemma4`，支持词嵌入缩放 $\sqrt{d_{\text{hidden}}}$、词表权重共享投影 (Tie Word Embeddings) 以及最终 Logit 软截断平滑 (Logit Softcapping: $c \tanh(\text{logits}/c)$) 与 4-bit 量化推理 (`Q4Linear`, `Gemma4Q4ForCausalLM`)。
+  - 在 `src/models.zig` 与 `src/root.zig` 导出 `models` 与 `gemma4` 别名，并在 `src/models/tests.zig` 设立独立测试套件。
+
+### Changed
+- **专用模型与非通用算子模块化解耦 (`src/models/`, `src/models.zig`, `src/tensor/`, `src/autodiff/`, `src/nn/`)**:
+  - 将以 Gemma 4 为代表的具体大模型架构与模型专用算子（如 Split-Half RoPE `ropeSplitHalf`、带有 unit offset 的 `GemmaRMSNorm` 等）统一收敛至新建的顶层 `models` 模块 (`src/models.zig`, `src/models/gemma4.zig`)。
+  - 从通用张量核心与计算图算子库 (`src/tensor/core.zig`、`src/tensor/nn_kernels.zig`、`src/autodiff/graph.zig`、`src/autodiff/graph_nn.zig`) 中彻底剥离非通用算子 `ropeSplitHalf`，确保底层基础库只承载纯粹的通用张量计算与 Autograd 算子。
+  - 从通用神经网络层命名空间 `nn` (`src/nn.zig`) 中移除所有 Gemma 4 专有结构体，使 `nn` 纯净对齐通用网络层标准。
 - **Safetensors 权重格式反序列化增强 (`src/nn/serialization.zig`, `src/nn/tests.zig`)**:
   - `serialization.loadTensorData` 与 `loadModel` 新增对 `BF16` (BFloat16) 与 `F16` (Float16) 浮点数据格式的原生读取与转换解析支持，能够直接从现代大模型 Safetensors 权重文件中还原载入参数。
 - **调试构建下的参数未初始化检查 (`src/nn/core.zig`, `src/nn.zig`, `src/optim.zig`, `src/nn/tests_init.zig`)**:

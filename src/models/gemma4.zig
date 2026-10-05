@@ -1,10 +1,11 @@
 const std = @import("std");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
-const core = @import("core.zig");
-const normalization = @import("normalization.zig");
-const transformer = @import("transformer.zig");
-const serialization = @import("serialization.zig");
+const nn = @import("../nn.zig");
+const core = nn.core;
+const normalization = nn.normalization;
+const transformer = nn.transformer;
+const serialization = nn.serialization;
 
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
@@ -15,6 +16,78 @@ const createPersistentTensor = core.createPersistentTensor;
 const freePersistentTensor = core.freePersistentTensor;
 const deinitModel = core.deinitModel;
 const enterModuleScope = core.enterModuleScope;
+
+// ============================================================================
+// Gemma 4 专用非通用算子 (Split-Half & Proportional RoPE)
+// ============================================================================
+
+/// 标准 GPT-NeoX / LLaMA / Gemma 规范的半切分旋转位置编码张量前向核函数 (Split-Half RoPE)
+/// 算法原理：将输入维度分为前半段 x1 与后半段 x2，rotate_half(x) = [-x2, x1]
+/// 对于每个旋转角 i (0 <= i < num_angles):
+/// out[i] = x[i] * cos(theta_i) - x[i + half] * sin(theta_i)
+/// out[i + half] = x[i + half] * cos(theta_i) + x[i] * sin(theta_i)
+/// 当 partial_rotary_factor < 1.0 (例如 Gemma 4 的 proportional RoPE) 时，
+/// 仅前 num_angles = int(partial_rotary_factor * D / 2) 个分量参与旋转，其余分量保持原始值 (cos=1, sin=0)。
+pub fn tensorRopeSplitHalf(
+    self: *Tensor,
+    start_pos: usize,
+    partial_rotary_factor: f32,
+    rope_theta: f32,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    const D = self.shape.dims[self.shape.len - 1];
+    const half = D / 2;
+    const T = if (self.shape.len >= 2) self.shape.dims[self.shape.len - 2] else 1;
+    const outer = self.data.len / (T * D);
+    const d_f = @as(f32, @floatFromInt(D));
+
+    const num_angles = @as(usize, @intFromFloat(@as(f32, @floatFromInt(half)) * partial_rotary_factor));
+
+    const Y = try tensor.zeros(allocator, self.shape.dims[0..self.shape.len]);
+    for (0..outer) |o| {
+        for (0..T) |t| {
+            const row_in = self.data[(o * T + t) * D .. (o * T + t + 1) * D];
+            const row_out = Y.data[(o * T + t) * D .. (o * T + t + 1) * D];
+
+            // 默认复制全部，后续对旋转维度进行覆盖更新
+            @memcpy(row_out, row_in);
+
+            const pos_f = @as(f32, @floatFromInt(start_pos + t));
+            for (0..num_angles) |i| {
+                const freq = 1.0 / std.math.pow(f32, rope_theta, @as(f32, @floatFromInt(2 * i)) / d_f);
+                const theta = pos_f * freq;
+                const cos_t = @cos(theta);
+                const sin_t = @sin(theta);
+
+                const x1 = row_in[i];
+                const x2 = row_in[i + half];
+
+                row_out[i] = x1 * cos_t - x2 * sin_t;
+                row_out[i + half] = x2 * cos_t + x1 * sin_t;
+            }
+        }
+    }
+    return Y;
+}
+
+/// Gemma 4 计算图级半切分旋转位置编码算子
+pub fn ropeSplitHalf(
+    graph: *autodiff.Graph,
+    X: *Tensor,
+    start_pos: usize,
+    partial_rotary_factor: f32,
+    rope_theta: f32,
+) !*Tensor {
+    const allocator = graph.arena.allocator();
+    const Y = try tensorRopeSplitHalf(X, start_pos, partial_rotary_factor, rope_theta, allocator);
+    return graph.registerSingleOutputOp(
+        Y,
+        &.{X},
+        .RoPE,
+        .{ .RoPE = .{ .start_pos = start_pos, .rotary_offset = 0, .base = rope_theta } },
+        false,
+    );
+}
 
 // ============================================================================
 // Gemma 4 架构定义与模型实现
@@ -310,8 +383,8 @@ pub const Gemma4Attention = struct {
         const v = try graph.transposeND(v_4d, 1, 2);
 
         // 4. 施加半切分 RoPE 旋转位置编码 (Split-Half RoPE, Gemma 官方标准)
-        const q_rot = try graph.ropeSplitHalf(q, 0, self.partial_rotary_factor, self.rope_theta);
-        const k_rot = try graph.ropeSplitHalf(k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
+        const q_rot = try ropeSplitHalf(graph, q, 0, self.partial_rotary_factor, self.rope_theta);
+        const k_rot = try ropeSplitHalf(graph, k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
 
         // 5. GQA 广播扩展至 nh 个头
         var k = k_rot;
@@ -950,8 +1023,8 @@ pub const Gemma4Q4Attention = struct {
         const v = try graph.transposeND(v_4d, 1, 2);
 
         // 4. 施加半切分 RoPE 旋转位置编码 (Split-Half RoPE, Gemma 官方标准)
-        const q_rot = try graph.ropeSplitHalf(q, 0, self.partial_rotary_factor, self.rope_theta);
-        const k_rot = try graph.ropeSplitHalf(k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
+        const q_rot = try ropeSplitHalf(graph, q, 0, self.partial_rotary_factor, self.rope_theta);
+        const k_rot = try ropeSplitHalf(graph, k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
 
         // 5. GQA 广播
         var k = k_rot;

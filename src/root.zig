@@ -11,6 +11,9 @@ pub const manifold = @import("manifold.zig");
 pub const cv = @import("cross_validation.zig");
 pub const engine = @import("engine.zig");
 pub const bench = @import("bench.zig");
+pub const models = @import("models.zig");
+
+pub const gemma4 = models.gemma4;
 
 pub const TSNE = manifold.TSNE;
 pub const TSNEOptions = manifold.TSNEOptions;
@@ -29,12 +32,6 @@ pub const trainModel = nn.trainModel;
 pub const evalModel = nn.evalModel;
 pub const ScaledDotProductAttention = nn.ScaledDotProductAttention;
 pub const DefaultGPT = nn.DefaultGPT;
-pub const DefaultGemma4 = nn.DefaultGemma4;
-pub const TinyGemma4 = nn.TinyGemma4;
-pub const TinyQ4Gemma4 = nn.TinyQ4Gemma4;
-pub const Q4Linear = nn.Q4Linear;
-pub const Q4Block = nn.Q4Block;
-pub const Gemma4Config = nn.Gemma4Config;
 pub const RNNResult = nn.RNNResult;
 pub const LSTMResult = nn.LSTMResult;
 pub const StackedLSTMResult = nn.StackedLSTMResult;

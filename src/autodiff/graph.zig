@@ -677,7 +677,6 @@ pub const Graph = struct {
     pub const groupNorm = graph_nn.groupNorm;
     pub const dropout = graph_nn.dropout;
     pub const rope = graph_nn.rope;
-    pub const ropeSplitHalf = graph_nn.ropeSplitHalf;
     pub const batchMatMul = graph_nn.batchMatMul;
     pub const embedding = graph_nn.embedding;
 

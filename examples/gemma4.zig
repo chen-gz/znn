@@ -3,6 +3,7 @@ const zig_ml = @import("zig_ml");
 
 const nn = zig_ml.nn;
 const autodiff = zig_ml.autodiff;
+const gemma4 = zig_ml.models.gemma4;
 
 /// Gemma 4 官方 Tokenizer 规范与词表映射
 const Gemma4ChatTokenizer = struct {
@@ -148,10 +149,10 @@ pub fn main(init: std.process.Init) !void {
 
     // 4. 加载完整 262K 词表解码器与 48 层 Gemma 4 Q4 量化模型
     std.debug.print("4. [加载 262K 官方词表与 48 层 Gemma 4 12B 模型并执行自回归生成]:\n", .{});
-    var vocab = try nn.Gemma4Vocabulary.openFile(io, "gemma4_vocab.bin");
+    var vocab = try gemma4.Gemma4Vocabulary.openFile(io, "gemma4_vocab.bin");
     defer vocab.deinit();
 
-    const model = try nn.DefaultGemma4Q4.loadFromMmap(allocator, mmap_ptr);
+    const model = try gemma4.DefaultGemma4Q4.loadFromMmap(allocator, mmap_ptr);
     defer {
         var m_mut = model;
         m_mut.deinit(allocator);
