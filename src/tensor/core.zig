@@ -734,6 +734,7 @@ pub const Tensor = struct {
     // --- Neural network kernels delegated to nn_kernels.zig ---
     pub const conv1d = nn_kernels.conv1d;
     pub const conv2d = nn_kernels.conv2d;
+    pub const convTranspose1d = nn_kernels.convTranspose1d;
     pub const convTranspose2d = nn_kernels.convTranspose2d;
     pub const maxpool2d = nn_kernels.maxpool2d;
     pub const avgpool2d = nn_kernels.avgpool2d;

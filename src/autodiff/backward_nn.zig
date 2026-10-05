@@ -367,6 +367,64 @@ pub fn backwardNN(self: *Op) !void {
                 }
             }
         },
+        .ConvTranspose1D => {
+            const A = self.inputs[0];
+            const W = self.inputs[1];
+            const C = self.outputs[0];
+            const bias = if (self.inputs.len > 2) self.inputs[2] else null;
+            const stride = self.context.ConvTranspose1D.stride;
+            const padding = self.context.ConvTranspose1D.padding;
+
+            const N = A.shape.dims[0];
+            const C_in = A.shape.dims[1];
+            const L_in = A.shape.dims[2];
+
+            const C_out = W.shape.dims[1];
+            const K = W.shape.dims[2];
+            const L_out = C.shape.dims[2];
+
+            if (bias) |b| {
+                if (b.requires_grad) {
+                    for (0..N) |n| {
+                        for (0..C_out) |co| {
+                            for (0..L_out) |l| {
+                                b.grad[co] += C.grad[(n * C_out + co) * L_out + l];
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (0..N) |n| {
+                for (0..C_in) |ci| {
+                    for (0..L_in) |l_in| {
+                        const in_idx = (n * C_in + ci) * L_in + l_in;
+                        const input_val = A.data[in_idx];
+
+                        for (0..C_out) |co| {
+                            for (0..K) |k| {
+                                const out_l_raw = l_in * stride + k;
+                                if (out_l_raw < padding) continue;
+                                const out_l = out_l_raw - padding;
+                                if (out_l >= L_out) continue;
+
+                                const out_idx = (n * C_out + co) * L_out + out_l;
+                                const grad_out = C.grad[out_idx];
+                                if (grad_out == 0.0) continue;
+
+                                const w_idx = (ci * C_out + co) * K + k;
+                                if (W.requires_grad) {
+                                    W.grad[w_idx] += grad_out * input_val;
+                                }
+                                if (A.requires_grad) {
+                                    A.grad[in_idx] += grad_out * W.data[w_idx];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
         .ConvTranspose2D => {
             const A = self.inputs[0];
             const W = self.inputs[1];

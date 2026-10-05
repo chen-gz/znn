@@ -1078,9 +1078,7 @@ test "ConvTranspose2D eager and autograd backward" {
         in_channels,
         out_channels,
         kernel_size,
-        stride,
-        padding,
-        true,
+        .{ .stride = stride, .padding = padding, .use_bias = true },
     );
     conv_t.resetParameters(random, .{});
     defer nn.deinitModel(&conv_t, allocator);
@@ -1135,9 +1133,7 @@ test "ConvTranspose2D eager and autograd backward" {
         1,
         1,
         4,
-        2,
-        1,
-        false,
+        .{ .stride = 2, .padding = 1, .use_bias = false },
     );
     upsample_conv.resetParameters(random, .{});
     defer nn.deinitModel(&upsample_conv, allocator);

@@ -278,23 +278,107 @@ pub fn conv2d(
     return out;
 }
 
+/// 一维转置卷积前向计算 (1-Dimensional Transposed Convolution, ConvTranspose1D)
+/// 输入形状: `[N, C_in, L_in]`，权重形状: `[C_in, C_out, K]`，可选偏置形状: `[C_out]`
+/// 输出长度: `L_out = (L_in - 1) * stride + K - 2 * padding`
+pub fn convTranspose1d(
+    self: *Tensor,
+    weight: *Tensor,
+    bias: ?*Tensor,
+    options: ConvOptions,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len != 3 or weight.shape.len != 3) {
+        return error.IncompatibleDimensions;
+    }
+    const stride = options.stride;
+    const padding = options.padding;
+    if (stride == 0) {
+        return error.InvalidStride;
+    }
+    const N = self.shape.dims[0];
+    const C_in = self.shape.dims[1];
+    const L_in = self.shape.dims[2];
+    if (L_in == 0) return error.InvalidDimension;
+
+    if (weight.shape.dims[0] != C_in) return error.ShapeMismatch;
+    const C_out = weight.shape.dims[1];
+    const K = weight.shape.dims[2];
+
+    if (bias) |b| {
+        if (b.shape.len != 1 or b.shape.dims[0] != C_out) return error.ShapeMismatch;
+    }
+
+    const raw_len = (L_in - 1) * stride + K;
+    if (raw_len <= 2 * padding) return error.KernelBiggerThanInput;
+    const L_out = raw_len - 2 * padding;
+
+    const out = try zeros(allocator, &.{ N, C_out, L_out });
+    errdefer out.deinit(allocator);
+
+    const s_n = self.strides.dims[0];
+    const s_c = self.strides.dims[1];
+    const s_l = self.strides.dims[2];
+
+    const w_ci = weight.strides.dims[0];
+    const w_co = weight.strides.dims[1];
+    const w_k = weight.strides.dims[2];
+
+    for (0..N) |n| {
+        for (0..C_out) |co| {
+            const b_val = if (bias) |b| b.data[co * b.strides.dims[0]] else 0.0;
+            if (b_val != 0.0) {
+                @memset(out.data[(n * C_out + co) * L_out .. (n * C_out + co + 1) * L_out], b_val);
+            }
+        }
+    }
+
+    for (0..N) |n| {
+        for (0..C_in) |ci| {
+            for (0..L_in) |l_in| {
+                const input_val = self.data[n * s_n + ci * s_c + l_in * s_l];
+                if (input_val == 0.0) continue;
+
+                for (0..C_out) |co| {
+                    for (0..K) |k| {
+                        const out_l_raw = l_in * stride + k;
+                        if (out_l_raw < padding) continue;
+                        const out_l = out_l_raw - padding;
+                        if (out_l >= L_out) continue;
+
+                        const weight_val = weight.data[ci * w_ci + co * w_co + k * w_k];
+                        out.data[(n * C_out + co) * L_out + out_l] += input_val * weight_val;
+                    }
+                }
+            }
+        }
+    }
+
+    return out;
+}
+
 /// 二维转置卷积前向计算 (2-Dimensional Transposed Convolution, ConvTranspose2D)
 /// 输入形状: `[N, C_in, H_in, W_in]`，权重形状: `[C_in, C_out, KH, KW]`，可选偏置形状: `[C_out]`
 pub fn convTranspose2d(
     self: *Tensor,
     weight: *Tensor,
     bias: ?*Tensor,
-    stride: usize,
-    padding: usize,
+    options: ConvOptions,
     allocator: std.mem.Allocator,
 ) !*Tensor {
     if (self.shape.len != 4 or weight.shape.len != 4) {
         return error.IncompatibleDimensions;
     }
+    const stride = options.stride;
+    const padding = options.padding;
+    if (stride == 0) {
+        return error.InvalidStride;
+    }
     const N = self.shape.dims[0];
     const C_in = self.shape.dims[1];
     const H_in = self.shape.dims[2];
     const W_in = self.shape.dims[3];
+    if (H_in == 0 or W_in == 0) return error.InvalidDimension;
 
     if (weight.shape.dims[0] != C_in) return error.ShapeMismatch;
     const C_out = weight.shape.dims[1];
@@ -305,18 +389,32 @@ pub fn convTranspose2d(
         if (b.shape.len != 1 or b.shape.dims[0] != C_out) return error.ShapeMismatch;
     }
 
-    const H_out = (H_in - 1) * stride + KH - 2 * padding;
-    const W_out = (W_in - 1) * stride + KW - 2 * padding;
+    const raw_h = (H_in - 1) * stride + KH;
+    const raw_w = (W_in - 1) * stride + KW;
+    if (raw_h <= 2 * padding or raw_w <= 2 * padding) return error.KernelBiggerThanInput;
+
+    const H_out = raw_h - 2 * padding;
+    const W_out = raw_w - 2 * padding;
 
     const out = try zeros(allocator, &.{ N, C_out, H_out, W_out });
+    errdefer out.deinit(allocator);
+
+    const s_n = self.strides.dims[0];
+    const s_c = self.strides.dims[1];
+    const s_h = self.strides.dims[2];
+    const s_w = self.strides.dims[3];
+
+    const w_ci = weight.strides.dims[0];
+    const w_co = weight.strides.dims[1];
+    const w_kh = weight.strides.dims[2];
+    const w_kw = weight.strides.dims[3];
 
     for (0..N) |n| {
         for (0..C_out) |co| {
-            const b_val = if (bias) |b| b.data[co] else 0.0;
-            for (0..H_out) |h| {
-                for (0..W_out) |w| {
-                    out.data[n * (C_out * H_out * W_out) + co * (H_out * W_out) + h * W_out + w] = b_val;
-                }
+            const b_val = if (bias) |b| b.data[co * b.strides.dims[0]] else 0.0;
+            if (b_val != 0.0) {
+                const plane_start = (n * C_out + co) * (H_out * W_out);
+                @memset(out.data[plane_start .. plane_start + H_out * W_out], b_val);
             }
         }
     }
@@ -325,7 +423,7 @@ pub fn convTranspose2d(
         for (0..C_in) |ci| {
             for (0..H_in) |h| {
                 for (0..W_in) |w| {
-                    const input_val = self.data[n * (C_in * H_in * W_in) + ci * (H_in * W_in) + h * W_in + w];
+                    const input_val = self.data[n * s_n + ci * s_c + h * s_h + w * s_w];
                     if (input_val == 0.0) continue;
 
                     for (0..C_out) |co| {
@@ -341,7 +439,7 @@ pub fn convTranspose2d(
                                 const out_w = out_w_raw - padding;
                                 if (out_w >= W_out) continue;
 
-                                const weight_val = weight.data[ci * (C_out * KH * KW) + co * (KH * KW) + kh * KW + kw];
+                                const weight_val = weight.data[ci * w_ci + co * w_co + kh * w_kh + kw * w_kw];
                                 out.data[n * (C_out * H_out * W_out) + co * (H_out * W_out) + out_h * W_out + out_w] += input_val * weight_val;
                             }
                         }

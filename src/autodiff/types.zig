@@ -41,6 +41,7 @@ pub const OpType = enum {
     // --- 神经网络层与结构运算 (Neural Network Layers & Structural Ops) ---
     Conv1D, // 一维卷积 (1D Convolution, Conv1D)
     Conv2D, // 二维卷积 (2D Convolution, Conv2D)
+    ConvTranspose1D, // 一维转置卷积 / 反卷积 (1D Transposed Convolution, ConvTranspose1D)
     ConvTranspose2D, // 二维转置卷积 / 反卷积 (2D Transposed Convolution, ConvTranspose2D)
     MaxPool2D, // 二维最大池化 (2D Max Pooling, MaxPool2D)
     AvgPool2D, // 二维平均池化 (2D Average Pooling, AvgPool2D)
@@ -98,7 +99,7 @@ pub const OpType = enum {
             .Tanh => "y = \\tanh(x) = \\frac{e^x - e^{-x}}{e^x + e^{-x}}",
             .Softmax => "P_i = \\frac{e^{z_i - \\max(z)}}{\\sum_j e^{z_j - \\max(z)}}",
             .Conv1D, .Conv2D => "y = x \\ast W + b",
-            .ConvTranspose2D => "y = x \\ast_{\\text{deconv}} W + b",
+            .ConvTranspose1D, .ConvTranspose2D => "y = x \\ast_{\\text{deconv}} W + b",
             .MaxPool2D => "y = \\max_{k \\times k}(x)",
             .AvgPool2D => "y = \\frac{1}{k^2} \\sum_{k \\times k} x",
             .RmsNorm => "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma",
@@ -203,9 +204,13 @@ pub const OpContext = union(enum) {
         stride: usize = 1,
         padding: usize = 0,
     },
+    ConvTranspose1D: struct {
+        stride: usize = 1,
+        padding: usize = 0,
+    },
     ConvTranspose2D: struct {
-        stride: usize,
-        padding: usize,
+        stride: usize = 1,
+        padding: usize = 0,
     },
     MaxPool2D: struct {
         pool_size: usize,

@@ -36,6 +36,7 @@ const freePersistentTensor = nn.freePersistentTensor;
 const Linear = nn.Linear;
 const Conv1D = nn.Conv1D;
 const Conv2D = nn.Conv2D;
+const ConvTranspose1D = nn.ConvTranspose1D;
 const ConvTranspose2D = nn.ConvTranspose2D;
 const Module = nn.Module;
 const deinitModel = nn.deinitModel;
@@ -1076,7 +1077,7 @@ test "Comptime reflection supports slice modules, optional bias, and frozen LoRA
     try std.testing.expectEqual(@as(usize, 32), lstm_params.len);
 
     // 3. ConvTranspose2D (?*Tensor field: bias)
-    var deconv = try ConvTranspose2D.init(allocator, 2, 3, 2, 1, 0, true);
+    var deconv = try ConvTranspose2D.init(allocator, 2, 3, 2, .{});
     deconv.resetParameters(random, .{});
     defer deinitModel(&deconv, allocator);
     const deconv_params = try parameters(&deconv, allocator);
@@ -1108,7 +1109,7 @@ test "Safetensors serialization supports slice modules, optional bias, and out-o
 
     var m1 = CompositeModel{
         .moe = try MoELayer.init(allocator, 4, 8, 2, 1, 1),
-        .deconv = try ConvTranspose2D.init(allocator, 2, 2, 2, 1, 0, true),
+        .deconv = try ConvTranspose2D.init(allocator, 2, 2, 2, .{}),
         .lora = try LoRALinear.initWithBias(allocator, 4, 3, 2, 2.0, true),
     };
     defer deinitModel(&m1, allocator);
@@ -1125,7 +1126,7 @@ test "Safetensors serialization supports slice modules, optional bias, and out-o
 
     var m2 = CompositeModel{
         .moe = try MoELayer.init(allocator, 4, 8, 2, 1, 1),
-        .deconv = try ConvTranspose2D.init(allocator, 2, 2, 2, 1, 0, true),
+        .deconv = try ConvTranspose2D.init(allocator, 2, 2, 2, .{}),
         .lora = try LoRALinear.initWithBias(allocator, 4, 3, 2, 2.0, true),
     };
     defer deinitModel(&m2, allocator);
@@ -1310,6 +1311,49 @@ test "Conv1D with stride and padding forward and backward (im2col + sgemm)" {
     // x[0] is covered only by window 0 at k=1 -> dL/dx[0] = w[0,0,1] + w[1,0,1] = 1 + 2 = 3
     // x[1] is covered by window 0 (k=2) and window 1 (k=0) -> dL/dx[1] = 2 * (1 + 2) = 6
     try std.testing.expectApproxEqAbs(@as(f32, 3.0), x.grad[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), x.grad[1], 1e-4);
+}
+
+test "ConvTranspose1D with stride and padding forward and backward" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(2027);
+    const random = prng.random();
+
+    var deconv = try ConvTranspose1D.init(allocator, 1, 2, 3, .{ .stride = 2, .padding = 1, .use_bias = true });
+    deconv.resetParameters(random, .{});
+    defer nn.deinitModel(&deconv, allocator);
+    // weight shape: [in_c=1, out_c=2, K=3]
+    @memset(deconv.weight.data[0..3], 1.0);
+    @memset(deconv.weight.data[3..6], 2.0);
+    deconv.bias.?.data[0] = 0.5;
+    deconv.bias.?.data[1] = -0.5;
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    // Input [1, 1, 2] = {1, 2}, stride=2, padding=1, K=3 -> L_out = (2-1)*2 + 3 - 2 = 3
+    // l_in=0 (val=1) contributes to out_l_raw in {0,1,2} -> out_l in {0,1} (k=1,2)
+    // l_in=1 (val=2) contributes to out_l_raw in {2,3,4} -> out_l in {1,2} (k=0,1)
+    const x = try graph.tensorNDWithData(&.{ 1, 1, 2 }, &.{ 1.0, 2.0 }, true);
+    const out = try deconv.forward(&graph, x);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 2, 3 }, out.shape.dims[0..out.shape.len]);
+
+    // Channel 0 (w=1, b=0.5): out_l=0 -> 1*1 + 0.5 = 1.5; out_l=1 -> 1*1 + 2*1 + 0.5 = 3.5; out_l=2 -> 2*1 + 0.5 = 2.5
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), out.data[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.5), out.data[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.5), out.data[2], 1e-4);
+    // Channel 1 (w=2, b=-0.5): out_l=0 -> 2 - 0.5 = 1.5; out_l=1 -> 2 + 4 - 0.5 = 5.5; out_l=2 -> 4 - 0.5 = 3.5
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), out.data[3], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.5), out.data[4], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.5), out.data[5], 1e-4);
+
+    const loss = try graph.sum(out, null, false);
+    try graph.backward(loss);
+
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), deconv.bias.?.grad[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), deconv.bias.?.grad[1], 1e-4);
+    // Both l_in=0 and l_in=1 land on 2 valid output positions per channel -> dL/dx[i] = 2*(1 + 2) = 6
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), x.grad[0], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 6.0), x.grad[1], 1e-4);
 }
 

@@ -315,24 +315,43 @@ pub fn conv2d(
     }
 }
 
-pub fn convTranspose2D(
+pub fn convTranspose1d(
     self: *Graph,
     A: *Tensor,
     weight: *Tensor,
     bias: ?*Tensor,
-    stride: usize,
-    padding: usize,
+    options: tensor_mod.ConvOptions,
 ) !*Tensor {
     const allocator = self.arena.allocator();
-    const C = try A.convTranspose2d(weight, bias, stride, padding, allocator);
+    const C = try A.convTranspose1d(weight, bias, options, allocator);
     const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
-    const ctx: OpContext = .{ .ConvTranspose2D = .{ .stride = stride, .padding = padding } };
+    const ctx: OpContext = .{ .ConvTranspose1D = .{ .stride = options.stride, .padding = options.padding } };
+    if (bias) |b| {
+        return self.registerSingleOutputOp(C, &.{ A, weight, b }, .ConvTranspose1D, ctx, req_grad);
+    } else {
+        return self.registerSingleOutputOp(C, &.{ A, weight }, .ConvTranspose1D, ctx, req_grad);
+    }
+}
+
+pub fn convTranspose2d(
+    self: *Graph,
+    A: *Tensor,
+    weight: *Tensor,
+    bias: ?*Tensor,
+    options: tensor_mod.ConvOptions,
+) !*Tensor {
+    const allocator = self.arena.allocator();
+    const C = try A.convTranspose2d(weight, bias, options, allocator);
+    const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
+    const ctx: OpContext = .{ .ConvTranspose2D = .{ .stride = options.stride, .padding = options.padding } };
     if (bias) |b| {
         return self.registerSingleOutputOp(C, &.{ A, weight, b }, .ConvTranspose2D, ctx, req_grad);
     } else {
         return self.registerSingleOutputOp(C, &.{ A, weight }, .ConvTranspose2D, ctx, req_grad);
     }
 }
+
+pub const convTranspose2D = convTranspose2d;
 
 pub fn maxpool2d(self: *Graph, A: *Tensor, pool_size: usize, stride: usize) !*Tensor {
     const allocator = self.arena.allocator();

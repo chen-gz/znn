@@ -10,6 +10,7 @@ const free = ops_mod.free;
 
 pub const conv1d = conv_pool.conv1d;
 pub const conv2d = conv_pool.conv2d;
+pub const convTranspose1d = conv_pool.convTranspose1d;
 pub const convTranspose2d = conv_pool.convTranspose2d;
 pub const maxpool2d = conv_pool.maxpool2d;
 pub const avgpool2d = conv_pool.avgpool2d;
