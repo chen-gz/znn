@@ -217,10 +217,15 @@ pub const Op = struct {
                 const ctx = self.context.Conv2D;
                 copyFromEager(self.outputs[0], try self.inputs[0].conv2d(self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
             },
+            .ConvTranspose1D => {
+                const bias = if (self.inputs.len > 2) self.inputs[2] else null;
+                const ctx = self.context.ConvTranspose1D;
+                copyFromEager(self.outputs[0], try self.inputs[0].convTranspose1d(self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            },
             .ConvTranspose2D => {
                 const bias = if (self.inputs.len > 2) self.inputs[2] else null;
                 const ctx = self.context.ConvTranspose2D;
-                copyFromEager(self.outputs[0], try self.inputs[0].convTranspose2d(self.inputs[1], bias, ctx.stride, ctx.padding, allocator), allocator);
+                copyFromEager(self.outputs[0], try self.inputs[0].convTranspose2d(self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
             },
             .MaxPool2D => {
                 const ctx = self.context.MaxPool2D;
@@ -416,6 +421,7 @@ pub const Op = struct {
 
             .Conv1D,
             .Conv2D,
+            .ConvTranspose1D,
             .ConvTranspose2D,
             .MaxPool2D,
             .AvgPool2D,

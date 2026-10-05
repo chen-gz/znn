@@ -219,34 +219,120 @@ pub const Conv2D = struct {
     }
 };
 
-pub const ConvTranspose2D = struct {
+pub const ConvTranspose1D = struct {
     in_channels: usize,
     out_channels: usize,
     kernel_size: usize,
-    stride: usize,
-    padding: usize,
+    stride: usize = 1,
+    padding: usize = 0,
     weight: *Tensor,
     bias: ?*Tensor,
     name: ?[]const u8 = null,
-    module_type: []const u8 = "ConvTranspose2D",
+    module_type: []const u8 = "ConvTranspose1D",
 
-    /// 构造反卷积层：只分配参数内存 (反卷积核与可选偏置全零)，不做任何数值初始化
+    pub const Options = struct {
+        stride: usize = 1,
+        padding: usize = 0,
+        use_bias: bool = true,
+
+        pub const default: Options = .{};
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    /// 构造一维转置卷积层：只分配参数内存 (转置卷积核 `[in_channels, out_channels, kernel_size]` 与可选偏置全零)，不做任何数值初始化
     pub fn init(
         allocator: std.mem.Allocator,
         in_channels: usize,
         out_channels: usize,
         kernel_size: usize,
-        stride: usize,
-        padding: usize,
-        use_bias: bool,
+        options: Options,
+    ) !ConvTranspose1D {
+        if (options.stride == 0) return error.InvalidStride;
+        const weight = try createPersistentTensor(allocator, 1, in_channels * out_channels * kernel_size, true);
+        errdefer freePersistentTensor(allocator, weight);
+        weight.shape = Shape.init(&.{ in_channels, out_channels, kernel_size });
+        weight.strides = tensor.computeContiguousStrides(weight.shape);
+
+        var bias: ?*Tensor = null;
+        if (options.use_bias) {
+            const b = try createPersistentTensor(allocator, 1, out_channels, true);
+            errdefer freePersistentTensor(allocator, b);
+            b.shape = Shape.init(&.{out_channels});
+            b.strides = tensor.computeContiguousStrides(b.shape);
+            bias = b;
+        }
+
+        return ConvTranspose1D{
+            .in_channels = in_channels,
+            .out_channels = out_channels,
+            .kernel_size = kernel_size,
+            .stride = options.stride,
+            .padding = options.padding,
+            .weight = weight,
+            .bias = bias,
+        };
+    }
+
+    /// 库内标准参数初始化：在已分配的张量上按 options 重新填充转置卷积核与偏置，不分配内存，也不设置 is_custom_initialized 标记
+    pub fn resetParameters(self: *ConvTranspose1D, random: std.Random, options: InitOptions) void {
+        const fan_in = self.in_channels * self.kernel_size;
+        const fan_out = self.out_channels * self.kernel_size;
+        const w_init = options.resolveWeightInit();
+        initWeights(random, self.weight.data, fan_in, fan_out, w_init);
+        if (self.bias) |b| {
+            initWeights(random, b.data, fan_in, fan_out, options.bias_init);
+        }
+    }
+
+    pub const formula = "y = x \\ast_{\\text{deconv}} W + b";
+
+    pub fn forward(self: *const ConvTranspose1D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+        return try graph.convTranspose1d(x, self.weight, self.bias, .{ .stride = self.stride, .padding = self.padding });
+    }
+};
+
+pub const ConvTranspose2D = struct {
+    in_channels: usize,
+    out_channels: usize,
+    kernel_size: usize,
+    stride: usize = 1,
+    padding: usize = 0,
+    weight: *Tensor,
+    bias: ?*Tensor,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "ConvTranspose2D",
+
+    pub const Options = struct {
+        stride: usize = 1,
+        padding: usize = 0,
+        use_bias: bool = true,
+
+        pub const default: Options = .{};
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    /// 构造二维转置卷积层：只分配参数内存 (转置卷积核 `[in_channels, out_channels, kernel_size, kernel_size]` 与可选偏置全零)，不做任何数值初始化
+    pub fn init(
+        allocator: std.mem.Allocator,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        options: Options,
     ) !ConvTranspose2D {
+        if (options.stride == 0) return error.InvalidStride;
         const weight = try createPersistentTensor(allocator, 1, in_channels * out_channels * kernel_size * kernel_size, true);
         errdefer freePersistentTensor(allocator, weight);
         weight.shape = Shape.init(&.{ in_channels, out_channels, kernel_size, kernel_size });
         weight.strides = tensor.computeContiguousStrides(weight.shape);
 
         var bias: ?*Tensor = null;
-        if (use_bias) {
+        if (options.use_bias) {
             const b = try createPersistentTensor(allocator, 1, out_channels, true);
             errdefer freePersistentTensor(allocator, b);
             b.shape = Shape.init(&.{out_channels});
@@ -258,8 +344,8 @@ pub const ConvTranspose2D = struct {
             .in_channels = in_channels,
             .out_channels = out_channels,
             .kernel_size = kernel_size,
-            .stride = stride,
-            .padding = padding,
+            .stride = options.stride,
+            .padding = options.padding,
             .weight = weight,
             .bias = bias,
         };
@@ -276,10 +362,12 @@ pub const ConvTranspose2D = struct {
         }
     }
 
+    pub const formula = "y = x \\ast_{\\text{deconv}} W + b";
+
     pub fn forward(self: *const ConvTranspose2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        return try graph.convTranspose2D(x, self.weight, self.bias, self.stride, self.padding);
+        return try graph.convTranspose2d(x, self.weight, self.bias, .{ .stride = self.stride, .padding = self.padding });
     }
 };
 

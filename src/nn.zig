@@ -47,6 +47,7 @@ pub const Linear = core.Linear;
 pub const ConvOptions = tensor.ConvOptions;
 pub const Conv1D = core.Conv1D;
 pub const Conv2D = core.Conv2D;
+pub const ConvTranspose1D = core.ConvTranspose1D;
 pub const ConvTranspose2D = core.ConvTranspose2D;
 pub const Module = core.Module;
 pub const deinitModel = core.deinitModel;

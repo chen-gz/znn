@@ -47,6 +47,7 @@ pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u
         if (std.mem.eql(u8, m_type, "Linear")) return "y = x W^T + b";
         if (std.mem.eql(u8, m_type, "Conv1D")) return "y = \\text{Conv1D}(x; W, b)";
         if (std.mem.eql(u8, m_type, "Conv2D")) return "y = \\text{Conv2D}(x; W, b)";
+        if (std.mem.eql(u8, m_type, "ConvTranspose1D")) return "y = \\text{ConvTranspose1D}(x; W, b)";
         if (std.mem.eql(u8, m_type, "ConvTranspose2D")) return "y = \\text{ConvTranspose2D}(x; W, b)";
         if (std.mem.eql(u8, m_type, "RMSNorm")) return "y = \\text{RMSNorm}(x; \\gamma, \\epsilon)";
         if (std.mem.eql(u8, m_type, "LayerNorm")) return "y = \\text{LayerNorm}(x; \\gamma, \\beta)";
@@ -243,6 +244,7 @@ pub const ParamFans = struct {
 ///   左操作数 (`y = W x`，W 为 `[..., out, in]`)：fan_in = 最后一维，fan_out = 倒数第二维；
 /// - `Conv1D` 卷积核 `[out_c, in_c, k]`：fan_in = in_c·k，fan_out = out_c·k；
 /// - `Conv2D` 卷积核 `[out_c, in_c, kh, kw]`：fan_in = in_c·kh·kw，fan_out = out_c·kh·kw；
+/// - `ConvTranspose1D` 卷积核 `[in_c, out_c, k]`：fan_in = in_c·k，fan_out = out_c·k；
 /// - `ConvTranspose2D` 卷积核 `[in_c, out_c, kh, kw]`：fan_in = in_c·kh·kw，fan_out = out_c·kh·kw；
 /// - 参数先经 `Transpose` 再参与投影 (如 `y = x W^T`) 时，按转置后的张量及其消费算子确定；
 /// - 计算图中没有上述消费算子时，按形状推断 (`shapeParamFans`)。
@@ -266,6 +268,11 @@ pub fn computeParamFans(self: *const Graph, t: *const Tensor) ParamFans {
                 if (dims.len != 4 or op.inputs.len < 2 or op.inputs[1] != t) continue;
                 const receptive = dims[2] * dims[3];
                 return .{ .fan_in = dims[1] * receptive, .fan_out = dims[0] * receptive };
+            },
+            .ConvTranspose1D => {
+                if (dims.len != 3 or op.inputs.len < 2 or op.inputs[1] != t) continue;
+                const receptive = dims[2];
+                return .{ .fan_in = dims[0] * receptive, .fan_out = dims[1] * receptive };
             },
             .ConvTranspose2D => {
                 if (dims.len != 4 or op.inputs.len < 2 or op.inputs[1] != t) continue;
@@ -459,7 +466,7 @@ pub fn detectConsumerActivation(self: *Graph, target: *Tensor) @import("../nn/in
                         .Gelu => return .gelu,
                         .Silu => return .silu,
                         .LeakyRelu => return .{ .leaky_relu = op.context.LeakyRelu.alpha },
-                        .MatMul, .Conv1D, .Conv2D, .ConvTranspose2D => {
+                        .MatMul, .Conv1D, .Conv2D, .ConvTranspose1D, .ConvTranspose2D => {
                             if (!passed_projection and op.outputs.len > 0) {
                                 passed_projection = true;
                                 current = op.outputs[0];

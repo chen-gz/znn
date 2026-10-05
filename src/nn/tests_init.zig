@@ -145,7 +145,9 @@ test "Graph.computeParamFans derives fan_in and fan_out from the consuming op" {
     defer nn.deinitModel(&conv1d, allocator);
     var conv = try nn.Conv2D.init(allocator, 3, 8, 3, .{});
     defer nn.deinitModel(&conv, allocator);
-    var deconv = try nn.ConvTranspose2D.init(allocator, 6, 2, 3, 1, 0, true);
+    var deconv1d = try nn.ConvTranspose1D.init(allocator, 6, 2, 5, .{});
+    defer nn.deinitModel(&deconv1d, allocator);
+    var deconv = try nn.ConvTranspose2D.init(allocator, 6, 2, 3, .{});
     defer nn.deinitModel(&deconv, allocator);
 
     var graph = autodiff.Graph.init(allocator);
@@ -163,6 +165,8 @@ test "Graph.computeParamFans derives fan_in and fan_out from the consuming op" {
     _ = try conv1d.forward(&graph, try graph.ones(&.{ 1, 3, 10 }, false));
     // Conv2D 卷积核 [out_c=8, in_c=3, 3, 3]
     _ = try conv.forward(&graph, try graph.ones(&.{ 1, 3, 6, 6 }, false));
+    // ConvTranspose1D 卷积核 [in_c=6, out_c=2, 5]
+    _ = try deconv1d.forward(&graph, try graph.ones(&.{ 1, 6, 8 }, false));
     // ConvTranspose2D 卷积核 [in_c=6, out_c=2, 3, 3]
     _ = try deconv.forward(&graph, try graph.ones(&.{ 1, 6, 4, 4 }, false));
 
@@ -177,6 +181,7 @@ test "Graph.computeParamFans derives fan_in and fan_out from the consuming op" {
     try expectFans(graph.computeParamFans(w_t), 5, 7);
     try expectFans(graph.computeParamFans(conv1d.weight), 3 * 5, 8 * 5);
     try expectFans(graph.computeParamFans(conv.weight), 3 * 9, 8 * 9);
+    try expectFans(graph.computeParamFans(deconv1d.weight), 6 * 5, 2 * 5);
     try expectFans(graph.computeParamFans(deconv.weight), 6 * 9, 2 * 9);
 }
 
@@ -186,7 +191,7 @@ test "initModel uses the transposed-convolution kernel layout for ConvTranspose2
     const random = prng.random();
 
     // 卷积核 [in_c=32, out_c=4, 3, 3]：fan_in = 32·9 = 288，下游无激活函数 -> He Normal (gain=1)，Var = 1/288
-    var deconv = try nn.ConvTranspose2D.init(allocator, 32, 4, 3, 1, 0, true);
+    var deconv = try nn.ConvTranspose2D.init(allocator, 32, 4, 3, .{});
     defer nn.deinitModel(&deconv, allocator);
 
     var graph = autodiff.Graph.init(allocator);
@@ -421,7 +426,7 @@ test "Built-in library initialization never marks is_custom_initialized" {
     try std.testing.expect(!conv.weight.is_custom_initialized);
     try std.testing.expect(!conv.bias.is_custom_initialized);
 
-    var deconv = try nn.ConvTranspose2D.init(allocator, 4, 3, 3, 1, 0, true);
+    var deconv = try nn.ConvTranspose2D.init(allocator, 4, 3, 3, .{});
     defer nn.deinitModel(&deconv, allocator);
     deconv.resetParameters(random, .{});
     try std.testing.expect(!deconv.weight.is_custom_initialized);
