@@ -91,6 +91,21 @@ pub const PoolOptions = struct {
     }
 };
 
+/// 旋转位置编码可选参数配置 (Rotary Position Embedding Options, RopeOptions)
+pub const RopeOptions = struct {
+    rotary_offset: usize = 0, // 旋转子空间起始偏移量，默认为 0 (对全部维度应用旋转位置编码 (Rotary Position Embedding, RoPE))
+    base: f32 = 10000.0, // 频率基数，默认为 10000.0
+
+    pub const default: RopeOptions = .{};
+
+    pub fn defaultOptions() RopeOptions {
+        return .{};
+    }
+};
+
+/// 旋转位置编码配置类型别名 (Rotary Position Embedding Options Alias, RoPEOptions)
+pub const RoPEOptions = RopeOptions;
+
 /// 将任意张量标量元素安全转换为非负索引 (`usize`)，并对越界或非有限值返回 `IndexOutOfBounds`
 pub inline fn indexScalarToUsize(comptime IdxT: type, raw: IdxT, bound: usize) !usize {
     const idx: usize = switch (@typeInfo(IdxT)) {

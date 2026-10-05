@@ -731,7 +731,7 @@ pub const Tensor = struct {
         return out;
     }
 
-    // --- Neural network kernels delegated to nn_kernels.zig ---
+    // --- Neural network kernels delegated to nn_kernels.zig / conv_pool.zig ---
     pub const conv1d = nn_kernels.conv1d;
     pub const conv2d = nn_kernels.conv2d;
     pub const convTranspose1d = nn_kernels.convTranspose1d;
@@ -750,7 +750,6 @@ pub const Tensor = struct {
     pub const groupNorm = nn_kernels.groupNorm;
     pub const applyDropoutMask = nn_kernels.applyDropoutMask;
     pub const rope = nn_kernels.rope;
-    pub const ropeOffset = nn_kernels.ropeOffset;
     pub const repeatKV = nn_kernels.repeatKV;
     pub const batchMatMul = nn_kernels.batchMatMul;
     pub const embedding = nn_kernels.embedding;

@@ -48,6 +48,8 @@ pub const DType = tensor.DType;
 pub const SliceRange = tensor.SliceRange;
 pub const ConvOptions = tensor.ConvOptions;
 pub const PoolOptions = tensor.PoolOptions;
+pub const RopeOptions = tensor.RopeOptions;
+pub const RoPEOptions = tensor.RoPEOptions;
 
 pub const CrossValidationOptions = cv.CrossValidationOptions;
 

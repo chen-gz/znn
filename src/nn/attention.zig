@@ -518,13 +518,13 @@ pub const MLALayer = struct {
         // 3. 重塑并转置为四维 (4-Dimensional, 4D) 多头结构，对查询 (Query) 的旋转位置编码 (Rotary Position Embedding, RoPE) 子空间与共享 k_r 施加旋转位置编码
         const q_4d = try graph.reshape(q_all, &.{ B, T, nh, q_head_dim });
         const q_trans = try graph.transposeND(q_4d, 1, 2);
-        const q_rot = try graph.ropeOffset(q_trans, 0, hd);
+        const q_rot = try graph.rope(q_trans, 0, .{ .rotary_offset = hd });
 
         const k_c_4d = try graph.reshape(k_c_2d, &.{ B, T, nh, hd });
         const k_c = try graph.transposeND(k_c_4d, 1, 2);
 
         const k_r_4d = try graph.reshape(k_r_2d, &.{ B, 1, T, dr });
-        const k_r_rot = try graph.rope(k_r_4d, 0);
+        const k_r_rot = try graph.rope(k_r_4d, 0, .{});
 
         const k_r_heads = if (nh > 1) try graph.repeatKV(k_r_rot, nh) else k_r_rot;
 
