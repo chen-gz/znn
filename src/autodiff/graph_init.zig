@@ -57,7 +57,9 @@ pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u
         if (std.mem.eql(u8, m_type, "AdaptiveAvgPool2D")) return "y = \\text{AdaptiveAvgPool2D}(x; H_{\\text{out}}, W_{\\text{out}})";
         if (std.mem.eql(u8, m_type, "RMSNorm")) return "y = \\text{RMSNorm}(x; \\gamma, \\epsilon)";
         if (std.mem.eql(u8, m_type, "LayerNorm")) return "y = \\text{LayerNorm}(x; \\gamma, \\beta)";
+        if (std.mem.eql(u8, m_type, "BatchNorm1d")) return "y = \\text{BatchNorm1d}(x; \\gamma, \\beta)";
         if (std.mem.eql(u8, m_type, "BatchNorm2d")) return "y = \\text{BatchNorm2d}(x; \\gamma, \\beta)";
+        if (std.mem.eql(u8, m_type, "GroupNorm")) return "y = \\text{GroupNorm}(x; \\gamma, \\beta)";
         if (std.mem.eql(u8, m_type, "Embedding")) return "y = \\text{Embedding}(x; W)";
         if (std.mem.eql(u8, m_type, "MLP")) return "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}";
         if (std.mem.eql(u8, m_type, "SwiGLU")) return "y = (\\text{SiLU}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
@@ -110,7 +112,7 @@ pub fn initWeights(self: *Graph, random: std.Random) void {
 pub fn isNormScaleParam(self: *const Graph, t: *const Tensor) bool {
     for (self.ops.items) |op| {
         switch (op.op_type) {
-            .RmsNorm, .LayerNorm, .BatchNorm2d => {
+            .RmsNorm, .LayerNorm, .BatchNorm1d, .BatchNorm2d, .GroupNorm => {
                 if (op.inputs.len >= 2 and op.inputs[1] == t) return true;
             },
             else => {},

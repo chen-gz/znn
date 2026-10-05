@@ -77,6 +77,89 @@ pub const LayerNorm = struct {
     }
 };
 
+/// 一维批量归一化 (1-Dimensional Batch Normalization, BatchNorm1d)
+pub const BatchNorm1d = struct {
+    num_features: usize,
+    eps: f32,
+    momentum: f32,
+    training: bool,
+    gamma: *Tensor,
+    beta: *Tensor,
+    running_mean: *Tensor,
+    running_var: *Tensor,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "BatchNorm1d",
+
+    pub const Options = struct {
+        eps: f32 = 1e-5,
+        momentum: f32 = 0.1,
+
+        pub const default: Options = .{};
+
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    pub const formula = "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta";
+
+    pub fn defaultOptions() Options {
+        return Options.defaultOptions();
+    }
+
+    pub fn init(allocator: std.mem.Allocator, num_features: usize, options: Options) !BatchNorm1d {
+        const gamma = try createPersistentTensor(allocator, 1, num_features, true);
+        errdefer freePersistentTensor(allocator, gamma);
+        @memset(gamma.data, 1.0);
+        gamma.shape = Shape.init(&.{num_features});
+        gamma.strides = tensor.computeContiguousStrides(gamma.shape);
+
+        const beta = try createPersistentTensor(allocator, 1, num_features, true);
+        errdefer freePersistentTensor(allocator, beta);
+        @memset(beta.data, 0.0);
+        beta.shape = Shape.init(&.{num_features});
+        beta.strides = tensor.computeContiguousStrides(beta.shape);
+
+        const running_mean = try createPersistentTensor(allocator, 1, num_features, false);
+        errdefer freePersistentTensor(allocator, running_mean);
+        @memset(running_mean.data, 0.0);
+        running_mean.shape = Shape.init(&.{num_features});
+        running_mean.strides = tensor.computeContiguousStrides(running_mean.shape);
+
+        const running_var = try createPersistentTensor(allocator, 1, num_features, false);
+        errdefer freePersistentTensor(allocator, running_var);
+        @memset(running_var.data, 1.0);
+        running_var.shape = Shape.init(&.{num_features});
+        running_var.strides = tensor.computeContiguousStrides(running_var.shape);
+
+        return BatchNorm1d{
+            .num_features = num_features,
+            .eps = options.eps,
+            .momentum = options.momentum,
+            .training = true,
+            .gamma = gamma,
+            .beta = beta,
+            .running_mean = running_mean,
+            .running_var = running_var,
+        };
+    }
+
+    pub fn forward(self: *BatchNorm1d, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+        return try graph.batchNorm1d(
+            x,
+            self.gamma,
+            self.beta,
+            self.running_mean,
+            self.running_var,
+            self.eps,
+            self.momentum,
+            self.training,
+        );
+    }
+};
+
 /// 二维批量归一化 (2-Dimensional Batch Normalization, BatchNorm2d)
 pub const BatchNorm2d = struct {
     num_features: usize,
@@ -143,6 +226,64 @@ pub const BatchNorm2d = struct {
             self.momentum,
             self.training,
         );
+    }
+};
+
+/// 分组归一化 (Group Normalization, GroupNorm)
+pub const GroupNorm = struct {
+    num_groups: usize,
+    num_channels: usize,
+    eps: f32,
+    weight: *Tensor,
+    bias: *Tensor,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "GroupNorm",
+
+    pub const Options = struct {
+        eps: f32 = 1e-5,
+
+        pub const default: Options = .{};
+
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    pub const formula = "y = \\frac{x - \\mu_g}{\\sqrt{\\sigma_g^2 + \\epsilon}} \\odot \\gamma + \\beta";
+
+    pub fn defaultOptions() Options {
+        return Options.defaultOptions();
+    }
+
+    pub fn init(allocator: std.mem.Allocator, num_groups: usize, num_channels: usize, options: Options) !GroupNorm {
+        if (num_groups == 0 or num_channels == 0 or num_channels % num_groups != 0) {
+            return error.ShapeMismatch;
+        }
+        const weight = try createPersistentTensor(allocator, 1, num_channels, true);
+        errdefer freePersistentTensor(allocator, weight);
+        @memset(weight.data, 1.0);
+        weight.shape = Shape.init(&.{num_channels});
+        weight.strides = tensor.computeContiguousStrides(weight.shape);
+
+        const bias = try createPersistentTensor(allocator, 1, num_channels, true);
+        errdefer freePersistentTensor(allocator, bias);
+        @memset(bias.data, 0.0);
+        bias.shape = Shape.init(&.{num_channels});
+        bias.strides = tensor.computeContiguousStrides(bias.shape);
+
+        return GroupNorm{
+            .num_groups = num_groups,
+            .num_channels = num_channels,
+            .eps = options.eps,
+            .weight = weight,
+            .bias = bias,
+        };
+    }
+
+    pub fn forward(self: *const GroupNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+        return try graph.groupNorm(x, self.weight, self.bias, self.num_groups, self.eps);
     }
 };
 

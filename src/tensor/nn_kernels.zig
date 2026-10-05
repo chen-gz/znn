@@ -100,6 +100,95 @@ pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std
     return Y;
 }
 
+/// 一维批量归一化统一前向核函数 (1-Dimensional Batch Normalization, BatchNorm1d)
+/// 支持二维 `[N, C]` 与三维 `[N, C, L]` 张量
+pub fn batchNorm1d(
+    self: *Tensor,
+    gamma: *Tensor,
+    beta: *Tensor,
+    running_mean: ?*Tensor,
+    running_var: ?*Tensor,
+    training: bool,
+    eps: f32,
+    momentum: f32,
+    saved_mean_out: ?[]f32,
+    saved_inv_std_out: ?[]f32,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len != 2 and self.shape.len != 3) return error.IncompatibleDimensions;
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const L = if (self.shape.len == 3) self.shape.dims[2] else 1;
+    if (gamma.data.len != C or beta.data.len != C) return error.ShapeMismatch;
+    if (running_mean) |rm| {
+        if (rm.data.len != C) return error.ShapeMismatch;
+    }
+    if (running_var) |rv| {
+        if (rv.data.len != C) return error.ShapeMismatch;
+    }
+
+    const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (!self.isContiguous()) x_contig.deinit(allocator);
+
+    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    errdefer Y.deinit(allocator);
+
+    const m = N * L;
+    const m_f = @as(f32, @floatFromInt(m));
+
+    for (0..C) |c_| {
+        var mean_val: f32 = 0.0;
+        var inv_std: f32 = 1.0;
+
+        if (training) {
+            var sum_x: f32 = 0.0;
+            for (0..N) |n| {
+                const start_idx = (n * C + c_) * L;
+                for (x_contig.data[start_idx .. start_idx + L]) |val| {
+                    sum_x += val;
+                }
+            }
+            mean_val = sum_x / m_f;
+
+            var var_sum: f32 = 0.0;
+            for (0..N) |n| {
+                const start_idx = (n * C + c_) * L;
+                for (x_contig.data[start_idx .. start_idx + L]) |val| {
+                    const diff = val - mean_val;
+                    var_sum += diff * diff;
+                }
+            }
+            const var_val = var_sum / m_f;
+            inv_std = 1.0 / @sqrt(var_val + eps);
+
+            if (running_mean) |rm| {
+                rm.data[c_] = (1.0 - momentum) * rm.data[c_] + momentum * mean_val;
+            }
+            if (running_var) |rv| {
+                const unbiased_var = if (m > 1) var_sum / @as(f32, @floatFromInt(m - 1)) else var_val;
+                rv.data[c_] = (1.0 - momentum) * rv.data[c_] + momentum * unbiased_var;
+            }
+        } else {
+            mean_val = if (running_mean) |rm| rm.data[c_] else if (saved_mean_out) |sm| sm[c_] else 0.0;
+            const var_val = if (running_var) |rv| rv.data[c_] else 1.0;
+            inv_std = if (running_var != null) 1.0 / @sqrt(var_val + eps) else if (saved_inv_std_out) |si| si[c_] else 1.0 / @sqrt(1.0 + eps);
+        }
+
+        if (saved_mean_out) |sm| sm[c_] = mean_val;
+        if (saved_inv_std_out) |si| si[c_] = inv_std;
+
+        const g = gamma.data[c_];
+        const b = beta.data[c_];
+        for (0..N) |n| {
+            const start_idx = (n * C + c_) * L;
+            for (0..L) |i| {
+                Y.data[start_idx + i] = (x_contig.data[start_idx + i] - mean_val) * inv_std * g + b;
+            }
+        }
+    }
+    return Y;
+}
+
 /// 二维批量归一化统一前向核函数 (2-Dimensional Batch Normalization, BatchNorm2d)
 /// 输入形状: `[N, C, H, W]`
 pub fn batchNorm2d(
@@ -185,6 +274,72 @@ pub fn batchNorm2d(
             const start_idx = (n * C + c_) * spatial_size;
             for (0..spatial_size) |i| {
                 Y.data[start_idx + i] = (x_contig.data[start_idx + i] - mean_val) * inv_std * g + b;
+            }
+        }
+    }
+    return Y;
+}
+
+/// 分组归一化统一前向核函数 (Group Normalization, GroupNorm)
+/// 支持任意维度 `>= 2` 的输入张量 `[N, C, ...]`，要求 `C % num_groups == 0`
+pub fn groupNorm(
+    self: *Tensor,
+    gamma: *Tensor,
+    beta: *Tensor,
+    num_groups: usize,
+    eps: f32,
+    saved_mean_out: ?[]f32,
+    saved_inv_std_out: ?[]f32,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (self.shape.len < 2) return error.IncompatibleDimensions;
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    if (num_groups == 0 or C == 0 or C % num_groups != 0) return error.ShapeMismatch;
+    if (gamma.data.len != C or beta.data.len != C) return error.ShapeMismatch;
+
+    const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (!self.isContiguous()) x_contig.deinit(allocator);
+
+    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    errdefer Y.deinit(allocator);
+
+    var spatial_size: usize = 1;
+    for (2..self.shape.len) |d| {
+        spatial_size *= self.shape.dims[d];
+    }
+    const c_per_g = C / num_groups;
+    const group_elems = c_per_g * spatial_size;
+    const group_elems_f = @as(f32, @floatFromInt(group_elems));
+
+    for (0..N) |n| {
+        for (0..num_groups) |g| {
+            const group_offset = (n * num_groups + g) * group_elems;
+            const group_slice = x_contig.data[group_offset .. group_offset + group_elems];
+
+            var sum_x: f32 = 0.0;
+            for (group_slice) |val| sum_x += val;
+            const mean_val = sum_x / group_elems_f;
+
+            var var_sum: f32 = 0.0;
+            for (group_slice) |val| {
+                const diff = val - mean_val;
+                var_sum += diff * diff;
+            }
+            const inv_std = 1.0 / @sqrt(var_sum / group_elems_f + eps);
+
+            const ng_idx = n * num_groups + g;
+            if (saved_mean_out) |sm| sm[ng_idx] = mean_val;
+            if (saved_inv_std_out) |si| si[ng_idx] = inv_std;
+
+            for (0..c_per_g) |cg| {
+                const c_idx = g * c_per_g + cg;
+                const g_val = gamma.data[c_idx];
+                const b_val = beta.data[c_idx];
+                const ch_offset = (n * C + c_idx) * spatial_size;
+                for (0..spatial_size) |s| {
+                    Y.data[ch_offset + s] = (x_contig.data[ch_offset + s] - mean_val) * inv_std * g_val + b_val;
+                }
             }
         }
     }
