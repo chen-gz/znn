@@ -48,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 为 `RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`MoELayer`、`MLALayer`、`LoRALinear` 补齐 `formula` 与 `Graph.enterModule` 作用域追踪。
 
 ### Changed
+- **抽取卷积与池化内核子模块、统一 `PoolOptions` / `RopeOptions` 配置，新增 1D 转置卷积、1D/自适应池化与 `BatchNorm1d` / `GroupNorm` (`src/tensor/conv_pool.zig`, `src/tensor/nn_kernels.zig`, `src/tensor/types.zig`, `src/autodiff/`, `src/nn/`)**:
+  - 将 1D/2D 卷积、转置卷积与池化内核拆分至独立子模块 `src/tensor/conv_pool.zig`，并将 `BatchNorm2d` 与 `Dropout` 前向计算统一收敛为单源 `Tensor` 内核。
+  - 新增 `ConvTranspose1D` 与 `convTranspose1d`，并将 `Tensor.convTranspose2d`、`Graph.convTranspose2d` 与 `ConvTranspose2D.init` 统一为接收 `ConvOptions` / `ConvTranspose2D.Options`。
+  - 新增 `tensor.PoolOptions`（`stride: ?usize = null, padding: usize = 0`、`resolveStride`）与 `MaxPool1D`、`AvgPool1D`、`MaxPool2D`、`AdaptiveAvgPool1D`、`AdaptiveAvgPool2D`，并将 `AvgPool2D.init` 统一为接收 `PoolOptions`。
+  - 新增 `BatchNorm1d`（支持 `[N, C]` 与 `[N, C, L]` 输入）与 `GroupNorm`（支持 `[N, C, ...]` 输入）的张量内核、自动微分算子与神经网络层。
+  - 新增 `tensor.RopeOptions` / `RoPEOptions`（`rotary_offset: usize = 0, base: f32 = 10000.0`），将 `Tensor.ropeOffset` / `Graph.ropeOffset` 统一合并入 `Tensor.rope` / `Graph.rope`。
 - **统一卷积 `ConvOptions` 配置，新增一维卷积 `Conv1D` / `conv1d` (`src/tensor/types.zig`, `src/tensor/nn_kernels.zig`, `src/autodiff/`, `src/nn/core.zig`, `src/nn.zig`, `src/root.zig`)**:
   - 新增 `tensor.ConvOptions`（`stride: usize = 1`、`padding: usize = 0`、`default`、`defaultOptions()`），将 `Tensor.conv2dWithConfig`、`Graph.conv2dWithConfig` 与 `Conv2D.initWithConfig` 统一合并为接收 `ConvOptions` 的 `Tensor.conv2d`、`Graph.conv2d` 与 `Conv2D.init`。
   - 新增一维卷积内核 `Tensor.conv1d`、自动微分算子 `Graph.conv1d` / `OpType.Conv1D`（支持 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向传播）、`Graph.computeParamFans` 一维卷积核扇入/扇出推导及神经网络模块 `nn.Conv1D`。

@@ -24,11 +24,12 @@ Layer 4: Top-Level Pipelines, Classical ML & Benchmarks
           │
           ▼
 Layer 3: Neural Network Modules, Reflection & Visualization (`src/nn.zig` & `src/nn/*`)
-  ├── core.zig                  (Linear, Conv2D, ConvTranspose2D, MaxPool2D, Module, Sequential, reflection)
+  ├── core.zig                  (Linear, Conv1D, Conv2D, ConvTranspose1D, ConvTranspose2D, Module, Sequential)
+  ├── module.zig                (Module(T) wrapper & comptime reflection via nn.walk)
   ├── activations.zig           (ReLU, LeakyReLU, Sigmoid, Tanh, GELU, SiLU)
-  ├── normalization.zig         (RMSNorm, LayerNorm, BatchNorm2d, AvgPool2D, Dropout)
+  ├── normalization.zig         (RMSNorm, LayerNorm, BatchNorm1d, BatchNorm2d, GroupNorm, Dropout, 1D/2D/Adaptive Pooling)
   ├── recurrent.zig             (RNNCell, RNN, LSTMCell, LSTM, StackedLSTM, GRUCell, GRU + *Result structs)
-  ├── attention.zig             (KVCache, CausalSelfAttention with GQA/MQA, MLACache, MLALayer)
+  ├── attention.zig             (ScaledDotProductAttention, KVCache, CausalSelfAttention with GQA/MQA, MLACache, MLALayer)
   ├── transformer.zig           (Embedding, MLP, SwiGLU, MoELayer, TransformerBlock, TransformerDecoder, GPT)
   ├── llm.zig                   (LoRALinear, maskedCrossEntropyLoss, dpoLoss, grpoLoss, sampleTopP/TopK)
   ├── init.zig                  (He, Xavier, LeCun, Normal, Uniform, activation gain inference)
@@ -37,18 +38,19 @@ Layer 3: Neural Network Modules, Reflection & Visualization (`src/nn.zig` & `src
           │
           ▼
 Layer 2: Dynamic Reverse-Mode Autodiff Engine (`src/autodiff.zig` & `src/autodiff/*`)
-  ├── types.zig                 (38 OpType variants, OpContext union)
-  ├── op.zig                    (Op node, forward dispatch, backward dispatcher)
+  ├── types.zig                 (OpType variants, OpContext union)
+  ├── op.zig                    (Op node, single-source forward dispatch, backward dispatcher)
   ├── backward_{core,nn,math}   (Analytical backward passes partitioned by operator domain)
   └── graph_{*,nn,init}.zig     (Arena-backed Graph tape, ScopeGuard stack, operator builders, auto-init)
           │
           ▼
 Layer 1: Multi-Dimensional Tensor Primitives (`src/tensor.zig` & `src/tensor/*`, `src/cblas.zig`)
   ├── shape.zig                 (Up to 8D Shape, contiguous/transposed/broadcast strides)
-  ├── types.zig                 (DType, native bf16, SliceRange, GenericTensor(T))
+  ├── types.zig                 (DType, native bf16, SliceRange, ConvOptions, PoolOptions, RopeOptions, GenericTensor(T))
   ├── static.zig                (Compile-time shape-checked StaticTensor(T, dims))
   ├── core.zig                  (f32 autograd-capable Tensor, views, indexing, basic arithmetic/activations)
-  ├── nn_kernels.zig            (im2col/col2im Conv2D, ConvTranspose2D, pooling, norms, RoPE, BatchMatMul)
+  ├── conv_pool.zig             (1D/2D im2col/col2im convolution, transposed convolution, max/avg/adaptive pooling)
+  ├── nn_kernels.zig            (softmax, RMSNorm, LayerNorm, BatchNorm1d, BatchNorm2d, GroupNorm, Dropout, RoPE, BatchMatMul)
   ├── reductions.zig            (Multi-axis reductions, masking, comparisons, slicing, sorting)
   └── ops.zig                   (Creation factories, concat/split/stack, linear system & SVD/QR/Symeig solvers)
 ```
@@ -57,11 +59,11 @@ Layer 1: Multi-Dimensional Tensor Primitives (`src/tensor.zig` & `src/tensor/*`,
 
 | Metric | Pre-Refactoring Baseline | Post-Refactoring State |
 | :--- | :--- | :--- |
-| **Total `.zig` files in `src/`** | 31 files (1,010,099 B / 26,242 lines) | **45 cohesive files** (39 non-test + 6 test; 1,027,418 B / 27,174 lines; all 45 `< 60 KB`) |
-| **Non-test `src/` files `> 60 KB`** | 5 files (`op.zig` 98.6 KB, `transformer.zig` 92.2 KB, `core.zig` 84.7 KB, `graph.zig` 73.1 KB, `bench.zig` 62.9 KB) + `visualization.zig` (54.9 KB) | **0 files** (largest non-test implementation file is `src/nn/transformer.zig` at `41,940 B` / `40.96 KiB`) |
-| **Largest test file in `src/`** | `src/nn/tests.zig` (113,206 B / 110.55 KiB / 2,801 lines) | Split into `tests.zig` (`48,722 B` / `47.58 KiB`), `tests_init.zig` (`14,327 B` / `13.99 KiB`), `tests_vis.zig` (`51,368 B` / `50.16 KiB`); largest overall test file is `src/tests.zig` (`52,513 B` / `51.28 KiB`) |
+| **Total `.zig` files in `src/`** | 31 files (1,010,099 B / 26,242 lines) | **48 cohesive files** (all `< 60 KB`) |
+| **Non-test `src/` files `> 60 KB`** | 5 files (`op.zig` 98.6 KB, `transformer.zig` 92.2 KB, `core.zig` 84.7 KB, `graph.zig` 73.1 KB, `bench.zig` 62.9 KB) + `visualization.zig` (54.9 KB) | **0 files** |
+| **Largest test file in `src/`** | `src/nn/tests.zig` (113,206 B / 110.55 KiB / 2,801 lines) | Split into `tests.zig`, `tests_init.zig`, `tests_module.zig`, `tests_vis.zig` (all `< 60 KB`) |
 | **Runnable Example Targets (`build.zig`)** | 17 wired + 1 unwired (`comptime_static_tensor.zig`) | **18 wired targets** (`run` through `run-static`) |
-| **Autograd `OpType` Variants** | 38 variants in `src/autodiff/types.zig` | 38 variants with modularized forward/backward dispatch |
+| **Autograd `OpType` Variants** | 38 variants in `src/autodiff/types.zig` | 46 variants with modularized forward/backward dispatch |
 | **Model Graph Schema Version** | Schema `2.0` (`src/nn/model_graph.schema.json`, 29 `ModuleType`s) | Schema `2.0` (byte-for-byte verified across 20 exported JSON artifacts) |
 | **Broken Facade Re-Exports** | 9 broken declarations in `src/tensor.zig` & `src/nn.zig` | **0 broken declarations** (guarded by `std.testing.refAllDecls` in every facade) |
 
@@ -103,8 +105,8 @@ Because Zig `0.16.0` removed `usingnamespace`, decomposing large structs (`Tenso
 const nn_kernels = @import("nn_kernels.zig");
 const reductions = @import("reductions.zig");
 
+pub const conv1d = nn_kernels.conv1d;
 pub const conv2d = nn_kernels.conv2d;
-pub const conv2dWithConfig = nn_kernels.conv2dWithConfig;
 pub const sum = reductions.sum;
 pub const mean = reductions.mean;
 ```
@@ -115,17 +117,18 @@ In Zig, `pub fn foo(self: *Tensor, ...)` inside `struct Tensor` is identical in 
 
 | Subsystem | Original File (Exact Bytes / KiB) | Refactored Sub-Modules | Exact Post-Split Size (Bytes / KiB / Lines) | Responsibility & Exported Symbols |
 | :--- | :--- | :--- | ---: | :--- |
-| **`src/tensor/`** | `src/tensor/core.zig` (84,663 B / 82.68 KiB) + unwired `StaticTensor` | `src/tensor/core.zig` | 32,271 B (31.51 KiB, 829 lines) | `Tensor` struct, naming, indexing, basic arithmetic (`matmul`, `add`..`div`), activations, elementary math (`sqrt`, `exp`, `log`, `abs`), losses, `reshape`/`transpose`/`repeat`/`tile`, `svd`/`qr`/`symeig`, `to`/`fromGeneric`, method bindings. |
-| | | `src/tensor/nn_kernels.zig` | 22,126 B (21.61 KiB, 597 lines) | Eager neural kernels bound onto `Tensor`: `conv2d`, `conv2dWithConfig` (`im2col` + `cblas_sgemm`), `convTranspose2d`, `maxpool2d`, `avgpool2d`, `softmax`, `rmsNorm`, `layerNorm`, `rope`, `ropeOffset`, `repeatKV`, `batchMatMul`, `embedding`. |
-| | | `src/tensor/reductions.zig` | 28,508 B (27.84 KiB, 820 lines) | Reductions, inplace ops, masking, comparisons, slicing, and sorting bound onto `Tensor`: `clone`, `mulScalar_`, `addScalar_`, `add_`, `argmax`, `max`, `isContiguous`, `numel`, `sum`, `mean`, `variance`, `stdDev`, `where`, `maskedFill`, `maskedFill_`, `gtScalar`..`neScalar`, `squeeze`, `unsqueeze`, `slice`, `contiguous`, `clip`, `clip_`, `sort`, `argsort`, `nonzero`. |
-| | | `src/tensor/static.zig` | 10,077 B (9.84 KiB, 274 lines) | Compile-time shape-checked `StaticTensor(comptime ElemT: type, comptime dims: anytype)` with `init`, `deinit`, `fromSlice`, `matmul`, `add`, `reshape`, and unit tests. Re-exported in `src/tensor.zig` and `src/root.zig`. |
-| **`src/autodiff/`** | `src/autodiff/op.zig` (98,593 B / 96.28 KiB) | `src/autodiff/op.zig` | 19,108 B (18.66 KiB, 440 lines) | `Op` struct definition, `copyFromEager`, 38-branch `Op.forward`, and top-level `Op.backward` dispatcher delegating to `backward_core`, `backward_nn`, and `backward_math`. |
-| | | `src/autodiff/backward_core.zig` | 27,653 B (27.00 KiB, 699 lines) | Analytical backward kernels for `MatMul`, activations (`Relu`, `Gelu`, `Sigmoid`, `Tanh`, `LeakyRelu`, `Silu`), losses (`SoftmaxCrossEntropy`, `DpoLoss`, `GrpoLoss`, `BceWithLogitsLoss`, `SigmoidCrossEntropy`, `BceLoss`, `MseLoss`), shape/view ops (`Reshape`, `Transpose`, `Concat`, `Split`, `RepeatKV`), and scalar/broadcast binary ops (`MulScalar`..`SubScalar`, `AddBias`, `Add`..`Div`). |
-| | | `src/autodiff/backward_nn.zig` | 32,531 B (31.77 KiB, 729 lines) | Analytical backward kernels for spatial, normalization, attention, and sequence ops: `Conv2D` (`col2im` + `cblas_sgemm`), `ConvTranspose2D`, `MaxPool2D`, `AvgPool2D`, `Softmax`, `RmsNorm`, `LayerNorm`, `BatchNorm2d`, `Dropout`, `RoPE`, `BatchMatMul`, `Embedding`. |
-| | | `src/autodiff/backward_math.zig` | 12,429 B (12.14 KiB, 313 lines) | `reduceSumMeanBackward` helper + analytical backward kernels for regularization (`L2Loss`, `L1Loss`), elementary math (`Sqrt`, `Exp`, `Log`, `Abs`), reductions (`Sum`, `Mean`), conditional masking (`Where`, `MaskedFill`), and `Slice`. |
-| **`src/autodiff/`** | `src/autodiff/graph.zig` (73,075 B / 71.36 KiB) | `src/autodiff/graph.zig` | 35,967 B (35.12 KiB, 963 lines) | `Graph` struct, `ScopeGuard`, `init`, `initNoGrad`, `arenaAllocator`, scope stack (`pushScope`, `popScope`, `enterModule`, `enterChildScope`), `recordOp`, `registerSingleOutputOp`, `runAndRecordPreallocatedOp`, tensor creation, core math/view ops, `backward`, `topologicalSort`, `forward`, `zeroGrad`, `reset`. |
-| | | `src/autodiff/graph_nn.zig` | 20,470 B (19.99 KiB, 603 lines) | Neural network, loss, and regularization graph operators bound onto `Graph`: `softmaxCrossEntropy`, `maskedCrossEntropyLoss`, `dpoLoss`, `grpoLoss`, `mseLoss`, `bceWithLogitsLoss`, `sigmoidCrossEntropy`, `bceLoss`, `randomNormal`, `randomUniform`, `l2Loss`, `ridgeLoss`, `l1Loss`, `lassoLoss`, `elasticNetLoss`, `conv2d`, `conv2dWithConfig`, `convTranspose2d`, `maxpool2d`, `avgpool2d`, `softmax`, `rmsNorm`, `layerNorm`, `batchNorm2d`, `dropout`, `rope`, `ropeOffset`, `batchMatMul`, `embedding`. |
-| | | `src/autodiff/graph_init.zig` | 15,929 B (15.56 KiB, 354 lines) | Graph introspection, automatic weight initialization, formula inference, and Schema 2.0 JSON export bound onto `Graph`: `inferModuleFormula`, `initWeights`, `initSingleTensor`, `detectConsumerActivation`, `formatInitReport`, `printInitReport`, `formatJson`, `exportJson`. Isolates all `@import("../nn/...")` calls into this single bridge module. |
+| **`src/tensor/`** | `src/tensor/core.zig` (84,663 B / 82.68 KiB) + unwired `StaticTensor` | `src/tensor/core.zig` | 32.0 KiB | `Tensor` struct, naming, indexing, basic arithmetic (`matmul`, `add`..`div`), activations, elementary math (`sqrt`, `exp`, `log`, `abs`), losses, `reshape`/`transpose`/`repeat`/`tile`, `svd`/`qr`/`symeig`, `to`/`fromGeneric`, method bindings. |
+| | | `src/tensor/conv_pool.zig` | 29.0 KiB | 1D/2D convolution, transposed convolution, and pooling kernels (`conv1d`, `conv2d`, `convTranspose1d`, `convTranspose2d`, `maxpool1d`, `maxpool2d`, `avgpool1d`, `avgpool2d`, `adaptiveAvgPool1d`, `adaptiveAvgPool2d`). |
+| | | `src/tensor/nn_kernels.zig` | 19.3 KiB | Normalization, dropout, attention, and sequence kernels bound onto `Tensor`: `softmax`, `rmsNorm`, `layerNorm`, `batchNorm1d`, `batchNorm2d`, `groupNorm`, `applyDropoutMask`, `rope`, `repeatKV`, `batchMatMul`, `embedding`. |
+| | | `src/tensor/reductions.zig` | 27.8 KiB | Reductions, inplace ops, masking, comparisons, slicing, and sorting bound onto `Tensor`: `clone`, `mulScalar_`, `addScalar_`, `add_`, `argmax`, `max`, `isContiguous`, `numel`, `sum`, `mean`, `variance`, `stdDev`, `where`, `maskedFill`, `maskedFill_`, `gtScalar`..`neScalar`, `squeeze`, `unsqueeze`, `slice`, `contiguous`, `clip`, `clip_`, `sort`, `argsort`, `nonzero`. |
+| | | `src/tensor/static.zig` | 9.8 KiB | Compile-time shape-checked `StaticTensor(comptime ElemT: type, comptime dims: anytype)` with `init`, `deinit`, `fromSlice`, `matmul`, `add`, `reshape`, and unit tests. Re-exported in `src/tensor.zig` and `src/root.zig`. |
+| **`src/autodiff/`** | `src/autodiff/op.zig` (98,593 B / 96.28 KiB) | `src/autodiff/op.zig` | 21.1 KiB | `Op` struct definition, `copyFromEager`, single-source `Op.forward`, and top-level `Op.backward` dispatcher delegating to `backward_core`, `backward_nn`, and `backward_math`. |
+| | | `src/autodiff/backward_core.zig` | 27.0 KiB | Analytical backward kernels for `MatMul`, activations (`Relu`, `Gelu`, `Sigmoid`, `Tanh`, `LeakyRelu`, `Silu`), losses (`SoftmaxCrossEntropy`, `DpoLoss`, `GrpoLoss`, `BceWithLogitsLoss`, `SigmoidCrossEntropy`, `BceLoss`, `MseLoss`), shape/view ops (`Reshape`, `Transpose`, `Concat`, `Split`, `RepeatKV`), and scalar/broadcast binary ops (`MulScalar`..`SubScalar`, `AddBias`, `Add`..`Div`). |
+| | | `src/autodiff/backward_nn.zig` | 55.2 KiB | Analytical backward kernels for spatial, normalization, attention, and sequence ops: `Conv1D`, `Conv2D` (`col2im` + `cblas_sgemm`), `ConvTranspose1D`, `ConvTranspose2D`, `MaxPool1D`, `MaxPool2D`, `AvgPool1D`, `AvgPool2D`, `AdaptiveAvgPool1D`, `AdaptiveAvgPool2D`, `Softmax`, `RmsNorm`, `LayerNorm`, `BatchNorm1d`, `BatchNorm2d`, `GroupNorm`, `Dropout`, `RoPE`, `BatchMatMul`, `Embedding`. |
+| | | `src/autodiff/backward_math.zig` | 12.1 KiB | `reduceSumMeanBackward` helper + analytical backward kernels for regularization (`L2Loss`, `L1Loss`), elementary math (`Sqrt`, `Exp`, `Log`, `Abs`), reductions (`Sum`, `Mean`), conditional masking (`Where`, `MaskedFill`), and `Slice`. |
+| **`src/autodiff/`** | `src/autodiff/graph.zig` (73,075 B / 71.36 KiB) | `src/autodiff/graph.zig` | 35.8 KiB | `Graph` struct, `ScopeGuard`, `init`, `initNoGrad`, `arenaAllocator`, scope stack (`pushScope`, `popScope`, `enterModule`, `enterChildScope`), `recordOp`, `registerSingleOutputOp`, `runAndRecordPreallocatedOp`, tensor creation, core math/view ops, `backward`, `topologicalSort`, `forward`, `zeroGrad`, `reset`. |
+| | | `src/autodiff/graph_nn.zig` | 23.7 KiB | Neural network, loss, and regularization graph operators bound onto `Graph`: `softmaxCrossEntropy`, `maskedCrossEntropyLoss`, `dpoLoss`, `grpoLoss`, `mseLoss`, `bceWithLogitsLoss`, `sigmoidCrossEntropy`, `bceLoss`, `randomNormal`, `randomUniform`, `l2Loss`, `ridgeLoss`, `l1Loss`, `lassoLoss`, `elasticNetLoss`, `conv1d`, `conv2d`, `convTranspose1d`, `convTranspose2d`, `maxpool1d`, `maxpool2d`, `avgpool1d`, `avgpool2d`, `adaptiveAvgPool1d`, `adaptiveAvgPool2d`, `softmax`, `rmsNorm`, `layerNorm`, `batchNorm1d`, `batchNorm2d`, `groupNorm`, `dropout`, `rope`, `batchMatMul`, `embedding`. |
+| | | `src/autodiff/graph_init.zig` | 22.6 KiB | Graph introspection, automatic weight initialization, formula inference, and Schema 2.0 JSON export bound onto `Graph`: `inferModuleFormula`, `initWeights`, `initSingleTensor`, `detectConsumerActivation`, `formatInitReport`, `printInitReport`, `formatJson`, `exportJson`. Isolates all `@import("../nn/...")` calls into this single bridge module. |
 | **`src/nn/`** | `src/nn/transformer.zig` (92,196 B / 90.04 KiB) | `src/nn/attention.zig` | 32,615 B (31.85 KiB, 770 lines) | `KVCache`, `CausalSelfAttention` (MHA/GQA/MQA + `forwardInference`), `applyRope1D`, `MLACache`, `MLALayer` (DeepSeek Multi-Head Latent Attention + `forwardInference`). |
 | | | `src/nn/transformer.zig` | 41,940 B (40.96 KiB, 1,070 lines) | `Embedding`, `MLP`, `SwiGLU`, `MoELayer` (Top-K sparse routing + shared experts), `TransformerBlock`, `TransformerDecoder`, `GPTConfig`, `GPT(config)`, `DefaultGPT`, plus public re-exports of `attention.zig` and `llm.zig`. |
 | | | `src/nn/llm.zig` | 18,895 B (18.45 KiB, 570 lines) | `LoRALinear`, `maskedCrossEntropyLoss`, `maskedCrossEntropyLossGraph`, `dpoLoss`, `dpoLossGraph`, `computeGroupAdvantages`, `computeGRPOLoss`, `grpoLoss`, `grpoLossGraph`, `sampleTopP`, `sampleTopK`. |
