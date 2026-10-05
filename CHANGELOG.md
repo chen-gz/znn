@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 新增顶层 `models` 模块与 Gemma 4 专有架构：`GemmaRMSNorm` (支持 $1 + w$ 仿射缩放)、`GemmaUnscaledRMSNorm` (无权重 RMSNorm)、`Gemma4MLP` (门控 GeLU_tanh 投影)、`Gemma4Attention` (支持混合滑动窗口与全局注意力、头部 Q/K-Norm、分组查询注意力 GQA、专用 Split-Half RoPE 旋转位置编码与局部窗口掩码) 与 `Gemma4DecoderLayer` (前置与后置双 RMSNorm)。
   - 新增支持 `Gemma4ForCausalLM` 模型定义、`DefaultGemma4` 与 `TinyGemma4`，支持词嵌入缩放 $\sqrt{d_{\text{hidden}}}$、词表权重共享投影 (Tie Word Embeddings) 以及最终 Logit 软截断平滑 (Logit Softcapping: $c \tanh(\text{logits}/c)$) 与 4-bit 量化推理 (`Q4Linear`, `Gemma4Q4ForCausalLM`)。
   - 在 `src/models.zig` 与 `src/root.zig` 导出 `models` 与 `gemma4` 别名，并在 `src/models/tests.zig` 设立独立测试套件。
+### Fixed
+- **旋转位置编码 (RoPE) 统一拓扑、梯度断流修复与静态图重演闭环 (`src/tensor/`, `src/autodiff/`, `src/models/gemma4.zig`, `src/autodiff/tests.zig`)**:
+  - **模式与部分旋转因子扩展**：在 `RopeOptions` 中扩展 `mode: Mode = .interleaved`（支持 `.interleaved` 相邻配对与 `.split_half` 半切分配对两种主流拓扑）及 `partial_rotary_factor: f32 = 1.0`（比例旋转因子 Proportional RoPE），统一底层 `Tensor.rope` 前向内核。
+  - **修复 Autograd 梯度断流与伴随正交逆旋转**：修复计算图此前硬编码 `requires_grad = false` 导致的梯度阻断；在 `backward_nn.zig` 中基于正交伴随矩阵 $\mathbf{R}^T$ 完整推导并实现 `interleaved` 与 `split_half` 的伴随逆旋转 Autograd 反向求导内核，并通过有限差分数值梯度检验（Finite Difference Gradient Check）。
+  - **修复静态图重演元数据丢失**：在 `OpContext.RoPE` 中补齐 `mode` 与 `partial_rotary_factor` 上下文字段，使 `Op.forward` 图重演与 eager 计算 100% 数值一致。
+  - **解耦 Gemma 4 专用算子**：Gemma 4 中的 `tensorRopeSplitHalf` 与 `ropeSplitHalf` 直接委派至统一的通用 `Tensor.rope` 与 `Graph.rope`，消除底层非通用代码冗余。
 
 ### Changed
 - **专用模型与非通用算子模块化解耦 (`src/models/`, `src/models.zig`, `src/tensor/`, `src/autodiff/`, `src/nn/`)**:

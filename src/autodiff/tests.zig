@@ -900,3 +900,150 @@ test "SigmoidCrossEntropy forward and backward" {
     try std.testing.expectApproxEqAbs(@as(f32, -0.166667), logits.grad[1], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, -0.039734), logits.grad[2], 1e-5);
 }
+
+test "RoPE forward, graph replay, and autograd backward for interleaved and split_half modes" {
+    const allocator = std.testing.allocator;
+
+    const modes = [_]tensor.RopeOptions.Mode{ .interleaved, .split_half };
+    for (modes) |mode| {
+        // 1. 验证 requires_grad 继承与梯度流传递
+        {
+            var graph = Graph.init(allocator);
+            defer graph.deinit();
+
+            const x = try graph.tensorNDWithData(&.{ 1, 2, 4 }, &.{
+                1.0, 2.0, 3.0, 4.0,
+                0.5, 1.5, -1.0, 2.5,
+            }, true);
+            const y = try graph.rope(x, 0, .{
+                .mode = mode,
+                .base = 10000.0,
+                .partial_rotary_factor = 1.0,
+            });
+
+            try std.testing.expect(y.requires_grad);
+
+            // 设置输出梯度 dY
+            const dy_vals = [_]f32{ 0.1, -0.2, 0.3, 0.4, -0.5, 0.6, 0.7, -0.8 };
+            @memcpy(y.grad, &dy_vals);
+
+            try graph.backwardWithGrad(y);
+
+            // 有限差分数值梯度检验 (Finite Difference Gradient Check)
+            const eps: f32 = 1e-3;
+            for (0..x.data.len) |idx| {
+                const orig_val = x.data[idx];
+
+                // f(x + eps)
+                x.data[idx] = orig_val + eps;
+                const y_pos = try x.rope(0, .{ .mode = mode, .base = 10000.0, .partial_rotary_factor = 1.0 }, allocator);
+                defer tensor.free(allocator, y_pos);
+                var loss_pos: f32 = 0.0;
+                for (y_pos.data, dy_vals) |yp, dy| loss_pos += yp * dy;
+
+                // f(x - eps)
+                x.data[idx] = orig_val - eps;
+                const y_neg = try x.rope(0, .{ .mode = mode, .base = 10000.0, .partial_rotary_factor = 1.0 }, allocator);
+                defer tensor.free(allocator, y_neg);
+                var loss_neg: f32 = 0.0;
+                for (y_neg.data, dy_vals) |yn, dy| loss_neg += yn * dy;
+
+                x.data[idx] = orig_val;
+
+                const num_grad = (loss_pos - loss_neg) / (2.0 * eps);
+                const ana_grad = x.grad[idx];
+                try std.testing.expectApproxEqAbs(num_grad, ana_grad, 1e-3);
+            }
+        }
+
+        // 2. 验证静态图重演 (Graph Replay: graph.forward()) 精度与数值一致性
+        {
+            var graph = Graph.init(allocator);
+            defer graph.deinit();
+
+            const x = try graph.tensorNDWithData(&.{ 1, 2, 4 }, &.{
+                1.0, 2.0, 3.0, 4.0,
+                0.5, 1.5, -1.0, 2.5,
+            }, false);
+            const y = try graph.rope(x, 1, .{
+                .mode = mode,
+                .base = 10000.0,
+                .partial_rotary_factor = 1.0,
+            });
+
+            // 保存首次 eager 前向计算的数值结果
+            const eager_res = try allocator.alloc(f32, y.data.len);
+            defer allocator.free(eager_res);
+            @memcpy(eager_res, y.data);
+
+            // 修改输入张量数值并执行静态图重演
+            const new_input = [_]f32{
+                2.0, -1.0, 0.5, 3.0,
+                -2.0, 1.0, 4.0, -0.5,
+            };
+            @memcpy(x.data, &new_input);
+            try graph.forward();
+
+            // 计算期望的参考输出
+            const expected_y = try x.rope(1, .{
+                .mode = mode,
+                .base = 10000.0,
+                .partial_rotary_factor = 1.0,
+            }, allocator);
+            defer tensor.free(allocator, expected_y);
+
+            // 验证图重演更新后的结果与期望相符，且由于输入已改变，数值不应等于旧的 eager_res
+            for (y.data, expected_y.data) |act, exp| {
+                try std.testing.expectApproxEqAbs(exp, act, 1e-5);
+            }
+            try std.testing.expect(!std.mem.eql(f32, eager_res, y.data));
+        }
+    }
+
+    // 3. 验证带 partial_rotary_factor (Proportional RoPE) 的反向传播与图重演
+    {
+        var graph = Graph.init(allocator);
+        defer graph.deinit();
+
+        // 8 维输入，half = 4，factor = 0.5 -> 仅前 2 个角度 (4 维) 旋转，后 4 维直通
+        const x = try graph.tensorNDWithData(&.{ 1, 1, 8 }, &.{
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0,
+        }, true);
+        const y = try graph.rope(x, 2, .{
+            .mode = .split_half,
+            .base = 10000.0,
+            .partial_rotary_factor = 0.5,
+        });
+
+        try std.testing.expect(y.requires_grad);
+
+        const dy_vals = [_]f32{ 0.2, -0.3, 0.4, -0.5, 0.6, -0.7, 0.8, -0.9 };
+        @memcpy(y.grad, &dy_vals);
+
+        try graph.backwardWithGrad(y);
+
+        // 有限差分检验
+        const eps: f32 = 1e-3;
+        for (0..x.data.len) |idx| {
+            const orig_val = x.data[idx];
+
+            x.data[idx] = orig_val + eps;
+            const y_pos = try x.rope(2, .{ .mode = .split_half, .base = 10000.0, .partial_rotary_factor = 0.5 }, allocator);
+            defer tensor.free(allocator, y_pos);
+            var loss_pos: f32 = 0.0;
+            for (y_pos.data, dy_vals) |yp, dy| loss_pos += yp * dy;
+
+            x.data[idx] = orig_val - eps;
+            const y_neg = try x.rope(2, .{ .mode = .split_half, .base = 10000.0, .partial_rotary_factor = 0.5 }, allocator);
+            defer tensor.free(allocator, y_neg);
+            var loss_neg: f32 = 0.0;
+            for (y_neg.data, dy_vals) |yn, dy| loss_neg += yn * dy;
+
+            x.data[idx] = orig_val;
+
+            const num_grad = (loss_pos - loss_neg) / (2.0 * eps);
+            const ana_grad = x.grad[idx];
+            try std.testing.expectApproxEqAbs(num_grad, ana_grad, 1e-3);
+        }
+    }
+}
