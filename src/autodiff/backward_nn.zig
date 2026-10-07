@@ -1267,13 +1267,7 @@ pub fn backwardNN(self: *Op) !void {
                         for (w_grad_row, y_grad_row) |*wg, yg| {
                             wg.* += yg;
                         }
-                        var d = rank;
-                        while (d > 0) {
-                            d -= 1;
-                            coord[d] += 1;
-                            if (coord[d] < X.shape.dims[d]) break;
-                            coord[d] = 0;
-                        }
+                        X.shape.incrementCoord(&coord);
                     }
                 }
             }
