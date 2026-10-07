@@ -66,3 +66,5 @@ coverage-report/
 
 # Agent metadata and teamwork workspace
 .agents/
+zig-x86_64-linux-*
+zig-linux-x86_64-*

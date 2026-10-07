@@ -215,61 +215,69 @@ pub const CrossValidationGridSearch = struct {
 
         var min_mse: f32 = 1e12;
 
-        for (alphas, 0..) |alpha, a_idx| {
-            const fold_mses = try self.allocator.alloc(f32, self.k_splits);
+        const all_fold_mses = try self.allocator.alloc([]f32, alphas.len);
+        defer self.allocator.free(all_fold_mses);
 
-            for (0..self.k_splits) |k| {
-                const tr_indices = folds[k].train_indices;
-                const va_indices = folds[k].val_indices;
-                const N_tr = tr_indices.len;
-                const N_va = va_indices.len;
+        for (alphas, 0..) |_, a_idx| {
+            all_fold_mses[a_idx] = try self.allocator.alloc(f32, self.k_splits);
+        }
 
-                // Extract train data
-                const X_tr = try self.allocator.alloc(f32, N_tr * n_features);
-                defer self.allocator.free(X_tr);
-                const y_tr = try self.allocator.alloc(f32, N_tr);
-                defer self.allocator.free(y_tr);
+        for (0..self.k_splits) |k| {
+            const tr_indices = folds[k].train_indices;
+            const va_indices = folds[k].val_indices;
+            const N_tr = tr_indices.len;
+            const N_va = va_indices.len;
 
-                for (tr_indices, 0..) |orig_i, local_i| {
-                    y_tr[local_i] = y[orig_i];
-                    for (0..n_features) |j| {
-                        X_tr[local_i * n_features + j] = X[orig_i * n_features + j];
-                    }
+            // Extract train data
+            const X_tr = try self.allocator.alloc(f32, N_tr * n_features);
+            defer self.allocator.free(X_tr);
+            const y_tr = try self.allocator.alloc(f32, N_tr);
+            defer self.allocator.free(y_tr);
+
+            for (tr_indices, 0..) |orig_i, local_i| {
+                y_tr[local_i] = y[orig_i];
+                for (0..n_features) |j| {
+                    X_tr[local_i * n_features + j] = X[orig_i * n_features + j];
                 }
+            }
 
-                // Extract val data
-                const X_va = try self.allocator.alloc(f32, N_va * n_features);
-                defer self.allocator.free(X_va);
-                const y_va = try self.allocator.alloc(f32, N_va);
-                defer self.allocator.free(y_va);
+            // Extract val data
+            const X_va = try self.allocator.alloc(f32, N_va * n_features);
+            defer self.allocator.free(X_va);
+            const y_va = try self.allocator.alloc(f32, N_va);
+            defer self.allocator.free(y_va);
 
-                for (va_indices, 0..) |orig_i, local_i| {
-                    y_va[local_i] = y[orig_i];
-                    for (0..n_features) |j| {
-                        X_va[local_i * n_features + j] = X[orig_i * n_features + j];
-                    }
+            for (va_indices, 0..) |orig_i, local_i| {
+                y_va[local_i] = y[orig_i];
+                for (0..n_features) |j| {
+                    X_va[local_i * n_features + j] = X[orig_i * n_features + j];
                 }
+            }
 
-                // Standardize strictly inside fold
-                var scaler = try StandardScaler.init(self.allocator, n_features);
-                defer scaler.deinit();
+            // Standardize strictly inside fold
+            var scaler = try StandardScaler.init(self.allocator, n_features);
+            defer scaler.deinit();
 
-                const X_tr_scaled = try self.allocator.alloc(f32, N_tr * n_features);
-                defer self.allocator.free(X_tr_scaled);
-                scaler.fitTransform(X_tr, N_tr, n_features, X_tr_scaled);
+            const X_tr_scaled = try self.allocator.alloc(f32, N_tr * n_features);
+            defer self.allocator.free(X_tr_scaled);
+            scaler.fitTransform(X_tr, N_tr, n_features, X_tr_scaled);
 
-                const X_va_scaled = try self.allocator.alloc(f32, N_va * n_features);
-                defer self.allocator.free(X_va_scaled);
-                scaler.transform(X_va, N_va, n_features, X_va_scaled);
+            const X_va_scaled = try self.allocator.alloc(f32, N_va * n_features);
+            defer self.allocator.free(X_va_scaled);
+            scaler.transform(X_va, N_va, n_features, X_va_scaled);
 
+            for (alphas, 0..) |alpha, a_idx| {
                 // Fit Least Absolute Shrinkage and Selection Operator (LASSO)
                 var model = try regression.solveLasso(self.allocator, X_tr_scaled, y_tr, N_tr, n_features, alpha, 1000, 1e-4);
                 defer model.deinit();
 
                 // Compute validation Mean Squared Error (MSE)
-                fold_mses[k] = model.computeMSE(X_va_scaled, y_va, N_va, n_features);
+                all_fold_mses[a_idx][k] = model.computeMSE(X_va_scaled, y_va, N_va, n_features);
             }
+        }
 
+        for (alphas, 0..) |alpha, a_idx| {
+            const fold_mses = all_fold_mses[a_idx];
             var sum_mse: f32 = 0.0;
             for (fold_mses) |m| sum_mse += m;
             const mean_mse = sum_mse / @as(f32, @floatFromInt(self.k_splits));
