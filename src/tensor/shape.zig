@@ -49,6 +49,17 @@ pub const Shape = struct {
         }
         return total;
     }
+
+    /// Increments an N-dimensional coordinate array in-place, carrying over to the previous dimension if a dimension reaches its limit.
+    pub inline fn incrementCoord(self: Shape, coord: *[8]usize) void {
+        var d = self.len;
+        while (d > 0) {
+            d -= 1;
+            coord[d] += 1;
+            if (coord[d] < self.dims[d]) break;
+            coord[d] = 0;
+        }
+    }
 };
 
 /// 计算行优先（Row-Major）布局下的连续跨度（Contiguous Strides）
@@ -204,15 +215,7 @@ pub fn broadcastBinaryOpRaw(
 
         c_val.* = op(A_data[a_idx], B_data[b_idx]);
 
-        var d = len;
-        while (d > 0) {
-            d -= 1;
-            coord[d] += 1;
-            if (coord[d] < C_shape.dims[d]) {
-                break;
-            }
-            coord[d] = 0;
-        }
+        C_shape.incrementCoord(&coord);
     }
 }
 

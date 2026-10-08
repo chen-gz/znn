@@ -246,13 +246,7 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
                     src_idx += coord[d] * self.strides.dims[d];
                 }
                 total += self.data[src_idx];
-                var d = len;
-                while (d > 0) {
-                    d -= 1;
-                    coord[d] += 1;
-                    if (coord[d] < self.shape.dims[d]) break;
-                    coord[d] = 0;
-                }
+                self.shape.incrementCoord(&coord);
             }
         }
 
@@ -346,13 +340,7 @@ pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator
 
         C.data[c_flat] = if (isTruthyScalar(cond.data[cond_flat])) x.data[x_flat] else y.data[y_flat];
 
-        var d: usize = rank;
-        while (d > 0) {
-            d -= 1;
-            indices[d] += 1;
-            if (indices[d] < target_shape.dims[d]) break;
-            indices[d] = 0;
-        }
+        target_shape.incrementCoord(&indices);
     }
 
     return C;
@@ -379,13 +367,7 @@ pub fn maskedFill(self: *Tensor, mask: anytype, value: f32, allocator: std.mem.A
             if (isTruthyScalar(mask.data[m_idx])) {
                 out_v.* = value;
             }
-            var d = len;
-            while (d > 0) {
-                d -= 1;
-                coord[d] += 1;
-                if (coord[d] < mask.shape.dims[d]) break;
-                coord[d] = 0;
-            }
+            mask.shape.incrementCoord(&coord);
         }
     }
     return C;
@@ -416,13 +398,7 @@ pub fn maskedFill_(self: *Tensor, mask: anytype, value: f32) !*Tensor {
             if (isTruthyScalar(mask.data[m_idx])) {
                 self.data[s_idx] = value;
             }
-            var d = len;
-            while (d > 0) {
-                d -= 1;
-                coord[d] += 1;
-                if (coord[d] < self.shape.dims[d]) break;
-                coord[d] = 0;
-            }
+            self.shape.incrementCoord(&coord);
         }
     }
     return self;
@@ -442,13 +418,7 @@ pub fn compareScalarOp(self: *const Tensor, val: f32, allocator: std.mem.Allocat
             var src_idx: usize = 0;
             for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
             out.data[dest_i] = cmp_fn(self.data[src_idx], val);
-            var d = len;
-            while (d > 0) {
-                d -= 1;
-                coord[d] += 1;
-                if (coord[d] < self.shape.dims[d]) break;
-                coord[d] = 0;
-            }
+            self.shape.incrementCoord(&coord);
         }
     }
     return out;
@@ -616,13 +586,7 @@ pub fn contiguous(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
         }
         out.data[dest_i] = self.data[src_idx];
 
-        var d = len;
-        while (d > 0) {
-            d -= 1;
-            coord[d] += 1;
-            if (coord[d] < self.shape.dims[d]) break;
-            coord[d] = 0;
-        }
+        self.shape.incrementCoord(&coord);
     }
     return out;
 }
@@ -645,13 +609,7 @@ pub fn clip(self: *Tensor, min_val: f32, max_val: f32, allocator: std.mem.Alloca
             }
             out.data[dest_i] = std.math.clamp(self.data[src_idx], min_val, max_val);
 
-            var d = len;
-            while (d > 0) {
-                d -= 1;
-                coord[d] += 1;
-                if (coord[d] < self.shape.dims[d]) break;
-                coord[d] = 0;
-            }
+            self.shape.incrementCoord(&coord);
         }
     }
     return out;
@@ -783,13 +741,7 @@ pub fn nonzero(self: Tensor, allocator: std.mem.Allocator) !*GenericTensor(usize
         if (self.data[src_idx] != 0.0) {
             count += 1;
         }
-        var d = len;
-        while (d > 0) {
-            d -= 1;
-            coord[d] += 1;
-            if (coord[d] < self.shape.dims[d]) break;
-            coord[d] = 0;
-        }
+        self.shape.incrementCoord(&coord);
     }
 
     const out = try GenericTensor(usize).init(allocator, &.{ count, len }, null);
@@ -808,13 +760,7 @@ pub fn nonzero(self: Tensor, allocator: std.mem.Allocator) !*GenericTensor(usize
             }
             row += 1;
         }
-        var d = len;
-        while (d > 0) {
-            d -= 1;
-            coord[d] += 1;
-            if (coord[d] < self.shape.dims[d]) break;
-            coord[d] = 0;
-        }
+        self.shape.incrementCoord(&coord);
     }
     return out;
 }

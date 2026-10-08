@@ -375,13 +375,7 @@ pub const Op = struct {
                         y_flat += indices[d] * y_strides.dims[d];
                     }
                     C.data[c_flat] = if (mask[c_flat]) X.data[x_flat] else Y.data[y_flat];
-                    var d = rank;
-                    while (d > 0) {
-                        d -= 1;
-                        indices[d] += 1;
-                        if (indices[d] < C.shape.dims[d]) break;
-                        indices[d] = 0;
-                    }
+                    C.shape.incrementCoord(&indices);
                 }
             },
             .MaskedFill => {
@@ -398,13 +392,7 @@ pub const Op = struct {
                         for (0..len) |d| src_idx += coord[d] * X.strides.dims[d];
                         C.data[i] = X.data[src_idx];
                     }
-                    var d = len;
-                    while (d > 0) {
-                        d -= 1;
-                        coord[d] += 1;
-                        if (coord[d] < X.shape.dims[d]) break;
-                        coord[d] = 0;
-                    }
+                    X.shape.incrementCoord(&coord);
                 }
             },
             .Slice => {
@@ -416,13 +404,7 @@ pub const Op = struct {
                     var src_idx: usize = ctx.offset;
                     for (0..ctx.rank) |d| src_idx += coord[d] * ctx.strides[d];
                     C.data[dest_i] = X.data[src_idx];
-                    var d = ctx.rank;
-                    while (d > 0) {
-                        d -= 1;
-                        coord[d] += 1;
-                        if (coord[d] < C.shape.dims[d]) break;
-                        coord[d] = 0;
-                    }
+                    C.shape.incrementCoord(&coord);
                 }
             },
         }

@@ -294,13 +294,7 @@ pub fn backwardCore(self: *Op) !void {
                         }
                         A.grad[src_idx] += g;
 
-                        var d = len;
-                        while (d > 0) {
-                            d -= 1;
-                            coord[d] += 1;
-                            if (coord[d] < A.shape.dims[d]) break;
-                            coord[d] = 0;
-                        }
+                        A.shape.incrementCoord(&coord);
                     }
                 }
             }
@@ -325,15 +319,7 @@ pub fn backwardCore(self: *Op) !void {
                     }
                     A.grad[src_flat_idx] += C.grad[dest_flat_idx];
 
-                    var d: usize = len;
-                    while (d > 0) {
-                        d -= 1;
-                        indices[d] += 1;
-                        if (indices[d] < C.shape.dims[d]) {
-                            break;
-                        }
-                        indices[d] = 0;
-                    }
+                    C.shape.incrementCoord(&indices);
                 }
             }
         },
@@ -522,15 +508,7 @@ pub fn backwardCore(self: *Op) !void {
                         B.grad[b_idx] += c_g;
                     }
 
-                    var d = len;
-                    while (d > 0) {
-                        d -= 1;
-                        coord[d] += 1;
-                        if (coord[d] < C.shape.dims[d]) {
-                            break;
-                        }
-                        coord[d] = 0;
-                    }
+                    C.shape.incrementCoord(&coord);
                 }
             }
         },
@@ -574,15 +552,7 @@ pub fn backwardCore(self: *Op) !void {
                         B.grad[b_idx] -= c_g;
                     }
 
-                    var d = len;
-                    while (d > 0) {
-                        d -= 1;
-                        coord[d] += 1;
-                        if (coord[d] < C.shape.dims[d]) {
-                            break;
-                        }
-                        coord[d] = 0;
-                    }
+                    C.shape.incrementCoord(&coord);
                 }
             }
         },
@@ -627,15 +597,7 @@ pub fn backwardCore(self: *Op) !void {
                         B.grad[b_idx] += c_g * A.data[a_idx];
                     }
 
-                    var d = len;
-                    while (d > 0) {
-                        d -= 1;
-                        coord[d] += 1;
-                        if (coord[d] < C.shape.dims[d]) {
-                            break;
-                        }
-                        coord[d] = 0;
-                    }
+                    C.shape.incrementCoord(&coord);
                 }
             }
         },
@@ -682,15 +644,7 @@ pub fn backwardCore(self: *Op) !void {
                         B.grad[b_idx] -= c_g * a_val / (b_val * b_val);
                     }
 
-                    var d = len;
-                    while (d > 0) {
-                        d -= 1;
-                        coord[d] += 1;
-                        if (coord[d] < C.shape.dims[d]) {
-                            break;
-                        }
-                        coord[d] = 0;
-                    }
+                    C.shape.incrementCoord(&coord);
                 }
             }
         },

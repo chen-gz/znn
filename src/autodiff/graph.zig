@@ -252,13 +252,7 @@ pub const Graph = struct {
                 }
                 C.data[dest_i] = A.data[src_idx];
 
-                var d = len;
-                while (d > 0) {
-                    d -= 1;
-                    coord[d] += 1;
-                    if (coord[d] < A.shape.dims[d]) break;
-                    coord[d] = 0;
-                }
+                A.shape.incrementCoord(&coord);
             }
         }
         if (req_grad) {
@@ -782,13 +776,7 @@ pub const Graph = struct {
             var cond_flat: usize = 0;
             for (0..rank) |d| cond_flat += indices[d] * cond_strides.dims[d];
             mask_buf[c_flat] = tensor_mod.isTruthyScalar(cond.data[cond_flat]);
-            var d = rank;
-            while (d > 0) {
-                d -= 1;
-                indices[d] += 1;
-                if (indices[d] < C.shape.dims[d]) break;
-                indices[d] = 0;
-            }
+            C.shape.incrementCoord(&indices);
         }
         return self.registerSingleOutputOp(
             C,
@@ -814,13 +802,7 @@ pub const Graph = struct {
                 var m_idx: usize = 0;
                 for (0..len) |d| m_idx += coord[d] * mask.strides.dims[d];
                 mb.* = tensor_mod.isTruthyScalar(mask.data[m_idx]);
-                var d = len;
-                while (d > 0) {
-                    d -= 1;
-                    coord[d] += 1;
-                    if (coord[d] < mask.shape.dims[d]) break;
-                    coord[d] = 0;
-                }
+                mask.shape.incrementCoord(&coord);
             }
         }
         return self.registerSingleOutputOp(
