@@ -1047,3 +1047,26 @@ test "RoPE forward, graph replay, and autograd backward for interleaved and spli
         }
     }
 }
+
+test "Graph.getModuleFormula / setModuleFormula" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.init(allocator);
+    defer graph.deinit();
+
+    // Verify null is returned for non-existent formula
+    try std.testing.expect(graph.getModuleFormula("non.existent.path") == null);
+
+    // Set a formula
+    try graph.setModuleFormula("gpt.layers.0.attn", "A = softmax(QK^T / sqrt(d_k)) V");
+
+    // Get the formula and verify it matches
+    const formula = graph.getModuleFormula("gpt.layers.0.attn");
+    try std.testing.expect(formula != null);
+    try std.testing.expectEqualStrings("A = softmax(QK^T / sqrt(d_k)) V", formula.?);
+
+    // Override the formula
+    try graph.setModuleFormula("gpt.layers.0.attn", "A = V");
+    const updated = graph.getModuleFormula("gpt.layers.0.attn");
+    try std.testing.expect(updated != null);
+    try std.testing.expectEqualStrings("A = V", updated.?);
+}
