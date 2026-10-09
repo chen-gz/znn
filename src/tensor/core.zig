@@ -700,7 +700,7 @@ pub const Tensor = struct {
             }
             out.data[dest_i] = src_contig.data[src_flat];
 
-            out_shape.incrementCoord(&coord);
+            out.shape.incrementCoord(&coord);
         }
         return out;
     }
