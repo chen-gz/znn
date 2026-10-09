@@ -307,13 +307,7 @@ pub fn GenericTensor(comptime T: type) type {
                         src_idx += coord[d] * self.strides.dims[d];
                     }
                     out.data[dest_i] = self.data[src_idx];
-                    var d = len;
-                    while (d > 0) {
-                        d -= 1;
-                        coord[d] += 1;
-                        if (coord[d] < self.shape.dims[d]) break;
-                        coord[d] = 0;
-                    }
+                    self.shape.incrementCoord(&coord);
                 }
             }
             return out;
@@ -428,13 +422,7 @@ pub fn GenericTensor(comptime T: type) type {
                 }
                 out.data[c_flat] = op_fn(self.data[a_flat], other.data[b_flat]);
 
-                var d: usize = rank;
-                while (d > 0) {
-                    d -= 1;
-                    indices[d] += 1;
-                    if (indices[d] < target_shape.dims[d]) break;
-                    indices[d] = 0;
-                }
+                target_shape.incrementCoord(&indices);
             }
             return out;
         }
@@ -552,13 +540,7 @@ pub fn GenericTensor(comptime T: type) type {
                 var src_idx: usize = 0;
                 for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
                 if (isTruthyScalar(self.data[src_idx])) return true;
-                var d = len;
-                while (d > 0) {
-                    d -= 1;
-                    coord[d] += 1;
-                    if (coord[d] < self.shape.dims[d]) break;
-                    coord[d] = 0;
-                }
+                self.shape.incrementCoord(&coord);
             }
             return false;
         }
@@ -577,13 +559,7 @@ pub fn GenericTensor(comptime T: type) type {
                 var src_idx: usize = 0;
                 for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
                 if (!isTruthyScalar(self.data[src_idx])) return false;
-                var d = len;
-                while (d > 0) {
-                    d -= 1;
-                    coord[d] += 1;
-                    if (coord[d] < self.shape.dims[d]) break;
-                    coord[d] = 0;
-                }
+                self.shape.incrementCoord(&coord);
             }
             return true;
         }
@@ -660,13 +636,7 @@ pub fn GenericTensor(comptime T: type) type {
                         var src_idx: usize = 0;
                         for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
                         acc += convertScalar(f64, T, self.data[src_idx]);
-                        var d = len;
-                        while (d > 0) {
-                            d -= 1;
-                            coord[d] += 1;
-                            if (coord[d] < self.shape.dims[d]) break;
-                            coord[d] = 0;
-                        }
+                        self.shape.incrementCoord(&coord);
                     }
                 }
                 if (keepdims) {
@@ -706,13 +676,7 @@ pub fn GenericTensor(comptime T: type) type {
                         src_idx += coord[d] * self.strides.dims[d];
                     }
                     out.data[dest_i] = convertScalar(DestT, T, self.data[src_idx]);
-                    var d = len;
-                    while (d > 0) {
-                        d -= 1;
-                        coord[d] += 1;
-                        if (coord[d] < self.shape.dims[d]) break;
-                        coord[d] = 0;
-                    }
+                    self.shape.incrementCoord(&coord);
                 }
             }
             return out;

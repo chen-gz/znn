@@ -71,13 +71,7 @@ pub fn reduceSumMeanBackward(A: *Tensor, C: *Tensor, axis: ?usize, keepdims: boo
                 var src_idx: usize = 0;
                 for (0..len) |d| src_idx += coord[d] * A.strides.dims[d];
                 A.grad[src_idx] += g;
-                var d = len;
-                while (d > 0) {
-                    d -= 1;
-                    coord[d] += 1;
-                    if (coord[d] < A.shape.dims[d]) break;
-                    coord[d] = 0;
-                }
+                A.shape.incrementCoord(&coord);
             }
         }
     }
@@ -122,13 +116,7 @@ pub fn backwardMath(self: *Op) !void {
                         var src_idx: usize = 0;
                         for (0..len) |d| src_idx += coord[d] * A.strides.dims[d];
                         A.grad[src_idx] += cg / (2.0 * @max(c_val, 1e-12));
-                        var d = len;
-                        while (d > 0) {
-                            d -= 1;
-                            coord[d] += 1;
-                            if (coord[d] < A.shape.dims[d]) break;
-                            coord[d] = 0;
-                        }
+                        A.shape.incrementCoord(&coord);
                     }
                 }
             }
@@ -148,13 +136,7 @@ pub fn backwardMath(self: *Op) !void {
                         var src_idx: usize = 0;
                         for (0..len) |d| src_idx += coord[d] * A.strides.dims[d];
                         A.grad[src_idx] += cg * c_val;
-                        var d = len;
-                        while (d > 0) {
-                            d -= 1;
-                            coord[d] += 1;
-                            if (coord[d] < A.shape.dims[d]) break;
-                            coord[d] = 0;
-                        }
+                        A.shape.incrementCoord(&coord);
                     }
                 }
             }
@@ -174,13 +156,7 @@ pub fn backwardMath(self: *Op) !void {
                         var src_idx: usize = 0;
                         for (0..len) |d| src_idx += coord[d] * A.strides.dims[d];
                         A.grad[src_idx] += cg / A.data[src_idx];
-                        var d = len;
-                        while (d > 0) {
-                            d -= 1;
-                            coord[d] += 1;
-                            if (coord[d] < A.shape.dims[d]) break;
-                            coord[d] = 0;
-                        }
+                        A.shape.incrementCoord(&coord);
                     }
                 }
             }
@@ -203,13 +179,7 @@ pub fn backwardMath(self: *Op) !void {
                         const a_val = A.data[src_idx];
                         const sign: f32 = if (a_val > 0.0) 1.0 else if (a_val < 0.0) -1.0 else 0.0;
                         A.grad[src_idx] += cg * sign;
-                        var d = len;
-                        while (d > 0) {
-                            d -= 1;
-                            coord[d] += 1;
-                            if (coord[d] < A.shape.dims[d]) break;
-                            coord[d] = 0;
-                        }
+                        A.shape.incrementCoord(&coord);
                     }
                 }
             }
@@ -249,13 +219,7 @@ pub fn backwardMath(self: *Op) !void {
                             Y.grad[y_flat] += g;
                         }
                     }
-                    var d = rank;
-                    while (d > 0) {
-                        d -= 1;
-                        indices[d] += 1;
-                        if (indices[d] < C.shape.dims[d]) break;
-                        indices[d] = 0;
-                    }
+                    C.shape.incrementCoord(&indices);
                 }
             }
         },
@@ -277,13 +241,7 @@ pub fn backwardMath(self: *Op) !void {
                             for (0..len) |d| src_idx += coord[d] * X.strides.dims[d];
                             X.grad[src_idx] += g;
                         }
-                        var d = len;
-                        while (d > 0) {
-                            d -= 1;
-                            coord[d] += 1;
-                            if (coord[d] < X.shape.dims[d]) break;
-                            coord[d] = 0;
-                        }
+                        X.shape.incrementCoord(&coord);
                     }
                 }
             }
@@ -298,13 +256,7 @@ pub fn backwardMath(self: *Op) !void {
                     var src_idx: usize = ctx.offset;
                     for (0..ctx.rank) |d| src_idx += coord[d] * ctx.strides[d];
                     X.grad[src_idx] += C.grad[dest_i];
-                    var d = ctx.rank;
-                    while (d > 0) {
-                        d -= 1;
-                        coord[d] += 1;
-                        if (coord[d] < C.shape.dims[d]) break;
-                        coord[d] = 0;
-                    }
+                    C.shape.incrementCoord(&coord);
                 }
             }
         },

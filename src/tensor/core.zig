@@ -347,13 +347,7 @@ pub const Tensor = struct {
                 var src_idx: usize = 0;
                 for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
                 C.data[dest_i] = math_fn(self.data[src_idx]);
-                var d = len;
-                while (d > 0) {
-                    d -= 1;
-                    coord[d] += 1;
-                    if (coord[d] < self.shape.dims[d]) break;
-                    coord[d] = 0;
-                }
+                self.shape.incrementCoord(&coord);
             }
         }
         return C;
@@ -549,13 +543,7 @@ pub const Tensor = struct {
                 }
                 C.data[dest_i] = self.data[src_idx];
 
-                var d = len;
-                while (d > 0) {
-                    d -= 1;
-                    coord[d] += 1;
-                    if (coord[d] < self.shape.dims[d]) break;
-                    coord[d] = 0;
-                }
+                self.shape.incrementCoord(&coord);
             }
         }
         return C;
@@ -618,15 +606,7 @@ pub const Tensor = struct {
             }
             C.data[dest_flat_idx] = self.data[src_flat_idx];
 
-            var d: usize = len;
-            while (d > 0) {
-                d -= 1;
-                indices[d] += 1;
-                if (indices[d] < C_shape.dims[d]) {
-                    break;
-                }
-                indices[d] = 0;
-            }
+            C_shape.incrementCoord(&indices);
         }
         return C;
     }
@@ -720,13 +700,7 @@ pub const Tensor = struct {
             }
             out.data[dest_i] = src_contig.data[src_flat];
 
-            var d = rank;
-            while (d > 0) {
-                d -= 1;
-                coord[d] += 1;
-                if (coord[d] < out_shape_dims[d]) break;
-                coord[d] = 0;
-            }
+            out.shape.incrementCoord(&coord);
         }
         return out;
     }
@@ -807,13 +781,7 @@ pub const Tensor = struct {
                     src_idx += coord[d] * self.strides.dims[d];
                 }
                 out.data[dest_i] = convertScalar(DestT, f32, self.data[src_idx]);
-                var d = len;
-                while (d > 0) {
-                    d -= 1;
-                    coord[d] += 1;
-                    if (coord[d] < self.shape.dims[d]) break;
-                    coord[d] = 0;
-                }
+                self.shape.incrementCoord(&coord);
             }
         }
         return out;

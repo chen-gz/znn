@@ -536,13 +536,7 @@ pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator) 
                 const y_row = Y.data[i * D .. (i + 1) * D];
                 @memcpy(y_row, w_row);
 
-                var d = in_rank;
-                while (d > 0) {
-                    d -= 1;
-                    coord[d] += 1;
-                    if (coord[d] < indices.shape.dims[d]) break;
-                    coord[d] = 0;
-                }
+                indices.shape.incrementCoord(&coord);
             }
         }
         return Y;

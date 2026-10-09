@@ -696,13 +696,7 @@ pub fn embedding(self: *Graph, W: *Tensor, X: anytype) !*Tensor {
                     var flat: usize = 0;
                     for (0..rank) |d| flat += coord[d] * X.strides.dims[d];
                     t.data[i] = tensor_mod.convertScalar(f32, @TypeOf(X.data[0]), X.data[flat]);
-                    var d = rank;
-                    while (d > 0) {
-                        d -= 1;
-                        coord[d] += 1;
-                        if (coord[d] < X.shape.dims[d]) break;
-                        coord[d] = 0;
-                    }
+                    X.shape.incrementCoord(&coord);
                 }
             }
             break :blk t;
