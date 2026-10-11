@@ -68,3 +68,7 @@ coverage-report/
 .agents/
 zig-x86_64-linux-*
 zig-linux-x86_64-*
+
+# Web visualizer dependencies and build output
+web/node_modules/
+web/dist/

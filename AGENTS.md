@@ -31,11 +31,10 @@
   - deprecated aliases, re-exports, wrapper functions, or duplicated old/new code paths,
   - heuristics kept only to support a mechanism that has been replaced.
 - **Delete What Is Superseded (删除被取代的内容)**: Remove replaced code, tests and plan documents in the same change, and update the affected tests to the new behavior instead of keeping the old assertions. Leave no commented-out code behind. Documents describe the current design only; the history of a change belongs in commit messages and `CHANGELOG.md`.
-- **Upgrade Producer and Consumer Together (生产端与消费端同步升级)**: When a shared format changes (e.g. the model graph JSON produced by `graph_ir.serializeJson` / `Graph.exportJson` and consumed by the chen-gz.github.io `/visualizer` page), in the same change:
+- **Upgrade Producer and Consumer Together (生产端与消费端同步升级)**: When a shared format changes (e.g. the model graph JSON produced by `graph_ir.serializeJson` / `Graph.exportJson` and consumed by the `web/` visualizer), in the same change:
   - update the exporter and `src/nn/model_graph.schema.json` (field descriptions and `enum` lists matching the Zig enums),
-  - regenerate `examples/sample_model_graph.json` and `examples/minimal_model_graph.json` with `zig build run-report`,
-  - copy the schema and both samples to `public/tools/visualizer/` in chen-gz.github.io and update its consumers,
-  - update the tests, `doc/model-graph-visualization.md` and the full specification (`doc/visualization-model-edge-design.md` in chen-gz.github.io),
+  - regenerate `examples/sample_model_graph.json`, `examples/minimal_model_graph.json` (`zig build run-report`) and `examples/models/*.json` (`zig build run-book-models`),
+  - update the `web/` visualizer consumers, tests (`cd web && npm test`), `doc/model-graph-visualization.md` and the full specification (`doc/visualization-model-edge-design.md`),
   - for breaking changes, bump the format version and record the change under `Changed` in the `CHANGELOG.md` `Unreleased` section.
 
 ## 4. Configuration Structs (配置结构体默认值)

@@ -19,6 +19,8 @@
 | Architecture: layers, tensor and autodiff internals, modules, optimizers, acceleration | [`doc/architecture.md`](doc/architecture.md) |
 | Architectural & codebase review report (4-dimension audit & refactoring blueprint) | [`doc/framework-review.md`](doc/framework-review.md) |
 | Model graph export (scopes, local graphs, JSON Schema) | [`doc/model-graph-visualization.md`](doc/model-graph-visualization.md) |
+| Model graph visualization & edge routing specification | [`doc/visualization-model-edge-design.md`](doc/visualization-model-edge-design.md) |
+| Interactive web visualizer (`web/`) | [`web/README.md`](web/README.md) |
 | Documentation index | [`doc/README.md`](doc/README.md) |
 | Roadmap and task list | [`plan/TODO.md`](plan/TODO.md) |
 | Comparison with NumPy 2.x | [`plan/NUMPY_GAP_ANALYSIS.md`](plan/NUMPY_GAP_ANALYSIS.md) |
