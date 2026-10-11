@@ -1,0 +1,44 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --color-bg-primary: #faf8f5;
+  --bg-secondary: #f3f0ea;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f8f6f1;
+  --border-color: #dcd6cc;
+  --border-focus: #1a5fb4;
+  --color-text-primary: #20242c;
+  --theme-prose-lead: #5c6470;
+  --color-accent: #1a5fb4;
+  --color-accent-hover: #154c91;
+}
+
+html.dark {
+  --color-bg-primary: #1e1e2e;
+  --bg-secondary: #181825;
+  --bg-card: #242538;
+  --bg-card-hover: #2c2e45;
+  --border-color: #313244;
+  --border-focus: #89b4fa;
+  --color-text-primary: #cdd6f4;
+  --theme-prose-lead: #a6adc8;
+  --color-accent: #89b4fa;
+  --color-accent-hover: #74a8fc;
+}
+
+body {
+  background-color: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  margin: 0;
+  min-height: 100vh;
+}

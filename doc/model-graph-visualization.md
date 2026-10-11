@@ -1,6 +1,6 @@
 # ZNN 模型图导出 (Model Graph Export)
 
-`znn` 把一次 `forward` 的计算图导出为分层的模型图 JSON，供 chen-gz.github.io 的 `/visualizer` 页面渲染。完整规范（局部图模型、端口解析、残差判定、前端渲染与 GPT 黄金边集）见 chen-gz.github.io 仓库的 `doc/visualization-model-edge-design.md`。
+`znn` 把一次 `forward` 的计算图导出为分层的模型图 JSON，供 [`web/`](../web/) 可视化前端渲染。完整规范（局部图模型、端口解析、残差判定、前端渲染与 GPT 黄金边集）见 [`doc/visualization-model-edge-design.md`](visualization-model-edge-design.md)。
 
 ## 1. 流程
 
@@ -37,12 +37,13 @@ Module.forward ──(作用域栈)──▶ autodiff.Graph ──graph_ir.build
 | `src/nn/tests_vis.zig` | 作用域归属、黄金边集、schema 一致性、枚举一致性与 18 个经典模型导出测试 |
 | `examples/export_model_report.zig` | `zig build run-report` 导出 `examples/sample_model_graph.json`（2 层 GPT）与 `examples/minimal_model_graph.json`（单个 `Linear`） |
 | `examples/export_book_models.zig` | `zig build run-book-models` 导出 `examples/models/manifest.json` 与 18 个经典章节模型的 schema 2.0 计算图 JSON |
+| `web/` | 前端可视化器（`model-graph.ts`、`flow-edges.ts`、`json-schema.ts`、`visualizer.ts` 及 Vitest 测试套件） |
 
 ## 4. 修改导出格式
 
 在同一变更中完成（与 [`AGENTS.md`](../AGENTS.md) §3 一致）：
 
 1. 修改导出端与 `model_graph.schema.json`。
-2. 运行 `zig build test` 与 `zig build run-report`。
-3. 把 schema 与两个样例逐字节复制到 chen-gz.github.io 的 `public/tools/visualizer/`，同步修改渲染端与规范文档。
+2. 运行 `zig build test`、`zig build run-report` 与 `zig build run-book-models`。
+3. 同步修改 `web/` 渲染端与 [`doc/visualization-model-edge-design.md`](visualization-model-edge-design.md)，运行 `cd web && npm test`。
 4. 在 `CHANGELOG.md` 的 `Unreleased` 小节记录。

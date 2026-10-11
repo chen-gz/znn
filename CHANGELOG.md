@@ -10,10 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **内聚前端模型图可视化器 (`web/`, `doc/visualization-model-edge-design.md`)**:
+  - 将 Schema 2.0 模型计算图可视化前端（`web/src/utils/model-graph.ts`、`web/src/utils/flow-edges.ts`、`web/src/utils/json-schema.ts`、`web/src/scripts/visualizer.ts` 及对应的 Vitest 单元测试套件）与完整设计规范 `doc/visualization-model-edge-design.md` 收归至 `znn` 仓库，直接读取 `src/nn/model_graph.schema.json` 与 `examples/` 下的导出模型图，消除跨仓文件复制。
 - **专用模型库与 Gemma 4 架构实现 (`src/models/gemma4.zig`, `src/models.zig`, `src/root.zig`, `src/models/tests.zig`)**:
   - 新增顶层 `models` 模块与 Gemma 4 专有架构：`GemmaRMSNorm` (支持 $1 + w$ 仿射缩放)、`GemmaUnscaledRMSNorm` (无权重 RMSNorm)、`Gemma4MLP` (门控 GeLU_tanh 投影)、`Gemma4Attention` (支持混合滑动窗口与全局注意力、头部 Q/K-Norm、分组查询注意力 GQA、专用 Split-Half RoPE 旋转位置编码与局部窗口掩码) 与 `Gemma4DecoderLayer` (前置与后置双 RMSNorm)。
   - 新增支持 `Gemma4ForCausalLM` 模型定义、`DefaultGemma4` 与 `TinyGemma4`，支持词嵌入缩放 $\sqrt{d_{\text{hidden}}}$、词表权重共享投影 (Tie Word Embeddings) 以及最终 Logit 软截断平滑 (Logit Softcapping: $c \tanh(\text{logits}/c)$) 与 4-bit 量化推理 (`Q4Linear`, `Gemma4Q4ForCausalLM`)。
   - 在 `src/models.zig` 与 `src/root.zig` 导出 `models` 与 `gemma4` 别名，并在 `src/models/tests.zig` 设立独立测试套件。
+
 ### Fixed
 - **旋转位置编码 (RoPE) 统一拓扑、梯度断流修复与静态图重演闭环 (`src/tensor/`, `src/autodiff/`, `src/models/gemma4.zig`, `src/autodiff/tests.zig`)**:
   - **模式与部分旋转因子扩展**：在 `RopeOptions` 中扩展 `mode: Mode = .interleaved`（支持 `.interleaved` 相邻配对与 `.split_half` 半切分配对两种主流拓扑）及 `partial_rotary_factor: f32 = 1.0`（比例旋转因子 Proportional RoPE），统一底层 `Tensor.rope` 前向内核。
@@ -28,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 从通用神经网络层命名空间 `nn` (`src/nn.zig`) 中移除所有 Gemma 4 专有结构体，使 `nn` 纯净对齐通用网络层标准。
 - **Safetensors 权重格式反序列化增强 (`src/nn/serialization.zig`, `src/nn/tests.zig`)**:
   - `serialization.loadTensorData` 与 `loadModel` 新增对 `BF16` (BFloat16) 与 `F16` (Float16) 浮点数据格式的原生读取与转换解析支持，能够直接从现代大模型 Safetensors 权重文件中还原载入参数。
+
+### Added (Continued)
 - **调试构建下的参数未初始化检查 (`src/nn/core.zig`, `src/nn.zig`, `src/optim.zig`, `src/nn/tests_init.zig`)**:
   - 新增 `nn.inspectParameterInit(params) ParameterInitReport` 与 `nn.warnIfParametersUninitialized(params)`：只统计可训练权重矩阵（向量形参数如偏置、归一化 γ / β 不参与判断），所有权重矩阵都全为 0 时判定为未初始化。
   - `SGDOptimizer`、`AdamOptimizer`、`AdamWOptimizer` 构造时调用该检查，Debug 构建下输出 `std.log.warn` 提示先调用 `nn.initModel` / `Module.initParameters` / `Graph.initWeights`；非 Debug 构建下为空操作。
