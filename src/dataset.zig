@@ -689,5 +689,92 @@ test "DataLoader drop_last, shuffle, and edge batch slicing" {
     try std.testing.expectEqual(@as(usize, 0), small_ds.numBatches(1));
 }
 
+test "loadImages" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const cwd = std.Io.Dir.cwd();
+    const io = testing.io;
+
+    const valid_file = "test_dataset_images_valid.bin";
+    const invalid_file = "test_dataset_images_invalid.bin";
+
+    // 1. Test Valid File
+    {
+        var file = try cwd.createFile(io, valid_file, .{});
+        defer cwd.deleteFile(io, valid_file) catch {};
+
+        var buf: [1024]u8 = undefined;
+        var file_writer = file.writer(io, &buf);
+        const writer = &file_writer.interface;
+
+        // Write magic number: 0x00000803
+        var temp: [4]u8 = undefined;
+        std.mem.writeInt(u32, &temp, 0x00000803, .big);
+        try writer.writeAll(&temp);
+
+        // Write num_images: 2
+        std.mem.writeInt(u32, &temp, 2, .big);
+        try writer.writeAll(&temp);
+
+        // Write rows: 2
+        std.mem.writeInt(u32, &temp, 2, .big);
+        try writer.writeAll(&temp);
+
+        // Write cols: 2
+        std.mem.writeInt(u32, &temp, 2, .big);
+        try writer.writeAll(&temp);
+
+        // Write 8 pixels (2 images * 2 rows * 2 cols)
+        const pixels = [_]u8{ 0, 51, 102, 153, 204, 255, 127, 64 };
+        try writer.writeAll(&pixels);
+
+        try writer.flush();
+        file.close(io);
+
+        var ds = try loadImages(allocator, io, valid_file);
+        defer ds.deinit(allocator);
+
+        try testing.expectEqual(@as(u32, 2), ds.num_images);
+        try testing.expectEqual(@as(u32, 2), ds.rows);
+        try testing.expectEqual(@as(u32, 2), ds.cols);
+
+        // Check normalized values
+        try testing.expectApproxEqRel(@as(f32, 0.0), ds.data[0], 1e-4);
+        try testing.expectApproxEqRel(@as(f32, 51.0 / 255.0), ds.data[1], 1e-4);
+        try testing.expectApproxEqRel(@as(f32, 1.0), ds.data[5], 1e-4);
+    }
+
+    // 2. Test Invalid Magic Number
+    {
+        var file = try cwd.createFile(io, invalid_file, .{});
+        defer cwd.deleteFile(io, invalid_file) catch {};
+
+        var buf: [128]u8 = undefined;
+        var file_writer = file.writer(io, &buf);
+        const writer = &file_writer.interface;
+
+        // Write wrong magic number: 0x00000801 (this is for labels, not images)
+        var temp: [4]u8 = undefined;
+        std.mem.writeInt(u32, &temp, 0x00000801, .big);
+        try writer.writeAll(&temp);
+
+        std.mem.writeInt(u32, &temp, 2, .big);
+        try writer.writeAll(&temp);
+
+        std.mem.writeInt(u32, &temp, 2, .big);
+        try writer.writeAll(&temp);
+
+        std.mem.writeInt(u32, &temp, 2, .big);
+        try writer.writeAll(&temp);
+
+        const pixels = [_]u8{0} ** 8;
+        try writer.writeAll(&pixels);
+
+        try writer.flush();
+        file.close(io);
+
+        try testing.expectError(error.InvalidMagicNumber, loadImages(allocator, io, invalid_file));
+    }
+}
 
 
