@@ -475,27 +475,13 @@ pub fn solveRidgeAnalytical(
         return error.ShapeMismatch;
     }
 
-
     const N = n_samples;
     const D = n_features;
-    const N_f = @as(f32, @floatFromInt(N));
 
-    // 1. Compute means
-    const mean_x = try allocator.alloc(f32, D);
-    defer allocator.free(mean_x);
-    @memset(mean_x, 0.0);
-
-    var sum_y: f32 = 0.0;
-    for (0..N) |i| {
-        sum_y += y[i];
-        for (0..D) |j| {
-            mean_x[j] += x[i * D + j];
-        }
-    }
-    const mean_y = sum_y / N_f;
-    for (0..D) |j| {
-        mean_x[j] /= N_f;
-    }
+    // 1. Compute means and center data
+    const math_mod = @import("../math.zig");
+    const centered = try math_mod.computeCenteredData(allocator, x, y, n_samples, n_features);
+    defer centered.deinit(allocator);
 
     // 2. Build normal matrix M = X_c^T * X_c + lambda * I, and vector v = X_c^T * y_c
     const M = try allocator.alloc(f32, D * D);
@@ -507,12 +493,12 @@ pub fn solveRidgeAnalytical(
     @memset(v, 0.0);
 
     for (0..N) |i| {
-        const dy = y[i] - mean_y;
+        const dy = centered.y_c[i];
         for (0..D) |j| {
-            const dx_j = x[i * D + j] - mean_x[j];
+            const dx_j = centered.X_c[i * D + j];
             v[j] += dx_j * dy;
             for (0..D) |k| {
-                const dx_k = x[i * D + k] - mean_x[k];
+                const dx_k = centered.X_c[i * D + k];
                 M[j * D + k] += dx_j * dx_k;
             }
         }
@@ -529,9 +515,9 @@ pub fn solveRidgeAnalytical(
     // 4. Compute intercept b = mean_y - w^T * mean_x
     var dot_w_mean_x: f32 = 0.0;
     for (0..D) |j| {
-        dot_w_mean_x += out_w[j] * mean_x[j];
+        dot_w_mean_x += out_w[j] * centered.mean_x[j];
     }
-    out_b.* = mean_y - dot_w_mean_x;
+    out_b.* = centered.mean_y - dot_w_mean_x;
 }
 
 /// 旋转位置编码 (Rotary Position Embedding, RoPE) 应用算子

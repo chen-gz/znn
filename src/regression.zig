@@ -109,35 +109,15 @@ pub fn solveRidge(
     const D = n_features;
     const N_f = @as(f32, @floatFromInt(N));
 
-    // 1. Calculate column means
-    const mean_x = try allocator.alloc(f32, D);
-    defer allocator.free(mean_x);
-    @memset(mean_x, 0.0);
+    // 1 & 2. Compute means and center data
+    const math = @import("math.zig");
+    const centered = try math.computeCenteredData(allocator, x, y, N, D);
+    defer centered.deinit(allocator);
 
-    var sum_y: f32 = 0.0;
-    for (0..N) |i| {
-        sum_y += y[i];
-        for (0..D) |j| {
-            mean_x[j] += x[i * D + j];
-        }
-    }
-    const mean_y = sum_y / N_f;
-    for (0..D) |j| {
-        mean_x[j] /= N_f;
-    }
-
-    // 2. Center X and y
-    const X_c = try allocator.alloc(f32, N * D);
-    defer allocator.free(X_c);
-    const y_c = try allocator.alloc(f32, N);
-    defer allocator.free(y_c);
-
-    for (0..N) |i| {
-        y_c[i] = y[i] - mean_y;
-        for (0..D) |j| {
-            X_c[i * D + j] = x[i * D + j] - mean_x[j];
-        }
-    }
+    const mean_x = centered.mean_x;
+    const mean_y = centered.mean_y;
+    const X_c = centered.X_c;
+    const y_c = centered.y_c;
 
     // 3. Compute normal matrix M = (1/N) * X_c^T X_c + alpha * I, and v = (1/N) * X_c^T y_c
     const M = try allocator.alloc(f32, D * D);
@@ -213,33 +193,14 @@ pub fn solveLasso(
     const D = n_features;
     const N_f = @as(f32, @floatFromInt(N));
 
-    const mean_x = try allocator.alloc(f32, D);
-    defer allocator.free(mean_x);
-    @memset(mean_x, 0.0);
+    const math = @import("math.zig");
+    const centered = try math.computeCenteredData(allocator, x, y, N, D);
+    defer centered.deinit(allocator);
 
-    var sum_y: f32 = 0.0;
-    for (0..N) |i| {
-        sum_y += y[i];
-        for (0..D) |j| {
-            mean_x[j] += x[i * D + j];
-        }
-    }
-    const mean_y = sum_y / N_f;
-    for (0..D) |j| {
-        mean_x[j] /= N_f;
-    }
-
-    const X_c = try allocator.alloc(f32, N * D);
-    defer allocator.free(X_c);
-    const y_c = try allocator.alloc(f32, N);
-    defer allocator.free(y_c);
-
-    for (0..N) |i| {
-        y_c[i] = y[i] - mean_y;
-        for (0..D) |j| {
-            X_c[i * D + j] = x[i * D + j] - mean_x[j];
-        }
-    }
+    const mean_x = centered.mean_x;
+    const mean_y = centered.mean_y;
+    const X_c = centered.X_c;
+    const y_c = centered.y_c;
 
     const L = try allocator.alloc(f32, D);
     defer allocator.free(L);
@@ -320,33 +281,14 @@ pub fn solveElasticNet(
     const D = n_features;
     const N_f = @as(f32, @floatFromInt(N));
 
-    const mean_x = try allocator.alloc(f32, D);
-    defer allocator.free(mean_x);
-    @memset(mean_x, 0.0);
+    const math = @import("math.zig");
+    const centered = try math.computeCenteredData(allocator, x, y, N, D);
+    defer centered.deinit(allocator);
 
-    var sum_y: f32 = 0.0;
-    for (0..N) |i| {
-        sum_y += y[i];
-        for (0..D) |j| {
-            mean_x[j] += x[i * D + j];
-        }
-    }
-    const mean_y = sum_y / N_f;
-    for (0..D) |j| {
-        mean_x[j] /= N_f;
-    }
-
-    const X_c = try allocator.alloc(f32, N * D);
-    defer allocator.free(X_c);
-    const y_c = try allocator.alloc(f32, N);
-    defer allocator.free(y_c);
-
-    for (0..N) |i| {
-        y_c[i] = y[i] - mean_y;
-        for (0..D) |j| {
-            X_c[i * D + j] = x[i * D + j] - mean_x[j];
-        }
-    }
+    const mean_x = centered.mean_x;
+    const mean_y = centered.mean_y;
+    const X_c = centered.X_c;
+    const y_c = centered.y_c;
 
     const L = try allocator.alloc(f32, D);
     defer allocator.free(L);

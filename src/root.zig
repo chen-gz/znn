@@ -2,6 +2,7 @@ pub const VERSION = "0.2.7";
 pub const version = @import("std").SemanticVersion{ .major = 0, .minor = 2, .patch = 7 };
 
 pub const tensor = @import("tensor.zig");
+pub const math = @import("math.zig");
 pub const nn = @import("nn.zig");
 pub const dataset = @import("dataset.zig");
 pub const autodiff = @import("autodiff.zig");
