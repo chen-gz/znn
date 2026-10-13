@@ -92,6 +92,66 @@ pub const ModelResult = struct {
     }
 };
 
+/// Result of centering the data
+pub const CenteredData = struct {
+    mean_x: []f32,
+    mean_y: f32,
+    X_c: []f32,
+    y_c: []f32,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *CenteredData) void {
+        self.allocator.free(self.mean_x);
+        self.allocator.free(self.X_c);
+        self.allocator.free(self.y_c);
+    }
+};
+
+/// Helper function to compute means and center the data
+pub fn centerData(allocator: std.mem.Allocator, x: []const f32, y: []const f32, n_samples: usize, n_features: usize) !CenteredData {
+    const N = n_samples;
+    const D = n_features;
+    const N_f = @as(f32, @floatFromInt(N));
+
+    // 1. Calculate column means
+    const mean_x = try allocator.alloc(f32, D);
+    errdefer allocator.free(mean_x);
+    @memset(mean_x, 0.0);
+
+    var sum_y: f32 = 0.0;
+    for (0..N) |i| {
+        sum_y += y[i];
+        for (0..D) |j| {
+            mean_x[j] += x[i * D + j];
+        }
+    }
+    const mean_y = sum_y / N_f;
+    for (0..D) |j| {
+        mean_x[j] /= N_f;
+    }
+
+    // 2. Center X and y
+    const X_c = try allocator.alloc(f32, N * D);
+    errdefer allocator.free(X_c);
+    const y_c = try allocator.alloc(f32, N);
+    errdefer allocator.free(y_c);
+
+    for (0..N) |i| {
+        y_c[i] = y[i] - mean_y;
+        for (0..D) |j| {
+            X_c[i * D + j] = x[i * D + j] - mean_x[j];
+        }
+    }
+
+    return CenteredData{
+        .mean_x = mean_x,
+        .mean_y = mean_y,
+        .X_c = X_c,
+        .y_c = y_c,
+        .allocator = allocator,
+    };
+}
+
 /// Solves Ordinary Least Squares (OLS) or Ridge regression analytically:
 /// min (1/2N) * ||Xw + b - y||_2^2 + (alpha/2) * ||w||_2^2
 pub fn solveRidge(
@@ -109,35 +169,13 @@ pub fn solveRidge(
     const D = n_features;
     const N_f = @as(f32, @floatFromInt(N));
 
-    // 1. Calculate column means
-    const mean_x = try allocator.alloc(f32, D);
-    defer allocator.free(mean_x);
-    @memset(mean_x, 0.0);
+    var centered_data = try centerData(allocator, x, y, n_samples, n_features);
+    defer centered_data.deinit();
 
-    var sum_y: f32 = 0.0;
-    for (0..N) |i| {
-        sum_y += y[i];
-        for (0..D) |j| {
-            mean_x[j] += x[i * D + j];
-        }
-    }
-    const mean_y = sum_y / N_f;
-    for (0..D) |j| {
-        mean_x[j] /= N_f;
-    }
-
-    // 2. Center X and y
-    const X_c = try allocator.alloc(f32, N * D);
-    defer allocator.free(X_c);
-    const y_c = try allocator.alloc(f32, N);
-    defer allocator.free(y_c);
-
-    for (0..N) |i| {
-        y_c[i] = y[i] - mean_y;
-        for (0..D) |j| {
-            X_c[i * D + j] = x[i * D + j] - mean_x[j];
-        }
-    }
+    const mean_x = centered_data.mean_x;
+    const mean_y = centered_data.mean_y;
+    const X_c = centered_data.X_c;
+    const y_c = centered_data.y_c;
 
     // 3. Compute normal matrix M = (1/N) * X_c^T X_c + alpha * I, and v = (1/N) * X_c^T y_c
     const M = try allocator.alloc(f32, D * D);
@@ -213,33 +251,13 @@ pub fn solveLasso(
     const D = n_features;
     const N_f = @as(f32, @floatFromInt(N));
 
-    const mean_x = try allocator.alloc(f32, D);
-    defer allocator.free(mean_x);
-    @memset(mean_x, 0.0);
+    var centered_data = try centerData(allocator, x, y, n_samples, n_features);
+    defer centered_data.deinit();
 
-    var sum_y: f32 = 0.0;
-    for (0..N) |i| {
-        sum_y += y[i];
-        for (0..D) |j| {
-            mean_x[j] += x[i * D + j];
-        }
-    }
-    const mean_y = sum_y / N_f;
-    for (0..D) |j| {
-        mean_x[j] /= N_f;
-    }
-
-    const X_c = try allocator.alloc(f32, N * D);
-    defer allocator.free(X_c);
-    const y_c = try allocator.alloc(f32, N);
-    defer allocator.free(y_c);
-
-    for (0..N) |i| {
-        y_c[i] = y[i] - mean_y;
-        for (0..D) |j| {
-            X_c[i * D + j] = x[i * D + j] - mean_x[j];
-        }
-    }
+    const mean_x = centered_data.mean_x;
+    const mean_y = centered_data.mean_y;
+    const X_c = centered_data.X_c;
+    const y_c = centered_data.y_c;
 
     const L = try allocator.alloc(f32, D);
     defer allocator.free(L);
@@ -320,33 +338,13 @@ pub fn solveElasticNet(
     const D = n_features;
     const N_f = @as(f32, @floatFromInt(N));
 
-    const mean_x = try allocator.alloc(f32, D);
-    defer allocator.free(mean_x);
-    @memset(mean_x, 0.0);
+    var centered_data = try centerData(allocator, x, y, n_samples, n_features);
+    defer centered_data.deinit();
 
-    var sum_y: f32 = 0.0;
-    for (0..N) |i| {
-        sum_y += y[i];
-        for (0..D) |j| {
-            mean_x[j] += x[i * D + j];
-        }
-    }
-    const mean_y = sum_y / N_f;
-    for (0..D) |j| {
-        mean_x[j] /= N_f;
-    }
-
-    const X_c = try allocator.alloc(f32, N * D);
-    defer allocator.free(X_c);
-    const y_c = try allocator.alloc(f32, N);
-    defer allocator.free(y_c);
-
-    for (0..N) |i| {
-        y_c[i] = y[i] - mean_y;
-        for (0..D) |j| {
-            X_c[i * D + j] = x[i * D + j] - mean_x[j];
-        }
-    }
+    const mean_x = centered_data.mean_x;
+    const mean_y = centered_data.mean_y;
+    const X_c = centered_data.X_c;
+    const y_c = centered_data.y_c;
 
     const L = try allocator.alloc(f32, D);
     defer allocator.free(L);
