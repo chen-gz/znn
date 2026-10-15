@@ -239,6 +239,10 @@ test "engine trainClassificationStep and evalClassificationStep" {
             };
         }
 
+        pub fn deinit(self: *const @This(), alloc: std.mem.Allocator) void {
+            self.fc.deinit(alloc);
+        }
+
         pub fn forward(self: *const @This(), graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
             return try self.fc.forward(graph, x);
         }
@@ -277,6 +281,58 @@ test "engine trainClassificationStep and evalClassificationStep" {
     try std.testing.expectEqual(@as(usize, 2), step_clip_res.batch_size);
 }
 
+test "engine trainClassificationStep learning" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    const SimpleMLP = struct {
+        fc: nn.Linear,
+
+        pub fn init(alloc: std.mem.Allocator) !@This() {
+            return .{
+                .fc = try nn.Linear.init(alloc, 2, 2),
+            };
+        }
+
+        pub fn deinit(self: *const @This(), alloc: std.mem.Allocator) void {
+            self.fc.deinit(alloc);
+        }
+
+        pub fn forward(self: *const @This(), graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+            return try self.fc.forward(graph, x);
+        }
+    };
+
+    const Model = nn.Module(SimpleMLP);
+    var model = try Model.init(arena, try SimpleMLP.init(arena));
+    {
+        var init_graph = autodiff.Graph.init(arena);
+        defer init_graph.deinit();
+        _ = try model.forward(&init_graph, try init_graph.ones(&.{ 1, 2 }, false));
+        try model.initParameters(&init_graph, random);
+    }
+    defer model.deinit();
+
+    var optim = try @import("optim.zig").SGDOptimizer.init(arena, &model, .{ .lr = 0.5 });
+    defer optim.deinit();
+
+    const x_mock = [_]f32{ 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0 }; // 4 samples of dim 2
+    const y_mock = [_]u8{ 0, 1, 0, 1 }; // targets
+
+    const initial_res = try trainClassificationStep(arena, &model, &optim, &x_mock, &y_mock);
+    var current_loss = initial_res.loss;
+
+    // Train for 20 steps to ensure loss decreases
+    for (0..20) |_| {
+        const res = try trainClassificationStep(arena, &model, &optim, &x_mock, &y_mock);
+        current_loss = res.loss;
+    }
+
+    // Check that loss decreased significantly
+    try std.testing.expect(current_loss < initial_res.loss);
+}
+
 test "engine computeAccuracy edge cases" {
     const arena = std.testing.allocator;
 
@@ -311,6 +367,9 @@ test "engine trainClassificationEpoch and evaluateClassification with DataLoader
         fc: nn.Linear,
         pub fn init(alloc: std.mem.Allocator) !@This() {
             return .{ .fc = try nn.Linear.init(alloc, 4, 2) };
+        }
+        pub fn deinit(self: *const @This(), alloc: std.mem.Allocator) void {
+            self.fc.deinit(alloc);
         }
         pub fn forward(self: *const @This(), graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
             return try self.fc.forward(graph, x);
