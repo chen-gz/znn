@@ -641,31 +641,53 @@ pub fn sort(self: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.All
     var inner_size: usize = 1;
     for (ax + 1..out.shape.len) |d| inner_size *= out.shape.dims[d];
 
-    const temp_buf = try allocator.alloc(f32, dim_size);
-    defer allocator.free(temp_buf);
-
     const stride = inner_size;
+
+    var temp_buf: ?[]f32 = null;
+    defer if (temp_buf) |buf| allocator.free(buf);
+    if (stride > 1) {
+        temp_buf = try allocator.alloc(f32, dim_size);
+    }
+
     for (0..outer_size) |outer| {
         for (0..inner_size) |inner| {
             const base = outer * dim_size * inner_size + inner;
-            for (0..dim_size) |k| {
-                temp_buf[k] = out.data[base + k * stride];
-            }
-            if (ascending) {
-                std.mem.sort(f32, temp_buf, {}, struct {
-                    fn asc(_: void, a: f32, b: f32) bool {
-                        return a < b;
-                    }
-                }.asc);
+            if (stride == 1) {
+                const cur_slice = out.data[base .. base + dim_size];
+                if (ascending) {
+                    std.mem.sort(f32, cur_slice, {}, struct {
+                        fn asc(_: void, a: f32, b: f32) bool {
+                            return a < b;
+                        }
+                    }.asc);
+                } else {
+                    std.mem.sort(f32, cur_slice, {}, struct {
+                        fn desc(_: void, a: f32, b: f32) bool {
+                            return a > b;
+                        }
+                    }.desc);
+                }
             } else {
-                std.mem.sort(f32, temp_buf, {}, struct {
-                    fn desc(_: void, a: f32, b: f32) bool {
-                        return a > b;
-                    }
-                }.desc);
-            }
-            for (0..dim_size) |k| {
-                out.data[base + k * stride] = temp_buf[k];
+                const buf = temp_buf.?;
+                for (0..dim_size) |k| {
+                    buf[k] = out.data[base + k * stride];
+                }
+                if (ascending) {
+                    std.mem.sort(f32, buf, {}, struct {
+                        fn asc(_: void, a: f32, b: f32) bool {
+                            return a < b;
+                        }
+                    }.asc);
+                } else {
+                    std.mem.sort(f32, buf, {}, struct {
+                        fn desc(_: void, a: f32, b: f32) bool {
+                            return a > b;
+                        }
+                    }.desc);
+                }
+                for (0..dim_size) |k| {
+                    out.data[base + k * stride] = buf[k];
+                }
             }
         }
     }
@@ -691,34 +713,48 @@ pub fn argsort(self: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.
     var inner_size: usize = 1;
     for (ax + 1..contig.shape.len) |d| inner_size *= contig.shape.dims[d];
 
-    const temp_vals = try allocator.alloc(f32, dim_size);
-    defer allocator.free(temp_vals);
-    const temp_idxs = try allocator.alloc(usize, dim_size);
-    defer allocator.free(temp_idxs);
+    const stride = inner_size;
+
+    var temp_idxs: ?[]usize = null;
+    defer if (temp_idxs) |idxs| allocator.free(idxs);
+    if (stride > 1) {
+        temp_idxs = try allocator.alloc(usize, dim_size);
+    }
 
     const SortCtx = struct {
         vals: []const f32,
+        base: usize,
+        stride: usize,
         asc: bool,
         fn cmp(ctx: @This(), a: usize, b: usize) bool {
+            const val_a = ctx.vals[ctx.base + a * ctx.stride];
+            const val_b = ctx.vals[ctx.base + b * ctx.stride];
             if (ctx.asc) {
-                return ctx.vals[a] < ctx.vals[b];
+                return val_a < val_b;
             } else {
-                return ctx.vals[a] > ctx.vals[b];
+                return val_a > val_b;
             }
         }
     };
 
-    const stride = inner_size;
     for (0..outer_size) |outer| {
         for (0..inner_size) |inner| {
             const base = outer * dim_size * inner_size + inner;
-            for (0..dim_size) |k| {
-                temp_vals[k] = contig.data[base + k * stride];
-                temp_idxs[k] = k;
-            }
-            std.mem.sort(usize, temp_idxs, SortCtx{ .vals = temp_vals, .asc = ascending }, SortCtx.cmp);
-            for (0..dim_size) |k| {
-                out_indices.data[base + k * stride] = temp_idxs[k];
+            if (stride == 1) {
+                const cur_slice = out_indices.data[base .. base + dim_size];
+                for (0..dim_size) |k| {
+                    cur_slice[k] = k;
+                }
+                std.mem.sort(usize, cur_slice, SortCtx{ .vals = contig.data, .base = base, .stride = stride, .asc = ascending }, SortCtx.cmp);
+            } else {
+                const idxs = temp_idxs.?;
+                for (0..dim_size) |k| {
+                    idxs[k] = k;
+                }
+                std.mem.sort(usize, idxs, SortCtx{ .vals = contig.data, .base = base, .stride = stride, .asc = ascending }, SortCtx.cmp);
+                for (0..dim_size) |k| {
+                    out_indices.data[base + k * stride] = idxs[k];
+                }
             }
         }
     }
