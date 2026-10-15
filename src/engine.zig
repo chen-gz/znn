@@ -363,3 +363,90 @@ test "engine trainClassificationEpoch and evaluateClassification with DataLoader
     try std.testing.expect(eval_res.loss > 0.0);
 }
 
+test "engine evaluateClassification standalone" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(456);
+    const random = prng.random();
+
+    const SimpleMLP = struct {
+        fc: nn.Linear,
+        pub fn init(alloc: std.mem.Allocator) !@This() {
+            return .{ .fc = try nn.Linear.init(alloc, 4, 2) };
+        }
+        pub fn forward(self: *const @This(), graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+            return try self.fc.forward(graph, x);
+        }
+    };
+
+    const Model = nn.Module(SimpleMLP);
+    var model = try Model.init(arena, try SimpleMLP.init(arena));
+    {
+        var init_graph = autodiff.Graph.init(arena);
+        defer init_graph.deinit();
+        _ = try model.forward(&init_graph, try init_graph.ones(&.{ 1, 4 }, false));
+        try model.initParameters(&init_graph, random);
+    }
+    defer model.deinit();
+
+    var img_data = [_]f32{
+        1, 2, 3, 4,
+        5, 6, 7, 8,
+        9, 10, 11, 12,
+    };
+    var lbl_data = [_]u8{ 0, 1, 0 };
+    const mock_ds = dataset.Dataset{
+        .images = .{ .num_images = 3, .rows = 2, .cols = 2, .data = &img_data },
+        .labels = .{ .num_items = 3, .data = &lbl_data },
+    };
+
+    // batch size 2, 3 items -> 2 batches
+    var loader = try dataset.DataLoader.init(arena, mock_ds, 2, .{ .shuffle = false, .drop_last = false });
+    defer loader.deinit(arena);
+
+    const eval_res = try evaluateClassification(arena, &model, &loader);
+    try std.testing.expectEqual(@as(usize, 2), eval_res.num_batches);
+    try std.testing.expect(eval_res.loss > 0.0);
+    try std.testing.expect(eval_res.accuracy >= 0.0 and eval_res.accuracy <= 1.0);
+}
+
+test "engine evaluateClassification empty dataloader" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(789);
+    const random = prng.random();
+
+    const SimpleMLP = struct {
+        fc: nn.Linear,
+        pub fn init(alloc: std.mem.Allocator) !@This() {
+            return .{ .fc = try nn.Linear.init(alloc, 4, 2) };
+        }
+        pub fn forward(self: *const @This(), graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+            return try self.fc.forward(graph, x);
+        }
+    };
+
+    const Model = nn.Module(SimpleMLP);
+    var model = try Model.init(arena, try SimpleMLP.init(arena));
+    {
+        var init_graph = autodiff.Graph.init(arena);
+        defer init_graph.deinit();
+        _ = try model.forward(&init_graph, try init_graph.ones(&.{ 1, 4 }, false));
+        try model.initParameters(&init_graph, random);
+    }
+    defer model.deinit();
+
+    // empty dataset
+    var img_data = [_]f32{};
+    var lbl_data = [_]u8{};
+    const mock_ds = dataset.Dataset{
+        .images = .{ .num_images = 0, .rows = 2, .cols = 2, .data = &img_data },
+        .labels = .{ .num_items = 0, .data = &lbl_data },
+    };
+
+    var loader = try dataset.DataLoader.init(arena, mock_ds, 2, .{ .shuffle = false, .drop_last = false });
+    defer loader.deinit(arena);
+
+    const eval_res = try evaluateClassification(arena, &model, &loader);
+    try std.testing.expectEqual(@as(usize, 0), eval_res.num_batches);
+    try std.testing.expectEqual(@as(f32, 0.0), eval_res.loss);
+    try std.testing.expectEqual(@as(f32, 0.0), eval_res.accuracy);
+}
