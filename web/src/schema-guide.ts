@@ -1,6 +1,7 @@
 import schemaJson from "../../src/nn/model_graph.schema.json";
 import minimalGraph from "../../examples/minimal_model_graph.json";
 import { schemaSections, type JsonSchema } from "./utils/json-schema";
+import DOMPurify from "dompurify";
 
 const SCHEMA_URL = "/tools/visualizer/model_graph.schema.json";
 const MINIMAL_URL = "/tools/visualizer/minimal_model_graph.json";
@@ -75,7 +76,7 @@ export function renderSchemaGuide(container: HTMLElement | null): void {
     })
     .join("");
 
-  container.innerHTML = `<details id="schema-guide" class="mb-6 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl overflow-hidden group">
+  container.innerHTML = DOMPurify.sanitize(`<details id="schema-guide" class="mb-6 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-xl overflow-hidden group">
     <summary class="bg-[var(--bg-card)] px-4 py-3 cursor-pointer flex items-center gap-3 list-none select-none hover:bg-[var(--bg-card-hover)] transition-colors">
       <span class="transition-transform group-open:rotate-90 inline-block text-[10px] text-[var(--color-accent)]">▶</span>
       <span class="text-base">📖</span>
@@ -127,5 +128,5 @@ export function renderSchemaGuide(container: HTMLElement | null): void {
         <pre class="${pre} mt-3"><code id="schema-json-code">${esc(schemaText)}</code></pre>
       </details>
     </div>
-  </details>`;
+  </details>`);
 }
