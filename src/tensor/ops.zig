@@ -17,6 +17,11 @@ pub const GenericTensor = types_mod.GenericTensor;
 const core_mod = @import("core.zig");
 pub const Tensor = core_mod.Tensor;
 
+const linalg_mod = @import("linalg.zig");
+pub const QRResult = linalg_mod.QRResult;
+pub const SymEigResult = linalg_mod.SymEigResult;
+pub const SVDResult = linalg_mod.SVDResult;
+
 
 
 
@@ -219,10 +224,31 @@ pub fn concat(allocator: std.mem.Allocator, inputs: []const *Tensor, dim: usize)
         inner_size *= out_shape.dims[d];
     }
 
+    // 确保所有输入张量为连续内存，非连续或视图张量先物化为连续副本
+    const contig_inputs = try allocator.alloc(*Tensor, inputs.len);
+    defer allocator.free(contig_inputs);
+    const needs_free = try allocator.alloc(bool, inputs.len);
+    defer allocator.free(needs_free);
+
+    for (inputs, 0..) |t, i| {
+        if (t.isContiguous() and !t.is_view) {
+            contig_inputs[i] = t;
+            needs_free[i] = false;
+        } else {
+            contig_inputs[i] = try t.contiguous(allocator);
+            needs_free[i] = true;
+        }
+    }
+    defer {
+        for (contig_inputs, 0..) |t, i| {
+            if (needs_free[i]) free(allocator, t);
+        }
+    }
+
     for (0..outer_size) |outer| {
         const out_base = outer * concat_dim_total * inner_size;
         var offset_dim: usize = 0;
-        for (inputs) |t| {
+        for (contig_inputs) |t| {
             const d_k = t.shape.dims[dim];
             const src_base = outer * d_k * inner_size;
             const dest_base = out_base + offset_dim * inner_size;
@@ -316,13 +342,16 @@ pub fn split(allocator: std.mem.Allocator, input: *Tensor, num_splits: usize, di
         inner_size *= input.shape.dims[d];
     }
 
+    const in_contig = if (input.isContiguous() and !input.is_view) input else try input.contiguous(allocator);
+    defer if (!input.isContiguous() or input.is_view) free(allocator, in_contig);
+
     for (0..outer_size) |outer| {
         const src_base = outer * dim_size * inner_size;
         for (0..num_splits) |k| {
             const dest_base = outer * split_dim_size * inner_size;
             const src_offset = src_base + k * split_dim_size * inner_size;
             const copy_len = split_dim_size * inner_size;
-            @memcpy(outputs[k].data[dest_base .. dest_base + copy_len], input.data[src_offset .. src_offset + copy_len]);
+            @memcpy(outputs[k].data[dest_base .. dest_base + copy_len], in_contig.data[src_offset .. src_offset + copy_len]);
         }
     }
 
@@ -380,6 +409,34 @@ pub fn argsort(t: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.All
 
 pub fn nonzero(t: Tensor, allocator: std.mem.Allocator) !*GenericTensor(usize) {
     return t.nonzero(allocator);
+}
+
+pub fn argmax(t: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+    return t.argmax(dim, allocator);
+}
+
+pub fn argmin(t: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+    return t.argmin(dim, allocator);
+}
+
+pub fn max(t: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+    return t.max(dim, allocator);
+}
+
+pub fn min(t: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+    return t.min(dim, allocator);
+}
+
+pub fn qr(t: Tensor, allocator: std.mem.Allocator) !QRResult {
+    return t.qr(allocator);
+}
+
+pub fn symeig(t: Tensor, allocator: std.mem.Allocator) !SymEigResult {
+    return t.symeig(allocator);
+}
+
+pub fn svd(t: Tensor, allocator: std.mem.Allocator) !SVDResult {
+    return t.svd(allocator);
 }
 
 

@@ -26,6 +26,10 @@ const tensorSplit = ops_mod.split;
 
 const nn_kernels = @import("nn_kernels.zig");
 const reductions = @import("reductions.zig");
+pub const linalg = @import("linalg.zig");
+pub const QRResult = linalg.QRResult;
+pub const SymEigResult = linalg.SymEigResult;
+pub const SVDResult = linalg.SVDResult;
 
 extern fn erff(x: f32) f32;
 
@@ -178,6 +182,11 @@ pub const Tensor = struct {
         if (self.shape.dims[1] != other.shape.dims[0]) {
             return error.ShapeMismatch;
         }
+        const a_contig = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+        defer if (!self.isContiguous() or self.is_view) a_contig.deinit(allocator);
+        const b_contig = if (other.isContiguous() and !other.is_view) other else try other.contiguous(allocator);
+        defer if (!other.isContiguous() or other.is_view) b_contig.deinit(allocator);
+
         const M = self.shape.dims[0];
         const K = self.shape.dims[1];
         const N = other.shape.dims[1];
@@ -190,9 +199,9 @@ pub const Tensor = struct {
             @intCast(N),
             @intCast(K),
             1.0,
-            self.data.ptr,
+            a_contig.data.ptr,
             @intCast(K),
-            other.data.ptr,
+            b_contig.data.ptr,
             @intCast(N),
             0.0,
             C.data.ptr,
@@ -206,36 +215,39 @@ pub const Tensor = struct {
         return self.add(bias, allocator);
     }
 
-    pub fn mulScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
+    fn scalarOpEager(self: *const Tensor, val: f32, allocator: std.mem.Allocator, comptime op: fn (f32, f32) f32) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, s_val| {
-            c_val.* = s_val * val;
+        if (self.isContiguous() and self.data.len >= C.data.len) {
+            for (C.data, self.data[0..C.data.len]) |*c_val, s_val| {
+                c_val.* = op(s_val, val);
+            }
+        } else {
+            var coord = [_]usize{0} ** 8;
+            const len = self.shape.len;
+            for (0..C.data.len) |dest_i| {
+                var src_idx: usize = 0;
+                for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
+                C.data[dest_i] = op(self.data[src_idx], val);
+                self.shape.incrementCoord(&coord);
+            }
         }
         return C;
+    }
+
+    pub fn mulScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
+        return self.scalarOpEager(val, allocator, struct { fn op(a: f32, b: f32) f32 { return a * b; } }.op);
     }
 
     pub fn addScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, s_val| {
-            c_val.* = s_val + val;
-        }
-        return C;
+        return self.scalarOpEager(val, allocator, struct { fn op(a: f32, b: f32) f32 { return a + b; } }.op);
     }
 
     pub fn subScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, s_val| {
-            c_val.* = s_val - val;
-        }
-        return C;
+        return self.scalarOpEager(val, allocator, struct { fn op(a: f32, b: f32) f32 { return a - b; } }.op);
     }
 
     pub fn divScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, s_val| {
-            c_val.* = s_val / val;
-        }
-        return C;
+        return self.scalarOpEager(val, allocator, struct { fn op(a: f32, b: f32) f32 { return a / b; } }.op);
     }
 
     fn addOp(a: f32, b: f32) f32 { return a + b; }
@@ -276,60 +288,69 @@ pub const Tensor = struct {
     }
 
     pub fn silu(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, a_val| {
-            const sig = if (a_val >= 0.0) 1.0 / (1.0 + @exp(-a_val)) else @exp(a_val) / (1.0 + @exp(a_val));
-            c_val.* = a_val * sig;
-        }
-        return C;
+        return self.unaryMathEager(allocator, struct {
+            fn op(a_val: f32) f32 {
+                const sig = if (a_val >= 0.0) 1.0 / (1.0 + @exp(-a_val)) else @exp(a_val) / (1.0 + @exp(a_val));
+                return a_val * sig;
+            }
+        }.op);
     }
 
     pub fn relu(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        const total = self.data.len;
-        for (0..total) |i| {
-            C.data[i] = if (self.data[i] > 0.0) self.data[i] else 0.0;
-        }
-        return C;
+        return self.unaryMathEager(allocator, struct {
+            fn op(x: f32) f32 {
+                return if (x > 0.0) x else 0.0;
+            }
+        }.op);
     }
 
     pub fn gelu(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        const total = self.data.len;
-        const sqrt_2: f32 = @sqrt(@as(f32, 2.0));
-        for (0..total) |i| {
-            const x = self.data[i];
-            const erf_val = erff(x / sqrt_2);
-            C.data[i] = 0.5 * x * (1.0 + erf_val);
-        }
-        return C;
+        return self.unaryMathEager(allocator, struct {
+            fn op(x: f32) f32 {
+                const sqrt_2: f32 = @sqrt(@as(f32, 2.0));
+                const erf_val = erff(x / sqrt_2);
+                return 0.5 * x * (1.0 + erf_val);
+            }
+        }.op);
     }
 
     pub fn sigmoid(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, a_val| {
-            if (a_val >= 0.0) {
-                c_val.* = 1.0 / (1.0 + @exp(-a_val));
-            } else {
-                const e = @exp(a_val);
-                c_val.* = e / (1.0 + e);
+        return self.unaryMathEager(allocator, struct {
+            fn op(a_val: f32) f32 {
+                if (a_val >= 0.0) {
+                    return 1.0 / (1.0 + @exp(-a_val));
+                } else {
+                    const e = @exp(a_val);
+                    return e / (1.0 + e);
+                }
             }
-        }
-        return C;
+        }.op);
     }
 
     pub fn tanh(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, a_val| {
-            c_val.* = std.math.tanh(a_val);
-        }
-        return C;
+        return self.unaryMathEager(allocator, struct {
+            fn op(a_val: f32) f32 {
+                return std.math.tanh(a_val);
+            }
+        }.op);
     }
 
     pub fn leakyRelu(self: *Tensor, alpha: f32, allocator: std.mem.Allocator) !*Tensor {
         const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-        for (C.data, self.data) |*c_val, a_val| {
-            c_val.* = if (a_val > 0.0) a_val else alpha * a_val;
+        if (self.isContiguous() and self.data.len >= C.data.len) {
+            for (C.data, self.data[0..C.data.len]) |*c_val, a_val| {
+                c_val.* = if (a_val > 0.0) a_val else alpha * a_val;
+            }
+        } else {
+            var coord = [_]usize{0} ** 8;
+            const len = self.shape.len;
+            for (0..C.data.len) |dest_i| {
+                var src_idx: usize = 0;
+                for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
+                const a_val = self.data[src_idx];
+                C.data[dest_i] = if (a_val > 0.0) a_val else alpha * a_val;
+                self.shape.incrementCoord(&coord);
+            }
         }
         return C;
     }
@@ -391,12 +412,17 @@ pub const Tensor = struct {
 
     pub fn bceWithLogitsLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const loss = try zeros(allocator, &.{ 1, 1 });
-        const N = self.data.len;
-        if (N != targets.data.len) return error.ShapeMismatch;
+        const N = self.shape.numel();
+        if (N != targets.shape.numel()) return error.ShapeMismatch;
+        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
+        const y_c = if (targets.isContiguous() and !targets.is_view) targets else try targets.contiguous(allocator);
+        defer if (!targets.isContiguous() or targets.is_view) y_c.deinit(allocator);
+
         var total_loss: f32 = 0.0;
         for (0..N) |i| {
-            const x = self.data[i];
-            const y = targets.data[i];
+            const x = x_c.data[i];
+            const y = y_c.data[i];
             const max_x = @max(x, 0.0);
             const abs_x = @abs(x);
             total_loss += max_x - x * y + @log(1.0 + @exp(-abs_x));
@@ -407,12 +433,17 @@ pub const Tensor = struct {
 
     pub fn bceLoss(self: *Tensor, targets: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
         const loss = try zeros(allocator, &.{ 1, 1 });
-        const N = self.data.len;
-        if (N != targets.data.len) return error.ShapeMismatch;
+        const N = self.shape.numel();
+        if (N != targets.shape.numel()) return error.ShapeMismatch;
+        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
+        const y_c = if (targets.isContiguous() and !targets.is_view) targets else try targets.contiguous(allocator);
+        defer if (!targets.isContiguous() or targets.is_view) y_c.deinit(allocator);
+
         var total_loss: f32 = 0.0;
         for (0..N) |i| {
-            const p = self.data[i];
-            const y = targets.data[i];
+            const p = x_c.data[i];
+            const y = y_c.data[i];
             const p_clip = @max(p, eps);
             const one_minus_p_clip = @max(1.0 - p, eps);
             total_loss += -(y * @log(p_clip) + (1.0 - y) * @log(one_minus_p_clip));
@@ -423,7 +454,7 @@ pub const Tensor = struct {
 
     pub fn fillNormal(self: *Tensor, random: std.Random, mean_val: f32, stddev: f32) void {
         var i: usize = 0;
-        const len = self.data.len;
+        const len = self.shape.numel();
         while (i < len) {
             var u_1: f32 = random.float(f32);
             while (u_1 == 0.0) {
@@ -443,7 +474,8 @@ pub const Tensor = struct {
 
     pub fn fillUniform(self: *Tensor, random: std.Random, min_val: f32, max_val: f32) void {
         const range = max_val - min_val;
-        for (self.data) |*val| {
+        const len = self.shape.numel();
+        for (self.data[0..len]) |*val| {
             val.* = min_val + random.float(f32) * range;
         }
     }
@@ -455,9 +487,12 @@ pub const Tensor = struct {
         const N = self.shape.dims[1];
         if (B != targets.len) return error.ShapeMismatch;
 
+        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
+
         var loss_sum: f32 = 0.0;
         for (0..B) |i| {
-            const logits_row = self.data[i * N .. (i + 1) * N];
+            const logits_row = x_c.data[i * N .. (i + 1) * N];
             var max_val = logits_row[0];
             for (logits_row[1..]) |val| {
                 if (val > max_val) max_val = val;
@@ -483,12 +518,17 @@ pub const Tensor = struct {
     }
 
     pub fn mseLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        const N = self.data.len;
-        if (N != targets.data.len) return error.ShapeMismatch;
+        const N = self.shape.numel();
+        if (N != targets.shape.numel()) return error.ShapeMismatch;
+        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
+        const y_c = if (targets.isContiguous() and !targets.is_view) targets else try targets.contiguous(allocator);
+        defer if (!targets.isContiguous() or targets.is_view) y_c.deinit(allocator);
+
         const loss = try zeros(allocator, &.{ 1, 1 });
         var loss_sum: f32 = 0.0;
         for (0..N) |i| {
-            const diff = self.data[i] - targets.data[i];
+            const diff = x_c.data[i] - y_c.data[i];
             loss_sum += diff * diff;
         }
         loss.data[0] = loss_sum / @as(f32, @floatFromInt(N));
@@ -497,8 +537,11 @@ pub const Tensor = struct {
 
     pub fn l2Loss(self: *Tensor, lambda: f32, allocator: std.mem.Allocator) !*Tensor {
         const loss = try zeros(allocator, &.{ 1, 1 });
+        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
+
         var sum_sq: f32 = 0.0;
-        for (self.data) |v| {
+        for (x_c.data[0..self.shape.numel()]) |v| {
             sum_sq += v * v;
         }
         loss.data[0] = 0.5 * lambda * sum_sq;
@@ -507,8 +550,11 @@ pub const Tensor = struct {
 
     pub fn l1Loss(self: *Tensor, lambda: f32, allocator: std.mem.Allocator) !*Tensor {
         const loss = try zeros(allocator, &.{ 1, 1 });
+        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
+
         var sum_abs: f32 = 0.0;
-        for (self.data) |v| {
+        for (x_c.data[0..self.shape.numel()]) |v| {
             sum_abs += @abs(v);
         }
         loss.data[0] = lambda * sum_abs;
@@ -734,7 +780,9 @@ pub const Tensor = struct {
     pub const addScalar_ = reductions.addScalar_;
     pub const add_ = reductions.add_;
     pub const argmax = reductions.argmax;
+    pub const argmin = reductions.argmin;
     pub const max = reductions.max;
+    pub const min = reductions.min;
     pub const isContiguous = reductions.isContiguous;
     pub const numel = reductions.numel;
     pub const sum = reductions.sum;
@@ -792,6 +840,21 @@ pub const Tensor = struct {
         const f32_gen = try generic_t.to(f32, allocator);
         defer f32_gen.deinit(allocator);
         return array(allocator, f32_gen.shape.dims[0..f32_gen.shape.len], f32_gen.data);
+    }
+
+    /// 正交三角分解 (QR Decomposition, QR)
+    pub fn qr(self: Tensor, allocator: std.mem.Allocator) !linalg.QRResult {
+        return linalg.qr(self, allocator);
+    }
+
+    /// 实对称特征值分解 (Symmetric Eigenvalue Decomposition, SymEig)
+    pub fn symeig(self: Tensor, allocator: std.mem.Allocator) !linalg.SymEigResult {
+        return linalg.symeig(self, allocator);
+    }
+
+    /// 奇异值分解 (Singular Value Decomposition, SVD)
+    pub fn svd(self: Tensor, allocator: std.mem.Allocator) !linalg.SVDResult {
+        return linalg.svd(self, allocator);
     }
 
     pub fn deinit(self: *Tensor, allocator: std.mem.Allocator) void {

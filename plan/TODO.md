@@ -14,7 +14,7 @@
 * **维度上限与高维扩展**：
   [`Shape.init`](../src/tensor/shape.zig) 与 [`Shape.fromSlice`](../src/tensor/shape.zig) 采用固定 `[8]usize` 栈数组并通过 `MaxDimensionsExceeded` 进行显式边界校验，满足绝大多数深度学习场景（最高 8 维），但尚未支持超过 8 维的任意高维张量缩并。
 * **正定线性代数求解器扩展**：
-  [`src/tensor/core.zig`](../src/tensor/core.zig) 已支持 QR 分解 (`Tensor.qr`)、奇异值分解 (`Tensor.svd`) 与实对称特征值分解 (`Tensor.symeig`)，但 [`solveLinearSystem`](../src/tensor/ops.zig) 仍采用高斯-若尔当消元（Gauss-Jordan），尚待引入针对对称正定矩阵的 Cholesky 分解 ($LL^T$) 求解器。
+  [`src/tensor/core.zig`](../src/tensor/core.zig) 与 [`src/tensor/linalg.zig`](../src/tensor/linalg.zig) 已支持基于 Householder 变换的 QR 分解 (`Tensor.qr`)、奇异值分解 (`Tensor.svd`) 与实对称特征值分解 (`Tensor.symeig`)，但 [`solveLinearSystem`](../src/tensor/ops.zig) 仍采用高斯-若尔当消元（Gauss-Jordan），尚待引入针对对称正定矩阵的 Cholesky 分解 ($LL^T$) 求解器。
 
 ### 2. 自动求导与计算图 (Autodiff & Graph Engine)
 * **不支持高阶导数 (No Higher-Order Gradients)**：

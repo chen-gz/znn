@@ -56,7 +56,7 @@
 
 ### 3.4 高级线性代数与爱因斯坦求和 (`linalg` & `einsum`)
 * **已实现能力**：
-  * [`src/tensor/core.zig`](../src/tensor/core.zig) 已实现基于 Householder 变换的 QR 分解 (`Tensor.qr`)、奇异值分解 (`Tensor.svd`) 以及实对称矩阵 Jacobi 特征值分解 (`Tensor.symeig`)，并在 [`src/tensor/ops.zig`](../src/tensor/ops.zig) 中提供 `solveLinearSystem` 与 `solveRidgeAnalytical`。
+  * [`src/tensor/core.zig`](../src/tensor/core.zig) 与 [`src/tensor/linalg.zig`](../src/tensor/linalg.zig) 已实现基于 Householder 变换的 QR 分解 (`Tensor.qr`)、奇异值分解 (`Tensor.svd`) 以及实对称矩阵 Jacobi 特征值分解 (`Tensor.symeig`)，并在 [`src/tensor/ops.zig`](../src/tensor/ops.zig) 中提供 `solveLinearSystem` 与 `solveRidgeAnalytical`。
 * **剩余差距与演进目标**：
   * 引入对称正定矩阵 **Cholesky 分解 ($LL^T$)**、显式矩阵求逆 `inv(A)` 与行列式 `det(A)`。
   * 引入轻量级编译期/运行期 **Einsum 算子**（如 `einsum("bshd,bthd->bhst", q, k)`）。

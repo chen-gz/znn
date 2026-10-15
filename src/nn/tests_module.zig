@@ -110,3 +110,30 @@ test "Module forwards a single input or a tuple of inputs to the wrapped model" 
     defer named.deinit();
     try std.testing.expectEqualStrings("cell.w_ih_r.weight", named.items[0].name);
 }
+
+test "deinitModel handles tied weights without double free" {
+    const allocator = std.testing.allocator;
+
+    const TiedModel = struct {
+        fc1: nn.Linear,
+        fc2: struct {
+            weight: *Tensor,
+            bias: *Tensor,
+        },
+    };
+
+    const fc1 = try nn.Linear.init(allocator, 4, 4);
+    const bias2 = try nn.createPersistentTensor(allocator, 1, 4, true);
+
+    // Tied weights: fc2 shares the exact same weight tensor pointer as fc1
+    var model = TiedModel{
+        .fc1 = fc1,
+        .fc2 = .{
+            .weight = fc1.weight,
+            .bias = bias2,
+        },
+    };
+
+    // deinitModel should free fc1.weight, fc1.bias, and bias2, without double-freeing fc1.weight
+    nn.deinitModel(&model, allocator);
+}

@@ -1070,3 +1070,44 @@ test "Graph.getModuleFormula / setModuleFormula" {
     try std.testing.expect(updated != null);
     try std.testing.expectEqualStrings("A = V", updated.?);
 }
+
+test "Graph.split autograd backward executes once without gradient multiplication" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.init(allocator);
+    defer graph.deinit();
+
+    // Input X of shape [2, 4] with requires_grad = true
+    const x = try graph.tensor(2, 4, true);
+    for (x.data, 0..) |*val, i| {
+        val.* = @as(f32, @floatFromInt(i + 1));
+    }
+
+    // Split X into 2 parts along dim 1: each part is [2, 2]
+    const splits = try graph.split(x, 2, 1);
+    try std.testing.expectEqual(@as(usize, 2), splits.len);
+
+    const s1 = splits[0]; // columns 0..2
+    const s2 = splits[1]; // columns 2..4
+
+    // Apply different operations to s1 and s2
+    const z1 = try graph.mulScalar(s1, 2.0); // grad wrt s1 will be 2.0
+    const z2 = try graph.mulScalar(s2, 3.0); // grad wrt s2 will be 3.0
+
+    // Combine both outputs
+    const z = try graph.add(z1, z2);
+    const loss = try graph.sum(z, null, false);
+
+    try graph.backward(loss);
+
+    // Verify gradients on X:
+    // Left two columns (from s1) should have grad = 2.0
+    // Right two columns (from s2) should have grad = 3.0
+    for (0..2) |r| {
+        for (0..2) |c| {
+            try std.testing.expectApproxEqAbs(@as(f32, 2.0), x.grad[r * 4 + c], 1e-5);
+        }
+        for (2..4) |c| {
+            try std.testing.expectApproxEqAbs(@as(f32, 3.0), x.grad[r * 4 + c], 1e-5);
+        }
+    }
+}

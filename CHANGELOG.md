@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **高级线性代数分解算子 (`src/tensor/linalg.zig`, `src/tensor/core.zig`, `src/tensor/ops.zig`, `src/tensor.zig`, `src/root.zig`, `src/tensor/tests.zig`)**:
+  - 新增精简正交三角分解 (`Tensor.qr`, `linalg.qr`)：基于豪斯霍尔德变换 (Householder Transformation)，支持任意形状 $M \times N$ 矩阵，输出具有标准正交列的正交矩阵 $Q \in \mathbb{R}^{M \times K}$ 与对角元素非负的上三角矩阵 $R \in \mathbb{R}^{K \times N}$ ($K = \min(M, N)$)，满足 $A = Q R$。
+  - 新增实对称特征值分解 (`Tensor.symeig`, `linalg.symeig`)：基于雅可比旋转法 (Jacobi Rotation Method)，输出按代数值升序排列的特征值向量与标准正交特征向量矩阵 $V \in \mathbb{R}^{N \times N}$，满足 $A V = V \text{diag}(\lambda)$ 与 $V^T V = I$。
+  - 新增奇异值分解 (`Tensor.svd`, `linalg.svd`)：基于单边雅可比奇异值分解 (One-Sided Jacobi SVD)，同时支持高瘦 ($M \ge N$) 与扁平 ($M < N$) 任意矩形矩阵，输出标准正交列矩阵 $U \in \mathbb{R}^{M \times K}$、降序排列非负奇异值向量 $S \in \mathbb{R}^K$ 及标准正交行矩阵 $V^T \in \mathbb{R}^{K \times N}$ ($K = \min(M, N)$)，满足 $A = U \text{diag}(S) V^T$。
+- **全维度归约极值与索引算子 (`src/tensor/reductions.zig`, `src/tensor/core.zig`, `src/tensor/ops.zig`, `src/tensor.zig`, `src/tensor/tests.zig`)**:
+  - 彻底泛化 `argmax` 与 `max` 从此前的 2D 限制扩展至支持任意秩 $N$ 维张量沿任意合法轴 `dim < rank` 归约。
+  - 新增对偶算子 `argmin` 与 `min`，并在张量方法、`ops` 算子及顶层门面完成完整导出与测试覆盖。
+
+### Fixed
+- **自动微分多输出算子反向传播重复执行与梯度相乘缺陷 (`src/autodiff/graph.zig`, `src/autodiff/backward_core.zig`, `src/autodiff/tests.zig`)**:
+  - 核心重构：将此前作用在 `*Tensor` 上的拓扑排序升级为以 `*Op` 算子为顶点的有向无环图深度优先遍历 (`topologicalSortOps`)，在 `backward` 与 `backwardWithGrad` 中按反向拓扑序严格保证每个多输出算子（如 `Split`）仅执行且只执行一次 `Op.backward()`，彻底消除梯度随消费分支指数倍增的严重隐患。
+- **切片视图与非连续张量物理长度匹配与跨步物化 (`src/tensor/core.zig`, `src/tensor/nn_kernels.zig`, `src/tensor/ops.zig`, `src/autodiff/backward_core.zig`, `backward_math.zig`, `backward_nn.zig`)**:
+  - 全面清理直接以底层物理缓冲区长度 `self.data.len` 循环导致的越界或脏数据问题，改以逻辑元素量 `self.shape.numel()` 与 `data[0..numel]` 正确遍历。
+  - 在核心矩阵乘法 (`matmul`)、拼接 (`concat`)、分割 (`split`) 与激活/归约前置检查中，对非连续切片视图张量自动物化连续副本，保障底层 BLAS 与 SIMD 访存安全。
+- **全连接层 (`Linear.forward`) 任意 N 维张量与 1D 向量输入支持 (`src/nn/core.zig`, `src/nn/tests.zig`)**:
+  - 新增对秩大于 2 的张量（如 Transformer 批次序列 `[B, S, D]`）的前置维度自动展平与输出重组恢复，同时支持 1D 单向量 `[in_features]` 直接前向与自动求导。
+- **复合模型权重共享 (Tied Weights) 重复释放防护 (`src/nn/module.zig`, `src/nn/tests_module.zig`)**:
+  - 在 `deinitModel` 反射遍历器中引入指针去重哈希集 `seen: std.AutoHashMap(*Tensor, void)`，保证共享权重的张量仅被销毁释放一次，彻底杜绝悬垂指针与 Double-Free 崩溃。
+- **BPE 分词器多字节 UTF-8 分块边界完整性 (`src/dataset.zig`)**:
+  - 优化 `BPETokenizer.encode` 分块算法：在分块后半段优先检索空白字符以保持词汇边界；若无空白字符，自动向后回退跳过 UTF-8 延续字节 (`10xxxxxx`)，确保绝不在多字节字符中间截断。
 - **内聚前端模型图可视化器 (`web/`, `doc/visualization-model-edge-design.md`)**:
   - 将 Schema 2.0 模型计算图可视化前端（`web/src/utils/model-graph.ts`、`web/src/utils/flow-edges.ts`、`web/src/utils/json-schema.ts`、`web/src/scripts/visualizer.ts` 及对应的 Vitest 单元测试套件）与完整设计规范 `doc/visualization-model-edge-design.md` 收归至 `znn` 仓库，直接读取 `src/nn/model_graph.schema.json` 与 `examples/` 下的导出模型图，消除跨仓文件复制。
 - **专用模型库与 Gemma 4 架构实现 (`src/models/gemma4.zig`, `src/models.zig`, `src/root.zig`, `src/models/tests.zig`)**:

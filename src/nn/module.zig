@@ -135,18 +135,26 @@ fn walkElement(item_ptr: anytype, visitor: anytype, path: *Path) !void {
 // 构建在 walk 之上的模块操作
 // ============================================================================
 
-/// 释放模型持有的全部张量 (参数与缓冲区) 及可变切片字段
+/// 释放模型持有的全部张量 (参数与缓冲区) 及可变切片字段（去重避免权重共享时 Double Free）
 pub fn deinitModel(model: anytype, allocator: std.mem.Allocator) void {
     const Visitor = struct {
         allocator: std.mem.Allocator,
+        seen: std.AutoHashMap(*Tensor, void),
+
         pub fn visitTensor(self: *@This(), _: []const u8, t: *Tensor) !void {
+            if (self.seen.contains(t)) return;
+            self.seen.put(t, {}) catch {};
             freePersistentTensor(self.allocator, t);
         }
         pub fn visitOwnedSlice(self: *@This(), s: anytype) !void {
             self.allocator.free(s);
         }
     };
-    var v = Visitor{ .allocator = allocator };
+    var v = Visitor{
+        .allocator = allocator,
+        .seen = std.AutoHashMap(*Tensor, void).init(allocator),
+    };
+    defer v.seen.deinit();
     walk(model, &v) catch |err| switch (err) {};
 }
 

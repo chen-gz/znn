@@ -53,6 +53,12 @@ pub const ConvOptions = tensor.ConvOptions;
 pub const PoolOptions = tensor.PoolOptions;
 pub const RopeOptions = tensor.RopeOptions;
 pub const RoPEOptions = tensor.RoPEOptions;
+pub const QRResult = tensor.QRResult;
+pub const SymEigResult = tensor.SymEigResult;
+pub const SVDResult = tensor.SVDResult;
+pub const qr = tensor.qr;
+pub const symeig = tensor.symeig;
+pub const svd = tensor.svd;
 
 pub const CrossValidationOptions = cv.CrossValidationOptions;
 

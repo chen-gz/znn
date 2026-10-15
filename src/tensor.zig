@@ -8,6 +8,12 @@ pub const nn_kernels = @import("tensor/nn_kernels.zig");
 pub const reductions = @import("tensor/reductions.zig");
 pub const ops = @import("tensor/ops.zig");
 pub const static = @import("tensor/static.zig");
+pub const linalg = @import("tensor/linalg.zig");
+
+// --- Re-export Linear Algebra Results ---
+pub const QRResult = linalg.QRResult;
+pub const SymEigResult = linalg.SymEigResult;
+pub const SVDResult = linalg.SVDResult;
 
 // --- Re-export shape and stride utilities ---
 pub const Shape = shape.Shape;
@@ -72,12 +78,19 @@ pub const clip = ops.clip;
 pub const sort = ops.sort;
 pub const argsort = ops.argsort;
 pub const nonzero = ops.nonzero;
+pub const argmax = ops.argmax;
+pub const argmin = ops.argmin;
+pub const max = ops.max;
+pub const min = ops.min;
 pub const sqrt = ops.sqrt;
 pub const exp = ops.exp;
 pub const log = ops.log;
 pub const abs = ops.abs;
 pub const solveLinearSystem = ops.solveLinearSystem;
 pub const solveRidgeAnalytical = ops.solveRidgeAnalytical;
+pub const qr = ops.qr;
+pub const symeig = ops.symeig;
+pub const svd = ops.svd;
 pub const applyRoPE = ops.applyRoPE;
 pub const applyRoPETensor = ops.applyRoPETensor;
 

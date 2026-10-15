@@ -869,61 +869,61 @@ pub const Graph = struct {
     // 执行计算图的反向传播
     pub fn backward(self: *Graph, loss_tensor: *Tensor) !void {
         const allocator = self.arena.allocator();
-        var visited = std.AutoHashMap(*Tensor, void).init(allocator);
+        var visited = std.AutoHashMap(*Op, void).init(allocator);
         defer visited.deinit();
-        var sorted_list: std.ArrayList(*Tensor) = .empty;
-        defer sorted_list.deinit(allocator);
+        var sorted_ops: std.ArrayList(*Op) = .empty;
+        defer sorted_ops.deinit(allocator);
 
-        // 1. 对计算图进行拓扑排序，以确保节点按正确的计算依赖关系进行链式求导
-        try self.topologicalSort(loss_tensor, &visited, &sorted_list);
+        // 1. 对算子进行拓扑排序，以确保节点按正确的计算依赖关系进行链式求导
+        if (loss_tensor.creator) |root_op| {
+            try self.topologicalSortOps(root_op, &visited, &sorted_ops);
+        }
 
         // 2. 损失函数节点本身的偏导数设为 1.0 (dL/dL = 1.0)
         loss_tensor.grad[0] = 1.0;
 
         // 3. 按拓扑排序的逆序执行各算子的 backward 求导函数，由深至浅传导梯度
-        var i = sorted_list.items.len;
+        var i = sorted_ops.items.len;
         while (i > 0) {
             i -= 1;
-            const node = sorted_list.items[i];
-            if (node.creator) |op| {
-                try op.backward();
-            }
+            const op = sorted_ops.items[i];
+            try op.backward();
         }
     }
 
     // 执行计算图的反向传播，起点张量的梯度已被外部手动预填（常用于自定义损失函数如 MSE）
     pub fn backwardWithGrad(self: *Graph, output_tensor: *Tensor) !void {
         const allocator = self.arena.allocator();
-        var visited = std.AutoHashMap(*Tensor, void).init(allocator);
+        var visited = std.AutoHashMap(*Op, void).init(allocator);
         defer visited.deinit();
-        var sorted_list: std.ArrayList(*Tensor) = .empty;
-        defer sorted_list.deinit(allocator);
+        var sorted_ops: std.ArrayList(*Op) = .empty;
+        defer sorted_ops.deinit(allocator);
 
-        // 1. 对计算图进行拓扑排序
-        try self.topologicalSort(output_tensor, &visited, &sorted_list);
+        // 1. 对算子进行拓扑排序
+        if (output_tensor.creator) |root_op| {
+            try self.topologicalSortOps(root_op, &visited, &sorted_ops);
+        }
 
         // 2. 按拓扑排序的逆序执行各算子的 backward 求导，由深至浅传导梯度
-        var i = sorted_list.items.len;
+        var i = sorted_ops.items.len;
         while (i > 0) {
             i -= 1;
-            const node = sorted_list.items[i];
-            if (node.creator) |op| {
-                try op.backward();
-            }
+            const op = sorted_ops.items[i];
+            try op.backward();
         }
     }
 
-    // 拓扑排序辅助函数（深度优先搜索 DFS 实现）
-    fn topologicalSort(self: *Graph, node: *Tensor, visited: *std.AutoHashMap(*Tensor, void), list: *std.ArrayList(*Tensor)) !void {
-        if (visited.contains(node)) return;
-        try visited.put(node, {});
+    // 拓扑排序辅助函数（深度优先搜索 DFS 实现，以算子为图节点）
+    fn topologicalSortOps(self: *Graph, op: *Op, visited: *std.AutoHashMap(*Op, void), list: *std.ArrayList(*Op)) !void {
+        if (visited.contains(op)) return;
+        try visited.put(op, {});
 
-        if (node.creator) |op| {
-            for (op.inputs) |input| {
-                try self.topologicalSort(input, visited, list);
+        for (op.inputs) |input| {
+            if (input.creator) |prev_op| {
+                try self.topologicalSortOps(prev_op, visited, list);
             }
         }
-        try list.append(self.arena.allocator(), node);
+        try list.append(self.arena.allocator(), op);
     }
 
     // 运行计算图的前向传播，根据输入更新所有算子节点的值
