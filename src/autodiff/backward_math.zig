@@ -84,7 +84,7 @@ pub fn backwardMath(self: *Op) !void {
             const C = self.outputs[0];
             const lambda = self.context.L2Loss.lambda;
             if (A.requires_grad) {
-                for (0..A.data.len) |i| {
+                for (0..A.shape.numel()) |i| {
                     A.grad[i] += C.grad[0] * lambda * A.data[i];
                 }
             }
@@ -94,7 +94,7 @@ pub fn backwardMath(self: *Op) !void {
             const C = self.outputs[0];
             const lambda = self.context.L1Loss.lambda;
             if (A.requires_grad) {
-                for (0..A.data.len) |i| {
+                for (0..A.shape.numel()) |i| {
                     const val = A.data[i];
                     const sign: f32 = if (val > 0.0) 1.0 else if (val < 0.0) -1.0 else 0.0;
                     A.grad[i] += C.grad[0] * lambda * sign;

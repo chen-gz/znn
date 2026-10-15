@@ -96,8 +96,38 @@ pub const Linear = struct {
     pub fn forward(self: *const Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        const z = try graph.matmul(x, self.weight);
-        return try graph.addBias(z, self.bias);
+
+        if (x.shape.len == 2) {
+            const z = try graph.matmul(x, self.weight);
+            return try graph.addBias(z, self.bias);
+        } else if (x.shape.len > 2) {
+            const in_features = self.weight.shape.dims[0];
+            const out_features = self.weight.shape.dims[1];
+            if (x.shape.dims[x.shape.len - 1] != in_features) return error.ShapeMismatch;
+            const N = x.shape.numel() / in_features;
+
+            const x_flat = try graph.reshape(x, &.{ N, in_features });
+            const z_flat = try graph.matmul(x_flat, self.weight);
+            const out_flat = try graph.addBias(z_flat, self.bias);
+
+            var out_dims = [_]usize{0} ** 8;
+            for (0..x.shape.len - 1) |i| {
+                out_dims[i] = x.shape.dims[i];
+            }
+            out_dims[x.shape.len - 1] = out_features;
+            return try graph.reshape(out_flat, out_dims[0..x.shape.len]);
+        } else if (x.shape.len == 1) {
+            const in_features = self.weight.shape.dims[0];
+            const out_features = self.weight.shape.dims[1];
+            if (x.shape.dims[0] != in_features) return error.ShapeMismatch;
+
+            const x_flat = try graph.reshape(x, &.{ 1, in_features });
+            const z_flat = try graph.matmul(x_flat, self.weight);
+            const out_flat = try graph.addBias(z_flat, self.bias);
+            return try graph.reshape(out_flat, &.{out_features});
+        } else {
+            return error.IncompatibleDimensions;
+        }
     }
 };
 

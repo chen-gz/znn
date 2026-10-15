@@ -23,12 +23,16 @@ pub const adaptiveAvgPool1d = conv_pool.adaptiveAvgPool1d;
 pub const adaptiveAvgPool2d = conv_pool.adaptiveAvgPool2d;
 
 pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-    const D = self.shape.dims[self.shape.len - 1];
-    const M = self.data.len / D;
-    const C = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+    defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
+
+    const D = x.shape.dims[x.shape.len - 1];
+    if (D == 0) return error.DivisionByZero;
+    const M = x.shape.numel() / D;
+    const C = try zeros(allocator, x.shape.dims[0..x.shape.len]);
 
     for (0..M) |i| {
-        const row_in = self.data[i * D .. (i + 1) * D];
+        const row_in = x.data[i * D .. (i + 1) * D];
         const row_out = C.data[i * D .. (i + 1) * D];
 
         var max_val = row_in[0];
@@ -52,12 +56,20 @@ pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
 
 /// 均方根层归一化前向核函数 (Root Mean Square Layer Normalization, RMSNorm)
 pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
-    const D = self.shape.dims[self.shape.len - 1];
-    const M = self.data.len / D;
-    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+    defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
+
+    const g_c = if (G.isContiguous() and !G.is_view) G else try G.contiguous(allocator);
+    defer if (!G.isContiguous() or G.is_view) g_c.deinit(allocator);
+
+    const D = x.shape.dims[x.shape.len - 1];
+    if (D == 0) return error.DivisionByZero;
+    if (g_c.shape.numel() != D) return error.ShapeMismatch;
+    const M = x.shape.numel() / D;
+    const Y = try zeros(allocator, x.shape.dims[0..x.shape.len]);
 
     for (0..M) |i| {
-        const row_in = self.data[i * D .. (i + 1) * D];
+        const row_in = x.data[i * D .. (i + 1) * D];
         const row_out = Y.data[i * D .. (i + 1) * D];
 
         var sum_x2: f32 = 0.0;
@@ -66,7 +78,7 @@ pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator
         }
         const rms = @sqrt(sum_x2 / @as(f32, @floatFromInt(D)) + eps);
 
-        for (row_in, row_out, G.data) |x_val, *y_val, g_val| {
+        for (row_in, row_out, g_c.data[0..D]) |x_val, *y_val, g_val| {
             y_val.* = x_val / rms * g_val;
         }
     }
@@ -75,14 +87,24 @@ pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator
 
 /// 标准层归一化前向核函数 (Layer Normalization, LayerNorm)
 pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
-    const D = self.shape.dims[self.shape.len - 1];
-    if (G.data.len != D or B.data.len != D) return error.ShapeMismatch;
-    const M = self.data.len / D;
-    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+    defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
+
+    const g_c = if (G.isContiguous() and !G.is_view) G else try G.contiguous(allocator);
+    defer if (!G.isContiguous() or G.is_view) g_c.deinit(allocator);
+
+    const b_c = if (B.isContiguous() and !B.is_view) B else try B.contiguous(allocator);
+    defer if (!B.isContiguous() or B.is_view) b_c.deinit(allocator);
+
+    const D = x.shape.dims[x.shape.len - 1];
+    if (D == 0) return error.DivisionByZero;
+    if (g_c.shape.numel() != D or b_c.shape.numel() != D) return error.ShapeMismatch;
+    const M = x.shape.numel() / D;
+    const Y = try zeros(allocator, x.shape.dims[0..x.shape.len]);
     const d_f = @as(f32, @floatFromInt(D));
 
     for (0..M) |i| {
-        const row_in = self.data[i * D .. (i + 1) * D];
+        const row_in = x.data[i * D .. (i + 1) * D];
         const row_out = Y.data[i * D .. (i + 1) * D];
 
         var sum_x: f32 = 0.0;
@@ -97,7 +119,7 @@ pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std
         const inv_std = 1.0 / @sqrt(var_sum / d_f + eps);
 
         for (0..D) |j| {
-            row_out[j] = (row_in[j] - mean_val) * inv_std * G.data[j] + B.data[j];
+            row_out[j] = (row_in[j] - mean_val) * inv_std * g_c.data[j] + b_c.data[j];
         }
     }
     return Y;
@@ -351,12 +373,13 @@ pub fn groupNorm(
 
 /// 随机失活掩码前向核函数 (Dropout Mask Application)
 pub fn applyDropoutMask(self: *Tensor, mask: []const f32, allocator: std.mem.Allocator) !*Tensor {
-    const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
-    defer if (!self.isContiguous()) x_contig.deinit(allocator);
+    const total = self.shape.numel();
+    if (mask.len != total) return error.ShapeMismatch;
+    const x_contig = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+    defer if (!self.isContiguous() or self.is_view) x_contig.deinit(allocator);
 
-    if (mask.len != x_contig.data.len) return error.ShapeMismatch;
     const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-    for (x_contig.data, Y.data, mask) |x_val, *y_val, m_val| {
+    for (x_contig.data[0..total], Y.data, mask) |x_val, *y_val, m_val| {
         y_val.* = x_val * m_val;
     }
     return Y;
@@ -366,12 +389,15 @@ pub fn applyDropoutMask(self: *Tensor, mask: []const f32, allocator: std.mem.All
 /// 支持经典相邻配对 (Interleaved) 与主流半切分配对 (Split-Half) 两种拓扑，
 /// 以及任意频率基数 (base)、旋转子空间偏移 (rotary_offset) 与部分旋转因子 (partial_rotary_factor)。
 pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: std.mem.Allocator) !*Tensor {
+    const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
+    defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
+
     const rotary_offset = options.rotary_offset;
     const base = options.base;
-    const D = self.shape.dims[self.shape.len - 1];
+    const D = x.shape.dims[x.shape.len - 1];
     if (rotary_offset > D) return error.DimensionOutOfBounds;
-    const T = if (self.shape.len >= 2) self.shape.dims[self.shape.len - 2] else 1;
-    const outer = self.data.len / (T * D);
+    const T = if (x.shape.len >= 2) x.shape.dims[x.shape.len - 2] else 1;
+    const outer = x.shape.numel() / (T * D);
     const rot_dim = D - rotary_offset;
     const half = rot_dim / 2;
     const rot_dim_f = @as(f32, @floatFromInt(rot_dim));
@@ -382,7 +408,7 @@ pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: st
     const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
     for (0..outer) |o| {
         for (0..T) |t| {
-            const row_in = self.data[(o * T + t) * D .. (o * T + t + 1) * D];
+            const row_in = x.data[(o * T + t) * D .. (o * T + t + 1) * D];
             const row_out = Y.data[(o * T + t) * D .. (o * T + t + 1) * D];
 
             // 先复制整行，后续仅更新参与旋转的维度

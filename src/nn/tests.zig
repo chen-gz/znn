@@ -1593,4 +1593,51 @@ test "Safetensors BF16 deserialization and loadModel" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), w.data[3], 1e-4);
 }
 
+test "Linear forward supports 3D and 1D inputs with autograd" {
+    const allocator = std.testing.allocator;
+    var linear = try Linear.init(allocator, 3, 2);
+    defer nn.deinitModel(&linear, allocator);
+
+    // Initialize weights and biases
+    @memcpy(linear.weight.data, &[_]f32{
+        1.0, 2.0,
+        3.0, 4.0,
+        5.0, 6.0,
+    });
+    @memcpy(linear.bias.data, &[_]f32{ 0.1, 0.2 });
+
+    var graph = autodiff.Graph.init(allocator);
+    defer graph.deinit();
+
+    // 1. 3D input: [B=2, T=2, C=3]
+    const x_3d = try graph.tensorND(&.{ 2, 2, 3 }, true);
+    for (x_3d.data, 0..) |*v, i| {
+        v.* = @as(f32, @floatFromInt(i + 1));
+    }
+
+    const y_3d = try linear.forward(&graph, x_3d);
+    try std.testing.expectEqual(@as(usize, 3), y_3d.shape.len);
+    try std.testing.expectEqual(@as(usize, 2), y_3d.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), y_3d.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 2), y_3d.shape.dims[2]);
+
+    // Backward pass
+    const loss = try graph.sum(y_3d, null, false);
+    try graph.backward(loss);
+    try std.testing.expect(x_3d.grad.len == 12);
+
+    // 2. 1D input: [C=3]
+    var g1 = autodiff.Graph.init(allocator);
+    defer g1.deinit();
+    const x_1d = try g1.tensorND(&.{3}, false);
+    @memcpy(x_1d.data, &[_]f32{ 1.0, 1.0, 1.0 });
+
+    const y_1d = try linear.forward(&g1, x_1d);
+    try std.testing.expectEqual(@as(usize, 1), y_1d.shape.len);
+    try std.testing.expectEqual(@as(usize, 2), y_1d.shape.dims[0]);
+    // y = [1, 1, 1] * W + [0.1, 0.2] = [1+3+5 + 0.1, 2+4+6 + 0.2] = [9.1, 12.2]
+    try std.testing.expectApproxEqAbs(@as(f32, 9.1), y_1d.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 12.2), y_1d.data[1], 1e-5);
+}
+
 

@@ -789,7 +789,7 @@ pub fn backwardNN(self: *Op) !void {
             const A = self.inputs[0];
             const C = self.outputs[0];
             const D = A.shape.dims[A.shape.len - 1];
-            const M = A.data.len / D;
+            const M = A.shape.numel() / D;
 
             if (A.requires_grad) {
                 for (0..M) |i| {
@@ -814,7 +814,7 @@ pub fn backwardNN(self: *Op) !void {
             const Y = self.outputs[0];
             const eps = self.context.RmsNorm.eps;
             const D = X.shape.dims[X.shape.len - 1];
-            const M = X.data.len / D;
+            const M = X.shape.numel() / D;
 
             for (0..M) |i| {
                 const row_in = X.data[i * D .. (i + 1) * D];
@@ -855,7 +855,7 @@ pub fn backwardNN(self: *Op) !void {
             const Y = self.outputs[0];
             const eps = self.context.LayerNorm.eps;
             const D = X.shape.dims[X.shape.len - 1];
-            const M = X.data.len / D;
+            const M = X.shape.numel() / D;
             const d_f = @as(f32, @floatFromInt(D));
 
             for (0..M) |i| {
@@ -1111,7 +1111,7 @@ pub fn backwardNN(self: *Op) !void {
                 const factor = std.math.clamp(self.context.RoPE.partial_rotary_factor, 0.0, 1.0);
                 const D = X.shape.dims[X.shape.len - 1];
                 const T = if (X.shape.len >= 2) X.shape.dims[X.shape.len - 2] else 1;
-                const outer = X.data.len / (T * D);
+                const outer = X.shape.numel() / (T * D);
                 const rot_dim = D - rotary_offset;
                 const half = rot_dim / 2;
                 const rot_dim_f = @as(f32, @floatFromInt(rot_dim));

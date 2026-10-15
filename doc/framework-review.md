@@ -51,7 +51,8 @@ Layer 1: Multi-Dimensional Tensor Primitives (`src/tensor.zig` & `src/tensor/*`,
   ├── core.zig                  (f32 autograd-capable Tensor, views, indexing, basic arithmetic/activations)
   ├── conv_pool.zig             (1D/2D im2col/col2im convolution, transposed convolution, max/avg/adaptive pooling)
   ├── nn_kernels.zig            (softmax, RMSNorm, LayerNorm, BatchNorm1d, BatchNorm2d, GroupNorm, Dropout, RoPE, BatchMatMul)
-  ├── reductions.zig            (Multi-axis reductions, masking, comparisons, slicing, sorting)
+  ├── reductions.zig            (Multi-axis reductions, masking, comparisons, slicing, sorting, argmax/argmin/max/min)
+  ├── linalg.zig                (Householder QR, Jacobi SymEig, and one-sided Jacobi SVD decompositions)
   └── ops.zig                   (Creation factories, concat/split/stack, linear system & SVD/QR/Symeig solvers)
 ```
 

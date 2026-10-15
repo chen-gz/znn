@@ -68,7 +68,7 @@ pub fn backwardCore(self: *Op) !void {
             const C = self.outputs[0];
 
             if (A.requires_grad) {
-                const total = A.data.len;
+                const total = A.shape.numel();
                 for (0..total) |i| {
                     A.grad[i] += if (A.data[i] > 0.0) C.grad[i] else 0.0;
                 }
@@ -82,7 +82,7 @@ pub fn backwardCore(self: *Op) !void {
             const C = self.outputs[0];
 
             if (A.requires_grad) {
-                const total = A.data.len;
+                const total = A.shape.numel();
                 const sqrt_2 = @sqrt(@as(f32, 2.0));
                 const inv_sqrt_2pi = 1.0 / @sqrt(@as(f32, 2.0 * std.math.pi));
                 for (0..total) |i| {
@@ -377,6 +377,7 @@ pub fn backwardCore(self: *Op) !void {
                 for (0..outer_size) |outer| {
                     const src_base = outer * dim_size * inner_size;
                     for (0..num_splits) |k| {
+                        if (self.outputs[k].grad.len == 0) continue;
                         const dest_base = outer * split_dim_size * inner_size;
                         const src_offset = src_base + k * split_dim_size * inner_size;
                         const copy_len = split_dim_size * inner_size;
@@ -416,7 +417,7 @@ pub fn backwardCore(self: *Op) !void {
             const A = self.inputs[0]; // y_pred
             const B = self.inputs[1]; // y_true
             const C = self.outputs[0]; // loss
-            const N = A.data.len;
+            const N = A.shape.numel();
             const N_f = @as(f32, @floatFromInt(N));
 
             if (A.requires_grad) {
@@ -435,7 +436,7 @@ pub fn backwardCore(self: *Op) !void {
             const C = self.outputs[0];
             const val = self.context.MulScalar.val;
             if (A.requires_grad) {
-                for (0..A.data.len) |i| {
+                for (0..A.shape.numel()) |i| {
                     A.grad[i] += C.grad[i] * val;
                 }
             }
@@ -445,7 +446,7 @@ pub fn backwardCore(self: *Op) !void {
             const C = self.outputs[0];
             const val = self.context.DivScalar.val;
             if (A.requires_grad) {
-                for (0..A.data.len) |i| {
+                for (0..A.shape.numel()) |i| {
                     A.grad[i] += C.grad[i] / val;
                 }
             }
@@ -454,7 +455,7 @@ pub fn backwardCore(self: *Op) !void {
             const A = self.inputs[0];
             const C = self.outputs[0];
             if (A.requires_grad) {
-                for (0..A.data.len) |i| {
+                for (0..A.shape.numel()) |i| {
                     A.grad[i] += C.grad[i];
                 }
             }
@@ -463,7 +464,7 @@ pub fn backwardCore(self: *Op) !void {
             const A = self.inputs[0];
             const C = self.outputs[0];
             if (A.requires_grad) {
-                for (0..A.data.len) |i| {
+                for (0..A.shape.numel()) |i| {
                     A.grad[i] += C.grad[i];
                 }
             }

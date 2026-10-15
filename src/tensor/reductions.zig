@@ -61,76 +61,170 @@ pub fn add_(self: *Tensor, other: *Tensor) !*Tensor {
 
 pub fn argmax(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
     if (dim >= self.shape.len) return error.DimensionOutOfBounds;
-    if (self.shape.len != 2) return error.UnsupportedDimension;
-    const M = self.shape.dims[0];
-    const N = self.shape.dims[1];
+    if (self.shape.len == 0) return error.UnsupportedDimension;
+    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
+    defer if (contig_ptr) |cp| free(allocator, cp);
+    const x_data = if (contig_ptr) |cp| cp.data else self.data;
 
-    if (dim == 1) {
-        const C = try zeros(allocator, &.{ M, 1 });
-        for (0..M) |i| {
-            var max_val = self.get(&.{ i, 0 });
-            var max_idx: usize = 0;
-            for (1..N) |j| {
-                const val = self.get(&.{ i, j });
-                if (val > max_val) {
-                    max_val = val;
-                    max_idx = j;
-                }
-            }
-            C.data[i] = @as(f32, @floatFromInt(max_idx));
-        }
-        return C;
-    } else if (dim == 0) {
-        const C = try zeros(allocator, &.{ 1, N });
-        for (0..N) |j| {
-            var max_val = self.get(&.{ 0, j });
-            var max_idx: usize = 0;
-            for (1..M) |i| {
-                const val = self.get(&.{ i, j });
-                if (val > max_val) {
-                    max_val = val;
-                    max_idx = i;
-                }
-            }
-            C.data[j] = @as(f32, @floatFromInt(max_idx));
-        }
-        return C;
-    } else {
-        return error.UnsupportedDimension;
+    var out_dims = [_]usize{0} ** 8;
+    for (0..self.shape.len) |d| {
+        out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
     }
+    const C = try zeros(allocator, out_dims[0..self.shape.len]);
+
+    const reduce_size = self.shape.dims[dim];
+    if (reduce_size == 0) return C;
+
+    var outer_size: usize = 1;
+    for (0..dim) |d| {
+        outer_size *= self.shape.dims[d];
+    }
+    var inner_size: usize = 1;
+    for ((dim + 1)..self.shape.len) |d| {
+        inner_size *= self.shape.dims[d];
+    }
+
+    for (0..outer_size) |outer| {
+        const out_base = outer * inner_size;
+        const src_base = outer * reduce_size * inner_size;
+        for (0..inner_size) |inner| {
+            var best_idx: usize = 0;
+            var best_val = x_data[src_base + inner];
+            for (1..reduce_size) |k| {
+                const val = x_data[src_base + k * inner_size + inner];
+                if (val > best_val) {
+                    best_val = val;
+                    best_idx = k;
+                }
+            }
+            C.data[out_base + inner] = @as(f32, @floatFromInt(best_idx));
+        }
+    }
+    return C;
+}
+
+pub fn argmin(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+    if (dim >= self.shape.len) return error.DimensionOutOfBounds;
+    if (self.shape.len == 0) return error.UnsupportedDimension;
+    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
+    defer if (contig_ptr) |cp| free(allocator, cp);
+    const x_data = if (contig_ptr) |cp| cp.data else self.data;
+
+    var out_dims = [_]usize{0} ** 8;
+    for (0..self.shape.len) |d| {
+        out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
+    }
+    const C = try zeros(allocator, out_dims[0..self.shape.len]);
+
+    const reduce_size = self.shape.dims[dim];
+    if (reduce_size == 0) return C;
+
+    var outer_size: usize = 1;
+    for (0..dim) |d| {
+        outer_size *= self.shape.dims[d];
+    }
+    var inner_size: usize = 1;
+    for ((dim + 1)..self.shape.len) |d| {
+        inner_size *= self.shape.dims[d];
+    }
+
+    for (0..outer_size) |outer| {
+        const out_base = outer * inner_size;
+        const src_base = outer * reduce_size * inner_size;
+        for (0..inner_size) |inner| {
+            var best_idx: usize = 0;
+            var best_val = x_data[src_base + inner];
+            for (1..reduce_size) |k| {
+                const val = x_data[src_base + k * inner_size + inner];
+                if (val < best_val) {
+                    best_val = val;
+                    best_idx = k;
+                }
+            }
+            C.data[out_base + inner] = @as(f32, @floatFromInt(best_idx));
+        }
+    }
+    return C;
 }
 
 pub fn max(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
     if (dim >= self.shape.len) return error.DimensionOutOfBounds;
-    if (self.shape.len != 2) return error.UnsupportedDimension;
-    const M = self.shape.dims[0];
-    const N = self.shape.dims[1];
+    if (self.shape.len == 0) return error.UnsupportedDimension;
+    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
+    defer if (contig_ptr) |cp| free(allocator, cp);
+    const x_data = if (contig_ptr) |cp| cp.data else self.data;
 
-    if (dim == 1) {
-        const C = try zeros(allocator, &.{ M, 1 });
-        for (0..M) |i| {
-            var max_val = self.get(&.{ i, 0 });
-            for (1..N) |j| {
-                const val = self.get(&.{ i, j });
-                if (val > max_val) max_val = val;
-            }
-            C.data[i] = max_val;
-        }
-        return C;
-    } else if (dim == 0) {
-        const C = try zeros(allocator, &.{ 1, N });
-        for (0..N) |j| {
-            var max_val = self.get(&.{ 0, j });
-            for (1..M) |i| {
-                const val = self.get(&.{ i, j });
-                if (val > max_val) max_val = val;
-            }
-            C.data[j] = max_val;
-        }
-        return C;
-    } else {
-        return error.UnsupportedDimension;
+    var out_dims = [_]usize{0} ** 8;
+    for (0..self.shape.len) |d| {
+        out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
     }
+    const C = try zeros(allocator, out_dims[0..self.shape.len]);
+
+    const reduce_size = self.shape.dims[dim];
+    if (reduce_size == 0) return C;
+
+    var outer_size: usize = 1;
+    for (0..dim) |d| {
+        outer_size *= self.shape.dims[d];
+    }
+    var inner_size: usize = 1;
+    for ((dim + 1)..self.shape.len) |d| {
+        inner_size *= self.shape.dims[d];
+    }
+
+    for (0..outer_size) |outer| {
+        const out_base = outer * inner_size;
+        const src_base = outer * reduce_size * inner_size;
+        for (0..inner_size) |inner| {
+            var best_val = x_data[src_base + inner];
+            for (1..reduce_size) |k| {
+                const val = x_data[src_base + k * inner_size + inner];
+                if (val > best_val) best_val = val;
+            }
+            C.data[out_base + inner] = best_val;
+        }
+    }
+    return C;
+}
+
+pub fn min(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+    if (dim >= self.shape.len) return error.DimensionOutOfBounds;
+    if (self.shape.len == 0) return error.UnsupportedDimension;
+    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
+    defer if (contig_ptr) |cp| free(allocator, cp);
+    const x_data = if (contig_ptr) |cp| cp.data else self.data;
+
+    var out_dims = [_]usize{0} ** 8;
+    for (0..self.shape.len) |d| {
+        out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
+    }
+    const C = try zeros(allocator, out_dims[0..self.shape.len]);
+
+    const reduce_size = self.shape.dims[dim];
+    if (reduce_size == 0) return C;
+
+    var outer_size: usize = 1;
+    for (0..dim) |d| {
+        outer_size *= self.shape.dims[d];
+    }
+    var inner_size: usize = 1;
+    for ((dim + 1)..self.shape.len) |d| {
+        inner_size *= self.shape.dims[d];
+    }
+
+    for (0..outer_size) |outer| {
+        const out_base = outer * inner_size;
+        const src_base = outer * reduce_size * inner_size;
+        for (0..inner_size) |inner| {
+            var best_val = x_data[src_base + inner];
+            for (1..reduce_size) |k| {
+                const val = x_data[src_base + k * inner_size + inner];
+                if (val < best_val) best_val = val;
+            }
+            C.data[out_base + inner] = best_val;
+        }
+    }
+    return C;
 }
 
 pub fn isContiguous(self: Tensor) bool {

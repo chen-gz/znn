@@ -434,7 +434,36 @@ pub const BPETokenizer = struct {
         const chunk_size: usize = 256;
         var start: usize = 0;
         while (start < text.len) {
-            const end = @min(start + chunk_size, text.len);
+            var end = @min(start + chunk_size, text.len);
+            if (end < text.len) {
+                // 优先在后半段寻找空白字符 (空格、换行、制表符) 进行分块，保持单词完整性
+                var found_ws: bool = false;
+                var scan_idx = end;
+                const min_split = start + chunk_size / 2;
+                while (scan_idx > min_split) {
+                    scan_idx -= 1;
+                    const c = text[scan_idx];
+                    if (c == ' ' or c == '\n' or c == '\t' or c == '\r') {
+                        end = scan_idx + 1;
+                        found_ws = true;
+                        break;
+                    }
+                }
+
+                // 若未找到空白字符，检测并避免截断多字节 UTF-8 字符序列 (UTF-8 延续字节: 10xxxxxx)
+                if (!found_ws) {
+                    while (end > start and (text[end] & 0xC0) == 0x80) {
+                        end -= 1;
+                    }
+                    if (end == start) {
+                        end = start + 1;
+                        while (end < text.len and (text[end] & 0xC0) == 0x80) {
+                            end += 1;
+                        }
+                    }
+                }
+            }
+
             try self.encodeChunk(allocator, text[start..end], &result);
             start = end;
         }
@@ -645,6 +674,34 @@ test "BPETokenizer edge cases empty and multibyte UTF8" {
     const utf8_dec = try tokenizer.decode(allocator, utf8_enc);
     defer allocator.free(utf8_dec);
     try std.testing.expectEqualStrings(utf8_str, utf8_dec);
+}
+
+test "BPETokenizer multi-byte UTF-8 chunk boundary handling" {
+    const allocator = std.testing.allocator;
+    var tokenizer = try BPETokenizer.init(allocator);
+    defer tokenizer.deinit();
+
+    // 构造一个长度远超 256 字节且无空格的连续多字节中文串，强制在 256 字节处分割
+    const chinese_segment = "人工智能与神经网络系统深度学习框架矩阵计算"; // 21 个汉字 * 3 = 63 字节
+    const long_chinese = chinese_segment ** 6; // 63 * 6 = 378 字节 (跨过 256 字节边界)
+
+    const encoded = try tokenizer.encode(allocator, long_chinese);
+    defer allocator.free(encoded);
+
+    const decoded = try tokenizer.decode(allocator, encoded);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings(long_chinese, decoded);
+
+    // 构造带有自然单词与空格的长文本，测试空白字符后向探测与无损还原
+    const mixed_corpus = "ZNN framework tokenization across multi-byte UTF-8 boundaries. " ** 8;
+    const mixed_encoded = try tokenizer.encode(allocator, mixed_corpus);
+    defer allocator.free(mixed_encoded);
+
+    const mixed_decoded = try tokenizer.decode(allocator, mixed_encoded);
+    defer allocator.free(mixed_decoded);
+
+    try std.testing.expectEqualStrings(mixed_corpus, mixed_decoded);
 }
 
 test "DataLoader drop_last, shuffle, and edge batch slicing" {

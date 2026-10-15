@@ -165,15 +165,15 @@ test "tensor eager broadcasting operations (add, sub, mul, div)" {
     try std.testing.expectApproxEqAbs(@as(f32, 3.0), s_div.data[5], 1e-5);
 }
 
-test "tensor argmax edge cases negative values and unsupported dimension error" {
+test "tensor argmax, argmin, max, min multi-dimension support and edge cases" {
     const allocator = std.testing.allocator;
 
     // 2x3 matrix with all negative values
     var t = try zeros(allocator, &.{ 2, 3 });
     defer free(allocator, t);
 
-    // Row 0: [-10.0, -2.0, -5.0] -> max index is 1 (-2.0)
-    // Row 1: [-1.0, -8.0, -4.0]  -> max index is 0 (-1.0)
+    // Row 0: [-10.0, -2.0, -5.0] -> max index is 1 (-2.0), min index is 0 (-10.0)
+    // Row 1: [-1.0, -8.0, -4.0]  -> max index is 0 (-1.0), min index is 1 (-8.0)
     t.set(&.{ 0, 0 }, -10.0);
     t.set(&.{ 0, 1 }, -2.0);
     t.set(&.{ 0, 2 }, -5.0);
@@ -181,26 +181,85 @@ test "tensor argmax edge cases negative values and unsupported dimension error" 
     t.set(&.{ 1, 1 }, -8.0);
     t.set(&.{ 1, 2 }, -4.0);
 
-    // 1. argmax dim=1
+    // 1. argmax / argmin / max / min dim=1
     const idx_col = try t.argmax(1, allocator);
     defer free(allocator, idx_col);
     try std.testing.expectEqual(@as(f32, 1.0), idx_col.data[0]);
     try std.testing.expectEqual(@as(f32, 0.0), idx_col.data[1]);
 
-    // 2. argmax dim=0
-    // Col 0: -10 vs -1 -> index 1 (-1)
-    // Col 1: -2 vs -8  -> index 0 (-2)
-    // Col 2: -5 vs -4  -> index 1 (-4)
+    const min_idx_col = try t.argmin(1, allocator);
+    defer free(allocator, min_idx_col);
+    try std.testing.expectEqual(@as(f32, 0.0), min_idx_col.data[0]);
+    try std.testing.expectEqual(@as(f32, 1.0), min_idx_col.data[1]);
+
+    const max_val_col = try t.max(1, allocator);
+    defer free(allocator, max_val_col);
+    try std.testing.expectEqual(@as(f32, -2.0), max_val_col.data[0]);
+    try std.testing.expectEqual(@as(f32, -1.0), max_val_col.data[1]);
+
+    const min_val_col = try t.min(1, allocator);
+    defer free(allocator, min_val_col);
+    try std.testing.expectEqual(@as(f32, -10.0), min_val_col.data[0]);
+    try std.testing.expectEqual(@as(f32, -8.0), min_val_col.data[1]);
+
+    // 2. argmax / argmin dim=0
+    // Col 0: -10 vs -1 -> max idx 1, min idx 0
+    // Col 1: -2 vs -8  -> max idx 0, min idx 1
+    // Col 2: -5 vs -4  -> max idx 1, min idx 0
     const idx_row = try t.argmax(0, allocator);
     defer free(allocator, idx_row);
     try std.testing.expectEqual(@as(f32, 1.0), idx_row.data[0]);
     try std.testing.expectEqual(@as(f32, 0.0), idx_row.data[1]);
     try std.testing.expectEqual(@as(f32, 1.0), idx_row.data[2]);
 
-    // 3. Unsupported dimension on 3D tensor: dim=2 passes assert(dim < shape.len) and reaches error.UnsupportedDimension
-    var t_3d = try zeros(allocator, &.{ 2, 2, 2 });
+    const min_idx_row = try t.argmin(0, allocator);
+    defer free(allocator, min_idx_row);
+    try std.testing.expectEqual(@as(f32, 0.0), min_idx_row.data[0]);
+    try std.testing.expectEqual(@as(f32, 1.0), min_idx_row.data[1]);
+    try std.testing.expectEqual(@as(f32, 0.0), min_idx_row.data[2]);
+
+    // 3. 1D vector test
+    var v = try zeros(allocator, &.{4});
+    defer free(allocator, v);
+    @memcpy(v.data, &[_]f32{ 3.0, 7.0, 1.0, 5.0 });
+
+    const v_argmax = try v.argmax(0, allocator);
+    defer free(allocator, v_argmax);
+    try std.testing.expectEqual(@as(f32, 1.0), v_argmax.data[0]);
+
+    const v_argmin = try v.argmin(0, allocator);
+    defer free(allocator, v_argmin);
+    try std.testing.expectEqual(@as(f32, 2.0), v_argmin.data[0]);
+
+    // 4. 3D tensor: shape [2, 2, 3] along dim 2
+    var t_3d = try zeros(allocator, &.{ 2, 2, 3 });
     defer free(allocator, t_3d);
-    try std.testing.expectError(error.UnsupportedDimension, t_3d.argmax(2, allocator));
+    t_3d.data[0] = 5.0; // [0, 0]: max at 0
+    t_3d.data[1] = 1.0;
+    t_3d.data[2] = 2.0;
+
+    t_3d.data[3] = 1.0;
+    t_3d.data[4] = 9.0; // [0, 1]: max at 1
+    t_3d.data[5] = 4.0;
+
+    t_3d.data[6] = 2.0;
+    t_3d.data[7] = 3.0;
+    t_3d.data[8] = 8.0; // [1, 0]: max at 2
+
+    t_3d.data[9] = 10.0; // [1, 1]: max at 0
+    t_3d.data[10] = 0.0;
+    t_3d.data[11] = 1.0;
+
+    const res_3d = try t_3d.argmax(2, allocator);
+    defer free(allocator, res_3d);
+    try std.testing.expectEqual(@as(usize, 3), res_3d.shape.len);
+    try std.testing.expectEqual(@as(usize, 2), res_3d.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 2), res_3d.shape.dims[1]);
+    try std.testing.expectEqual(@as(usize, 1), res_3d.shape.dims[2]);
+    try std.testing.expectEqual(@as(f32, 0.0), res_3d.data[0]);
+    try std.testing.expectEqual(@as(f32, 1.0), res_3d.data[1]);
+    try std.testing.expectEqual(@as(f32, 2.0), res_3d.data[2]);
+    try std.testing.expectEqual(@as(f32, 0.0), res_3d.data[3]);
 }
 
 test "solveLinearSystem singular matrix error and n=1 scalar" {
@@ -1094,5 +1153,264 @@ test "StaticTensor compile-time shaped arithmetic, matmul, transpose, reshape, a
     try std.testing.expectEqual(@as(usize, 2), dyn_t.shape.dims[0]);
     try std.testing.expectEqual(@as(usize, 2), dyn_t.shape.dims[1]);
     try std.testing.expectEqualSlices(f32, &[_]f32{ 31.0, 19.0, 85.0, 55.0 }, dyn_t.data);
+}
+
+test "Tensor slice views and non-contiguous inputs to ops" {
+    const allocator = std.testing.allocator;
+
+    // Create a 4x4 matrix
+    const parent = try zeros(allocator, &.{ 4, 4 });
+    defer free(allocator, parent);
+    for (parent.data, 0..) |*v, i| {
+        v.* = @as(f32, @floatFromInt(i)) - 5.0; // some negative, some positive
+    }
+
+    // Slice rows 1..3 (2 rows, 4 cols)
+    // In this view, self.data.len = 16 - 4 = 12, but shape.numel() = 8!
+    const s = try parent.slice(&.{ .{ .start = 1, .end = 3 } }, allocator);
+    defer free(allocator, s);
+    try std.testing.expectEqual(@as(usize, 8), s.shape.numel());
+    try std.testing.expect(s.data.len > s.shape.numel());
+
+    // Test relu on slice view
+    const r = try s.relu(allocator);
+    defer free(allocator, r);
+    try std.testing.expectEqual(@as(usize, 8), r.shape.numel());
+    try std.testing.expectEqual(@as(usize, 8), r.data.len);
+
+    // Test mulScalar on slice view
+    const m = try s.mulScalar(2.0, allocator);
+    defer free(allocator, m);
+    try std.testing.expectEqual(@as(usize, 8), m.shape.numel());
+
+    // Test softmax on slice view
+    const sm = try s.softmax(allocator);
+    defer free(allocator, sm);
+    try std.testing.expectEqual(@as(usize, 8), sm.shape.numel());
+
+    // Test matmul with transposed (non-contiguous) matrix
+    // A: 2x3, B: 3x2 (transposed from 2x3)
+    const A = try zeros(allocator, &.{ 2, 3 });
+    defer free(allocator, A);
+    @memcpy(A.data, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 });
+
+    const B_orig = try zeros(allocator, &.{ 2, 3 });
+    defer free(allocator, B_orig);
+    @memcpy(B_orig.data, &[_]f32{ 7.0, 9.0, 2.0, 8.0, 1.0, 3.0 });
+
+    const B_T = try B_orig.transposeView(0, 1, allocator);
+    defer free(allocator, B_T);
+    try std.testing.expect(!B_T.isContiguous());
+
+    // A is 2x3, B_T is 3x2
+    const C = try A.matmul(B_T, allocator);
+    defer free(allocator, C);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 31.0, 19.0, 85.0, 55.0 }, C.data);
+
+    // Test split on non-contiguous tensor
+    const splits = try split(allocator, B_T, 3, 0); // split 3x2 into three 1x2 tensors
+    defer {
+        for (splits) |sp| free(allocator, sp);
+        allocator.free(splits);
+    }
+    try std.testing.expectEqual(@as(usize, 3), splits.len);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 7.0, 8.0 }, splits[0].data);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 9.0, 1.0 }, splits[1].data);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 2.0, 3.0 }, splits[2].data);
+}
+
+test "Tensor linear algebra: Householder QR decomposition" {
+    const allocator = std.testing.allocator;
+
+    // 1. Tall rectangular matrix (4x3)
+    const A = try zeros(allocator, &.{ 4, 3 });
+    defer free(allocator, A);
+    @memcpy(A.data, &[_]f32{
+        1.0, 2.0, 4.0,
+        3.0, 8.0, 14.0,
+        2.0, 6.0, 13.0,
+        1.0, 4.0, 7.0,
+    });
+
+    const qr_res = try A.qr(allocator);
+    defer qr_res.deinit(allocator);
+
+    // Q: [4, 3], R: [3, 3]
+    try std.testing.expectEqual(@as(usize, 2), qr_res.Q.shape.len);
+    try std.testing.expectEqual(@as(usize, 4), qr_res.Q.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), qr_res.Q.shape.dims[1]);
+
+    try std.testing.expectEqual(@as(usize, 2), qr_res.R.shape.len);
+    try std.testing.expectEqual(@as(usize, 3), qr_res.R.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), qr_res.R.shape.dims[1]);
+
+    // Check R is upper triangular with non-negative diagonal
+    for (0..3) |i| {
+        try std.testing.expect(qr_res.R.data[i * 3 + i] >= -1e-6);
+        for (0..i) |j| {
+            try std.testing.expectApproxEqAbs(@as(f32, 0.0), qr_res.R.data[i * 3 + j], 1e-4);
+        }
+    }
+
+    // Check Q^T * Q = I_3
+    const QT = try qr_res.Q.transpose(0, 1, allocator);
+    defer free(allocator, QT);
+    const QTQ = try QT.matmul(qr_res.Q, allocator);
+    defer free(allocator, QTQ);
+
+    for (0..3) |i| {
+        for (0..3) |j| {
+            const expected: f32 = if (i == j) 1.0 else 0.0;
+            try std.testing.expectApproxEqAbs(expected, QTQ.data[i * 3 + j], 1e-4);
+        }
+    }
+
+    // Check A_rec = Q * R == A
+    const A_rec = try qr_res.Q.matmul(qr_res.R, allocator);
+    defer free(allocator, A_rec);
+    for (0..12) |i| {
+        try std.testing.expectApproxEqAbs(A.data[i], A_rec.data[i], 1e-4);
+    }
+}
+
+test "Tensor linear algebra: Jacobi real symmetric eigenvalue decomposition (symeig)" {
+    const allocator = std.testing.allocator;
+
+    // Real symmetric matrix 3x3
+    const A = try zeros(allocator, &.{ 3, 3 });
+    defer free(allocator, A);
+    @memcpy(A.data, &[_]f32{
+        4.0,  1.0, -2.0,
+        1.0,  2.0,  0.0,
+       -2.0,  0.0,  3.0,
+    });
+
+    const res = try A.symeig(allocator);
+    defer res.deinit(allocator);
+
+    // Eigenvalues should be 1D [3] and sorted in ascending order
+    try std.testing.expectEqual(@as(usize, 1), res.eigenvalues.shape.len);
+    try std.testing.expectEqual(@as(usize, 3), res.eigenvalues.shape.dims[0]);
+    try std.testing.expect(res.eigenvalues.data[0] <= res.eigenvalues.data[1] + 1e-6);
+    try std.testing.expect(res.eigenvalues.data[1] <= res.eigenvalues.data[2] + 1e-6);
+
+    // Eigenvectors should be [3, 3] and orthonormal: V^T * V = I_3
+    const VT = try res.eigenvectors.transpose(0, 1, allocator);
+    defer free(allocator, VT);
+    const VTV = try VT.matmul(res.eigenvectors, allocator);
+    defer free(allocator, VTV);
+
+    for (0..3) |i| {
+        for (0..3) |j| {
+            const expected: f32 = if (i == j) 1.0 else 0.0;
+            try std.testing.expectApproxEqAbs(expected, VTV.data[i * 3 + j], 1e-4);
+        }
+    }
+
+    // Check A * v[:, i] = lambda_i * v[:, i]
+    const AV = try A.matmul(res.eigenvectors, allocator);
+    defer free(allocator, AV);
+    for (0..3) |col| {
+        const lambda = res.eigenvalues.data[col];
+        for (0..3) |row| {
+            const expected = lambda * res.eigenvectors.data[row * 3 + col];
+            try std.testing.expectApproxEqAbs(expected, AV.data[row * 3 + col], 1e-4);
+        }
+    }
+}
+
+test "Tensor linear algebra: One-Sided Jacobi SVD decomposition" {
+    const allocator = std.testing.allocator;
+
+    // 1. Tall matrix 4x2
+    {
+        const A = try zeros(allocator, &.{ 4, 2 });
+        defer free(allocator, A);
+        @memcpy(A.data, &[_]f32{
+            1.0, 2.0,
+            3.0, 4.0,
+            5.0, 6.0,
+            7.0, 8.0,
+        });
+
+        const res = try A.svd(allocator);
+        defer res.deinit(allocator);
+
+        // U: [4, 2], S: [2], Vt: [2, 2]
+        try std.testing.expectEqual(@as(usize, 4), res.U.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 2), res.U.shape.dims[1]);
+        try std.testing.expectEqual(@as(usize, 2), res.S.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 2), res.Vt.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 2), res.Vt.shape.dims[1]);
+
+        // S non-negative and descending
+        try std.testing.expect(res.S.data[0] >= res.S.data[1]);
+        try std.testing.expect(res.S.data[1] >= 0.0);
+
+        // U^T * U = I_2
+        const UT = try res.U.transpose(0, 1, allocator);
+        defer free(allocator, UT);
+        const UTU = try UT.matmul(res.U, allocator);
+        defer free(allocator, UTU);
+        for (0..2) |i| {
+            for (0..2) |j| {
+                const exp_val: f32 = if (i == j) 1.0 else 0.0;
+                try std.testing.expectApproxEqAbs(exp_val, UTU.data[i * 2 + j], 1e-4);
+            }
+        }
+
+        // Reconstruct A_rec = U * diag(S) * Vt
+        const US = try zeros(allocator, &.{ 4, 2 });
+        defer free(allocator, US);
+        for (0..4) |r| {
+            for (0..2) |c| {
+                US.data[r * 2 + c] = res.U.data[r * 2 + c] * res.S.data[c];
+            }
+        }
+        const A_rec = try US.matmul(res.Vt, allocator);
+        defer free(allocator, A_rec);
+
+        for (0..8) |i| {
+            try std.testing.expectApproxEqAbs(A.data[i], A_rec.data[i], 1e-3);
+        }
+    }
+
+    // 2. Wide matrix 2x3
+    {
+        const B = try zeros(allocator, &.{ 2, 3 });
+        defer free(allocator, B);
+        @memcpy(B.data, &[_]f32{
+            3.0, 2.0, 2.0,
+            2.0, 3.0, -2.0,
+        });
+
+        const res = try B.svd(allocator);
+        defer res.deinit(allocator);
+
+        // U: [2, 2], S: [2], Vt: [2, 3]
+        try std.testing.expectEqual(@as(usize, 2), res.U.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 2), res.U.shape.dims[1]);
+        try std.testing.expectEqual(@as(usize, 2), res.S.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 2), res.Vt.shape.dims[0]);
+        try std.testing.expectEqual(@as(usize, 3), res.Vt.shape.dims[1]);
+
+        try std.testing.expect(res.S.data[0] >= res.S.data[1]);
+        try std.testing.expect(res.S.data[1] >= 0.0);
+
+        // Reconstruct B_rec = U * diag(S) * Vt
+        const US = try zeros(allocator, &.{ 2, 2 });
+        defer free(allocator, US);
+        for (0..2) |r| {
+            for (0..2) |c| {
+                US.data[r * 2 + c] = res.U.data[r * 2 + c] * res.S.data[c];
+            }
+        }
+        const B_rec = try US.matmul(res.Vt, allocator);
+        defer free(allocator, B_rec);
+
+        for (0..6) |i| {
+            try std.testing.expectApproxEqAbs(B.data[i], B_rec.data[i], 1e-3);
+        }
+    }
 }
 
