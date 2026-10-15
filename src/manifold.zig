@@ -65,10 +65,6 @@ pub fn binarySearchPerplexity(
     const target_entropy = @log2(target_perplexity);
     const ln2 = @log(2.0);
 
-    // Scratch buffers for probabilities per sample
-    const p_row = try allocator.alloc(f32, N);
-    defer allocator.free(p_row);
-
     for (0..N) |i| {
         var beta_min: f32 = -std.math.inf(f32);
         var beta_max: f32 = std.math.inf(f32);
@@ -81,11 +77,8 @@ pub fn binarySearchPerplexity(
             var sum_dp: f32 = 0.0;
 
             for (0..N) |j| {
-                if (j == i) {
-                    p_row[j] = 0.0;
-                } else {
+                if (j != i) {
                     const pj = @exp(-row_dist[j] * beta);
-                    p_row[j] = pj;
                     sum_p += pj;
                     sum_dp += row_dist[j] * pj;
                 }
@@ -119,18 +112,18 @@ pub fn binarySearchPerplexity(
         // Final normalization for sample i
         var sum_final: f32 = 0.0;
         for (0..N) |j| {
-            if (j == i) {
-                p_row[j] = 0.0;
-            } else {
+            if (j != i) {
                 const pj = @exp(-row_dist[j] * beta);
-                p_row[j] = pj;
+                P[i * N + j] = pj;
                 sum_final += pj;
+            } else {
+                P[i * N + j] = 0.0;
             }
         }
         if (sum_final == 0.0) sum_final = 1e-12;
 
         for (0..N) |j| {
-            P[i * N + j] = if (j == i) 0.0 else p_row[j] / sum_final;
+            P[i * N + j] /= sum_final;
         }
     }
 
