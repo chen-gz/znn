@@ -244,77 +244,7 @@ pub fn solveLasso(
     max_iter: usize,
     tol: f32,
 ) !ModelResult {
-    std.debug.assert(x.len == n_samples * n_features);
-    std.debug.assert(y.len == n_samples);
-
-    const N = n_samples;
-    const D = n_features;
-    const N_f = @as(f32, @floatFromInt(N));
-
-    var center_res = try centerData(allocator, x, y, N, D);
-    defer center_res.deinit(allocator);
-    const mean_x = center_res.mean_x;
-    const mean_y = center_res.mean_y;
-    const X_c = center_res.X_c;
-    const y_c = center_res.y_c;
-
-    const L = try allocator.alloc(f32, D);
-    defer allocator.free(L);
-    for (0..D) |j| {
-        var sum_sq: f32 = 0.0;
-        for (0..N) |i| {
-            const val = X_c[i * D + j];
-            sum_sq += val * val;
-        }
-        L[j] = sum_sq / N_f;
-    }
-
-    const weights = try allocator.alloc(f32, D);
-    @memset(weights, 0.0);
-
-    const r = try allocator.alloc(f32, N);
-    defer allocator.free(r);
-    @memcpy(r, y_c);
-
-    for (0..max_iter) |_| {
-        var max_diff: f32 = 0.0;
-
-        for (0..D) |j| {
-            if (L[j] < 1e-12) continue;
-
-            var dot_xr: f32 = 0.0;
-            for (0..N) |i| {
-                dot_xr += X_c[i * D + j] * r[i];
-            }
-            const c_j = (dot_xr / N_f) + L[j] * weights[j];
-            const w_new = softThreshold(c_j, alpha) / L[j];
-
-            const diff = w_new - weights[j];
-            if (@abs(diff) > 0.0) {
-                for (0..N) |i| {
-                    r[i] -= X_c[i * D + j] * diff;
-                }
-                weights[j] = w_new;
-                if (@abs(diff) > max_diff) {
-                    max_diff = @abs(diff);
-                }
-            }
-        }
-
-        if (max_diff < tol) break;
-    }
-
-    var dot_mw: f32 = 0.0;
-    for (0..D) |j| {
-        dot_mw += mean_x[j] * weights[j];
-    }
-    const intercept = mean_y - dot_mw;
-
-    return ModelResult{
-        .weights = weights,
-        .intercept = intercept,
-        .allocator = allocator,
-    };
+    return solveElasticNet(allocator, x, y, n_samples, n_features, alpha, 1.0, max_iter, tol);
 }
 
 /// Solves Elastic Net Regression using Coordinate Descent:
