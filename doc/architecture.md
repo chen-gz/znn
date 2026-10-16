@@ -6,7 +6,7 @@
 
 ## 1. 系统分层全景与数据流向 (System Overview & Architecture)
 
-`znn` 采用高度解耦的分层架构设计，各子系统职责单一且边界清晰，全库 45 个 `.zig` 源文件（39 个非测试实现文件与 6 个测试文件）均严格控制在 `< 60 KB` 以内（最大非测试实现文件为 `src/nn/transformer.zig`，`41,940 B / 40.96 KiB`）：
+`znn` 采用高度解耦的分层架构设计，各子系统职责单一且边界清晰，全库所有非测试实现文件均严格控制在 `< 60 KB` 以内：
 
 ```text
 src/
@@ -16,10 +16,11 @@ src/
 │   ├── shape.zig                 # 8D Shape 维度系统、跨步推导与 NumPy 广播规则
 │   ├── types.zig                 # DType、原生 bf16、SliceRange、ConvOptions、PoolOptions、RopeOptions 与 GenericTensor(T)
 │   ├── static.zig                # 编译期静态形状校验张量包装器 StaticTensor(T, dims)
-│   ├── core.zig                  # f32 自动微分张量核心、索引、基础算术、激活与 SVD/QR/Symeig
+│   ├── core.zig                  # f32 自动微分张量核心、索引、基础算术与激活函数
 │   ├── conv_pool.zig             # 1D/2D 卷积、转置卷积、最大/平均池化与自适应平均池化数值内核
 │   ├── nn_kernels.zig            # 归一化 (RMSNorm, LayerNorm, BatchNorm1d/2d, GroupNorm)、Dropout、RoPE 与 BatchMatMul
-│   ├── reductions.zig            # 多轴归约 (sum, mean, var, std)、条件掩码、跨步切片与排序检索
+│   ├── reductions.zig            # 多轴归约 (sum, mean, var, std, min, max, argmin, argmax)、条件掩码、跨步切片与排序检索
+│   ├── linalg.zig                # 豪斯霍尔德 QR 分解 (qr)、雅可比对称特征分解 (symeig) 与单边雅可比奇异值分解 (svd)
 │   ├── ops.zig                   # 张量创建工厂、拼接切分 (concat/split/stack) 与线性方程组求解
 │   └── tests.zig                 # 张量与线性代数单元测试集
 ├── autodiff.zig                  # 自动微分门面 (导出 Graph, Op, OpType, OpContext)
@@ -29,28 +30,34 @@ src/
 │   ├── backward_core.zig         # 核心算子反向传播 (MatMul, 激活, 损失函数, 形状/视图, 广播四则运算)
 │   ├── backward_nn.zig           # 神经网络算子反向传播 (1D/2D Conv/Deconv, Pooling, Norm, RoPE, Attention)
 │   ├── backward_math.zig         # 初等数学、正则化、按轴归约与条件切片算子反向传播
-│   ├── graph.zig                 # Graph 核心容器、Arena 内存池、模块作用域栈与基础算子构建器
+│   ├── graph.zig                 # Graph 核心容器、Arena 内存池、算子级拓扑排序 (topologicalSortOps) 与模块作用域栈
 │   ├── graph_nn.zig              # 神经网络、损失函数与正则化计算图算子构建器
-│   ├── graph_init.zig            # 自动权重初始化、数学公式推导与 Schema 2.0 JSON 导出桥接
+│   ├── graph_init.zig            # 自动权重初始化、扇入/扇出推导、数学公式推导与 Schema 2.0 JSON 导出桥接
 │   └── tests.zig                 # 自动微分与计算图单元测试集
 ├── nn.zig                        # 神经网络门面 (导出所有网络层、损失、序列化、可视化与反射工具)
 ├── nn/
-│   ├── core.zig                  # Linear, Conv1D, Conv2D, ConvTranspose1D, ConvTranspose2D, Module, Sequential
-│   ├── module.zig                # Module(T) 包装器与基于 nn.walk 的编译期结构反射协议
+│   ├── core.zig                  # Linear (1D/2D/N-D), Conv1D, Conv2D, ConvTranspose1D, ConvTranspose2D, Sequential
+│   ├── module.zig                # Module(T) 包装器与基于 nn.walk 的编译期结构反射协议 (含 tied weights 去重释放)
 │   ├── activations.zig           # ReLU, LeakyReLU, Sigmoid, Tanh, GELU, SiLU 激活层
 │   ├── normalization.zig         # RMSNorm, LayerNorm, BatchNorm1d, BatchNorm2d, GroupNorm, Dropout 与 1D/2D/自适应池化层
 │   ├── recurrent.zig             # RNNCell, RNN, LSTMCell, LSTM, StackedLSTM, GRUCell, GRU 与命名返回结构体
-│   ├── attention.zig             # KVCache, CausalSelfAttention (MHA/GQA/MQA), MLACache, MLALayer
+│   ├── attention.zig             # ScaledDotProductAttention, KVCache, CausalSelfAttention (MHA/GQA/MQA), MLACache, MLALayer
 │   ├── transformer.zig           # Embedding, MLP, SwiGLU, MoELayer, TransformerBlock, TransformerDecoder, GPT
 │   ├── llm.zig                   # LoRALinear, SFT/DPO/GRPO 对齐损失函数与 Top-K/Top-P 采样
 │   ├── init.zig                  # He, Xavier, LeCun, Normal, Uniform 权重初始化与激活增益计算
-│   ├── serialization.zig         # 零依赖 Safetensors 模型权重序列化与无序偏移量加载
+│   ├── serialization.zig         # 零依赖 Safetensors (F32/BF16/F16) 模型权重序列化与无序偏移量加载
 │   ├── visualization.zig         # Schema 2.0 节点/边枚举、作用域解析与局部图构建器 LocalGraphBuilder
 │   ├── graph_ir.zig              # 模型层级树构建 (graph_ir.build) 与 JSON 序列化导出
 │   ├── model_graph.schema.json   # 模型图 JSON Schema (draft 2020-12, Schema 2.0)
-│   ├── tests.zig                 # 核心网络层、循环网络、Transformer/LLM、反射与序列化测试
+│   ├── testing_init.zig          # 测试与基准测试内部初始化辅助函数
+│   ├── tests.zig                 # 核心网络层、循环网络、Transformer/LLM 與 Safetensors 测试
 │   ├── tests_init.zig            # 权重自动初始化与增益推导专项测试
+│   ├── tests_module.zig          # 编译期反射协议、字段路径命名与权重共享 (Tied Weights) 生命周期测试
 │   └── tests_vis.zig             # 可视化作用域归属、Schema 2.0 黄金边集与 18 个经典模型导出测试
+├── models.zig                    # 专用模型门面 (导出 gemma4)
+├── models/
+│   ├── gemma4.zig                # Gemma 4 架构 (GemmaRMSNorm, Gemma4Attention, Gemma4ForCausalLM, Q4Linear, Gemma4Q4ForCausalLM)
+│   └── tests.zig                 # Gemma 4 架构与 4-bit 量化推理单元测试
 ├── optim.zig                     # SGD, Adam, AdamW 优化器、4 类学习率调度器、梯度裁剪与 ZNNO 检查点
 ├── engine.zig                    # 分类任务训练与无梯度评估引擎 (Step / Epoch 执行器)
 ├── dataset.zig                   # MNIST/Fashion-MNIST IDX 加载器、DataLoader、BPETokenizer 与 BinaryMmapDataset
@@ -68,19 +75,19 @@ src/
 flowchart TD
     Dataset["数据与分词层 (src/dataset.zig)\n• MNIST/Fashion-MNIST IDX 解析器\n• BPETokenizer & BinaryMmapDataset\n• DataLoader (批次切片、打乱、丢弃余数)"]
     
-    TensorCore["张量底座 (src/tensor/{shape,types,static,core,conv_pool,nn_kernels,reductions,ops}.zig)\n• Shape 维度系统与物理 Strides 步长映射\n• GenericTensor(T) 泛型系统与编译期 StaticTensor(T, dims)\n• 统一算子配置 (ConvOptions, PoolOptions, RopeOptions)\n• 广播机制、跨步切片视图 (SliceRange) 与 1D/2D 卷积池化内核"]
+    TensorCore["张量底座 (src/tensor/{shape,types,static,core,conv_pool,nn_kernels,reductions,linalg,ops}.zig)\n• Shape 维度系统与物理 Strides 步长映射\n• GenericTensor(T) 泛型系统与编译期 StaticTensor(T, dims)\n• 统一算子配置 (ConvOptions, PoolOptions, RopeOptions)\n• 广播机制、跨步切片视图 (SliceRange)、1D/2D 卷积池化与 QR/SymEig/SVD 分解"]
     
-    Autodiff["动态自动微分引擎 (src/autodiff/{types,op,backward_*,graph*}.zig)\n• Graph 计算图容器 (Arena 生命周期管理)\n• 节点与算子追踪 (Tensor.creator / Op / OpContext) 与单源前向内核复用\n• 反向拓扑排序调度与分域反向内核 (backward_core/nn/math)\n• 模块作用域跟踪栈 (enterModule / enterChildScope)"]
+    Autodiff["动态自动微分引擎 (src/autodiff/{types,op,backward_*,graph*}.zig)\n• Graph 计算图容器 (Arena 生命周期管理)\n• 节点与算子追踪 (Tensor.creator / Op / OpContext) 与单源前向内核复用\n• 算子级逆拓扑排序调度 (topologicalSortOps) 与分域反向内核 (backward_core/nn/math)\n• 模块作用域跟踪栈 (enterModule / enterChildScope)"]
     
-    NNModules["神经网络模块族 (src/nn/)\n• 核心层 (nn/core.zig): Linear, Conv1D/2D, ConvTranspose1D/2D\n• 激活、归一化与池化 (nn/activations.zig, nn/normalization.zig): RMSNorm, LayerNorm, BatchNorm1d/2d, GroupNorm, 1D/2D/自适应池化\n• 循环网络 (nn/recurrent.zig): RNN, LSTM, StackedLSTM, GRU\n• 注意力与大模型 (nn/attention.zig, nn/transformer.zig, nn/llm.zig)\n• 权重初始化 (nn/init.zig): He, Xavier, LeCun, Normal, 激活增益自动推导"]
+    NNModules["神经网络与专用模型 (src/nn/, src/models/)\n• 核心层 (nn/core.zig): Linear (1D/2D/N-D), Conv1D/2D, ConvTranspose1D/2D\n• 激活、归一化与池化 (nn/activations.zig, nn/normalization.zig): RMSNorm, LayerNorm, BatchNorm1d/2d, GroupNorm, 1D/2D/自适应池化\n• 循环网络 (nn/recurrent.zig): RNN, LSTM, StackedLSTM, GRU\n• 注意力与大模型 (nn/attention.zig, nn/transformer.zig, nn/llm.zig, models/gemma4.zig)\n• 权重初始化 (nn/init.zig): He, Xavier, LeCun, Normal, 激活增益自动推导"]
     
     Engine["执行引擎与统计学习 (src/engine.zig, src/regression.zig)\n• trainClassificationStepWithClip / evalClassificationStep\n• 经典回归: OLS 闭式解, Ridge, Lasso, ElasticNet\n• K-Fold 交叉验证与网格超参数搜索 (src/cross_validation.zig)\n• t-SNE 高维流形降维 (src/manifold.zig)"]
     
     Optimizers["解耦优化器与调度器 (src/optim.zig)\n• SGDOptimizer (含动量缓冲)\n• AdamOptimizer (一阶/二阶矩估计与偏差修正)\n• AdamWOptimizer (解耦权重衰减更新)\n• 学习率调度器: Cosine (含预热), StepLR, LinearWarmup, ExponentialLR\n• 梯度控制: 全局 L2 范数剪裁 (clipGradNorm) 与数值截断"]
     
-    Persistence["序列化与持久化 (src/nn/serialization.zig, src/optim.zig)\n• 零依赖 Safetensors 模型权重读写 (saveSafetensors / loadSafetensors)\n• 优化器二进制状态检查点 (ZNNO 校验、版本与张量结构验证)"]
+    Persistence["序列化与持久化 (src/nn/serialization.zig, src/optim.zig)\n• 零依赖 Safetensors (F32/BF16/F16) 模型权重读写 (saveModel / loadModel)\n• 优化器二进制状态检查点 (ZNNO 校验、版本与张量结构验证)"]
     
-    Visualization["计算图可视化协议 Schema 2.0 (src/nn/visualization.zig, src/nn/graph_ir.zig)\n• Scoped Local Graph (模块局部图、端口 @in/@out 抽象)\n• 透明算子折叠与 LCA 拓扑收归\n• 导出 JSON 与 Web Visualizer (chen-gz.github.io) 严格对齐"]
+    Visualization["计算图可视化协议 Schema 2.0 (src/nn/visualization.zig, src/nn/graph_ir.zig, web/)\n• Scoped Local Graph (模块局部图、端口 @in/@out 抽象)\n• 透明算子折叠与 LCA 拓扑收归\n• 导出 JSON 与仓库内置 Web 可视化器 (web/) 严格对齐"]
     
     Hardware["硬件加速与 SIMD 后备 (src/cblas.zig)\n• macOS / Apple Silicon: Accelerate 框架 AMX 协处理器直通\n• 跨平台通用: Zig 原生 @Vector(8, f32) SIMD 向量化分块内核"]
 
@@ -119,15 +126,21 @@ flowchart TD
 2. **合法性检查**：对于对齐的轴 $d$，必须满足 $\text{dim}_A[d] == \text{dim}_B[d]$ 或其中之一为 $1$；
 3. **步长变换 (`computeBroadcastStrides`)**：若张量在轴 $d$ 上的尺寸为 $1$，则将其在广播输出中的计算步长强制置 $0$（实现虚拟重复访问而不消耗额外内存）。
 
-### 2.3 泛型张量、编译期静态张量与跨步切片 (`GenericTensor`, `StaticTensor` & `SliceRange`)
-* **`GenericTensor(T)` (`src/tensor/types.zig`)**：基于 Zig `comptime` 特性构建的多精度张量模板，统一支持 `f32`、`f64`、`bf16`（标准 Brain Floating Point 16-bit 格式）、`i32`、`i64`、`usize` 和 `bool`；
-* **`StaticTensor(T, dims)` (`src/tensor/static.zig`)**：将张量维度编码进类型系统的编译期形状校验包装器，在编译期通过 `@compileError` 拦截矩阵乘法内维不匹配、逐元素加法维度不一致或非法 `reshape`；
-* **`SliceRange` 跨步切片**：提供带 `step` 步长的任意子区间索引能力，支持无拷贝切片视图与原地连续化重排 (`contiguous`)。
+### 2.3 三层张量类型体系与跨步切片 (`Tensor`, `GenericTensor`, `StaticTensor` & `SliceRange`)
+`src/tensor/` 提供三层互补的张量抽象：
+
+| 抽象类型 | 位置 | 元素类型 | 形状校验 | 自动微分追踪 | 典型应用场景 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **`Tensor`** | `src/tensor/core.zig` | `f32` (`data: []f32`, `grad: []f32`) | 运行期 (`Shape`, 最高 8 维) | 支持 (`creator: ?*Op`, `requires_grad`) | 动态神经网络前向/反向传播、BLAS/SIMD 矩阵乘法、卷积、注意力与损失函数 |
+| **`GenericTensor(T)`** | `src/tensor/types.zig` | `f32`, `f64`, `bf16`, `i32`, `i64`, `usize`, `bool` | 运行期 (`Shape`, 最高 8 维) | 纯数据容器与视图 | Token 索引批次 (`UsizeTensor`, `IntTensor`)、布尔掩码 (`BoolTensor`)、`bf16` 存储与跨类型转换 (`to`/`fromGeneric`) |
+| **`StaticTensor(T, dims)`** | `src/tensor/static.zig` | 任意数值类型 `T` | **编译期** (`comptime dims`) | 包装 `*GenericTensor(T)` | 编译期维度校验（`@compileError` 拦截矩阵乘法内维不匹配、加法形状不一致或非法 `reshape`） |
+
+* **`SliceRange` 跨步切片**：提供带 `step` 步长的任意子区间索引能力，支持零拷贝切片视图（`is_view` 生命周期保护）与连续化拷贝 (`contiguous`)。
 
 ### 2.4 统一算子配置结构体 (`ConvOptions`, `PoolOptions` & `RopeOptions`)
 * **`ConvOptions` (`src/tensor/types.zig`)**：`stride: usize = 1, padding: usize = 0`，统一用于 `conv1d`、`conv2d`、`convTranspose1d`、`convTranspose2d`；
 * **`PoolOptions` (`src/tensor/types.zig`)**：`stride: ?usize = null, padding: usize = 0`（提供 `resolveStride(pool_size)`，当 `stride == null` 时默认等于 `pool_size`），统一用于 `maxpool1d`、`avgpool1d`、`maxpool2d`、`avgpool2d`；
-* **`RopeOptions` / `RoPEOptions` (`src/tensor/types.zig`)**：`rotary_offset: usize = 0, base: f32 = 10000.0`，统一用于 `Tensor.rope(start_pos, options, alloc)` 与 `Graph.rope(x, start_pos, options)`。
+* **`RopeOptions` / `RoPEOptions` (`src/tensor/types.zig`)**：`rotary_offset: usize = 0, base: f32 = 10000.0, mode: Mode = .interleaved, partial_rotary_factor: f32 = 1.0`（支持 `.interleaved` 相邻配对与 `.split_half` 半切分配对以及比例旋转因子），统一用于 `Tensor.rope(start_pos, options, alloc)` 与 `Graph.rope(x, start_pos, options)`。
 
 ---
 
@@ -137,10 +150,10 @@ flowchart TD
 `znn` 采用动态反向模式自动微分 (Dynamic Reverse-Mode Automatic Differentiation)：
 * **前向传播记录**：在运算发生时，动态创建输出 `Tensor`，将其 `creator` 指向生成该张量的 `Op` 结构体；
 * **反向传播调度**：
-  1. 调用 `graph.backward(loss)`，从目标标量张量开始执行深度优先搜索 (DFS)；
-  2. 生成严格的逆拓扑排序序列 (`topologicalSort`)；
+  1. 调用 `graph.backward(loss)`，从目标张量的创建算子开始执行基于算子节点 (`*Op`) 的深度优先后序遍历 (`topologicalSortOps`)；
+  2. 生成严格的算子逆拓扑排序序列，确保多输出算子（如 `Split`）在所有下游分支梯度汇总完毕后仅执行一次；
   3. 将损失张量的梯度初始化为 $1.0$ (`loss.grad[0] = 1.0`)；
-  4. 逆序遍历节点，调用 `Op.backward`（按算子领域分发至 `backward_core.zig`、`backward_nn.zig` 与 `backward_math.zig`），将梯度链式回传并累加至输入张量的 `grad` 切片中。
+  4. 逆序遍历算子节点，调用 `Op.backward`（按算子领域分发至 `backward_core.zig`、`backward_nn.zig` 与 `backward_math.zig`），将梯度链式回传并累加至输入张量的 `grad` 切片中。
 
 ### 3.2 批次级内存池架构 (Arena Allocator Lifecycle)
 深度学习训练循环中频繁产生大量的临时激活张量、中间形状与梯度切片。若通过通用的操作系统堆分配器频繁申请和释放，极易导致高昂的系统调用开销与内存碎片。
@@ -349,13 +362,13 @@ flowchart LR
 
 ## 7. 计算图可视化与 Schema 2.0 协议 (Graph Visualization Pipeline)
 
-`znn` 具备完善的计算图拓扑导出系统（`src/nn/visualization.zig` 与 `src/nn/graph_ir.zig`），输出符合 JSON Schema 2.0（draft 2020-12）标准的拓扑结构，与前端 Web 可视化工具（`chen-gz.github.io/visualizer`）保持严格的契约对齐。
+`znn` 具备完善的计算图拓扑导出系统（`src/nn/visualization.zig` 与 `src/nn/graph_ir.zig`），输出符合 JSON Schema 2.0（draft 2020-12）标准的拓扑结构，与仓库内置的前端 Web 可视化工具（[`web/`](../web/README.md)）保持严格的契约对齐。
 
 ```mermaid
 flowchart LR
     Model["模型执行 Forward\n(graph.enterModule 记录作用域)"] --> Export["nn/visualization.zig & nn/graph_ir.zig\n(局部图构建 & 端口解析)"]
     Export --> JsonFile["model_graph.json\n(Schema 2.0 规范)"]
-    JsonFile --> WebVisualizer["Web 端模型图谱浏览器\n(chen-gz.github.io/visualizer)"]
+    JsonFile --> WebVisualizer["Web 端模型图谱浏览器\n(web/)"]
 ```
 
 ### 7.1 局部图与端口化模型 (Scoped Local Graph & Ports)
@@ -387,14 +400,14 @@ flowchart LR
 
 以下关键瓶颈已列入技术演进追踪（详见 [`plan/TODO.md`](../plan/TODO.md)）：
 
-### 9.1 跨平台 CPU Fallback 多核并行瓶颈 (对应问题 3)
+### 9.1 跨平台 CPU Fallback 多核并行瓶颈
 * **现状定位**：
   在 macOS 平台，`znn` 借助 Accelerate 框架直接调用 Apple Silicon AMX 协处理器；但在 Linux 与 Windows 上，`src/cblas.zig` 的纯 Zig 后备实现采用单线程 `@Vector(8, f32)` SIMD 向量化，无法利用多核服务器的并发算力。
 * **规划方案**：
   1. 引入轻量级线程池调度器（`std.Thread`），对 M 维与 N 维进行分块（Tiling & Blocking）多线程并发调度；
   2. 在 `build.zig` 中引入 `-Dblas=[accelerate|openblas|mkl|fallback]` 编译配置选项，支持在 Linux 端自动探测并链接系统 OpenBLAS 或 Intel MKL。
 
-### 9.2 长序列自注意力 $O(S^2)$ 内存开销与 KV Cache 优化 (对应问题 4)
+### 9.2 长序列自注意力 $O(S^2)$ 内存开销与 KV Cache 优化
 * **现状定位**：
   `src/nn/attention.zig`（并由 `src/nn/transformer.zig` 重导出）的 `CausalSelfAttention` 目前完整物化 $[B, H, S, S]$ 的全量注意力矩阵，长序列（Long Context）训练时内存开销呈平方级暴增；KV Cache 当前采用静态预分配连续缓冲区。
 * **规划方案**：

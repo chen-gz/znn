@@ -41,12 +41,12 @@ Module.forward ──(作用域栈)──▶ autodiff.Graph ──graph_ir.build
 
 ```zig
 // 每个模块 forward 的第一行（模块未命名时返回空守卫）
-const module_scope = try graph.enterModule(self.name, self.module_type); // push + 注册模块类型
-defer module_scope.exit();                                               // pop
+const module_scope = try enterModuleScope(graph, self); // push + 注册模块类型与数学公式
+defer module_scope.exit();                              // pop
 ```
 
-* API：`pushScope(path, ?module_type)` / `popScope()` / `currentScope()`；`graph.enterModule` 与 `graph.enterChildScope` 返回 `ScopeGuard`，`enterModule` 同时注册模块类型。
-* 接入作用域与 Schema 枚举的全部 29 种 `module_type`：`root`、`container`、`GPT`、`TransformerDecoder`、`TransformerBlock`、`CausalSelfAttention`、`ScaledDotProductAttention`、`MLALayer`、`MoELayer`、`MLP`、`SwiGLU`、`Linear`、`LoRALinear`、`Embedding`、`RMSNorm`、`LayerNorm`、`BatchNorm2d`、`Conv2D`、`ConvTranspose2D`、`MaxPool2D`、`AvgPool2D`、`Dropout`、`RNN`、`RNNCell`、`LSTM`、`LSTMCell`、`StackedLSTM`、`GRU`、`GRUCell`。
+* API：`pushScope(path, ?module_type)` / `popScope()` / `currentScope()`；`graph.enterModule` 与 `graph.enterChildScope` 返回 `ScopeGuard`，`enterModule` 同时注册模块类型，`nn.enterModuleScope` 额外自动注册模块声明的 `pub const formula`。
+* 接入作用域的内置 `module_type`：`root`、`container`、`ModuleList`、`GPT`、`TransformerDecoder`、`TransformerBlock`、`CausalSelfAttention`、`ScaledDotProductAttention`、`MLALayer`、`MoELayer`、`MLP`、`SwiGLU`、`Linear`、`LoRALinear`、`Embedding`、`RMSNorm`、`LayerNorm`、`BatchNorm1d`、`BatchNorm2d`、`GroupNorm`、`Conv1D`、`Conv2D`、`ConvTranspose1D`、`ConvTranspose2D`、`MaxPool1D`、`AvgPool1D`、`MaxPool2D`、`AvgPool2D`、`AdaptiveAvgPool1D`、`AdaptiveAvgPool2D`、`Dropout`、`RNN`、`RNNCell`、`LSTM`、`LSTMCell`、`StackedLSTM`、`GRU`、`GRUCell`。
 * 每个 `Op` 在 `Graph.recordOp` 时记录 `op.scope`（栈顶模块的完整路径），每个张量在创建时记录 `Tensor.scope`。
 * 归属规则：
   * 算子：`op.scope`；若某个参数输入的名字前缀是 `op.scope` 更深的后代（未接入作用域的自定义模块），取该前缀。
@@ -304,8 +304,9 @@ schema 只使用以下关键字：`$ref`（指向 `$defs`）、`type`、`const`�
 * `Model graph JSON export conforms to the published JSON Schema`：GPT 与单个 `Linear` 的导出结果符合 schema；未声明字段与错误版本被拒绝。
 * `Visualization enums match the enum lists of the published JSON Schema`：§4.2 的枚举与 schema 一致。
 
-**`chen-gz.github.io`（`vitest`）**
+**`znn/web`（`cd web && npm test`，`vitest`）**
 
 * `model-graph.test.ts`：局部 DAG、路径解析、残差分支、分层结果（包括重心排序与源节点下沉）。
 * `flow-edges.test.ts`：竖直直线优先、锚点冲突时的直角折线、绕行通道、skip 直线通道及其折线形式。
 * `json-schema.test.ts`：样例与最小模板符合 schema；每个字段都有说明、每个对象都是封闭的；违规报告带 JSON 路径；TypeScript 枚举列表与 schema 一致。
+* `visualizer.test.ts`：前端页面渲染、模块导航与检查器交互测试。

@@ -6,7 +6,7 @@
 
 ## 🔍 第一部分：代码库现状诊断与演进空间 (Current Architecture Review)
 
-经全面审查与模块化重构（详见 [`doc/framework-review.md`](../doc/framework-review.md)），`znn` 已完成核心架构解耦与全模块精简（所有非测试源码文件均 `< 60 KB`，涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、动态 Autograd、视觉/循环/现代 LLM 算子、AdamW 优化器、BPE 分词器、交叉验证与 Schema 2.0 模型图导出），在以下 **6 个维度** 仍存在进一步演进空间：
+经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.3.0`）已完成核心架构解耦与全模块精简（所有非测试源码文件均 `< 60 KB`，涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
 
 ### 1. 核心计算与张量系统 (Tensor Engine & Core Math)
 * **自动微分多精度与量化张量扩展 (Mixed-Precision Autograd & Quantization)**：
@@ -31,18 +31,18 @@
   除 GEMM 外，逐元素算子、Softmax、Conv2D、RMSNorm、LayerNorm 仍以单线程循环执行，尚未接入 `std.Thread.Pool` 进行多核分块并行。
 
 ### 4. 网络架构与现代 LLM 特性完备度 (Model Architectures & Operators)
-* **注意力机制 FlashAttention 与端到端 GPT KV-Cache 推理**：
-  [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`MLALayer`](../src/nn/attention.zig) 已实现单层 `forwardInference`（支持 `KVCache` 与 `MLACache`），但 [`CausalSelfAttention.forward`](../src/nn/attention.zig) 训练时仍物化 $O(T^2)$ 注意力矩阵（待引入 FlashAttention 分块在线 Softmax），且 [`GPT.generate`](../src/nn/transformer.zig) 尚未跨层串联 `[]KVCache` 实现端到端 $O(T)$ 增量解码。
+* **注意力机制 FlashAttention 与端到端 GPT / Gemma 4 KV-Cache 推理**：
+  [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`MLALayer`](../src/nn/attention.zig) 已实现单层 `forwardInference`（支持 `KVCache` 与 `MLACache`），但 [`CausalSelfAttention.forward`](../src/nn/attention.zig) 训练时仍物化 $O(T^2)$ 注意力矩阵（待引入 FlashAttention 分块在线 Softmax），且 [`GPT.generate`](../src/nn/transformer.zig) 与 [`Gemma4ForCausalLM`](../src/models/gemma4.zig) / [`Gemma4Q4ForCausalLM`](../src/models/gemma4.zig) 尚未跨层串联增量 `KVCache` 实现端到端 $O(T)$ 单步解码与交互式多轮对话 CLI (Chat REPL)。
 * **视觉算子库高阶扩展**：
-  已支持可配置 `stride`/`padding` 的 `im2col` [`Conv2D`](../src/nn/core.zig)、[`MaxPool2D`](../src/nn/core.zig)、[`ConvTranspose2D`](../src/nn/core.zig) 与 [`AvgPool2D`](../src/nn/normalization.zig)，仍待补充 `AdaptiveAvgPool2D`、`Conv1D`、`Conv3D` 与 `GroupNorm`。
+  已支持可配置 `stride`/`padding` 的 `im2col` [`Conv1D`](../src/nn/core.zig)、[`Conv2D`](../src/nn/core.zig)、[`ConvTranspose1D`](../src/nn/core.zig)、[`ConvTranspose2D`](../src/nn/core.zig)、[`MaxPool1D`](../src/nn/normalization.zig)、[`AvgPool1D`](../src/nn/normalization.zig)、[`MaxPool2D`](../src/nn/normalization.zig)、[`AvgPool2D`](../src/nn/normalization.zig)、[`AdaptiveAvgPool1D`](../src/nn/normalization.zig)、[`AdaptiveAvgPool2D`](../src/nn/normalization.zig)、[`BatchNorm1d`](../src/nn/normalization.zig)、[`BatchNorm2d`](../src/nn/normalization.zig) 与 [`GroupNorm`](../src/nn/normalization.zig)，后续可按需扩展 `Conv3D`、`AdaptiveMaxPool2D` 与 `PixelShuffle`。
 * **混合精度与分布式训练原语**：
   缺少自动混合精度训练（AMP / `GradScaler`）与多卡数据并行原语。
 
 ### 5. 分词器与模型格式互操作性 (Tokenizer & Interoperability)
 * **BPE 分词器复杂度与预切分规则**：
-  [`BPETokenizer`](../src/dataset.zig) 编码时按合并表扫描，尚待引入优先队列（Min-Heap）$O(N \log N)$ 合并与 GPT-2/Llama 正则预切分（Pre-tokenization）。
+  [`BPETokenizer`](../src/dataset.zig) 已支持多字节 UTF-8 边界保护与词汇边界切分，编码时仍按合并表扫描，尚待引入优先队列（Min-Heap）$O(N \log N)$ 合并与 GPT-2/Llama 正则预切分（Pre-tokenization）。
 * **跨框架模型格式互操作**：
-  已提供原生零依赖 `SafeTensors` 读写解析器 ([`src/nn/serialization.zig`](../src/nn/serialization.zig)) 与优化器二进制检查点 ([`src/optim.zig`](../src/optim.zig))，仍缺少 `BF16`/`F16` Safetensors 权重自动转换、**GGUF/GGML** 加载与 **ONNX** 导出。
+  已提供原生零依赖 `SafeTensors`（支持 `F32`、`BF16`、`F16`）读写解析器 ([`src/nn/serialization.zig`](../src/nn/serialization.zig))、Gemma 4 流式 `Q4_0` 量化与 `mmap` 映射加载 ([`src/models/gemma4.zig`](../src/models/gemma4.zig)) 以及优化器二进制检查点 ([`src/optim.zig`](../src/optim.zig))，仍缺少通用 **GGUF/GGML** 加载与 **ONNX** 导出。
 
 ### 6. 训练引擎通用性 (Training Engine Generality)
 * **N 维输入与多任务训练引擎扩展**：
@@ -128,9 +128,9 @@
   - [x] **`Conv2D` 步长/填充扩展与 `im2col + sgemm` 加速**：为 [`Conv2D`](../src/nn/core.zig) 与 [`Tensor.conv2dWithConfig`](../src/tensor/nn_kernels.zig) 增加可配置 `stride` 与 `padding` 支持，并用 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向计算。
 
 - [x] **1.6 全库架构评审与超长模块解耦重构 (`< 60 KB` per File)**
-  - [x] 输出深度架构评审报告 [`doc/framework-review.md`](../doc/framework-review.md)，覆盖目录组织、核心抽象解耦、训练/推理/优化流水线与文档/测试/基准四大维度。
-  - [x] 将所有超 60 KB 的实现文件拆分为高内聚子模块：`src/tensor/{core,nn_kernels,reductions,static}.zig`、`src/autodiff/{op,backward_core,backward_nn,backward_math,graph,graph_nn,graph_init}.zig`、`src/nn/{attention,transformer,llm,visualization,graph_ir}.zig` 与 `src/bench/{suites.zig}`。
-  - [x] 在 [`src/nn/core.zig`](../src/nn/core.zig) 中新增全模型训练/评估状态切换函数 `setTrainingModel`、`trainModel` 与 `evalModel`；在 [`src/nn/recurrent.zig`](../src/nn/recurrent.zig) 中定义具名返回结构体 `RNNResult`、`LSTMResult`、`StackedLSTMResult`、`GRUResult`；补齐全部 25 个配置结构体的默认值与 `defaultOptions()` / `initDefault()`。
+  - [x] 完成目录组织、核心抽象解耦、训练/推理/优化流水线与文档/测试/基准四大维度的全库审查与文档同步（详见 [`doc/architecture.md`](../doc/architecture.md)）。
+  - [x] 将所有超 60 KB 的实现文件拆分为高内聚子模块：`src/tensor/{core,conv_pool,nn_kernels,reductions,linalg,static}.zig`、`src/autodiff/{op,backward_core,backward_nn,backward_math,graph,graph_nn,graph_init}.zig`、`src/nn/{attention,transformer,llm,visualization,graph_ir}.zig`、`src/models/{gemma4.zig}` 与 `src/bench/{suites.zig}`。
+  - [x] 在 [`src/nn/core.zig`](../src/nn/core.zig) 中新增全模型训练/评估状态切换函数 `setTrainingModel`、`trainModel` 与 `evalModel`；在 [`src/nn/recurrent.zig`](../src/nn/recurrent.zig) 中定义具名返回结构体 `RNNResult`、`LSTMResult`、`StackedLSTMResult`、`GRUResult`；补齐全部配置结构体的默认值与 `defaultOptions()` / `initDefault()`。
 
 ---
 
@@ -168,7 +168,8 @@
     - [x] **修复 `requires_grad` 硬编码为 `false` 导致的训练梯度断流**：在 [`src/autodiff/graph_nn.zig`](../src/autodiff/graph_nn.zig) 中，统一 RoPE 继承 `self.enable_grad and X.requires_grad`，彻底修复反向传播梯度断流问题。
     - [x] **修复 `op.zig` 中 `.RoPE` 静态图重演（`graph.forward()`）结果错误**：在 [`OpContext.RoPE`](../src/autodiff/types.zig) 中保存 `mode` 与 `partial_rotary_factor`，并在 [`Op.forward(.RoPE)`](../src/autodiff/op.zig) 重演时传入完整配置，实现 100% 数值一致的图重演。
     - [x] **补全 `backward_nn.zig` 中 `.RoPE` 反向传播对 `split_half` 与 `partial_rotary_factor` 的伴随正交逆旋转**：在 [`src/autodiff/backward_nn.zig`](../src/autodiff/backward_nn.zig) 中实现正交伴随逆旋转求导内核 $\mathbf{R}^T$，完整支持 `interleaved` 与 `split_half` 模式及部分旋转因子，并通过有限差分数值梯度检验。
-  - [ ] 为 [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`GPTConfig`](../src/nn/transformer.zig) 增加可选 RoPE 位置编码开关，并将单层 `KVCache` 串联至 `TransformerBlock` / `GPT.forwardInference` 实现端到端 $O(T)$ 增量生成。
+  - [ ] 为 [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`GPTConfig`](../src/nn/transformer.zig) 增加可选 RoPE 位置编码开关，并将单层 `KVCache` 串联至 `TransformerBlock` / `GPT.forwardInference` 以及 [`Gemma4ForCausalLM`](../src/models/gemma4.zig) / [`Gemma4Q4ForCausalLM`](../src/models/gemma4.zig) 实现端到端 $O(T)$ 增量生成（将 Gemma 4 单步生成延迟降至毫秒级）。
+  - [ ] 为 [`examples/gemma4.zig`](../examples/gemma4.zig) 增加多轮对话交互式 CLI (Chat REPL) 与流式 Token 实时打字机输出。
   - [ ] `KVCache` 支持动态扩容与分页块分配（Paged KV Cache），提升自回归解码吞吐。
   - [x] 在 [`CausalSelfAttention`](../src/nn/attention.zig) 中支持 **Grouped-Query Attention (GQA)** 与 **Multi-Query Attention (MQA)**。
   - [x] 实现 **Multi-Head Latent Attention (MLA)** 与极简低秩 `MLACache` 矩阵吸收推理。
