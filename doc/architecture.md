@@ -6,7 +6,7 @@
 
 ## 1. 系统分层全景与数据流向 (System Overview & Architecture)
 
-`znn` 采用高度解耦的分层架构设计，各子系统职责单一且边界清晰，全库所有非测试实现文件均严格控制在 `< 60 KB` 以内：
+`znn` 采用高度解耦的分层架构设计，各子系统职责单一且边界清晰；除 `src/models/gemma4.zig`（64,336 B，拆分任务见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](../plan/ASYNC_OFFLOAD_DESIGN.md) Phase 0）外，全库非测试实现文件均控制在 `< 60 KB` 以内：
 
 ```text
 src/
@@ -306,8 +306,8 @@ flowchart LR
    - 采用双路投影结构：$\text{SwiGLU}(x) = (\text{SiLU}(x W_{\text{gate}}) \odot (x W_{\text{up}})) W_{\text{down}}$；
    - 相比传统两层 MLP 具备更优秀的表征容量与训练稳定性。
 4. **混合专家网络 (`MoELayer`, `nn/transformer.zig`)**：
-   - 基于门控路由网络（Router）对 Token 进行 Top-K 专家稀疏激活打分与共享专家融合；
-   - 仅对命中的活跃专家执行前向计算。
+   - 基于门控路由网络（Router）对 Token 进行 Top-K 专家打分，以 Top-K 掩码严格置零非选中专家的门控概率，并与共享专家输出融合；
+   - 当前对全部路由专家在所有 Token 上执行稠密前向，再按门控概率加权合并（稀疏 Token 分发见 [`plan/TODO.md`](../plan/TODO.md) 3.1）。
 5. **参数高效微调 (`LoRALinear`, `nn/llm.zig`)**：
    - 冻结预训练基础权重 $W_0$，挂载并联低秩可学习矩阵 $A \in \mathbb{R}^{d \times r}$ 与 $B \in \mathbb{R}^{r \times k}$；
    - 前向变换：$h = x W_0 + \frac{\alpha}{r} (x A) B$；
@@ -400,12 +400,12 @@ flowchart LR
 
 以下关键瓶颈已列入技术演进追踪（详见 [`plan/TODO.md`](../plan/TODO.md)）：
 
-### 9.1 跨平台 CPU Fallback 多核并行瓶颈
+### 9.1 CPU 多核并行瓶颈
 * **现状定位**：
-  在 macOS 平台，`znn` 借助 Accelerate 框架直接调用 Apple Silicon AMX 协处理器；但在 Linux 与 Windows 上，`src/cblas.zig` 的纯 Zig 后备实现采用单线程 `@Vector(8, f32)` SIMD 向量化，无法利用多核服务器的并发算力。
-* **规划方案**：
-  1. 引入轻量级线程池调度器（`std.Thread`），对 M 维与 N 维进行分块（Tiling & Blocking）多线程并发调度；
-  2. 在 `build.zig` 中引入 `-Dblas=[accelerate|openblas|mkl|fallback]` 编译配置选项，支持在 Linux 端自动探测并链接系统 OpenBLAS 或 Intel MKL。
+  在 macOS 平台，`znn` 通过构建期链接的 Accelerate 框架调用 Apple Silicon AMX 协处理器完成 GEMM；在 Linux 与 Windows 上，`src/cblas.zig` 的纯 Zig 后备实现为单线程 `@Vector(8, f32)` SIMD 向量化。逐元素、Softmax、归一化与卷积算子均为单线程；Gemma 4 的 `Q4Linear.forward` 与 LM head argmax 每次调用临时 spawn 8 个 OS 线程。
+* **规划方案**（详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](../plan/ASYNC_OFFLOAD_DESIGN.md)）：
+  1. 基于 Zig 0.16 `std.Io` 实现固定粒度分块的确定性执行器，由应用创建 `std.Io.Threaded` 并经 `GraphOptions.io` 注入，替换临时 spawn 线程的实现；
+  2. 随目标传入式 (DPS) 内核改造，将行内归约、归一化与逐元素算子改为按行/按块并行；Linux GEMM 微内核与 `-Dblas=openblas` 作为后续阶段。
 
 ### 9.2 长序列自注意力 $O(S^2)$ 内存开销与 KV Cache 优化
 * **现状定位**：
@@ -413,4 +413,11 @@ flowchart LR
 * **规划方案**：
   1. 研发 FlashAttention 原理的 Online Softmax 分块流式计算，将显存复杂度降至 $O(S)$ 并大幅提升 SRAM/L1 缓存局部性；
   2. 实现动态扩容与分页式 KV 缓存（Paged KV Cache），最大化自回归解码吞吐。
+
+### 9.3 Apple Silicon Metal GPU 卸载
+* **现状定位**：
+  所有前向与反向计算均在 CPU 上执行；算子在记录时即分配输出并同步计算，无梯度图不记录 `Op`，`nn` / `models` 的 forward 中存在直接读写 `.data` 的宿主逻辑（如 MoE 路由与 KV Cache 推理路径）。
+* **规划方案**（详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](../plan/ASYNC_OFFLOAD_DESIGN.md)）：
+  1. 算子改造为目标传入式 (DPS) 内核，引入 `hostSlice` 宿主访问协议与 `eager` / `deferred` 双执行模式；
+  2. 以统一内存零拷贝 `MetalAllocator`、单一有序命令队列与运行期编译的 Metal 着色语言 (Metal Shading Language, MSL) 内核实现 Metal 后端，先推理、后训练。
 

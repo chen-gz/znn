@@ -10,8 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **异步计算图执行与异构硬件 Offload 架构设计规划 (`plan/ASYNC_OFFLOAD_DESIGN.md`, `plan/README.md`, `plan/TODO.md`, `doc/README.md`, `README.md`)**:
-  - 制定面向 `v0.4.0`–`v0.5.0` 的《异步计算图执行与异构硬件算子卸载架构设计规范》，定义零模型代码侵入的三态执行模式 (`eager` / `async_queue` / `lazy_dag`)、算子内分块多线程 (`CpuPoolBackend`) 与算子间无锁原子波前 DAG 调度器 (`DagScheduler`)、基于计算强度与访存带宽模型的 `CostRouter` 异构分发器、Apple Silicon 统一内存零拷贝协同（CPU + Accelerate AMX + Metal GPU）以及 Phase A–D 四阶段落地路线图。
+- **异步执行与 Apple Silicon Metal 卸载设计 (`plan/ASYNC_OFFLOAD_DESIGN.md`, `plan/README.md`, `plan/TODO.md`, `doc/README.md`, `README.md`)**:
+  - 新增面向 `v0.4.0`–`v0.5.x` 的设计文档：平台优先级为 Apple Silicon Metal > CPU 多核 > 其他 GPU；并发基于 Zig 0.16 `std.Io`，由应用创建 `std.Io.Threaded` 并经 `GraphOptions.io` 注入；`eager` / `deferred` 双执行模式与单一有序命令队列；统一内存零拷贝 `MetalAllocator`、Objective-C 运行时桥接与运行期编译 MSL；目标传入式 (DPS) 内核、`hostSlice` 宿主访问协议、静态内存规划与显式 `Attention` / `Q4MatMul` / `TopK` / `KVCacheAppend` 算子；Phase 0–5 路线图与验收标准。
+
+### Fixed
+- **规划与架构文档同代码现状对齐 (`plan/TODO.md`, `plan/README.md`, `doc/architecture.md`)**:
+  - 更正 `MoELayer` “稀疏激活”的不实描述：当前仅以 Top-K 掩码置零非选中专家的门控概率，专家前向仍为稠密计算，稀疏 Token 分发另列任务。
+  - 标注 `src/models/gemma4.zig`（64,336 B）超出 60 KB 规则，并将拆分列入 Phase 0。
+  - 更正多线程现状（Linux GEMM 后备为单线程；Gemma 4 Q4 每次调用临时 spawn 线程），并将 `std.Thread.Pool` 改为 Zig 0.16 `std.Io` 执行器；更正 Accelerate 为构建期链接；无梯度图不分配 `grad` 缓冲已实现，剩余工作为不记录 Op 与 `copyFromEager`；移除不存在的 `GPT.generate` 引用与“毫秒级”解码表述。
 
 ## [0.3.0] - 2026-10-16
 
