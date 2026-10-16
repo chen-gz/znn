@@ -6,11 +6,11 @@
 
 ## 🔍 第一部分：代码库现状诊断与演进空间 (Current Architecture Review)
 
-经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.3.0`）已完成核心架构解耦与全模块精简（所有非测试源码文件均 `< 60 KB`，涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
+经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.3.0`）已完成核心架构解耦与全模块精简（除 `src/models/gemma4.zig`（64,336 B，拆分任务见 2.5）外，所有非测试源码文件均 `< 60 KB`；涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
 
 ### 1. 核心计算与张量系统 (Tensor Engine & Core Math)
 * **自动微分多精度与量化张量扩展 (Mixed-Precision Autograd & Quantization)**：
-  [`src/tensor/types.zig`](../src/tensor/types.zig) 已实现支持 `f32`、`f64`、`bf16`、`i32`、`i64`、`usize`、`bool` 的泛型 [`GenericTensor(T)`](../src/tensor/types.zig)，且 [`src/tensor/static.zig`](../src/tensor/static.zig) 已提供编译期形状检查的 [`StaticTensor(T, dims)`](../src/tensor/static.zig)；但动态计算图节点 [`Tensor`](../src/tensor/core.zig) 与 [`Graph`](../src/autodiff/graph.zig) 的前向/反向传播目前仍以 `f32` 为主，尚未实现原生 `f16`/`bf16` 自动混合精度梯度流与低比特量化类型（如 `int8`、`q4_0`、`q8_0`）。
+  [`src/tensor/types.zig`](../src/tensor/types.zig) 已实现支持 `f32`、`f64`、`bf16`、`i32`、`i64`、`usize`、`bool` 的泛型 [`GenericTensor(T)`](../src/tensor/types.zig)，且 [`src/tensor/static.zig`](../src/tensor/static.zig) 已提供编译期形状检查的 [`StaticTensor(T, dims)`](../src/tensor/static.zig)；但动态计算图节点 [`Tensor`](../src/tensor/core.zig) 与 [`Graph`](../src/autodiff/graph.zig) 的前向/反向传播目前仍以 `f32` 为主，尚未实现原生 `f16`/`bf16` 自动混合精度梯度流与低比特量化类型（如 `int8`、`q4_0`、`q8_0`）；低比特量化目前仅以 Gemma 4 专用的 `Q4Block` / `Q4Linear` 形式存在于 [`src/models/gemma4.zig`](../src/models/gemma4.zig)，尚未作为张量层算子提供。
 * **维度上限与高维扩展**：
   [`Shape.init`](../src/tensor/shape.zig) 与 [`Shape.fromSlice`](../src/tensor/shape.zig) 采用固定 `[8]usize` 栈数组并通过 `MaxDimensionsExceeded` 进行显式边界校验，满足绝大多数深度学习场景（最高 8 维），但尚未支持超过 8 维的任意高维张量缩并。
 * **正定线性代数求解器扩展**：
@@ -20,20 +20,24 @@
 * **不支持高阶导数 (No Higher-Order Gradients)**：
   [`Tensor.grad`](../src/tensor/core.zig) 是一维切片 (`[]f32`)，反向传播由 [`Graph.backward`](../src/autodiff/graph.zig) 调度 [`backward_core.zig`](../src/autodiff/backward_core.zig)、[`backward_nn.zig`](../src/autodiff/backward_nn.zig) 与 [`backward_math.zig`](../src/autodiff/backward_math.zig) 执行单向链式传导，梯度计算本身不在图上注册为新节点，暂不支持二阶导数或 Hessian 向量积。
 * **就地操作 (In-place Ops) 版本计数器与前向零梯度内存优化**：
-  就地算子（如 [`mulScalar_`](../src/tensor/reductions.zig)、[`add_`](../src/tensor/reductions.zig)）目前通过 `assert(!requires_grad and creator == null)` 防御，尚缺计算图版本计数器（Version Counter）。此外，无梯度推理图 (`Graph.initNoGrad`) 下中间张量的 `grad` 切片按需跳过分配以及消除 `Op.forward` 中 `copyFromEager` 临时缓冲仍是进一步降低推理内存占用的关键优化点。
+  就地算子（如 [`mulScalar_`](../src/tensor/reductions.zig)、[`add_`](../src/tensor/reductions.zig)）目前通过 `assert(!requires_grad and creator == null)` 防御，尚缺计算图版本计数器（Version Counter）。无梯度推理图 (`Graph.initNoGrad`) 已不为中间张量分配 `grad` 缓冲，但也不记录 `Op` 节点，因此没有可供规划或重放的计算图；同时 `Op.forward` 与 `runAndRecordPreallocatedOp` 经 `copyFromEager` 先算到临时张量再拷贝，输出缓冲还会被预先清零，这些是降低推理内存与带宽开销的关键优化点。
 
 ### 3. 硬件加速与平台生态 (Hardware Acceleration & Parallelism)
-> 📐 **完整专项设计规范**：详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)（涵盖四层架构、算子内与算子间双层异步并行、`CostRouter` 异构硬件自动路由、Apple Silicon 统一内存零拷贝及四阶段实施路线图）。
-* **缺少 GPU / NPU 加速后端**：
-  所有前向计算与反向梯度求解均在 CPU 上执行，缺乏 Metal Compute、Vulkan Compute / WebGPU 或 CUDA 后端。
+> 📐 **专项设计**：详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)（Apple Silicon Metal 优先；并发经 `io: std.Io` 注入；`eager` / `deferred` 双模式；按流有序命令队列；Phase 0–5 路线图），对应任务见第二部分 2.4 与 2.5。
+* **缺少 GPU 加速后端**：
+  所有前向计算与反向梯度求解均在 CPU 上执行。首要目标为 Apple Silicon Metal（统一内存零拷贝），CUDA / Vulkan / WebGPU 不在近期范围内。
 * **跨平台系统级 BLAS 链接选项**：
-  在 macOS 上动态绑定 Apple Accelerate 框架以利用 AMX 协处理器 ([`cblas.zig`](../src/cblas.zig))；在 Linux/Windows 上使用纯 Zig 8 路 `@Vector(8, f32)` SIMD 后备内核，尚待在 `build.zig` 中提供显式链接系统 OpenBLAS、BLIS 或 Intel MKL 的配置选项。
-* **多核多线程并行度不足与同步阻塞执行**：
-  除 GEMM 外，逐元素算子、Softmax、Conv2D、RMSNorm、LayerNorm 仍以单线程循环执行，尚未接入 `std.Thread.Pool` 进行算子内分块并行与算子间无锁 DAG 波前异步调度。
+  macOS 上通过 `@extern` 与构建期 `linkFramework("Accelerate")` 调用 Accelerate，由其调度 AMX 协处理器 ([`cblas.zig`](../src/cblas.zig))；Linux/Windows 上使用单线程纯 Zig 8 路 `@Vector(8, f32)` SIMD 后备内核，既没有寄存器/缓存分块微内核，也未在 `build.zig` 中提供链接系统 OpenBLAS、BLIS 或 Intel MKL 的配置选项。
+* **多核并行度不足**：
+  逐元素算子、Softmax、Conv2D、RMSNorm、LayerNorm 与 Linux 上的 GEMM 后备内核均为单线程；Gemma 4 的 [`Q4Linear.forward`](../src/models/gemma4.zig) 与 LM head argmax 每次调用都临时 spawn 8 个 OS 线程（128 核 Linux 虚拟机实测约 1.9 ms/次，常驻线程池派发约 32 µs/次），且线程数写死为 8。Zig 0.16 已移除 `std.Thread.Pool`，并发原语迁移至 `std.Io`，需经 `io: std.Io` 注入执行器。
 
 ### 4. 网络架构与现代 LLM 特性完备度 (Model Architectures & Operators)
 * **注意力机制 FlashAttention 与端到端 GPT / Gemma 4 KV-Cache 推理**：
-  [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`MLALayer`](../src/nn/attention.zig) 已实现单层 `forwardInference`（支持 `KVCache` 与 `MLACache`），但 [`CausalSelfAttention.forward`](../src/nn/attention.zig) 训练时仍物化 $O(T^2)$ 注意力矩阵（待引入 FlashAttention 分块在线 Softmax），且 [`GPT.generate`](../src/nn/transformer.zig) 与 [`Gemma4ForCausalLM`](../src/models/gemma4.zig) / [`Gemma4Q4ForCausalLM`](../src/models/gemma4.zig) 尚未跨层串联增量 `KVCache` 实现端到端 $O(T)$ 单步解码与交互式多轮对话 CLI (Chat REPL)。
+  [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`MLALayer`](../src/nn/attention.zig) 已实现单层 `forwardInference`（支持 `KVCache` 与 `MLACache`），但 [`CausalSelfAttention.forward`](../src/nn/attention.zig) 训练时仍物化 $O(T^2)$ 注意力矩阵（待引入 FlashAttention 分块在线 Softmax），且 [`GPT`](../src/nn/transformer.zig)（尚无增量生成接口）与 [`Gemma4ForCausalLM`](../src/models/gemma4.zig) / [`Gemma4Q4ForCausalLM`](../src/models/gemma4.zig) 尚未跨层串联增量 `KVCache` 实现端到端 $O(T)$ 单步解码与交互式多轮对话 CLI (Chat REPL)；[`examples/gemma4.zig`](../examples/gemma4.zig) 每生成一个 Token 都重算整段序列。
+* **注意力实现分散**：
+  [`Gemma4Attention`](../src/models/gemma4.zig) 未复用 [`ScaledDotProductAttention`](../src/nn/attention.zig)，独立实现掩码与 Softmax，并物化 `repeatKV` 与多次转置。
+* **混合专家网络稀疏计算**：
+  [`MoELayer.forward`](../src/nn/transformer.zig) 以 Top-K 掩码严格置零非选中专家的门控概率，但仍对全部路由专家在所有 Token 上执行稠密前向（`expert_active` 计算后未被使用），计算量约为稀疏实现的 E/K 倍。
 * **视觉算子库高阶扩展**：
   已支持可配置 `stride`/`padding` 的 `im2col` [`Conv1D`](../src/nn/core.zig)、[`Conv2D`](../src/nn/core.zig)、[`ConvTranspose1D`](../src/nn/core.zig)、[`ConvTranspose2D`](../src/nn/core.zig)、[`MaxPool1D`](../src/nn/normalization.zig)、[`AvgPool1D`](../src/nn/normalization.zig)、[`MaxPool2D`](../src/nn/normalization.zig)、[`AvgPool2D`](../src/nn/normalization.zig)、[`AdaptiveAvgPool1D`](../src/nn/normalization.zig)、[`AdaptiveAvgPool2D`](../src/nn/normalization.zig)、[`BatchNorm1d`](../src/nn/normalization.zig)、[`BatchNorm2d`](../src/nn/normalization.zig) 与 [`GroupNorm`](../src/nn/normalization.zig)，后续可按需扩展 `Conv3D`、`AdaptiveMaxPool2D` 与 `PixelShuffle`。
 * **混合精度与分布式训练原语**：
@@ -56,9 +60,9 @@
 | 阶段 / 优先级 | 核心目标 | 涉及模块 | 预估复杂度 |
 | :--- | :--- | :--- | :--- |
 | **Phase 1 (P0)** | 健壮性增强、类型化错误、自动化测试覆盖、模块化重构 (`< 60 KB`) | `tensor/`, `autodiff/`, `nn/`, `bench/` | 🟡 中等 |
-| **Phase 2 (P1)** | 泛型/静态形状张量系统与 Linux BLAS / 多核加速 | `tensor/`, `cblas.zig`, `build.zig` | 🔴 较高 |
+| **Phase 2 (P1)** | 泛型/静态形状张量、`io: std.Io` 多核执行器与 Apple Silicon Metal 异步卸载 | `tensor/`, `backend/`, `autodiff/`, `build.zig` | 🔴 较高 |
 | **Phase 3 (P2)** | 现代 LLM 架构、FlashAttention、KV-Cache 解码与视觉算子 | `nn/`, `autodiff/`, `optim.zig` | 🔴 较高 |
-| **Phase 4 (P3)** | 分词器升级、格式互操作与 GPU 后端 | `dataset.zig`, `tools/`, `build.zig` | 🟣 复杂 |
+| **Phase 4 (P3)** | 分词器升级、格式互操作与非 Apple GPU 后端 | `dataset.zig`, `tools/`, `build.zig` | 🟣 复杂 |
 
 ---
 
@@ -123,7 +127,7 @@
   - [x] 将内联测试拆分为独立模块化测试文件（`src/tests.zig`、`src/nn/tests.zig`、`src/nn/tests_init.zig`、`src/nn/tests_vis.zig`），并用表驱动循环管理 [`build.zig`](../build.zig) 中全部 18 个示例构建与运行步骤。
 
 - [x] **1.5.11 核心算子性能与功能优化 (`nn/`, `cblas.zig`, `tensor/nn_kernels.zig`, `nn/core.zig`)**
-  - [x] **`MoELayer` 稀疏激活**：修复 [`MoELayer.forward`](../src/nn/transformer.zig) 对未选中专家仍执行全量前向计算且未严格置零非 Top-K 门控概率的问题。
+  - [x] **`MoELayer` 门控概率严格置零**：以 Top-K 掩码严格置零 [`MoELayer.forward`](../src/nn/transformer.zig) 中非 Top-K 专家的门控概率（专家前向仍为稠密计算，稀疏 Token 分发见 3.1）。
   - [x] **`CausalSelfAttention` 掩码广播优化**：将因果掩码从每次分配两份 $[B, n_h, T, T]$ 缩减为单份 $[1, 1, T, T]$ 广播张量。
   - [x] **`cblas_sgemm_fallback` `TransB` SIMD 加速**：为 [`cblas_sgemm_fallback`](../src/cblas.zig) 的 `NoTrans × Trans` 分支实现 8 路 `@Vector(8, f32)` 向量化内积。
   - [x] **`Conv2D` 步长/填充扩展与 `im2col + sgemm` 加速**：为 [`Conv2D`](../src/nn/core.zig) 与 [`Tensor.conv2dWithConfig`](../src/tensor/nn_kernels.zig) 增加可配置 `stride` 与 `padding` 支持，并用 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向计算。
@@ -135,7 +139,7 @@
 
 ---
 
-### Phase 2 (P1): 泛型数据类型与跨平台高性能加速 (Generic DTypes & High-Perf Math)
+### Phase 2 (P1): 泛型数据类型、多核执行器与 Apple Silicon Metal (Generic DTypes, Executor & Metal)
 
 - [x] **2.1 张量泛型化、编译期静态张量与多精度支持 (Generic & Static Tensor Types)**
   - [x] 引入泛型结构体 [`GenericTensor(comptime T: type)`](../src/tensor/types.zig) 与类型别名（`FloatTensor`, `DoubleTensor`, `IntTensor`, `LongTensor`, `BoolTensor`, `BFloat16Tensor`, `UsizeTensor`），完整支持 `f32`、`f64`、`i32`、`i64`、`usize`、`bool`、`bf16`。
@@ -145,7 +149,7 @@
   - [x] 引入跨步零拷贝切片 [`SliceRange`](../src/tensor/types.zig) 与 `slice()`，通过 `is_view` 保障生命周期安全与 `contiguous()` 紧凑化。
   - [x] 补充 `clip`, `clip_`, `sort`, `argsort`, `nonzero` 等排序检索算子。
 
-- [ ] **2.2 跨平台 BLAS 支持与构建选项**
+- [ ] **2.2 跨平台 BLAS 支持与构建选项（Apple Silicon 优先，本项顺延至设计 Phase 5）**
   - [ ] 在 [`build.zig`](../build.zig) 中增加选项 `-Dblas=[accelerate|openblas|mkl|fallback]`。
   - [ ] 完善 Linux / Windows 环境下自动探测并链接系统 `libopenblas` 或 Intel MKL 的配置。
   - [ ] 优化无外部依赖时的纯 Zig Fallback GEMM 内核（进一步利用缓存分块 Cache-blocking 与 AVX2 / NEON 向量化）。
@@ -154,27 +158,38 @@
   - [ ] 引入 Cholesky 分解 ($A = LL^T$) 与前代/回代求解器，替代线性回归/岭回归中现有的高斯-若尔当消元法 [`solveLinearSystem`](../src/tensor/ops.zig)。
   - [x] 增加 QR 分解 (`Tensor.qr`)、奇异值分解 (`Tensor.svd`) 与实对称特征值分解 (`Tensor.symeig`) 支持，提升病态矩阵求解稳定性。
 
-- [ ] **2.4 多核 CPU 并行化 (Multi-Threading)**
-  - [ ] 引入轻量级工作窃取（Work-stealing）或分块线程池调度器。
-  - [ ] 将 `Conv2D`、`Softmax`、`LayerNorm`、`RMSNorm` 及大矩阵逐元素算子改写为多线程分块并行。
+- [ ] **2.4 多核 CPU 并行化 (Multi-Threading，详见设计 Phase 0 / 1 / 5)**
+  - [ ] 基于 `std.Io`（应用创建 `std.Io.Threaded`，库内使用 `Io.Group`）实现固定粒度分块的确定性执行器 `parallelFor` / `parallelReduce`，经 `GraphOptions.io` 注入（Phase 0）。
+  - [ ] 用执行器替换 [`Q4Linear.forward`](../src/models/gemma4.zig) 与 Gemma 4 LM head argmax 中每次调用临时 spawn 线程的实现（Phase 0）。
+  - [ ] 将 `Softmax`、`LayerNorm`、`RMSNorm`、`RoPE`、`Conv2D` 及大张量逐元素算子改写为按行/按块并行（Phase 1，随 DPS 内核改造）。
+  - [ ] Linux GEMM 寄存器/缓存分块微内核与多线程（Phase 5）。
+
+- [ ] **2.5 Apple Silicon Metal 异步执行与卸载（详见 [`ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)）**
+  - [ ] **Phase 0 执行器与基线**：`GraphOptions` 与 `Graph.init(backing, options)` / `Graph.initDefault`（删除 `initNoGrad`）；拆分 `src/models/gemma4.zig`（当前 64,336 B，超出 60 KB）；`Q4Block` 与内核下沉为 `src/tensor/quant.zig` 并新增 `Q4MatMul` 算子；Q4 块内 split-half 排布与文件魔数 `ZNNQ4G02`；`src/cblas.zig` 迁入 `src/backend/`；新增 `executor` / `q4` / `decode` 基准。
+  - [ ] **Phase 1 DPS 内核与 deferred 图**：全部算子拆分为 `inferShape` + `xxxInto`；无梯度模式也记录 Op；`hostSlice` 宿主访问协议与 Debug NaN 毒化；`TopK` / `KVCacheAppend` 算子；`submit` / `sync` / `replay` 与静态内存规划。
+  - [ ] **Phase 2 Metal 推理 MVP**：Objective-C 运行时桥接、统一内存 `MetalAllocator`、按流有序命令队列、运行期编译 MSL、MPS f32 GEMM、Q4 GEMV / GEMM、CPU 回退与 CPU / Metal 一致性测试。
+  - [ ] **Phase 3 注意力、KV Cache 与融合**：显式 `Attention` 算子（统一三处注意力实现）、端到端 KV Cache、QKV 与 gate / up 权重融合、执行计划层融合、MoE 稀疏 Token 分发。
+  - [ ] **Phase 4 Metal 训练**：反向内核、优化器内核与 GPU 版 `clipGradNorm`。
+  - [ ] **Phase 5（可选）并发与扩展**：Metal 并发派发与缓冲区冲突分析、CPU 算子间并行、间接命令缓冲重放。
 
 ---
 
 ### Phase 3 (P2): 现代 LLM 架构与算子完备度 (Modern LLM & Layer Architecture)
 
 - [ ] **3.1 注意力机制升级 (Memory-Efficient & FlashAttention)**
-  - [ ] 实现基于 Tiling 分块与在线 Softmax 统计更新的 **FlashAttention** 前向与反向算子（避免显式存储 $O(T^2)$ 注意力分数矩阵）。
+  - [ ] 实现基于 Tiling 分块与在线 Softmax 统计更新的 **FlashAttention** 前向与反向算子（避免显式存储 $O(T^2)$ 注意力分数矩阵），以显式 `Attention` 算子实现，并统一 `ScaledDotProductAttention`、`Gemma4Attention` 与 `Gemma4Q4Attention`（设计 Phase 3）。
   - [x] 实现通用 **RoPE** 旋转位置编码的前向与反向 Autograd 算子（[`OpType.RoPE`](../src/autodiff/types.zig)、[`Graph.rope`](../src/autodiff/graph_nn.zig)、[`Tensor.rope`](../src/tensor/nn_kernels.zig) 统一接收 [`RopeOptions`](../src/tensor/types.zig)）并接入 [`MLALayer.forward`](../src/nn/attention.zig)。
   - [x] **补全 Split-Half 与 Partial Rotary RoPE 的静态图重演与反向传播支持 (`graph_nn.zig`, `op.zig`, `backward_nn.zig`, `models/gemma4.zig`)**：
     - [x] **修复 `requires_grad` 硬编码为 `false` 导致的训练梯度断流**：在 [`src/autodiff/graph_nn.zig`](../src/autodiff/graph_nn.zig) 中，统一 RoPE 继承 `self.enable_grad and X.requires_grad`，彻底修复反向传播梯度断流问题。
     - [x] **修复 `op.zig` 中 `.RoPE` 静态图重演（`graph.forward()`）结果错误**：在 [`OpContext.RoPE`](../src/autodiff/types.zig) 中保存 `mode` 与 `partial_rotary_factor`，并在 [`Op.forward(.RoPE)`](../src/autodiff/op.zig) 重演时传入完整配置，实现 100% 数值一致的图重演。
     - [x] **补全 `backward_nn.zig` 中 `.RoPE` 反向传播对 `split_half` 与 `partial_rotary_factor` 的伴随正交逆旋转**：在 [`src/autodiff/backward_nn.zig`](../src/autodiff/backward_nn.zig) 中实现正交伴随逆旋转求导内核 $\mathbf{R}^T$，完整支持 `interleaved` 与 `split_half` 模式及部分旋转因子，并通过有限差分数值梯度检验。
-  - [ ] 为 [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`GPTConfig`](../src/nn/transformer.zig) 增加可选 RoPE 位置编码开关，并将单层 `KVCache` 串联至 `TransformerBlock` / `GPT.forwardInference` 以及 [`Gemma4ForCausalLM`](../src/models/gemma4.zig) / [`Gemma4Q4ForCausalLM`](../src/models/gemma4.zig) 实现端到端 $O(T)$ 增量生成（将 Gemma 4 单步生成延迟降至毫秒级）。
+  - [ ] 为 [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`GPTConfig`](../src/nn/transformer.zig) 增加可选 RoPE 位置编码开关，并将单层 `KVCache` 串联至 `TransformerBlock` / `GPT.forwardInference` 以及 [`Gemma4ForCausalLM`](../src/models/gemma4.zig) / [`Gemma4Q4ForCausalLM`](../src/models/gemma4.zig) 实现端到端 $O(T)$ 增量生成（Gemma 4 解码从每步重算整段序列改为单 Token 增量计算；这是 Metal 解码延迟的前置条件，设计 Phase 3）。
   - [ ] 为 [`examples/gemma4.zig`](../examples/gemma4.zig) 增加多轮对话交互式 CLI (Chat REPL) 与流式 Token 实时打字机输出。
   - [ ] `KVCache` 支持动态扩容与分页块分配（Paged KV Cache），提升自回归解码吞吐。
   - [x] 在 [`CausalSelfAttention`](../src/nn/attention.zig) 中支持 **Grouped-Query Attention (GQA)** 与 **Multi-Query Attention (MQA)**。
   - [x] 实现 **Multi-Head Latent Attention (MLA)** 与极简低秩 `MLACache` 矩阵吸收推理。
   - [x] 实现混合专家前馈网络 **MoELayer**（DeepSeekMoE 细粒度路由、共享专家与 Top-K 门控）。
+  - [ ] **MoELayer 稀疏 Token 分发**：按专家 gather 选中 Token → 专家前向 → scatter-add 加权合并，替代当前对全部专家的稠密计算（固定容量填充以获得静态形状，设计 Phase 3）。
   - [x] 实现强化学习 **GRPO** (Group Relative Policy Optimization) 组内优势函数与带 KL 惩罚损失函数。
 
 - [x] **3.2 解耦优化器与训练基建 (Optimizers & Training Infrastructure)**
@@ -183,7 +198,7 @@
   - [x] 梯度裁剪组件：全局 L2 范数裁剪 (`clipGradNorm`) 与数值范围裁剪 (`clipGradValue`)。
   - [x] 二进制检查点持久化：支持签名魔数、格式校验与张量元数据验证的 `saveCheckpoint` / `loadCheckpoint`。
   - [x] 全模型训练与评估模式一键切换：`setTrainingModel`、`trainModel` 与 `evalModel`。
-  - [ ] 引入计算图版本计数器（Version Counter），增强就地修改（In-place ops）在反向传播时的安全性检测。
+  - [ ] 引入计算图版本计数器（Version Counter），增强就地修改（In-place ops）在反向传播时的安全性检测（与设计中的缓冲区级冲突跟踪统一，Phase 5）。
   - [ ] 实现自动混合精度训练（AMP）与 `GradScaler`（动态损失缩放，防止 `bf16`/`f16` 下溢）。
 
 - [x] **3.3 经典网络与视觉算子扩展**
@@ -196,13 +211,14 @@
 
 - [ ] **3.4 计算图执行与内存优化 (Graph Execution & Memory)**
   - [ ] 激活重计算（Activation / Gradient Checkpointing）：前向释放中间激活，反向时重算，以计算换显存。
-  - [ ] 无梯度模式 (`Graph.initNoGrad`) 下跳过中间张量的 `grad` 缓冲区分配，并消除 `Op.forward` 中 `copyFromEager` 的临时堆分配。
-  - [ ] 基于计算图生命周期分析的激活缓冲区原地复用（如 ReLU、Dropout 等非分支激活）。
+  - [x] 无梯度模式 (`Graph.initNoGrad`) 下不为中间张量分配 `grad` 缓冲（`tensorND`、`registerSingleOutputOp` 与张量层构造函数仅在需要梯度时分配）。
+  - [ ] 消除 `Op.forward` 与 `runAndRecordPreallocatedOp` 中 `copyFromEager` 的临时堆分配与输出预清零（并入设计 Phase 1 的 DPS 内核改造）。
+  - [ ] 基于计算图生命周期分析的激活缓冲区复用（deferred 模式静态内存规划，设计 Phase 1）。
   - [ ] 将 [`StaticTensor`](../src/tensor/static.zig) 融入动态计算图，得到零分配、编译期校验形状的子图。
 
 ---
 
-### Phase 4 (P3): 分词器、模型互操作与 GPU 加速 (Tokenizer, Interop & GPU)
+### Phase 4 (P3): 分词器、模型互操作与其他 GPU 后端 (Tokenizer, Interop & Other GPUs)
 
 - [ ] **4.1 生产级 BPE 分词器重构**
   - [x] 实现基础无依赖 `BPETokenizer`（支持字符与字节合并、UTF-8 边界容错编码/解码与无监督语料训练）。
@@ -221,8 +237,8 @@
   - [ ] 提供 Python 脚本工具将 PyTorch `.pt` / `.safetensors` 权重无缝转换为 `znn` 二进制结构。
   - [ ] 导出 ONNX 计算图与权重。
 
-- [ ] **4.3 异构硬件与 GPU 计算后端探索 (GPU Acceleration)**
-  - [ ] 探索通过 Metal Compute（macOS/iOS）执行矩阵乘法与注意力计算。
+- [ ] **4.3 非 Apple GPU 计算后端探索 (Other GPU Backends，Apple Silicon Metal 见 2.5)**
+  - [ ] 评估 CUDA 后端（`std.DynLib` 动态加载 `libcuda` / `libcublas`，自定义内核经 NVRTC 运行期编译）。
   - [ ] 探索通过 WebGPU / Vulkan Compute Shaders 实现跨平台纯图形 API 训练与推理后端。
 
 - [ ] **4.4 训练可观测性 (Training Telemetry)**
