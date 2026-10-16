@@ -21,6 +21,7 @@
 | Model graph visualization & edge routing specification | [`doc/visualization-model-edge-design.md`](doc/visualization-model-edge-design.md) |
 | Interactive web visualizer (`web/`) | [`web/README.md`](web/README.md) |
 | Documentation index | [`doc/README.md`](doc/README.md) |
+| Async execution & hardware offload design | [`plan/ASYNC_OFFLOAD_DESIGN.md`](plan/ASYNC_OFFLOAD_DESIGN.md) |
 | Roadmap and task list | [`plan/TODO.md`](plan/TODO.md) |
 | Comparison with NumPy 2.x | [`plan/NUMPY_GAP_ANALYSIS.md`](plan/NUMPY_GAP_ANALYSIS.md) |
 | Contributor and agent rules | [`AGENTS.md`](AGENTS.md) |

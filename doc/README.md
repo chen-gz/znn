@@ -24,9 +24,10 @@
 | **01. 系统全景架构** | [系统全景架构设计 (architecture.md)](architecture.md) | 系统分层模型、模块化目录结构、张量引擎与跨步内存、反向传播与动态计算图、参数与训练状态反射、前沿 Transformer 与循环网络、解耦优化器与学习率调度器、Safetensors 与二进制 Checkpoint、内存生命周期与软硬件加速。 |
 | **02. 模型图导出** | [模型图导出 (model-graph-visualization.md)](model-graph-visualization.md) | 模块作用域（`enterModule` / `enterChildScope`）、作用域局部图与端口（`@in<k>` / `@out<k>`）、透明算子折叠、JSON Schema 与枚举字段、修改导出格式的步骤。 |
 | **03. 模型图可视化规范** | [模型图可视化设计规范 (visualization-model-edge-design.md)](visualization-model-edge-design.md) | 局部图模型、端口解析、残差识别、分层管线布局、SVG 连线路由与 `web/` 前端架构、2 层 GPT 黄金边集验收标准。 |
-| **04. 技术差距分析** | [现代 NumPy 2.x 差距诊断 (NUMPY_GAP_ANALYSIS.md)](../plan/NUMPY_GAP_ANALYSIS.md) | 9 大能力维度深度对比表（泛型 Dtype、编译期 StaticTensor、零拷贝切片、多轴归约、线性代数等）、设计权衡与演进阶段规划。 |
-| **05. 研发任务清单** | [架构诊断与分阶段任务跟踪 (TODO.md)](../plan/TODO.md) | 6 大核心维度的成熟度诊断与演进状态跟踪、P0 至 P3 分阶段攻坚任务明细。 |
-| **06. 版本更新历史** | [版本发布与变更日志 (CHANGELOG.md)](../CHANGELOG.md) | 语义化版本记录、各版本特性增加（`Added`）、架构变更（`Changed`）与修复（`Fixed`）。 |
+| **04. 异步与异构 Offload 规划** | [异步执行与异构计算单元 Offload 架构设计 (ASYNC_OFFLOAD_DESIGN.md)](../plan/ASYNC_OFFLOAD_DESIGN.md) | 算子内多核分块与算子间无锁波前 DAG 异步调度、基于 `CostRouter` 的异构硬件（AMX / Metal / CUDA / OpenBLAS / CPU Pool）智能卸载、Apple Silicon 统一内存零拷贝协同及四阶段实施路线图。 |
+| **05. 技术差距分析** | [现代 NumPy 2.x 差距诊断 (NUMPY_GAP_ANALYSIS.md)](../plan/NUMPY_GAP_ANALYSIS.md) | 9 大能力维度深度对比表（泛型 Dtype、编译期 StaticTensor、零拷贝切片、多轴归约、线性代数等）、设计权衡与演进阶段规划。 |
+| **06. 研发任务清单** | [架构诊断与分阶段任务跟踪 (TODO.md)](../plan/TODO.md) | 6 大核心维度的成熟度诊断与演进状态跟踪、P0 至 P3 分阶段攻坚任务明细。 |
+| **07. 版本更新历史** | [版本发布与变更日志 (CHANGELOG.md)](../CHANGELOG.md) | 语义化版本记录、各版本特性增加（`Added`）、架构变更（`Changed`）与修复（`Fixed`）。 |
 
 ---
 

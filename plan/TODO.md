@@ -23,12 +23,13 @@
   就地算子（如 [`mulScalar_`](../src/tensor/reductions.zig)、[`add_`](../src/tensor/reductions.zig)）目前通过 `assert(!requires_grad and creator == null)` 防御，尚缺计算图版本计数器（Version Counter）。此外，无梯度推理图 (`Graph.initNoGrad`) 下中间张量的 `grad` 切片按需跳过分配以及消除 `Op.forward` 中 `copyFromEager` 临时缓冲仍是进一步降低推理内存占用的关键优化点。
 
 ### 3. 硬件加速与平台生态 (Hardware Acceleration & Parallelism)
+> 📐 **完整专项设计规范**：详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)（涵盖四层架构、算子内与算子间双层异步并行、`CostRouter` 异构硬件自动路由、Apple Silicon 统一内存零拷贝及四阶段实施路线图）。
 * **缺少 GPU / NPU 加速后端**：
   所有前向计算与反向梯度求解均在 CPU 上执行，缺乏 Metal Compute、Vulkan Compute / WebGPU 或 CUDA 后端。
 * **跨平台系统级 BLAS 链接选项**：
   在 macOS 上动态绑定 Apple Accelerate 框架以利用 AMX 协处理器 ([`cblas.zig`](../src/cblas.zig))；在 Linux/Windows 上使用纯 Zig 8 路 `@Vector(8, f32)` SIMD 后备内核，尚待在 `build.zig` 中提供显式链接系统 OpenBLAS、BLIS 或 Intel MKL 的配置选项。
-* **多核多线程并行度不足**：
-  除 GEMM 外，逐元素算子、Softmax、Conv2D、RMSNorm、LayerNorm 仍以单线程循环执行，尚未接入 `std.Thread.Pool` 进行多核分块并行。
+* **多核多线程并行度不足与同步阻塞执行**：
+  除 GEMM 外，逐元素算子、Softmax、Conv2D、RMSNorm、LayerNorm 仍以单线程循环执行，尚未接入 `std.Thread.Pool` 进行算子内分块并行与算子间无锁 DAG 波前异步调度。
 
 ### 4. 网络架构与现代 LLM 特性完备度 (Model Architectures & Operators)
 * **注意力机制 FlashAttention 与端到端 GPT / Gemma 4 KV-Cache 推理**：

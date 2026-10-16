@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **异步计算图执行与异构硬件 Offload 架构设计规划 (`plan/ASYNC_OFFLOAD_DESIGN.md`, `plan/README.md`, `plan/TODO.md`, `doc/README.md`, `README.md`)**:
+  - 制定面向 `v0.4.0`–`v0.5.0` 的《异步计算图执行与异构硬件算子卸载架构设计规范》，定义零模型代码侵入的三态执行模式 (`eager` / `async_queue` / `lazy_dag`)、算子内分块多线程 (`CpuPoolBackend`) 与算子间无锁原子波前 DAG 调度器 (`DagScheduler`)、基于计算强度与访存带宽模型的 `CostRouter` 异构分发器、Apple Silicon 统一内存零拷贝协同（CPU + Accelerate AMX + Metal GPU）以及 Phase A–D 四阶段落地路线图。
+
 ## [0.3.0] - 2026-10-16
 
 ### Added
