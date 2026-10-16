@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-16
+
 ### Added
 - **高级线性代数分解算子 (`src/tensor/linalg.zig`, `src/tensor/core.zig`, `src/tensor/ops.zig`, `src/tensor.zig`, `src/root.zig`, `src/tensor/tests.zig`)**:
   - 新增精简正交三角分解 (`Tensor.qr`, `linalg.qr`)：基于豪斯霍尔德变换 (Householder Transformation)，支持任意形状 $M \times N$ 矩阵，输出具有标准正交列的正交矩阵 $Q \in \mathbb{R}^{M \times K}$ 与对角元素非负的上三角矩阵 $R \in \mathbb{R}^{K \times N}$ ($K = \min(M, N)$)，满足 $A = Q R$。
@@ -17,165 +19,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **全维度归约极值与索引算子 (`src/tensor/reductions.zig`, `src/tensor/core.zig`, `src/tensor/ops.zig`, `src/tensor.zig`, `src/tensor/tests.zig`)**:
   - 彻底泛化 `argmax` 与 `max` 从此前的 2D 限制扩展至支持任意秩 $N$ 维张量沿任意合法轴 `dim < rank` 归约。
   - 新增对偶算子 `argmin` 与 `min`，并在张量方法、`ops` 算子及顶层门面完成完整导出与测试覆盖。
-
-### Fixed
-- **自动微分多输出算子反向传播重复执行与梯度相乘缺陷 (`src/autodiff/graph.zig`, `src/autodiff/backward_core.zig`, `src/autodiff/tests.zig`)**:
-  - 核心重构：将此前作用在 `*Tensor` 上的拓扑排序升级为以 `*Op` 算子为顶点的有向无环图深度优先遍历 (`topologicalSortOps`)，在 `backward` 与 `backwardWithGrad` 中按反向拓扑序严格保证每个多输出算子（如 `Split`）仅执行且只执行一次 `Op.backward()`，彻底消除梯度随消费分支指数倍增的严重隐患。
-- **切片视图与非连续张量物理长度匹配与跨步物化 (`src/tensor/core.zig`, `src/tensor/nn_kernels.zig`, `src/tensor/ops.zig`, `src/autodiff/backward_core.zig`, `backward_math.zig`, `backward_nn.zig`)**:
-  - 全面清理直接以底层物理缓冲区长度 `self.data.len` 循环导致的越界或脏数据问题，改以逻辑元素量 `self.shape.numel()` 与 `data[0..numel]` 正确遍历。
-  - 在核心矩阵乘法 (`matmul`)、拼接 (`concat`)、分割 (`split`) 与激活/归约前置检查中，对非连续切片视图张量自动物化连续副本，保障底层 BLAS 与 SIMD 访存安全。
-- **全连接层 (`Linear.forward`) 任意 N 维张量与 1D 向量输入支持 (`src/nn/core.zig`, `src/nn/tests.zig`)**:
-  - 新增对秩大于 2 的张量（如 Transformer 批次序列 `[B, S, D]`）的前置维度自动展平与输出重组恢复，同时支持 1D 单向量 `[in_features]` 直接前向与自动求导。
-- **复合模型权重共享 (Tied Weights) 重复释放防护 (`src/nn/module.zig`, `src/nn/tests_module.zig`)**:
-  - 在 `deinitModel` 反射遍历器中引入指针去重哈希集 `seen: std.AutoHashMap(*Tensor, void)`，保证共享权重的张量仅被销毁释放一次，彻底杜绝悬垂指针与 Double-Free 崩溃。
-- **BPE 分词器多字节 UTF-8 分块边界完整性 (`src/dataset.zig`)**:
-  - 优化 `BPETokenizer.encode` 分块算法：在分块后半段优先检索空白字符以保持词汇边界；若无空白字符，自动向后回退跳过 UTF-8 延续字节 (`10xxxxxx`)，确保绝不在多字节字符中间截断。
 - **内聚前端模型图可视化器 (`web/`, `doc/visualization-model-edge-design.md`)**:
   - 将 Schema 2.0 模型计算图可视化前端（`web/src/utils/model-graph.ts`、`web/src/utils/flow-edges.ts`、`web/src/utils/json-schema.ts`、`web/src/scripts/visualizer.ts` 及对应的 Vitest 单元测试套件）与完整设计规范 `doc/visualization-model-edge-design.md` 收归至 `znn` 仓库，直接读取 `src/nn/model_graph.schema.json` 与 `examples/` 下的导出模型图，消除跨仓文件复制。
-- **专用模型库与 Gemma 4 架构实现 (`src/models/gemma4.zig`, `src/models.zig`, `src/root.zig`, `src/models/tests.zig`)**:
-  - 新增顶层 `models` 模块与 Gemma 4 专有架构：`GemmaRMSNorm` (支持 $1 + w$ 仿射缩放)、`GemmaUnscaledRMSNorm` (无权重 RMSNorm)、`Gemma4MLP` (门控 GeLU_tanh 投影)、`Gemma4Attention` (支持混合滑动窗口与全局注意力、头部 Q/K-Norm、分组查询注意力 GQA、专用 Split-Half RoPE 旋转位置编码与局部窗口掩码) 与 `Gemma4DecoderLayer` (前置与后置双 RMSNorm)。
-  - 新增支持 `Gemma4ForCausalLM` 模型定义、`DefaultGemma4` 与 `TinyGemma4`，支持词嵌入缩放 $\sqrt{d_{\text{hidden}}}$、词表权重共享投影 (Tie Word Embeddings) 以及最终 Logit 软截断平滑 (Logit Softcapping: $c \tanh(\text{logits}/c)$) 与 4-bit 量化推理 (`Q4Linear`, `Gemma4Q4ForCausalLM`)。
-  - 在 `src/models.zig` 与 `src/root.zig` 导出 `models` 与 `gemma4` 别名，并在 `src/models/tests.zig` 设立独立测试套件。
-
-### Fixed
-- **旋转位置编码 (RoPE) 统一拓扑、梯度断流修复与静态图重演闭环 (`src/tensor/`, `src/autodiff/`, `src/models/gemma4.zig`, `src/autodiff/tests.zig`)**:
-  - **模式与部分旋转因子扩展**：在 `RopeOptions` 中扩展 `mode: Mode = .interleaved`（支持 `.interleaved` 相邻配对与 `.split_half` 半切分配对两种主流拓扑）及 `partial_rotary_factor: f32 = 1.0`（比例旋转因子 Proportional RoPE），统一底层 `Tensor.rope` 前向内核。
-  - **修复 Autograd 梯度断流与伴随正交逆旋转**：修复计算图此前硬编码 `requires_grad = false` 导致的梯度阻断；在 `backward_nn.zig` 中基于正交伴随矩阵 $\mathbf{R}^T$ 完整推导并实现 `interleaved` 与 `split_half` 的伴随逆旋转 Autograd 反向求导内核，并通过有限差分数值梯度检验（Finite Difference Gradient Check）。
-  - **修复静态图重演元数据丢失**：在 `OpContext.RoPE` 中补齐 `mode` 与 `partial_rotary_factor` 上下文字段，使 `Op.forward` 图重演与 eager 计算 100% 数值一致。
-  - **解耦 Gemma 4 专用算子**：Gemma 4 中的 `tensorRopeSplitHalf` 与 `ropeSplitHalf` 直接委派至统一的通用 `Tensor.rope` 与 `Graph.rope`，消除底层非通用代码冗余。
-
-### Changed
-- **专用模型与非通用算子模块化解耦 (`src/models/`, `src/models.zig`, `src/tensor/`, `src/autodiff/`, `src/nn/`)**:
-  - 将以 Gemma 4 为代表的具体大模型架构与模型专用算子（如 Split-Half RoPE `ropeSplitHalf`、带有 unit offset 的 `GemmaRMSNorm` 等）统一收敛至新建的顶层 `models` 模块 (`src/models.zig`, `src/models/gemma4.zig`)。
-  - 从通用张量核心与计算图算子库 (`src/tensor/core.zig`、`src/tensor/nn_kernels.zig`、`src/autodiff/graph.zig`、`src/autodiff/graph_nn.zig`) 中彻底剥离非通用算子 `ropeSplitHalf`，确保底层基础库只承载纯粹的通用张量计算与 Autograd 算子。
-  - 从通用神经网络层命名空间 `nn` (`src/nn.zig`) 中移除所有 Gemma 4 专有结构体，使 `nn` 纯净对齐通用网络层标准。
-- **Safetensors 权重格式反序列化增强 (`src/nn/serialization.zig`, `src/nn/tests.zig`)**:
-  - `serialization.loadTensorData` 与 `loadModel` 新增对 `BF16` (BFloat16) 与 `F16` (Float16) 浮点数据格式的原生读取与转换解析支持，能够直接从现代大模型 Safetensors 权重文件中还原载入参数。
-
-### Added (Continued)
+- **专用模型库与 Gemma 4 架构实现 (`src/models/gemma4.zig`, `src/models.zig`, `src/root.zig`, `src/models/tests.zig`, `examples/gemma4.zig`, `tools/quantize_gemma4.zig`)**:
+  - 新增顶层 `models` 模块与 Gemma 4 专有架构：`GemmaRMSNorm` (支持 $1 + w$ 仿射缩放)、`GemmaUnscaledRMSNorm` (无权重 RMSNorm)、`Gemma4MLP` (门控 GeLU_tanh 投影)、`Gemma4Attention` (支持混合滑动窗口与全局注意力、头部 Q/K-Norm、无权重缩放 `v_norm`、分组查询注意力 GQA、专用 Split-Half 与 Proportional RoPE 旋转位置编码与局部窗口掩码) 与 `Gemma4DecoderLayer` (前置与后置双 RMSNorm)。
+  - 新增 `Gemma4ForCausalLM` 模型定义、`DefaultGemma4` 与 `TinyGemma4`，支持词嵌入缩放 $\sqrt{d_{\text{hidden}}}$、词表权重共享投影 (Tie Word Embeddings)、最终 Logit 软截断平滑 (Logit Softcapping: $c \tanh(\text{logits}/c)$)、262K 词表解码器 `Gemma4Vocabulary` 以及流式 4-bit (Q4_0) 量化推理 (`Q4Linear`, `Gemma4Q4ForCausalLM`, `zig build quantize-gemma4`, `zig build run-gemma4`)。
 - **调试构建下的参数未初始化检查 (`src/nn/core.zig`, `src/nn.zig`, `src/optim.zig`, `src/nn/tests_init.zig`)**:
   - 新增 `nn.inspectParameterInit(params) ParameterInitReport` 与 `nn.warnIfParametersUninitialized(params)`：只统计可训练权重矩阵（向量形参数如偏置、归一化 γ / β 不参与判断），所有权重矩阵都全为 0 时判定为未初始化。
   - `SGDOptimizer`、`AdamOptimizer`、`AdamWOptimizer` 构造时调用该检查，Debug 构建下输出 `std.log.warn` 提示先调用 `nn.initModel` / `Module.initParameters` / `Graph.initWeights`；非 Debug 构建下为空操作。
 - **独立可调用的缩放点积注意力模块 (`src/nn/attention.zig`, `src/nn.zig`, `src/root.zig`, `src/nn/tests.zig`)**:
-  - 将此前仅承载可视化元数据的空壳结构体 `ScaledDotProductAttention` 升级为完整的功能模块：内置 `causal: bool = true`、`Options` (`defaultOptions()`)、`init()`、`initDefault()`、`forward()`（独立进入模块作用域）与 `forwardCore()`（在父模块子作用域内执行 $[B, H, T, D_q] \times [B, H, T_{kv}, D_q] \times [B, H, T_{kv}, D_v] \to [B, H, T, D_v]$ 核心计算，兼容 $D_q \neq D_v$）。
-  - `CausalSelfAttention` 与 `MLALayer` 均内嵌 `core: ScaledDotProductAttention = .{}` 并复用其核心前向实现，消除两处重复的注意力矩阵乘法、缩放、因果掩码与 Softmax 逻辑，同时保持 Schema 2.0 计算图导出逐字节一致。
+  - 将结构体 `ScaledDotProductAttention` 升级为完整的功能模块：内置 `causal: bool = true`、`Options` (`defaultOptions()`)、`init()`、`initDefault()`、`forward()`（独立进入模块作用域）与 `forwardCore()`（在父模块子作用域内执行 $[B, H, T, D_q] \times [B, H, T_{kv}, D_q] \times [B, H, T_{kv}, D_v] \to [B, H, T, D_v]$ 核心计算，兼容 $D_q \neq D_v$）。
+  - `CausalSelfAttention` 与 `MLALayer` 均内嵌 `core: ScaledDotProductAttention = .{}` 并复用其核心前向实现，消除两处重复的注意力矩阵乘法、缩放、因果掩码与 Softmax 逻辑。
 - **全库注释术语全称与缩写规范 (`src/`, `AGENTS.md`)**:
   - 在 `AGENTS.md` 新增第 5 节《注释缩写规范》，并统一梳理 `src/` 下所有源码注释：凡在注释中使用专业缩写（如 SDPA、MHA、GQA、MQA、MLA、MoE、LoRA、RoPE、KVCache、RMSNorm、BN、MLP、GELU、ReLU、SiLU、RNN、LSTM、GRU、SGD、AdamW、BCE、MSE、DPO、GRPO、OLS、PCA、t-SNE、BLAS、JSON、IR 等），均先写出完整名称再接括号缩写。
-- **全库架构深度评审报告 (`doc/framework-review.md`, `doc/README.md`)**:
-  - 新增涵盖模块与目录组织、核心抽象与解耦、训练/推理/优化流水线、文档/路线图/测试与基准四大维度的深度技术评审报告，记录全量配置结构体审计表、子模块拆分矩阵与演进路线图。
 - **编译期静态形状张量提升入库 (`src/tensor/static.zig`, `src/tensor.zig`, `src/root.zig`, `build.zig`)**:
-  - 将编译期形状校验包装器 `StaticTensor(comptime ElemT: type, comptime dims: anytype)` 提升为正式库模块 `src/tensor/static.zig` 并通过 `tensor.StaticTensor` 与 `zig_ml.StaticTensor` 导出；在 `build.zig` 中接入 `zig build run-static`（共 18 个示例运行目标）。
+  - 将编译期形状校验包装器 `StaticTensor(comptime ElemT: type, comptime dims: anytype)` 提升为正式库模块 `src/tensor/static.zig` 并通过 `tensor.StaticTensor` 与 `zig_ml.StaticTensor` 导出；在 `build.zig` 中接入 `zig build run-static`。
 - **全模型训练/评估状态递归切换 (`src/nn/core.zig`, `src/nn.zig`, `src/root.zig`)**:
-  - 新增 `setTrainingModel(model, is_training)`、`trainModel(model)` 与 `evalModel(model)` 编译期反射工具函数，支持一键递归切换复合模型中所有 `BatchNorm2d` 与 `Dropout` 层的 `.training` 状态。
+  - 新增 `setTrainingModel(model, is_training)`、`trainModel(model)` 与 `evalModel(model)` 编译期反射工具函数，支持一键递归切换复合模型中所有 `BatchNorm1d`、`BatchNorm2d` 与 `Dropout` 层的 `.training` 状态。
 - **循环网络具名输出结构体 (`src/nn/recurrent.zig`, `src/nn.zig`)**:
   - 定义并导出 `RNNResult`、`LSTMResult`、`StackedLSTMResult` 与 `GRUResult` 具名返回结构体，作为 `RNN.forward`、`LSTM.forward`、`StackedLSTM.forwardSequence` 与 `GRU.forward` 的强类型返回值。
 - **配置结构体默认构造与便捷入口补全 (`src/cross_validation.zig`, `src/nn/`, `src/optim.zig`)**:
   - 为 `CrossValidationGridSearch` 补充 `k_splits: usize = 5` 默认值、`default`、`defaultOptions()` 与 `initDefault(allocator)`；为 `GPT(config)` 补充 `initDefault` 与 `DefaultGPT` 别名；为 `Dropout` 与 `LeakyReLU` 补充 `default`、`defaultOptions()` 与 `initDefault()`；为 `CosineScheduler`、`StepLRScheduler`、`LinearWarmupScheduler`、`ExponentialLRScheduler` 补充 `initDefault()`；为 `LRScheduler`、`Nonlinearity`、`InitMethod` 补齐 `default` 与 `defaultConfig()` / `defaultOptions()`。
-- **显式模块作用域 (`src/autodiff/graph.zig`, `src/autodiff/op.zig`, `src/tensor/core.zig`)**:
+- **显式模块作用域与局部图导出 (`src/autodiff/graph.zig`, `src/autodiff/op.zig`, `src/tensor/core.zig`, `src/nn/visualization.zig`, `src/nn/graph_ir.zig`)**:
   - `Graph` 新增作用域栈与 `pushScope` / `popScope` / `currentScope`，以及 `Graph.enterModule` / `Graph.enterChildScope` 守卫 API；`Op.scope` 与 `Tensor.scope` 在创建时记录当前模块完整路径。
-  - 所有内置模块 (`Linear`, `Conv2D`, `ConvTranspose2D`, `RMSNorm`, `LayerNorm`, `BatchNorm2d`, `Embedding`, `MLP`, `SwiGLU`, `CausalSelfAttention`, `TransformerBlock`, `TransformerDecoder`, `GPT`) 在 `forward` 入口进入自身作用域并自动注册模块类型。
-  - `CausalSelfAttention` 将 $QK^T$、缩放、掩码、softmax 与加权求和封装在 `core` 子作用域 (`ScaledDotProductAttention`)。
-- **作用域局部图导出 (`src/nn/visualization.zig`, `src/nn/graph_ir.zig`)**: 每个组合模块导出自身的 `ports` / `flow_nodes` / `edges` 局部图；Reshape / Transpose / RepeatKV 折叠进边的 `transforms`；残差边通过局部图可达性判定；无参数但执行算子的叶子 (如 `core`) 导出算子级局部图。
-- 新增作用域归属测试与黄金边集测试 (`src/nn/tests_vis.zig`)。
-- **可视化 JSON Schema (`src/nn/model_graph.schema.json`)**: 以 JSON Schema (draft 2020-12) 逐字段描述 schema 2.0 导出格式 (所有对象 `additionalProperties: false`，字段均带 `description`)，通过 `visualization.SCHEMA_JSON` 嵌入；新增一致性测试，用 GPT 与单个 `Linear` 的导出结果校验 schema，并验证未声明字段与错误版本会被拒绝。
-- `examples/export_model_report.zig` 额外导出单个 `Linear` 层的最小参考 JSON `examples/minimal_model_graph.json` (可视化器 JSON 格式指南中的模板)。
-- **图书全模型计算图导出 (`examples/export_book_models.zig`, `build.zig`)**: 新增 `zig build run-book-models` 步骤，导出专著各章节涉及的全部 18 个经典模型（`linear`、`mlp`、`rnn`、`lstm`、`stacked_lstm`、`gru`、`embedding`、`attention`、`transformer_block`、`gpt`、`swiglu`、`lora_linear`、`layernorm`、`mla`、`deepseek_moe`、`gan_generator`、`gan_discriminator`、`conv2d`）的 schema 2.0 计算图 JSON。默认写入 `examples/models/`，也可通过 `zig build run-book-models -- <dir>...` 指定一个或多个输出目录 (例如同时写入 chen-gz.github.io 的 `public/tools/visualizer/models/`)；每个目录使用相同随机种子，输出逐字节一致。
+  - 每个组合模块导出自身的 `ports` / `flow_nodes` / `edges` 局部图；Reshape / Transpose / RepeatKV 折叠进边的 `transforms`；残差边通过局部图可达性判定；无参数但执行算子的叶子 (如 `core`) 导出算子级局部图。
+  - 新增作用域归属测试与黄金边集测试 (`src/nn/tests_vis.zig`)。
+- **可视化 JSON Schema 与图书全模型导出 (`src/nn/model_graph.schema.json`, `examples/export_model_report.zig`, `examples/export_book_models.zig`, `build.zig`)**:
+  - 以 JSON Schema (draft 2020-12) 逐字段描述 schema 2.0 导出格式，通过 `visualization.SCHEMA_JSON` 嵌入；新增 `examples/minimal_model_graph.json` 最小参考 JSON。
+  - 新增 `zig build run-book-models` 步骤，导出全部 18 个经典模型（`linear`、`mlp`、`rnn`、`lstm`、`stacked_lstm`、`gru`、`embedding`、`attention`、`transformer_block`、`gpt`、`swiglu`、`lora_linear`、`layernorm`、`mla`、`deepseek_moe`、`gan_generator`、`gan_discriminator`、`conv2d`）的 schema 2.0 计算图 JSON。
 - **Autograd 算子扩展与 LLM 后训练 Loss 求导 (`src/autodiff/`, `src/tensor/`, `src/nn/`)**:
-  - 新增 `LayerNorm`、`BatchNorm2d`、`Dropout`、`AvgPool2D`、`RoPE`、`MaskedCrossEntropyLoss`、`DpoLoss`、`GrpoLoss`、`Sqrt`、`Exp`、`Log`、`Abs`、`Sum`、`Mean`、`Variance`、`Where`、`MaskedFill`、`Squeeze`、`Unsqueeze`、`Slice` 等算子的计算图前向/反向传播与可视化数学公式。
+  - 新增 `LayerNorm`、`BatchNorm1d`、`BatchNorm2d`、`GroupNorm`、`Dropout`、`Conv1D`、`ConvTranspose1D`、`MaxPool1D`、`AvgPool1D`、`MaxPool2D`、`AvgPool2D`、`AdaptiveAvgPool1D`、`AdaptiveAvgPool2D`、`RoPE`、`MaskedCrossEntropyLoss`、`DpoLoss`、`GrpoLoss`、`Sqrt`、`Exp`、`Log`、`Abs`、`Sum`、`Mean`、`Variance`、`Where`、`MaskedFill`、`Squeeze`、`Unsqueeze`、`Slice` 等算子的计算图前向/反向传播与可视化数学公式。
   - `softmaxCrossEntropy` 与 `maskedCrossEntropyLoss` 支持 `anytype` 整型分类标签切片（`u8`、`u32`、`usize` 等），突破 256 类词表限制。
-  - `Conv2D` 与 `Tensor.conv2dWithConfig` / `Graph.conv2dWithConfig` 新增可配置 `stride` 与 `padding` 支持，并采用 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向传播。
-- **张量双轨互操作 (`src/tensor/types.zig`, `src/tensor/core.zig`, `src/nn/core.zig`)**:
-  - `GenericTensor(T)` 新增 `fromSlice`、`zeros`、`ones`、`full`、`reshape`、`transpose`、`add`/`sub`/`mul`、`sum`/`mean`、`eq`/`ne`/`gt`/`lt`、`any`/`all` 及与 `Tensor` 双向转换接口。
-  - `Embedding.forward` 支持直接传入 `GenericTensor(u32)` / `GenericTensor(usize)` / `GenericTensor(i32)` 或整型切片；`Tensor.where` 与 `Tensor.maskedFill` 支持直接接收 `BoolTensor`。
-- **全模块命名与可视化作用域覆盖 (`src/nn/recurrent.zig`, `src/nn/attention.zig`, `src/nn/transformer.zig`, `src/nn/llm.zig`)**:
-  - 为 `RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`MoELayer`、`MLALayer`、`LoRALinear` 补齐 `formula` 与 `Graph.enterModule` 作用域追踪。
+  - `Conv1D` 与 `Conv2D` 新增可配置 `stride` 与 `padding` 支持，并采用 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向传播。
+- **张量双轨互操作与核心模块单测覆盖扩充 (`src/tensor/types.zig`, `src/tensor/core.zig`, `src/nn/core.zig`, `src/dataset.zig`, `src/engine.zig`, `src/autodiff/tests.zig`)**:
+  - `GenericTensor(T)` 新增 `fromSlice`、`zeros`、`ones`、`full`、`reshape`、`transpose`、`add`/`sub`/`mul`、`sum`/`mean`、`eq`/`ne`/`gt`/`lt`、`any`/`all` 及与 `Tensor` 双向转换接口；`Embedding.forward` 支持直接传入整型 `GenericTensor` 或切片；`Tensor.where` 与 `Tensor.maskedFill` 支持直接接收 `BoolTensor`。
+  - 补充 `dataset.loadImages`、`engine.evaluateClassification`、`engine.trainClassificationStep` 以及 `Graph.getModuleFormula` 的专项单元测试。
 
 ### Changed
-- **抽取卷积与池化内核子模块、统一 `PoolOptions` / `RopeOptions` 配置，新增 1D 转置卷积、1D/自适应池化与 `BatchNorm1d` / `GroupNorm` (`src/tensor/conv_pool.zig`, `src/tensor/nn_kernels.zig`, `src/tensor/types.zig`, `src/autodiff/`, `src/nn/`)**:
+- **专用模型与非通用算子模块化解耦 (`src/models/`, `src/models.zig`, `src/tensor/`, `src/autodiff/`, `src/nn/`)**:
+  - 将以 Gemma 4 为代表的具体大模型架构与模型专用算子统一收敛至新建的顶层 `models` 模块 (`src/models.zig`, `src/models/gemma4.zig`)，确保 `tensor`、`autodiff` 与 `nn` 命名空间只承载纯粹的通用基础组件。
+- **Safetensors 权重格式反序列化增强 (`src/nn/serialization.zig`, `src/nn/tests.zig`)**:
+  - `serialization.loadTensorData` 与 `loadModel` 新增对 `BF16` (BFloat16) 与 `F16` (Float16) 浮点数据格式的原生读取与转换解析支持，并支持无序偏移量的 Safetensors 文件加载及定长张量数组字段 (`[N]*Tensor`)。
+- **抽取卷积与池化内核子模块、统一 `ConvOptions` / `PoolOptions` / `RopeOptions` 配置 (`src/tensor/conv_pool.zig`, `src/tensor/nn_kernels.zig`, `src/tensor/types.zig`, `src/autodiff/`, `src/nn/`)**:
   - 将 1D/2D 卷积、转置卷积与池化内核拆分至独立子模块 `src/tensor/conv_pool.zig`，并将 `BatchNorm2d` 与 `Dropout` 前向计算统一收敛为单源 `Tensor` 内核。
-  - 新增 `ConvTranspose1D` 与 `convTranspose1d`，并将 `Tensor.convTranspose2d`、`Graph.convTranspose2d` 与 `ConvTranspose2D.init` 统一为接收 `ConvOptions` / `ConvTranspose2D.Options`。
-  - 新增 `tensor.PoolOptions`（`stride: ?usize = null, padding: usize = 0`、`resolveStride`）与 `MaxPool1D`、`AvgPool1D`、`MaxPool2D`、`AdaptiveAvgPool1D`、`AdaptiveAvgPool2D`，并将 `AvgPool2D.init` 统一为接收 `PoolOptions`。
-  - 新增 `BatchNorm1d`（支持 `[N, C]` 与 `[N, C, L]` 输入）与 `GroupNorm`（支持 `[N, C, ...]` 输入）的张量内核、自动微分算子与神经网络层。
-  - 新增 `tensor.RopeOptions` / `RoPEOptions`（`rotary_offset: usize = 0, base: f32 = 10000.0`），将 `Tensor.ropeOffset` / `Graph.ropeOffset` 统一合并入 `Tensor.rope` / `Graph.rope`。
-- **统一卷积 `ConvOptions` 配置，新增一维卷积 `Conv1D` / `conv1d` (`src/tensor/types.zig`, `src/tensor/nn_kernels.zig`, `src/autodiff/`, `src/nn/core.zig`, `src/nn.zig`, `src/root.zig`)**:
-  - 新增 `tensor.ConvOptions`（`stride: usize = 1`、`padding: usize = 0`、`default`、`defaultOptions()`），将 `Tensor.conv2dWithConfig`、`Graph.conv2dWithConfig` 与 `Conv2D.initWithConfig` 统一合并为接收 `ConvOptions` 的 `Tensor.conv2d`、`Graph.conv2d` 与 `Conv2D.init`。
-  - 新增一维卷积内核 `Tensor.conv1d`、自动微分算子 `Graph.conv1d` / `OpType.Conv1D`（支持 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向传播）、`Graph.computeParamFans` 一维卷积核扇入/扇出推导及神经网络模块 `nn.Conv1D`。
-- **按字段路径自动命名，移除逐层样板代码 (`src/nn/module.zig`, `src/nn/core.zig`, `src/nn/recurrent.zig`, `src/nn/attention.zig`, `src/nn/transformer.zig`, `src/nn/normalization.zig`, `src/nn/llm.zig`, `src/nn/graph_ir.zig`, `src/nn.zig`, `examples/`)** (不兼容变更):
-  - 新增 `nn.nameModules(&model, arena, root)`：基于 `walk` 按字段路径为子模块（含 `name` 字段的 struct）与张量命名，如 `gpt.decoder.h.0.attn.c_attn.weight`、`deep_lstm.layers.1`、`ffn_moe.routed_experts.0`；名称字符串分配在调用方 arena 中，模型按值移动后不再出现悬挂名称。
-  - 新增 `nn.enterModuleScope(graph, self)`：进入模块作用域并登记 `pub const formula`，替代各层 `forward` 中重复的作用域与公式登记代码。
-  - 删除全部库层的 `setName`、`setNameFormatted`、`getName`、`registerFormula`、`setMaskPrefix`、`deinit`、`zeroGrad` 及 `name_buf` / `mask_prefix` 字段（`Sequential` 同样移除 `deinit` / `zeroGrad`），统一改用 `nn.nameModules`、`nn.deinitModel`、`nn.zeroGradModel`；`KVCache.deinit` 与 `MLACache.deinit` 保留。库层自身构造失败时的 `errdefer` 改用 `deinitModel`，修复 `TransformerDecoder.init` 与 `GPT.init` 中重复释放的 `errdefer`。
-  - `nn.Module(T)` 新增名称 arena：`init` 返回错误联合并自动以空根路径命名子模块，`setName(root)` 返回错误联合并按新根路径重新命名。
-  - `nn.walk` 只接受指向 struct 的指针，传入其他类型时编译期报错。
-  - 导出 JSON 的名称随字段路径变化：注意力因果掩码为 `*.attn.core.causal_mask`（MLA 的 `buffer_1` 同样改为 `causal_mask`），`MoELayer` 专家位于 `routed_experts` / `shared_experts`，`StackedLSTM` 各层位于 `layers.N`，`GPT` 子模块为 `token_embedding` / `position_embedding` / `decoder.h.N` / `decoder.ln_f`。`graph_ir` 将路径段为数字的未登记父级标记为 `ModuleList`；同步更新 `examples/sample_model_graph.json`、`examples/models/*.json` 与可视化器副本。
-- **PyTorch 风格模块协议 (`src/nn/module.zig`, `src/nn/core.zig`, `src/nn/serialization.zig`, `src/nn.zig`, `src/optim.zig`)**:
-  - 新增统一的编译期字段遍历 `nn.walk(model, visitor)`（可选字段路径、`enterModule` 剪枝、`visitOwnedSlice`），`deinitModel`、`zeroGradModel`、参数收集、`setTrainingModel`、`customInit` 分派与 Safetensors 读写全部改为基于它实现，删除 8 个重复的递归遍历函数，并统一跳过编译期字段（含编译期激活层字面量的 `nn.sequential` 元组可以直接调用 `deinitModel` / `zeroGradModel` / `evalModel`）。
-  - `nn.collectParameters` 更名为 `nn.parameters`；新增 `nn.namedParameters`（字段路径名称，与序列化键一致）、`nn.numParameters`、`nn.setRequiresGrad`（冻结 / 解冻任意子模块）与 `nn.callForward` / `nn.ForwardResult`。
-  - `nn.Module(T).forward(graph, args)` 支持单个输入或元组输入（如 `gru.forward(&g, .{ inputs, h_0 })`），返回类型与内部模型一致；新增 `parameters`、`namedParameters`、`numParameters`、`setRequiresGrad` 方法。`nn.initModelWithSample` 的样本参数同样接受单个值或元组。
-  - 参数收集不再在遇到 LoRA 结构时修改 `weight.requires_grad`（冻结由 `LoRALinear.init` 负责）；`freePersistentTensor` 按梯度缓冲是否已分配释放，冻结后的参数不会泄漏或重复释放。
-  - 所有库层（含激活函数）的 `forward` 统一以 `self: *const Self` 接收自身。
-- **内置库层移除 `customInit`，新增 `nn.initModel` 初始化分派 (`src/nn/core.zig`, `src/nn/transformer.zig`, `src/nn/llm.zig`, `src/nn/recurrent.zig`, `src/nn.zig`, `src/root.zig`, `src/autodiff/graph_init.zig`, `src/nn/visualization.zig`, `src/nn/tests_init.zig`, `src/nn/tests_vis.zig`)**:
-  - `Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、`LoRALinear` 不再定义 `customInit`；库层只提供 `init` / `resetParameters(random, options)` 内置初始化，且不会设置 `is_custom_initialized`。
-  - **依据前向计算图初始化**：新增 `nn.initModel(model, graph, random)`（`root.zig` 同步导出）与 `Module(T).initParameters(graph, random)`，必须在用样本输入执行过一次 `forward` 之后调用。先递归调用库外模块定义的 `customInit` 并将其可训练参数标记为 `CUSTOM_INIT`，再调用 `Graph.initWeights(random)` 依据计算图中的下游激活函数初始化其余参数；`graph` 为不记录算子的 `Graph.initNoGrad` 时返回 `error.GraphNotRecordingOps`；Debug 构建下报告未被计算图触达且未自定义初始化的可训练参数。
-  - **依据消费算子计算 fan**：新增 `Graph.computeParamFans`，`Graph.initWeights` 不再只按形状假定权重布局，而是由直接消费参数的算子确定 fan_in / fan_out（`MatMul` / `BatchMatMul` 左右操作数、`Conv2D`、`ConvTranspose2D`、先 `Transpose` 再投影）。修复 `ConvTranspose2D` 卷积核 `[in_c, out_c, kh, kw]` 被按 `Conv2D` 布局计算导致 fan_in / fan_out 对调、`in_c ≠ out_c` 时初始化方差错误的问题。
-  - 新增便捷入口 `nn.initModelWithSample(model, allocator, random, sample_args)` 与 `Module(T).initParametersWithSample(random, sample_args)`：内部用样本参数元组建立前向计算图后调用 `nn.initModel`。
-  - 移除与计算图初始化重复的静态推导：`nn.autoSequential`、`Sequential.autoInit` 与 `detectNextActivation`；`nn.initModel` 不再回退到 `resetParameters` / `autoInit`。
-  - 新增 `Tensor.init_constant`：库层在 `init` 中声明结构性常量初始值（`LSTMCell` 遗忘门偏置 1.0），`Graph.initWeights` 按该常量填充，替代依赖参数命名的遗忘门偏置识别（移除 `isForgetGateBiasParam`），未命名的模块同样正确初始化。
-  - 新增测试 / 基准内部辅助 `src/nn/testing_init.zig`（`initFromOnes`、`initRecurrent`）；单个库层的测试改为显式调用 `resetParameters(random, .{})`。
-  - `examples/export_book_models.zig` 在模型释放前完成 JSON 导出，修复计算图引用已释放参数张量的问题；参数收集跳过 `nn.sequential` 元组中的编译期字段。
-  - 新增 `LoRALinear.resetParameters` 与 `LSTMCell.resetParameters`（重置全部门控 `Linear` 并将遗忘门偏置置 1.0）。
-  - 库层参数重填函数 `reinit` 统一更名为 `resetParameters`，明确其只在已分配张量上重新填充数值、不分配内存。
-  - 移除冗余构造函数 `initClean`、`initUninitialized`、`Conv2D.initCleanWithConfig` 与 `Conv2D.initUninitializedWithConfig`。
-  - **两阶段构造**：所有库层的 `init` 不再接收随机数参数，只分配参数内存（全零）并设置与随机无关的结构默认值（归一化层 γ / β、LSTM 遗忘门偏置 1.0）；涉及 `Linear`、`Conv2D`、`ConvTranspose2D`、`Embedding`、`RNNCell`、`RNN`、`LSTMCell`、`LSTM`、`StackedLSTM`、`GRUCell`、`GRU`、`CausalSelfAttention`（含 `initGQA`）、`MLALayer`、`MLP`、`SwiGLU`、`MoELayer`、`TransformerBlock`、`TransformerDecoder`、`GPT`（含 `initDefault`）与 `LoRALinear`（含 `initDefault` / `initWithBias`）。参数数值在前向计算图建立后统一由 `nn.initModel` / `Module.initParameters` 设置，或由库外代码显式调用 `resetParameters`；全部示例改为 `init` → 前向建图 → `nn.initModel`（或 `initModelWithSample`）。
-  - `nn.initModel` 支持确定性 `customInit(self: *Self) void`（不消耗随机数）与随机 `customInit(self: *Self, random: std.Random) void` 两种签名，签名不符时编译期报错。
-  - `LoRALinear.resetParameters` 同时初始化冻结基础权重（He Normal），使 `init` 只分配内存；加载预训练权重时由 `loadModel` 覆盖。
-  - `Graph.initSingleTensor` 与 `Graph.describeAutoGraphParam` 统一覆盖归一化缩放参数 (`ones (1.0)`)、LSTM 遗忘门偏置 (`ones (1.0)`)、`Embedding` 词表 (`Normal (mean=0.0, std=0.02)`)、`LoRALinear` 旁路矩阵 $B$ (`zeros (0.0)`) 及下游激活函数增益推导，并同步更新 `examples/` 与可视化器下的全部模型图 JSON。
+  - 新增 `tensor.ConvOptions`、`tensor.PoolOptions` 与 `tensor.RopeOptions`（支持 `.interleaved` 与 `.split_half` 模式及 `partial_rotary_factor`），统一所有卷积、转置卷积、池化与 RoPE 算子接口。
+- **PyTorch 风格模块协议与按字段路径自动命名 (`src/nn/module.zig`, `src/nn/core.zig`, `src/nn/serialization.zig`, `src/nn.zig`, `src/optim.zig`)** (不兼容变更):
+  - 新增统一的编译期字段遍历 `nn.walk(model, visitor)`，`deinitModel`、`zeroGradModel`、`parameters`、`namedParameters`、`numParameters`、`setRequiresGrad`、`setTrainingModel`、`customInit` 分派与 Safetensors 读写全部基于它实现。
+  - 新增 `nn.nameModules(&model, arena, root)` 与 `nn.enterModuleScope(graph, self)`，删除全部库层的逐层 `setName`、`deinit`、`zeroGrad` 及 `name_buf` 样板代码。
+  - `nn.Module(T)` 包装器内置名称 arena，支持单输入或元组输入 `forward(graph, args)`。
+- **两阶段参数构造与基于前向计算图的 `nn.initModel` 初始化分派 (`src/nn/`, `src/autodiff/graph_init.zig`)**:
+  - 所有内置库层的 `init` 只分配全零参数内存并设置结构默认值（归一化 γ / β、LSTM 遗忘门偏置 `Tensor.init_constant = 1.0`），不再接收随机数参数；参数重填函数统一更名为 `resetParameters`。
+  - 新增 `nn.initModel(model, graph, random)` 与 `nn.initModelWithSample`：先递归执行库外模块的 `customInit`，再调用 `Graph.initWeights(random)` 依据直接消费算子 (`Graph.computeParamFans`) 与下游激活函数自动初始化其余参数。
 - **全库超长模块解耦重构（单实现文件 `< 60 KB`）(`src/tensor/`, `src/autodiff/`, `src/nn/`, `src/bench/`)**:
-  - 将 `src/tensor/core.zig` (84.7 KB) 按职责拆分为 `core.zig`、`nn_kernels.zig` 与 `reductions.zig`；
-  - 将 `src/autodiff/op.zig` (98.6 KB) 拆分为 `op.zig`、`backward_core.zig`、`backward_nn.zig` 与 `backward_math.zig`；
-  - 将 `src/autodiff/graph.zig` (73.1 KB) 拆分为 `graph.zig`、`graph_nn.zig` 与 `graph_init.zig`（将 `nn` 初始化与可视化导出桥接逻辑隔离在 `graph_init.zig`）；
-  - 将 `src/nn/transformer.zig` (92.2 KB) 拆分为 `attention.zig`、`transformer.zig` 与 `llm.zig`；
-  - 将 `src/nn/visualization.zig` (54.9 KB) 拆分为 `visualization.zig` 与 `graph_ir.zig`；
-  - 将 `src/bench.zig` (62.9 KB) 拆分为 `src/bench.zig` 与 `src/bench/suites.zig`；
-  - 将 `src/nn/tests.zig` (113.2 KB) 拆分为 `tests.zig`、`tests_init.zig` 与 `tests_vis.zig`。
-- **节点分类强类型枚举 (`src/nn/visualization.zig`, `src/nn/tests_vis.zig`)**: 将 `NodeData.kind` 从弱类型字符串切片 (`[]const u8`) 重构为强类型枚举 `NodeKind` (`.Param`, `.Input`, `.Buffer`, `.Activation`)，消除 `std.mem.eql` 字符串比较并利用 `switch` 提供编译期完备性检查；序列化与反序列化通过 `asString()` 与 `fromString()` 保持 JSON Schema 2.0 规格完全一致。
-- **其余取值字段同样改为枚举 (`src/nn/visualization.zig`, `src/nn/tests_vis.zig`)**: `NodeData.status` → `NodeStatus` (`CUSTOM_INIT` / `AUTO_GRAPH` / `INPUT` / `BUFFER` / `OP_OUTPUT`)，`FlowNode.kind` → `FlowNodeKind` (`port_in` / `port_out` / `module` / `op` / `buffer`)，`EdgeData.kind` → `EdgeKind` (`data` / `buffer`)；`summary` 的初始化计数改为穷举 `switch`；删除恒为 `"module"` 的 `ModuleNode.kind` 字段 (序列化仍固定输出 `"kind": "module"`)。新增测试断言这些枚举的标签与 `model_graph.schema.json` 中对应的 `enum` 列表逐一一致；导出的 JSON 逐字节不变。
-- **可视化 JSON 升级为 schema 2.0 (不兼容 1.0)**: 移除顶层 `edges`，新增 `default_scope`；端口以 `@in<k>` / `@out<k>` 命名并携带 `ref`；`summary` 新增 `buffer_nodes`；图输入归属 `root.nodes`，不再生成 `inputs` / `outputs` 伪模块。
-- **Schema 字段说明补全 (`src/nn/model_graph.schema.json`)**: `FlowNode.id` 写明本地 id 的来源、自动命名与重名后缀规则，`Edge.is_skip` 写明残差判定条件，`PortEntry.id` / `ref` 与 `ModuleNode` 写明端口编号、外部端点解析与局部图导出范围；模型图导出的设计摘要移至 `doc/model-graph-visualization.md`。
-- **文档整理 (`README.md`, `doc/`, `plan/`)**: README 精简为概览、文档索引、快速上手与 18 个示例命令表；README 中的路线图条目并入 `plan/TODO.md`，NumPy 对比与已完成里程碑分别由 `plan/NUMPY_GAP_ANALYSIS.md` 与本文件承载；`doc/model-graph-visualization.md` 按当前 schema 重写并删除 `plan/VISUALIZATION_GRAPH_EDGE_DESIGN.md`；`plan/` 中的绝对路径链接改为相对链接。
-- `TransformerBlock` 第二个残差加法节点由 `output` 更名为 `residual_mlp`；MLP 激活输出命名为 `gelu`。
-- `GPT` 的位置索引张量改为 `{gpt}.pos_indices` 静态缓冲区 (`is_buffer = true`)，不再作为模型输入出现。
-- `TransformerBlock.formula` 改用 `aligned` 环境分两行排版 (注意力残差与 MLP 残差各占一行)，不再以 `\quad` 拼接在同一行。
-- **算子前向去重与构建/测试模块化 (`src/autodiff/op.zig`, `src/tests.zig`, `src/nn/tests*.zig`, `build.zig`)**:
-  - `Op.forward` 复用 `Tensor` 的 Eager 算子实现，消除 `Tensor`、`Graph` 与 `Op.forward` 三处重复的前向计算逻辑。
-  - 将 `src/root.zig` 与 `src/nn.zig` 中的内联测试拆分为独立测试文件 `src/tests.zig` 与 `src/nn/tests*.zig`；`build.zig` 中 18 个示例构建与运行步骤统一收敛为表驱动循环。
-- **算子性能优化 (`src/nn/transformer.zig`, `src/nn/attention.zig`, `src/cblas.zig`)**:
-  - `MoELayer.forward` 实现 Top-K 稀疏门控掩码与活跃专家筛选，跳过未命中专家的前向计算。
-  - `CausalSelfAttention.forward` 将因果掩码从每次分配两份 `[B, nh, T, T]` 优化为单份 `[1, 1, T, T]` 广播张量。
-  - `cblas_sgemm_fallback` 的 `NoTrans × Trans` 分支新增 8 路 `@Vector(8, f32)` SIMD 向量化内积快路径。
-- **Tensor ← Graph ← nn 单向解耦 (`src/tensor/`, `src/autodiff/`, `src/nn/`, `src/engine.zig`, `examples/`)**:
-  - `Tensor` 方法与 `tensor.concat` / `tensor.split` 不再接收 `graph: ?*autodiff.Graph` 参数，只保留纯计算内核；`Tensor` 对 autodiff 仅保留数据字段 `creator: ?*Op`。新增 `Tensor.squeezedShape` / `unsqueezedShape` 供 `Graph.squeeze` / `unsqueeze` 复用；删除 `tensorSplit` 别名。
-  - `Graph` 新增 `initNoGrad` (推理用无梯度图) 与 `arenaAllocator`；`enterModule` / `enterChildScope` 改为 `Graph` 方法。
-  - 所有 nn 模块统一为 `forward(self, graph: *autodiff.Graph, x, ...)`，移除 Eager/Graph 双分支、`graph == null` 时的手动释放与 `free_*` 标记；`RNN` / `LSTM` / `StackedLSTM` / `GRU` 的输出切片分配在图 arena 中。
-  - `CausalSelfAttention.forwardInference` 与 `MLALayer.forwardInference` 内部使用局部无梯度图；`engine.evalClassificationStep` 改用无梯度图计算损失与准确率。
-  - `src/tensor/ops.zig` 中依赖 `Graph` 的测试迁移至 `src/autodiff/tests.zig`；`examples/sample_model_graph.json` 重新生成 (因果掩码为 `[1, 1, 16, 16]`)。
-  - `src/autodiff.zig` 只导出自身 API (`Graph`、`Op`、`OpType`、`OpContext`)；不再转出 `tensor`、`Tensor`、`Shape`、`computeContiguousStrides`、`transposeShape`，`types` / `op` / `graph` 子模块改为私有。张量类型统一从 `tensor` 模块引用。
+  - 将 `src/tensor/core.zig` 拆分为 `core.zig`、`conv_pool.zig`、`nn_kernels.zig`、`reductions.zig`、`linalg.zig` 与 `static.zig`；
+  - 将 `src/autodiff/op.zig` 拆分为 `op.zig`、`backward_core.zig`、`backward_nn.zig` 与 `backward_math.zig`；
+  - 将 `src/autodiff/graph.zig` 拆分为 `graph.zig`、`graph_nn.zig` 与 `graph_init.zig`；
+  - 将 `src/nn/transformer.zig` 拆分为 `attention.zig`、`transformer.zig` 与 `llm.zig`；
+  - 将 `src/nn/visualization.zig` 拆分为 `visualization.zig` 与 `graph_ir.zig`；
+  - 将 `src/bench.zig` 拆分为 `src/bench.zig` 与 `src/bench/suites.zig`；
+  - 将 `src/nn/tests.zig` 拆分为 `tests.zig`、`tests_init.zig`、`tests_module.zig` 与 `tests_vis.zig`。
+- **可视化 Schema 2.0 与强类型枚举 (`src/nn/visualization.zig`, `src/nn/model_graph.schema.json`)** (不兼容 1.0):
+  - 将 `NodeKind`、`NodeStatus`、`FlowNodeKind`、`EdgeKind` 全面重构为强类型枚举；移除顶层 `edges`，新增 `default_scope`、`summary.buffer_nodes` 与 `@in<k>` / `@out<k>` 端口模型。
+- **Tensor ← Graph ← nn 单向解耦与算子前向去重 (`src/tensor/`, `src/autodiff/`, `src/nn/`, `src/engine.zig`)**:
+  - `Tensor` 方法不再接收 `graph: ?*autodiff.Graph` 参数，只保留纯计算内核；`Graph` 新增 `initNoGrad` 与 `arenaAllocator`；所有 `nn` 模块统一为 `forward(self, graph: *autodiff.Graph, x, ...)`；`Op.forward` 复用 `Tensor` 的 Eager 算子实现。
+- **核心算子、排序与回归算法性能重构 (`src/tensor/`, `src/nn/`, `src/cblas.zig`, `src/regression.zig`, `src/cross_validation.zig`, `src/manifold.zig`)**:
+  - `argsort` 与 `sort` 针对连续内维实现零额外内存分配快路径；提取多维坐标递增辅助函数 `Shape.incrementCoord`。
+  - `MoELayer.forward` 实现 Top-K 稀疏门控掩码与活跃专家筛选；`CausalSelfAttention.forward` 因果掩码优化为单份 `[1, 1, T, T]` 广播张量；`cblas_sgemm_fallback` 的 `NoTrans × Trans` 分支新增 8 路 `@Vector(8, f32)` SIMD 向量化快路径。
+  - `regression.zig` 提取公共数据中心化逻辑 `centerData`，并将 `solveLasso` 统一委托给 `solveElasticNet(..., l1_ratio = 1.0)`；`cross_validation.zig` 优化 `kFold` 循环顺序消除重复分配与标准化；`manifold.zig` 移除 `binarySearchPerplexity` 中未使用的 `p_row` 临时缓冲区。
 
 ### Fixed
-- **门面导出完整性与底层边界修复 (`src/tensor/`, `src/autodiff.zig`, `src/nn/`, `scripts/coverage.sh`)**:
-  - 修复 `GenericTensor(T).transposeView` 中对非错误返回函数 `transposeShape` 误用 `try` 的编译错误，并增加维度越界检查 (`error.InvalidDimension`)。
-  - 修复 `Linear.setName` 直接保存外部切片引用导致的悬挂指针隐患，统一拷贝至内部 `name_buf` 并无条件同步子参数名称。
-  - 修复 `src/nn/serialization.zig` 中 Safetensors 序列化与反序列化遗漏定长张量数组字段 (`[N]*Tensor`) 的问题。
-  - 公开 `types.isTruthyScalar`、在 `src/tensor/ops.zig` 中补充 `pub fn contiguous`，并在 `src/tensor.zig`、`src/autodiff.zig`、`src/nn.zig` 中启用 `std.testing.refAllDecls(@This())` 编译期全量声明校验；在 `scripts/coverage.sh` 中纳入 `bench_tests`。
-- 修复算子依据输入推断归属导致的模块错配、`.core` 伪节点合成、端口名与真实节点冲突、残差判定依赖边顺序、根作用域边与顶层 `edges` 层级错位等问题 (详见 chen-gz.github.io `doc/visualization-model-edge-design.md`)。
-- **非连续视图内存安全 (`src/tensor/shape.zig`, `src/autodiff/backward_core.zig`, `src/autodiff/graph.zig`)**: 修复 `broadcastBinaryOpRaw`、`Op.backward` 与 `Graph.reshape` 在处理非连续步长视图 (`!isContiguous()`) 或带 `offset` 子视图时的越界与错读问题。
-- **训练路径与反射/序列化完整性 (`src/nn/attention.zig`, `src/nn/core.zig`, `src/nn/serialization.zig`)**:
-  - 修复 `MLALayer.forward` 未使用 `q_all`、`w_kr` 及因果注意力的占位实现，补全完整潜在多头注意力训练与求导路径。
-  - 修复 `collectParameters`、`deinitModel`、`zeroGradModel` 及 Safetensors 序列化对动态切片字段 (`[]T`) 与可选张量 (`?*Tensor`) 的遗漏，支持无序偏移量的 Safetensors 文件加载，并默认冻结 `LoRALinear` 基础权重梯度。
-- **可视化残差可达性判定 BFS 优化 (`src/nn/visualization.zig`)**: 将 `markSkips` 中递归 DFS 的 `reaches` 重构为带已访问哈希表 (`std.StringHashMap(void)`) 的线性 BFS，彻底解决多分支复合模块（如 LSTM、StackedLSTM、MoE）可达性检查指数爆炸卡死的问题。
-- **循环网络零初始状态归类 (`src/nn/recurrent.zig`)**: `RNN` / `LSTM` / `StackedLSTM` / `GRU` 在未传入初始状态时创建的全零 `h_0` / `c_0` 标记为模块常量缓冲区，并命名为 `{module}.h_0`、`{module}.c_0` (`StackedLSTM` 为 `{module}.h_0_{l}` / `{module}.c_0_{l}`)；此前它们被自动命名为 `{module}.input_k` 并计入 `summary.input_nodes`。重新生成 `examples/models/{rnn,lstm,stacked_lstm,gru}.json`。
+- **自动微分多输出算子反向传播重复执行与梯度相乘缺陷 (`src/autodiff/graph.zig`, `src/autodiff/backward_core.zig`, `src/autodiff/tests.zig`)**:
+  - 将此前作用在 `*Tensor` 上的拓扑排序重构为以 `*Op` 算子为顶点的有向无环图深度优先遍历 (`topologicalSortOps`)，在 `backward` 与 `backwardWithGrad` 中按反向拓扑序严格保证每个多输出算子（如 `Split`）仅执行一次 `Op.backward()`，消除梯度随消费分支倍增的缺陷。
+- **切片视图与非连续张量物理长度匹配与跨步物化 (`src/tensor/core.zig`, `src/tensor/nn_kernels.zig`, `src/tensor/ops.zig`, `src/tensor/shape.zig`, `src/autodiff/`)**:
+  - 全面清理直接以底层物理缓冲区长度 `self.data.len` 循环导致的越界或脏数据问题，改以逻辑元素量 `self.shape.numel()` 与 `data[0..numel]` 遍历。
+  - 在核心矩阵乘法 (`matmul`)、拼接 (`concat`)、分割 (`split`)、广播二元运算 (`broadcastBinaryOpRaw`)、`Graph.reshape` 及激活/归约前置检查中，对非连续切片视图张量自动物化连续副本，保障底层 BLAS 与 SIMD 访存安全。
+- **全连接层 (`Linear.forward`) 任意 N 维张量与 1D 向量输入支持 (`src/nn/core.zig`, `src/nn/tests.zig`)**:
+  - 新增对秩大于 2 的张量（如 Transformer 批次序列 `[B, S, D]`）的前置维度自动展平与输出形状恢复，同时支持 1D 单向量 `[in_features]` 直接前向与自动求导。
+- **复合模型权重共享 (Tied Weights) 重复释放防护 (`src/nn/module.zig`, `src/nn/tests_module.zig`)**:
+  - 在 `deinitModel` 反射遍历器中引入指针去重哈希集 `seen: std.AutoHashMap(*Tensor, void)`，保证共享权重的张量仅被销毁释放一次，杜绝 Double-Free 崩溃。
+- **BPE 分词器多字节 UTF-8 分块边界完整性 (`src/dataset.zig`)**:
+  - 优化 `BPETokenizer.encode` 分块算法：在分块后半段优先检索空白字符以保持词汇边界；若无空白字符，自动向后回退跳过 UTF-8 延续字节 (`10xxxxxx`)，确保绝不在多字节字符中间截断。
+- **旋转位置编码 (RoPE) 梯度断流修复与静态图重演闭环 (`src/tensor/`, `src/autodiff/`, `src/models/gemma4.zig`, `src/autodiff/tests.zig`)**:
+  - 修复计算图硬编码 `requires_grad = false` 导致的梯度阻断；在 `backward_nn.zig` 中基于正交伴随矩阵 $\mathbf{R}^T$ 完整实现 `interleaved` 与 `split_half` 的伴随逆旋转 Autograd 反向求导内核；在 `OpContext.RoPE` 中补齐 `mode` 与 `partial_rotary_factor` 使 `Op.forward` 图重演与 eager 计算完全一致。
+- **门面导出完整性、训练路径与可视化边界修复 (`src/tensor/`, `src/autodiff.zig`, `src/nn/`, `scripts/coverage.sh`)**:
+  - 修复 `GenericTensor(T).transposeView` 编译错误并增加维度越界检查；启用 `std.testing.refAllDecls(@This())` 编译期全量声明校验；在 `scripts/coverage.sh` 中纳入 `bench_tests`。
+  - 修复 `MLALayer.forward` 未使用 `q_all`、`w_kr` 及因果注意力的早期实现，补全完整潜在多头注意力训练与求导路径。
+  - 将 `markSkips` 中递归 DFS 的 `reaches` 重构为带已访问哈希表的线性 BFS；将 `RNN` / `LSTM` / `StackedLSTM` / `GRU` 的零初始状态 `h_0` / `c_0` 归类为模块常量缓冲区。
+
+### Security
+- **前端 Schema 指南 DOMPurify XSS 防护 (`web/src/schema-guide.ts`, `web/package.json`)**:
+  - 使用 `DOMPurify.sanitize` 对 `schema-guide.ts` 中写入 `container.innerHTML` 的 HTML 内容进行消毒，消除潜在跨站脚本 (XSS) 风险并升级 `dompurify` 依赖。
 
 ### Removed
-- 移除遗留向后兼容包装函数与冗余别名（遵循 `AGENTS.md` §3）：删除 `initializeWeights`、`sftCrossEntropyLoss` / `sftCrossEntropyLossGraph` 别名、未使用的 `swigluForward`、`src/tensor.zig` 中指向不存在符号的 `ops.svd` / `ops.qr` / `ops.eig` 转出、`src/manifold.zig` 中重复的 `normalRandom` 实现、`src/tests.zig` 中重复的 `refAllDecls` 块以及孤立空目录 `src/nn/visualization/`。
+- 移除遗留向后兼容包装函数与被取代的旧代码/文档（遵循 `AGENTS.md` §3）：删除 `initializeWeights`、`initClean` / `initUninitialized`、`autoSequential` / `Sequential.autoInit`、`sftCrossEntropyLoss` / `sftCrossEntropyLossGraph` 别名、未使用的 `swigluForward`、`src/manifold.zig` 中重复的 `normalRandom` 实现、孤立空目录 `src/nn/visualization/` 以及过时的临时排查/阶段评审文档（`gemma_todo.md`、`doc/framework-review.md`、`plan/VISUALIZATION_GRAPH_EDGE_DESIGN.md`）。
 
 ## [0.2.7] - 2026-09-27
 

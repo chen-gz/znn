@@ -16,10 +16,11 @@
 遵循语义化版本规范 (Semantic Versioning: `MAJOR.MINOR.PATCH`):
 - **日常改动记录在 `Unreleased`**：每个功能、重构与修复都记录在 [`CHANGELOG.md`](CHANGELOG.md) 的 `Unreleased` 小节 (遵循 [Keep a Changelog](https://keepachangelog.com/) 规范，分类记录 `Added`、`Changed`、`Fixed` 等条目)，不为单个提交递增版本号。
 - **版本号由用户决定**：版本号只在用户明确要求或确认时更新，通常在积累了一批重大特性后作为里程碑发布。完成重大特性时可以向用户建议发布新版本。
-- **关联文件同步**：更新版本号时，必须同步更新以下三个文件：
+- **关联文件同步**：更新版本号时，必须同步更新以下四个文件：
   1. [`build.zig.zon`](build.zig.zon) 中的 `.version = "X.Y.Z"`
   2. [`src/root.zig`](src/root.zig) 中的 `VERSION = "X.Y.Z"` 与 `version = .{ .major = X, .minor = Y, .patch = Z }`
-  3. [`CHANGELOG.md`](CHANGELOG.md) 中把 `Unreleased` 的内容归入新版本小节
+  3. [`src/tests.zig`](src/tests.zig) 中的 `VERSION` 与 `version` 断言
+  4. [`CHANGELOG.md`](CHANGELOG.md) 中把 `Unreleased` 的内容归入新版本小节
 - **推送与 Tag 规则**：
   - **日常改动只推 main 分支**：日常迭代、优化与 Bug 修复只推送 commit 到 `main` 分支，不打 Tag。
   - **Tag 只用于里程碑**：只有在发布新版本时 (即用户要求或确认之后) 才创建并推送对应的 Git Tag。

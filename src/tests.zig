@@ -48,10 +48,10 @@ const ScopeTimer = root.ScopeTimer;
 test "basic imports and struct definitions" {
     const std = @import("std");
     _ = @import("optim.zig");
-    try std.testing.expectEqualStrings("0.2.7", VERSION);
+    try std.testing.expectEqualStrings("0.3.0", VERSION);
     try std.testing.expectEqual(@as(u32, 0), version.major);
-    try std.testing.expectEqual(@as(u32, 2), version.minor);
-    try std.testing.expectEqual(@as(u32, 7), version.patch);
+    try std.testing.expectEqual(@as(u32, 3), version.minor);
+    try std.testing.expectEqual(@as(u32, 0), version.patch);
     try std.testing.expect(@TypeOf(nn.Linear) == type);
     try std.testing.expect(@TypeOf(nn.SwiGLU) == type);
     try std.testing.expect(@TypeOf(nn.LoRALinear) == type);

@@ -17,11 +17,11 @@
 
 ## 📊 2. 核心功能对比矩阵与演进状态
 
-| 功能大类 | 现代 NumPy (NumPy 2.x) | ZNN 当前已实现能力 (`v0.2.7`) | 剩余差距与补齐优先级 |
+| 功能大类 | 现代 NumPy (NumPy 2.x) | ZNN 当前已实现能力 (`v0.3.0`) | 剩余差距与补齐优先级 |
 | :--- | :--- | :--- | :---: |
-| **① 标量与数据类型系统 (Dtypes)** | `float16/32/64/128`, `int8~64`, `uint8~64`, `complex`, `bool`，支持类型提升与可扩展 DType API | `GenericTensor(T)` 支持 `f32`, `f64`, `bf16`, `i32`, `i64`, `usize`, `bool` 及 `to(DestT)` / `fromGeneric`；`StaticTensor(T, dims)` 支持编译期形状校验；Autograd `Tensor` 为 `f32` | **P1**（待扩展 `f16`/`bf16` 自动混合精度求导与 INT8/INT4 量化） |
+| **① 标量与数据类型系统 (Dtypes)** | `float16/32/64/128`, `int8~64`, `uint8~64`, `complex`, `bool`，支持类型提升与可扩展 DType API | `GenericTensor(T)` 支持 `f32`, `f64`, `bf16`, `i32`, `i64`, `usize`, `bool` 及 `to(DestT)` / `fromGeneric`；`StaticTensor(T, dims)` 支持编译期形状校验；Autograd `Tensor` 为 `f32` | **P1**（待扩展 `f16`/`bf16` 自动混合精度求导与通用 INT8/INT4 张量） |
 | **② 切片与多维索引 (Indexing)** | 基础切片（零拷贝 View）、步长 (`arr[::-1]`)、省略号 (`...`)、花式索引 (`arr[[0, 2]]`)、布尔掩码 (`arr[mask]`) | 支持 `SliceRange { start, end, step }` 跨步零拷贝视图 (`slice`, `is_view`, `contiguous`)、条件选择 `where`、布尔/条件掩码填充 `maskedFill`、`split`、`concat`、`stack` | **P1**（待补充通用 `gather` / `scatterAdd` 与布尔掩码一维过滤提取） |
-| **③ 归约与统计分析算子 (Reductions)** | `sum`, `prod`, `mean`, `std`, `var`, `min`, `max`, `ptp`, `quantile`，支持多轴 `axis=(0, 1)` 与 `keepdims` | 已实现沿指定轴或全局的 `sum`, `mean`, `variance`, `stdDev` (支持 `keepdims` 与 `ddof`)、`max`, `argmax`, `any`, `all`，且 `sum`/`mean` 已接入 Autograd 反向传播 | **P2**（待补充多轴元组 `axes: []const usize` 同时归约与 `quantile`/`median`） |
+| **③ 归约与统计分析算子 (Reductions)** | `sum`, `prod`, `mean`, `std`, `var`, `min`, `max`, `ptp`, `quantile`，支持多轴 `axis=(0, 1)` 与 `keepdims` | 已实现沿任意指定轴或全局的 `sum`, `mean`, `variance`, `stdDev` (支持 `keepdims` 与 `ddof`)、`max`, `min`, `argmax`, `argmin`, `any`, `all`，且 `sum`/`mean`/`variance` 已接入 Autograd 反向传播 | **P2**（待补充多轴元组 `axes: []const usize` 同时归约与 `quantile`/`median`/`prod`/`cumsum`） |
 | **④ 条件选择与查找排序 (Searching & Sorting)** | `where(condition, x, y)`, `nonzero`, `sort`, `argsort`, `searchsorted`, `clip` | 已完整实现多维广播 `where`、`nonzero`、沿任意轴 `sort` / `argsort`（支持升序/降序）、`clip` / `clip_`、以及 LLM `sampleTopK` / `sampleTopP` | **已基本对齐**（仅缺 `searchsorted` / `unique`） |
 | **⑤ 数组形态操纵 (Array Manipulation)** | `squeeze`, `expand_dims`, `tile`, `repeat`, `pad`, `flip`, `roll`, `stack`, `meshgrid` | 已实现 `reshape`, `transpose` / `transposeView`, `squeeze`, `unsqueeze`, `repeat`, `tile`, `concat`, `split`, `stack` | **P2**（待补充通用 `pad`、`flip`、`roll`、`meshgrid`） |
 | **⑥ 通用函数系统 (ufuncs)** | 上百种标准 ufunc，统一支持广播及 `.reduce()`, `.accumulate()`, `.outer()`, `.at()` 方法 | 已实现广播四则运算 (`add`, `sub`, `mul`, `div`)、比较算子 (`eq`, `ne`, `gt`, `ge`, `lt`, `le`)、激活函数与初等超越函数 (`sqrt`, `exp`, `log`, `abs` 含 Autograd) | **P2**（待补充三角/反三角函数 `sin`/`cos` 与幂函数 `pow`） |
@@ -50,9 +50,9 @@
 
 ### 3.3 通用多轴归约算子（Multi-axis Reductions）
 * **已实现能力**：
-  * [`src/tensor/reductions.zig`](../src/tensor/reductions.zig) 已封装通用轴向与全局归约接口：`sum(axis, keepdims)`, `mean(axis, keepdims)`, `variance(axis, keepdims, ddof)`, `stdDev(axis, keepdims, ddof)`, `max`, `argmax`，且 `Graph.sum`、`Graph.mean`、`Graph.variance` 已支持计算图自动求导。
+  * [`src/tensor/reductions.zig`](../src/tensor/reductions.zig) 已封装通用轴向与全局归约接口：`sum(axis, keepdims)`, `mean(axis, keepdims)`, `variance(axis, keepdims, ddof)`, `stdDev(axis, keepdims, ddof)` 以及支持任意维度 `dim < rank` 的 `max(dim)`, `min(dim)`, `argmax(dim)`, `argmin(dim)`，且 `Graph.sum`、`Graph.mean`、`Graph.variance` 已支持计算图自动求导。
 * **剩余差距与演进目标**：
-  * 扩展 `axis` 参数以支持同时沿多个轴（如 `axes: []const usize`）进行联合归约，并补充 `min`、`argmin`、`prod`、`cumsum`。
+  * 扩展 `axis` 参数以支持同时沿多个轴（如 `axes: []const usize`）进行联合归约，并补充 `prod`、`cumsum`。
 
 ### 3.4 高级线性代数与爱因斯坦求和 (`linalg` & `einsum`)
 * **已实现能力**：
