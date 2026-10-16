@@ -1,4 +1,5 @@
 const tensor_mod = @import("../tensor.zig");
+const Tensor = tensor_mod.Tensor;
 
 // 支持的算子类型枚举
 pub const OpType = enum {
@@ -317,4 +318,31 @@ pub const OpContext = union(enum) {
     L2Loss: struct {
         lambda: f32,
     },
+};
+
+// 计算图中的算子节点（Op）结构体：只承载算子类型、输入输出张量与上下文数据；
+// 前向重演与反向求导的分发实现位于 op.zig（`op.forward` / `op.backward`），
+// 各类反向内核位于 backward_core.zig / backward_nn.zig / backward_math.zig，均单向依赖本结构体。
+pub const Op = struct {
+    op_type: OpType, // 算子类别（如 MatMul, Relu）
+    inputs: []*Tensor, // 输入张量数组
+    outputs: []*Tensor, // 输出张量数组
+    context: OpContext, // 算子特有的运行时上下文数据
+    scope: []const u8 = "", // 创建该算子时所处的模块作用域完整路径（由 Graph 作用域栈记录，"" 表示图的根作用域）
+
+    /// 转换为张量层保存的不透明句柄（写入 `Tensor.creator`）
+    pub fn handle(self: *Op) *tensor_mod.OpHandle {
+        return @ptrCast(self);
+    }
+
+    /// 由张量层的不透明句柄还原算子指针
+    pub fn fromHandle(h: *tensor_mod.OpHandle) *Op {
+        return @ptrCast(@alignCast(h));
+    }
+
+    /// 返回产生张量 `t` 的算子；外部输入、参数与常量张量返回 null
+    pub fn creatorOf(t: *const Tensor) ?*Op {
+        const h = t.creator orelse return null;
+        return fromHandle(h);
+    }
 };

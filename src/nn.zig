@@ -1,7 +1,6 @@
 const std = @import("std");
 const autodiff = @import("autodiff.zig");
 const tensor = @import("tensor.zig");
-const engine = @import("engine.zig");
 
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
@@ -19,15 +18,14 @@ pub const llm = @import("nn/llm.zig");
 pub const transformer = @import("nn/transformer.zig");
 pub const serialization = @import("nn/serialization.zig");
 pub const visualization = @import("nn/visualization.zig");
-pub const graph_ir = visualization.graph_ir;
-pub const generateJson = visualization.generateJson;
-pub const exportJson = visualization.exportJson;
+pub const graph_ir = @import("nn/graph_ir.zig").graph_ir;
+pub const generateJson = graph_ir.generateJson;
+pub const exportJson = graph_ir.exportJson;
 pub const NodeKind = visualization.NodeKind;
 pub const NodeStatus = visualization.NodeStatus;
 pub const FlowNodeKind = visualization.FlowNodeKind;
 pub const EdgeKind = visualization.EdgeKind;
 pub const NodeData = visualization.NodeData;
-
 
 // ============================================================================
 // 门面层导出 (Facade Re-exports) - 确保 100% 向上兼容
@@ -145,21 +143,6 @@ pub const sampleTopK = transformer.sampleTopK;
 // 6. 权重序列化 (Serialization - Safetensors)
 pub const saveModel = serialization.saveModel;
 pub const loadModel = serialization.loadModel;
-
-// 7. 引擎执行与评估 (Training & Evaluation Engine)
-pub const trainClassificationStep = engine.trainClassificationStep;
-pub const evalClassificationStep = engine.evalClassificationStep;
-pub const trainClassificationEpoch = engine.trainClassificationEpoch;
-pub const evaluateClassification = engine.evaluateClassification;
-pub const computeAccuracy = engine.computeAccuracy;
-pub const ClassificationStepResult = engine.ClassificationStepResult;
-pub const ClassificationEpochResult = engine.ClassificationEpochResult;
-pub const trainStep = engine.trainStep;
-pub const evalStep = engine.evalStep;
-pub const trainEpoch = engine.trainEpoch;
-pub const evaluate = engine.evaluate;
-pub const StepResult = engine.StepResult;
-pub const EpochResult = engine.EpochResult;
 
 // ============================================================================
 

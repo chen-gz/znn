@@ -1,7 +1,6 @@
 const std = @import("std");
 const c = @import("../cblas.zig");
-const op_mod = @import("op.zig");
-const Op = op_mod.Op;
+const Op = @import("types.zig").Op;
 
 pub fn backwardNN(self: *Op) !void {
     switch (self.op_type) {

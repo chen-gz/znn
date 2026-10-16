@@ -4,8 +4,7 @@ const Tensor = tensor_mod.Tensor;
 const types = @import("types.zig");
 const OpType = types.OpType;
 const OpContext = types.OpContext;
-const op_mod = @import("op.zig");
-const Op = op_mod.Op;
+const Op = types.Op;
 const Graph = @import("graph.zig").Graph;
 
 // 损失函数 Softmax + Cross Entropy 结合前向传播

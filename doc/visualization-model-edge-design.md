@@ -24,8 +24,8 @@ Module.forward ──(作用域栈)──▶ autodiff.Graph ──graph_ir.build
 
 | 位置 | 文件 | 职责 |
 | :--- | :--- | :--- |
-| `znn` | `src/autodiff/graph.zig` / `src/autodiff/graph_init.zig` | 作用域栈、`Op.scope` / `Tensor.scope`、`formatJson` / `exportJson` |
-| `znn` | `src/nn/visualization.zig` & `src/nn/graph_ir.zig` | 局部图构建、枚举类型、模块树与 JSON 序列化 |
+| `znn` | `src/autodiff/graph.zig` | 作用域栈、`Op.scope` / `Tensor.scope` |
+| `znn` | `src/nn/visualization.zig` & `src/nn/graph_ir.zig` | 局部图构建、枚举类型、模块树、JSON 序列化与导出入口 (`nn.generateJson` / `nn.exportJson`) |
 | `znn` | `src/nn/model_graph.schema.json` | JSON Schema |
 | `znn/web` | `web/src/utils/model-graph.ts` | 数据层：局部 DAG、路径解析、残差识别、分层布局 |
 | `znn/web` | `web/src/utils/flow-edges.ts` | 连线路由（不依赖 DOM） |

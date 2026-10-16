@@ -74,7 +74,7 @@ test "Hierarchical module naming and interactive HTML report export" {
     block_out.setName("activations.block_0_out");
 
     // 4. 生成递归结构 JSON (后端生成递归数据结构，直接提供给前端解析)
-    const json_data = try graph.formatJson(allocator);
+    const json_data = try nn.generateJson(&graph, allocator);
     defer allocator.free(json_data);
 
     // 校验 JSON 结构可正常被解析且包含完整的递归模型树
@@ -181,7 +181,7 @@ test "Hierarchical module naming and interactive HTML report export" {
 
     // 5. 测试将递归 JSON 导出到临时测试文件
     const tmp_json_path = "tmp_test_model_graph.json";
-    try graph.exportJson(tmp_json_path);
+    try nn.exportJson(&graph, tmp_json_path, allocator);
 
     const json_z = try allocator.dupeZ(u8, tmp_json_path);
     defer allocator.free(json_z);
@@ -240,7 +240,7 @@ test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivit
     logits.setName("outputs.logits");
 
     // 3. 构建 ModelHierarchyGraph 与 JSON
-    const json_data = try graph.formatJson(allocator);
+    const json_data = try nn.generateJson(&graph, allocator);
     defer allocator.free(json_data);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_data, .{});
@@ -446,7 +446,7 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     const logits = try gpt.forward(&graph, input_tokens);
     logits.setName("outputs.logits");
 
-    const json_data = try graph.formatJson(allocator);
+    const json_data = try nn.generateJson(&graph, allocator);
     defer allocator.free(json_data);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_data, .{});
     defer parsed.deinit();
@@ -687,7 +687,7 @@ test "Model graph JSON export conforms to the published JSON Schema" {
         const logits = try gpt.forward(&graph, input_tokens);
         logits.setName("outputs.logits");
 
-        const json_data = try graph.formatJson(allocator);
+        const json_data = try nn.generateJson(&graph, allocator);
         defer allocator.free(json_data);
         try SchemaCheck.expectConforms(allocator, json_data);
     }
@@ -710,7 +710,7 @@ test "Model graph JSON export conforms to the published JSON Schema" {
         const y = try linear.forward(&graph, x);
         y.setName("outputs.y");
 
-        const json_data = try graph.formatJson(allocator);
+        const json_data = try nn.generateJson(&graph, allocator);
         defer allocator.free(json_data);
         try SchemaCheck.expectConforms(allocator, json_data);
     }
@@ -801,7 +801,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         x.setName("inputs.x");
         const y = try m.forward(&g, x);
         y.setName("outputs.y");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "linear");
     }
@@ -846,7 +846,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         x.setName("inputs.x");
         const y = try m.forward(&g, x);
         y.setName("outputs.logits");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "mlp");
     }
@@ -868,7 +868,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         }
         const res = try m.forward(&g, &inps, null);
         res.h_n.setName("outputs.h_n");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "rnn");
     }
@@ -891,7 +891,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         const res = try m.forward(&g, &inps, null, null);
         res.h_n.setName("outputs.h_n");
         res.c_n.setName("outputs.c_n");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "lstm");
     }
@@ -913,7 +913,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         }
         const res = try m.forwardSequence(&g, &inps, null, null);
         for (res.h_n, 0..) |h, l| h.setNameFormatted("outputs.h_l{d}", .{l});
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "stacked_lstm");
     }
@@ -935,7 +935,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         }
         const res = try m.forward(&g, &inps, null);
         res.h_n.setName("outputs.h_n");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "gru");
     }
@@ -955,7 +955,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         for (tokens.data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 16));
         const out = try m.forward(&g, tokens);
         out.setName("outputs.embeddings");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "embedding");
     }
@@ -974,7 +974,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         x.setName("inputs.x");
         const out = try m.forward(&g, x);
         out.setName("outputs.context");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "attention");
     }
@@ -993,7 +993,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         x.setName("inputs.x");
         const out = try m.forward(&g, x);
         out.setName("outputs.block_out");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "transformer_block");
     }
@@ -1020,7 +1020,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         for (tokens.data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
         const logits = try m.forward(&g, tokens);
         logits.setName("outputs.logits");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "gpt");
     }
@@ -1039,7 +1039,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         x.setName("inputs.x");
         const out = try m.forward(&g, x);
         out.setName("outputs.swiglu_out");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "swiglu");
     }
@@ -1058,7 +1058,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         x.setName("inputs.x");
         const out = try m.forward(&g, x);
         out.setName("outputs.adapted_out");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "lora_linear");
     }
@@ -1076,7 +1076,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         x.setName("inputs.x");
         const out = try m.forward(&g, x);
         out.setName("outputs.normed");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "layernorm");
     }
@@ -1095,7 +1095,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         x.setName("inputs.x");
         const out = try m.forward(&g, x);
         out.setName("outputs.mla_out");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "mla");
     }
@@ -1114,7 +1114,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         x.setName("inputs.x");
         const out = try m.forward(&g, x);
         out.setName("outputs.moe_out");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "deepseek_moe");
     }
@@ -1148,7 +1148,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         defer scope.exit();
         const fake_x = try net_g.forward(&g, z);
         fake_x.setName("outputs.fake_x");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "gan_generator");
     }
@@ -1182,7 +1182,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         defer scope.exit();
         const logits = try net_d.forward(&g, x);
         logits.setName("outputs.logits");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "gan_discriminator");
     }
@@ -1201,7 +1201,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         x.setName("inputs.x");
         const out = try m.forward(&g, x);
         out.setName("outputs.feature_map");
-        const json = try g.formatJson(allocator);
+        const json = try nn.generateJson(&g, allocator);
         defer allocator.free(json);
         try verifyModelJson.check(allocator, json, "conv2d");
     }

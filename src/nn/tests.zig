@@ -2,7 +2,6 @@ const std = @import("std");
 const testing_init = @import("testing_init.zig");
 const autodiff = @import("../autodiff.zig");
 const tensor = @import("../tensor.zig");
-const engine = @import("../engine.zig");
 const nn = @import("../nn.zig");
 
 const Tensor = tensor.Tensor;
@@ -96,19 +95,6 @@ const sampleTopK = nn.sampleTopK;
 const saveModel = nn.saveModel;
 const loadModel = nn.loadModel;
 
-const trainClassificationStep = nn.trainClassificationStep;
-const evalClassificationStep = nn.evalClassificationStep;
-const trainClassificationEpoch = nn.trainClassificationEpoch;
-const evaluateClassification = nn.evaluateClassification;
-const computeAccuracy = nn.computeAccuracy;
-const ClassificationStepResult = nn.ClassificationStepResult;
-const ClassificationEpochResult = nn.ClassificationEpochResult;
-const trainStep = nn.trainStep;
-const evalStep = nn.evalStep;
-const trainEpoch = nn.trainEpoch;
-const evaluate = nn.evaluate;
-const StepResult = nn.StepResult;
-const EpochResult = nn.EpochResult;
 
 // 单元测试套件 (Unit Tests)
 // ============================================================================
@@ -605,7 +591,7 @@ test "LayerNorm forward and backward autograd" {
     const gx = try graph.tensorNDWithData(&.{ 2, 4 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 1.0, 3.0 }, true);
     const gy = try ln.forward(&graph, gx);
     try std.testing.expect(gy.creator != null);
-    try std.testing.expectEqual(autodiff.OpType.LayerNorm, gy.creator.?.op_type);
+    try std.testing.expectEqual(autodiff.OpType.LayerNorm, autodiff.Op.creatorOf(gy).?.op_type);
 
     const target = try graph.tensorNDWithData(&.{ 2, 4 }, &[_]f32{ 0.5, -0.5, 1.0, -1.0, -0.5, 0.5, -1.0, 1.0 }, false);
     const loss = try graph.mseLoss(gy, target);
@@ -650,7 +636,7 @@ test "BatchNorm2d forward and backward autograd" {
     }
     const gy = try bn.forward(&graph, gx);
     try std.testing.expect(gy.creator != null);
-    try std.testing.expectEqual(autodiff.OpType.BatchNorm2d, gy.creator.?.op_type);
+    try std.testing.expectEqual(autodiff.OpType.BatchNorm2d, autodiff.Op.creatorOf(gy).?.op_type);
 
     for (gy.grad, 0..) |*g, i| {
         const fi = @as(f32, @floatFromInt(i));
@@ -689,7 +675,7 @@ test "BatchNorm1d and GroupNorm forward and backward autograd" {
     }
     const gy1 = try bn1.forward(&graph, gx1);
     try std.testing.expectEqualSlices(usize, &.{ 2, 2, 3 }, gy1.shape.dims[0..3]);
-    try std.testing.expectEqual(autodiff.OpType.BatchNorm1d, gy1.creator.?.op_type);
+    try std.testing.expectEqual(autodiff.OpType.BatchNorm1d, autodiff.Op.creatorOf(gy1).?.op_type);
     for (gy1.grad, 0..) |*g, i| g.* = @as(f32, @floatFromInt(i + 1)) * 0.1;
     try graph.backwardWithGrad(gy1);
     try std.testing.expect(@abs(gx1.grad[0]) + @abs(gx1.grad[1]) > 1e-5);
@@ -703,7 +689,7 @@ test "BatchNorm1d and GroupNorm forward and backward autograd" {
     }
     const gy2 = try gn.forward(&graph, gx2);
     try std.testing.expectEqualSlices(usize, &.{ 2, 4, 2, 2 }, gy2.shape.dims[0..4]);
-    try std.testing.expectEqual(autodiff.OpType.GroupNorm, gy2.creator.?.op_type);
+    try std.testing.expectEqual(autodiff.OpType.GroupNorm, autodiff.Op.creatorOf(gy2).?.op_type);
     for (gy2.grad, 0..) |*g, i| g.* = @as(f32, @floatFromInt(i + 1)) * 0.05;
     try graph.backwardWithGrad(gy2);
     try std.testing.expect(@abs(gx2.grad[0]) + @abs(gx2.grad[1]) > 1e-5);
@@ -746,11 +732,11 @@ test "Dropout and AvgPool2D forward and backward passes" {
 
     const g_dropped = try drop.forward(&graph, g_img, rand);
     try std.testing.expect(g_dropped.creator != null);
-    try std.testing.expectEqual(autodiff.OpType.Dropout, g_dropped.creator.?.op_type);
+    try std.testing.expectEqual(autodiff.OpType.Dropout, autodiff.Op.creatorOf(g_dropped).?.op_type);
 
     const g_pooled = try pool.forward(&graph, g_dropped);
     try std.testing.expect(g_pooled.creator != null);
-    try std.testing.expectEqual(autodiff.OpType.AvgPool2D, g_pooled.creator.?.op_type);
+    try std.testing.expectEqual(autodiff.OpType.AvgPool2D, autodiff.Op.creatorOf(g_pooled).?.op_type);
 
     @memset(g_pooled.grad, 1.0);
     try graph.backwardWithGrad(g_pooled);
@@ -1285,7 +1271,7 @@ test "Recurrent and Transformer modules naming and Graph scope registration" {
     const x = try graph.tensor(2, 4, true);
     @memset(x.data, 0.2);
     const out_lora = try lora.forward(&graph, x);
-    try std.testing.expectEqualStrings("proj_lora", out_lora.creator.?.scope);
+    try std.testing.expectEqualStrings("proj_lora", autodiff.Op.creatorOf(out_lora).?.scope);
     try std.testing.expectEqualStrings(LoRALinear.formula, graph.inferModuleFormula("proj_lora"));
 }
 

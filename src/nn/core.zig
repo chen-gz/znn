@@ -18,44 +18,21 @@ pub const trainModel = module.trainModel;
 pub const evalModel = module.evalModel;
 pub const nameModules = module.nameModules;
 pub const enterModuleScope = module.enterModuleScope;
+pub const createPersistentTensor = module.createPersistentTensor;
+pub const freePersistentTensor = module.freePersistentTensor;
 const applyCustomInit = module.applyCustomInit;
 
 // ============================================================================
-// 底层权重初始化与持久化张量内存辅助
+// 底层权重初始化辅助
 // ============================================================================
 
-pub const init_mod = @import("init.zig");
+pub const init_mod = tensor.weight_init;
 pub const Nonlinearity = init_mod.Nonlinearity;
 pub const calculateGain = init_mod.calculateGain;
 pub const InitMethod = init_mod.InitMethod;
 pub const InitOptions = init_mod.InitOptions;
 pub const normalRandom = init_mod.normalRandom;
 pub const initWeights = init_mod.initWeights;
-
-pub fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: usize, requires_grad: bool) !*Tensor {
-    const t = try allocator.create(Tensor);
-    const shape = Shape.init(&.{ rows, cols });
-    const strides = tensor.computeContiguousStrides(shape);
-    t.* = Tensor{
-        .data = try allocator.alloc(f32, rows * cols),
-        .grad = if (requires_grad) try allocator.alloc(f32, rows * cols) else &.{},
-        .shape = shape,
-        .strides = strides,
-        .requires_grad = requires_grad,
-        .creator = null,
-    };
-    @memset(t.data, 0.0);
-    if (requires_grad) {
-        @memset(t.grad, 0.0);
-    }
-    return t;
-}
-
-pub fn freePersistentTensor(allocator: std.mem.Allocator, t: *Tensor) void {
-    allocator.free(t.data);
-    if (t.grad.len > 0) allocator.free(t.grad);
-    allocator.destroy(t);
-}
 
 // ============================================================================
 // 线性层 (Linear) 与二维卷积模块 (2D Convolution, Conv2D / 2D Transposed Convolution, ConvTranspose2D)

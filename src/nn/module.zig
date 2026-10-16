@@ -14,7 +14,38 @@ const std = @import("std");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const Tensor = tensor.Tensor;
-const freePersistentTensor = @import("core.zig").freePersistentTensor;
+const Shape = tensor.Shape;
+
+// ============================================================================
+// 持久化参数张量的分配与释放（模块参数生命周期）
+// ============================================================================
+
+/// 分配一个由调用方分配器持有、生命周期独立于计算图的二维参数张量（数据与梯度均清零）
+pub fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: usize, requires_grad: bool) !*Tensor {
+    const t = try allocator.create(Tensor);
+    const shape = Shape.init(&.{ rows, cols });
+    const strides = tensor.computeContiguousStrides(shape);
+    t.* = Tensor{
+        .data = try allocator.alloc(f32, rows * cols),
+        .grad = if (requires_grad) try allocator.alloc(f32, rows * cols) else &.{},
+        .shape = shape,
+        .strides = strides,
+        .requires_grad = requires_grad,
+        .creator = null,
+    };
+    @memset(t.data, 0.0);
+    if (requires_grad) {
+        @memset(t.grad, 0.0);
+    }
+    return t;
+}
+
+/// 释放 `createPersistentTensor` 分配的张量；梯度缓冲只要存在即释放（参数被冻结后 `requires_grad` 可能为 false）
+pub fn freePersistentTensor(allocator: std.mem.Allocator, t: *Tensor) void {
+    allocator.free(t.data);
+    if (t.grad.len > 0) allocator.free(t.grad);
+    allocator.destroy(t);
+}
 
 /// 字段路径的最大长度 (字节)
 pub const max_path_len = 256;

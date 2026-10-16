@@ -28,7 +28,7 @@
 
 | 维度 | 现状 | 对本设计的影响 |
 | :--- | :--- | :--- |
-| 算子执行模型 | 计算与输出分配耦合：[`Graph.matmul`](../src/autodiff/graph.zig#L442-L452) → `A.matmul(B, allocator)` → 注册 Op；静态重演 [`Op.forward`](../src/autodiff/op.zig#L21-L31) 依赖 `copyFromEager`（算到临时张量 → `memcpy` → 释放） | 需改造为目标传入式 (Destination-Passing Style, DPS) 内核，GPU 才能写入预分配输出 |
+| 算子执行模型 | 计算与输出分配耦合：[`Graph.matmul`](../src/autodiff/graph.zig#L442-L452) → `A.matmul(B, allocator)` → 注册 Op；静态重演 [`op.forward`](../src/autodiff/op.zig#L15-L25) 依赖 `copyFromEager`（算到临时张量 → `memcpy` → 释放） | 需改造为目标传入式 (Destination-Passing Style, DPS) 内核，GPU 才能写入预分配输出 |
 | Op 记录 | `enable_grad == false` 时不记录 Op（[graph.zig L290-L305](../src/autodiff/graph.zig#L290-L305)、[L328-L341](../src/autodiff/graph.zig#L328-L341)） | 无梯度推理没有可规划、可重放的图 |
 | 宿主机读写 | `nn` / `models` 非测试代码在 forward 中直接读写 `.data`，如 [`MoELayer.forward`](../src/nn/transformer.zig#L344-L392) 的宿主机 Top-K、[`CausalSelfAttention.forwardInference`](../src/nn/attention.zig#L299-L359) 的 KV Cache 循环、[`generateNextTokenWithPenalty`](../src/models/gemma4.zig#L1428-L1500) 的采样 | 需要宿主访问协议，并把依赖数据的逻辑改为图算子 |
 | Q4 推理线程 | [`Q4Linear.forward`](../src/models/gemma4.zig#L768-L813) 对每一行输入、每次调用 spawn 8 个 OS 线程，LM head argmax 同样如此（[L1465-L1487](../src/models/gemma4.zig#L1465-L1487)） | 128 核 Linux 虚拟机实测：spawn + join 8 线程约 **1928 µs/次**，`std.Io.Group` 派发 8 任务约 **32 µs/次** |
@@ -37,7 +37,7 @@
 | 注意力 | [`ScaledDotProductAttention.forwardCore`](../src/nn/attention.zig#L102-L139) 与 [`Gemma4Attention.forward`](../src/models/gemma4.zig#L317-L394) 是两套实现；后者物化 `repeatKV` 与多次转置 | 以显式 `Attention` 算子统一 |
 | MoE | [`MoELayer.forward`](../src/nn/transformer.zig#L402-L410) 对所有路由专家、所有 Token 稠密计算，仅以 Top-K 掩码置零门控概率 | 稀疏 Token 分发是独立任务（Phase 3） |
 | BLAS | macOS 通过 `@extern` + 构建期 `linkFramework("Accelerate")` 调用（[`cblas.zig`](../src/cblas.zig#L11-L35)），编译期按操作系统选择；Linux 为单线程纯 Zig 后备 | Accelerate 内部自行调度 AMX，不应再套一层线程 |
-| 反向传播 | 梯度原地累加，如 MatMul 反向以 `beta = 1.0` 写入 `A.grad`（[backward_core.zig L23-L40](../src/autodiff/backward_core.zig#L23-L40)） | 单一有序命令流可保证安全；并发执行必须做冲突分析 |
+| 反向传播 | 梯度原地累加，如 MatMul 反向以 `beta = 1.0` 写入 `A.grad`（[backward_core.zig L22-L39](../src/autodiff/backward_core.zig#L22-L39)） | 单一有序命令流可保证安全；并发执行必须做冲突分析 |
 | Zig 0.16 | `std.Thread.Pool`、`std.Thread.ResetEvent`、`std.Thread.Mutex`、`WaitGroup` 已移除，并发原语迁移到 `std.Io`（`Io.Threaded`、`Io.Group`、`Io.Event`、`Io.Mutex`、`Io.Condition`） | 执行器基于 `std.Io` 构建 |
 | 解码流程 | [`examples/gemma4.zig`](../examples/gemma4.zig) 每生成一个 Token 新建无梯度图并重算整段序列（无端到端 KV Cache） | KV Cache 是 Metal 解码延迟的前置条件 |
 
@@ -57,7 +57,7 @@
 | 宿主访问 | `hostSlice()` / `hostSliceMut()` 同步协议 + Debug 构建下对未就绪输出填充 NaN（NaN 毒化）+ CPU/Metal 一致性测试 | 不重命名全库 1,200+ 处 `.data` 访问（src 非测试 628、测试 508、示例 75），内核内部继续直接访问 `data` |
 | 确定性 | 固定粒度分块（与线程数无关）+ 按块序合并的有序归约 | 跨线程数逐位一致，便于回归测试 |
 | 融合 | 显式算子（`Q4MatMul`、`TopK`、`KVCacheAppend`、`Attention`）+ 执行计划层融合；逻辑 Op 图保持不变 | 求导与 Schema 2.0 导出稳定 |
-| 分层 | `src/backend/` 为最底层（执行器、BLAS、Objective-C 桥接、Metal），只暴露原语内核；Op 到内核的下降 (lowering) 放在 `autodiff` | 保持 `backend ← tensor ← autodiff ← nn / models` 单向依赖 |
+| 分层 | `src/backend/` 为最底层（执行器、BLAS、Objective-C 桥接、Metal），只暴露原语内核；Op 到内核的下降 (lowering) 放在 `autodiff` | 保持 `backend ← tensor ← autodiff ← nn / models` 单向依赖；现有包级依赖已由 `zig build check-layers` 强制检查，新增 `backend` 包时在 [`tools/check_layers.zig`](../tools/check_layers.zig) 中登记为最底层 |
 
 ---
 
@@ -111,7 +111,7 @@ flowchart TD
 
 ### 4.2 主要修改的既有模块
 * [`src/autodiff/graph.zig`](../src/autodiff/graph.zig)：`GraphOptions`、`Graph.init(backing, options)` / `Graph.initDefault(backing)`（删除 `initNoGrad`，迁移约 39 处调用；约 164 处 `Graph.init(alloc)` 机械替换为 `initDefault`），`submit` / `sync` / `replay`（`replay` 取代 `Graph.forward()`），`deinit` 前同步。
-* [`src/autodiff/op.zig`](../src/autodiff/op.zig)：`Op.forward` 改为调用 `dispatch`，删除 `copyFromEager`。
+* [`src/autodiff/op.zig`](../src/autodiff/op.zig)：`op.forward` 改为调用 `dispatch`，删除 `copyFromEager`。
 * `src/tensor/{core,nn_kernels,conv_pool,reductions,ops}.zig`：各算子拆分为 `inferShape` 与 `xxxInto(exec, out, inputs, ctx)`；公开的分配式张量 API（如 `Tensor.matmul(other, allocator)`）改为“分配输出 + 调用 `xxxInto(.serial, ...)`”，不保留重复实现。
 * [`src/nn/transformer.zig`](../src/nn/transformer.zig)、[`src/nn/attention.zig`](../src/nn/attention.zig)、[`src/models/gemma4.zig`](../src/models/gemma4.zig)：宿主机 Top-K、KV Cache 写入与采样改为图算子或显式同步点。
 * [`build.zig`](../build.zig)：macOS 上链接 `Metal` / `Foundation` / `MetalPerformanceShaders` 与 `objc`；新增 `-Dmetal`、`-Dtsan` 选项与 `test-metal` 步骤。
@@ -420,7 +420,7 @@ flowchart LR
   2. 用执行器替换 `Q4Linear.forward` 与 LM head argmax 中每次调用 spawn 线程的实现；
   3. 拆分 `gemma4.zig`：`Q4Block` 与内核下沉为 `src/tensor/quant.zig`，Q4 模型拆为 `src/models/gemma4_q4.zig`，新增 `Q4MatMul` 算子并经 `Graph` 记录；
   4. Q4 split-half 块内排布 + 文件魔数 `ZNNQ4G02`，量化工具与加载器同步升级；
-  5. `src/cblas.zig` 迁入 `src/backend/cblas.zig`；
+  5. `src/cblas.zig` 迁入 `src/backend/cblas.zig`，并在 `tools/check_layers.zig` 中以 `backend` 包（层级 0）替换 `cblas`；
   6. 新增 `executor`、`q4`、`decode` 基准并记录基线。
 * **验收标准**：
   * `zig build test` 全部通过，所有非测试源码文件 `< 60 KB`；
@@ -430,7 +430,7 @@ flowchart LR
 
 ### Phase 1（`v0.4.0`）：DPS 内核与 deferred 图（CPU）
 * **开发内容**：
-  1. 全部 `OpType` 拆分为 `inferShape` + `xxxInto`，`Op.forward` 改为调用 `dispatch`（删除 `copyFromEager`）；实施 Op 记录规则；
+  1. 全部 `OpType` 拆分为 `inferShape` + `xxxInto`，`op.forward` 改为调用 `dispatch`（删除 `copyFromEager`）；实施 Op 记录规则；
   2. `Residency` 与 `hostSlice` / `hostSliceMut` / `item` / `isReady`，迁移 `nn` / `models` / `engine` / 示例中的宿主访问；
   3. `TopK`（MoE 路由）与 `KVCacheAppend` 算子，`forwardInference` 改为基于图的实现；
   4. deferred 模式：`submit` / `sync` / `replay`（取代 `Graph.forward()`）与静态内存规划；

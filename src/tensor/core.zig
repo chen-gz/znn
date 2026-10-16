@@ -1,5 +1,4 @@
 const std = @import("std");
-const Op = @import("../autodiff/op.zig").Op;
 const c = @import("../cblas.zig");
 const shape_mod = @import("shape.zig");
 pub const Shape = shape_mod.Shape;
@@ -37,6 +36,11 @@ extern fn erff(x: f32) f32;
 // 3. 基础张量（Tensor）核心定义与元数据
 // ============================================================================
 
+/// 自动微分算子节点的不透明句柄 (Opaque Handle)：张量层只保存指向产生该张量的算子的指针，
+/// 具体类型 `autodiff.Op` 由上层定义，并通过 `Op.handle` / `Op.creatorOf` 完成转换，
+/// 从而保持 `tensor` 层不依赖 `autodiff` 层（单向依赖）。
+pub const OpHandle = opaque {};
+
 /// 张量（Tensor）结构体：承载机器学习网络中所有物理数据与流转拓扑信息
 pub const Tensor = struct {
     data: []f32,          // 前向传播的数据缓冲区（行优先存储的一维切片）
@@ -44,7 +48,7 @@ pub const Tensor = struct {
     shape: Shape,         // 逻辑形状
     strides: Shape,       // 各维度的跨度步长（用于非连续张量及快速视图映射）
     requires_grad: bool,  // 是否需要求梯度（如模型参数为 true，输入数据为 false）
-    creator: ?*Op,        // 产生此张量的算子节点（前向图中的父节点，用于追踪计算路径）
+    creator: ?*OpHandle,  // 产生此张量的算子节点句柄（前向图中的父节点，由 `autodiff.Op.creatorOf` 还原为 `*Op`）
     is_view: bool = false, // 是否为零拷贝视图切片（若为 true，deinit 时不释放 data/grad）
     is_custom_initialized: bool = false, // 是否已被层专属自定义初始化 (避免被 Graph 自动初始化重写)
     init_constant: ?f32 = null, // 结构性常量初始值 (如 LSTM 遗忘门偏置 1.0)，Graph 自动初始化时以该常量填充，不依赖命名

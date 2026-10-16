@@ -7,7 +7,7 @@ const types = @import("types.zig");
 pub const OpType = types.OpType;
 pub const OpContext = types.OpContext;
 const op_mod = @import("op.zig");
-pub const Op = op_mod.Op;
+pub const Op = types.Op;
 const graph_nn = @import("graph_nn.zig");
 const graph_init = @import("graph_init.zig");
 
@@ -300,7 +300,7 @@ pub const Graph = struct {
                 .outputs = outs_copy,
                 .context = context,
             };
-            C.creator = o;
+            C.creator = o.handle();
             try self.recordOp(o);
         }
 
@@ -323,7 +323,7 @@ pub const Graph = struct {
             .outputs = @constCast(&[_]*Tensor{output}),
             .context = context,
         };
-        try temp_op.forward(self.backing_allocator);
+        try op_mod.forward(&temp_op, self.backing_allocator);
 
         if (self.enable_grad) {
             const allocator = self.arena.allocator();
@@ -336,7 +336,7 @@ pub const Graph = struct {
             o.* = temp_op;
             o.inputs = inps_copy;
             o.outputs = outs_copy;
-            output.creator = o;
+            output.creator = o.handle();
             try self.recordOp(o);
         }
 
@@ -413,7 +413,7 @@ pub const Graph = struct {
                 },
             };
             for (outputs) |out| {
-                out.creator = o;
+                out.creator = o.handle();
             }
             try self.recordOp(o);
         }
@@ -875,7 +875,7 @@ pub const Graph = struct {
         defer sorted_ops.deinit(allocator);
 
         // 1. 对算子进行拓扑排序，以确保节点按正确的计算依赖关系进行链式求导
-        if (loss_tensor.creator) |root_op| {
+        if (Op.creatorOf(loss_tensor)) |root_op| {
             try self.topologicalSortOps(root_op, &visited, &sorted_ops);
         }
 
@@ -887,7 +887,7 @@ pub const Graph = struct {
         while (i > 0) {
             i -= 1;
             const op = sorted_ops.items[i];
-            try op.backward();
+            try op_mod.backward(op);
         }
     }
 
@@ -900,7 +900,7 @@ pub const Graph = struct {
         defer sorted_ops.deinit(allocator);
 
         // 1. 对算子进行拓扑排序
-        if (output_tensor.creator) |root_op| {
+        if (Op.creatorOf(output_tensor)) |root_op| {
             try self.topologicalSortOps(root_op, &visited, &sorted_ops);
         }
 
@@ -909,7 +909,7 @@ pub const Graph = struct {
         while (i > 0) {
             i -= 1;
             const op = sorted_ops.items[i];
-            try op.backward();
+            try op_mod.backward(op);
         }
     }
 
@@ -919,7 +919,7 @@ pub const Graph = struct {
         try visited.put(op, {});
 
         for (op.inputs) |input| {
-            if (input.creator) |prev_op| {
+            if (Op.creatorOf(input)) |prev_op| {
                 try self.topologicalSortOps(prev_op, visited, list);
             }
         }
@@ -929,7 +929,7 @@ pub const Graph = struct {
     // 运行计算图的前向传播，根据输入更新所有算子节点的值
     pub fn forward(self: *Graph) !void {
         for (self.ops.items) |op| {
-            try op.forward(self.backing_allocator);
+            try op_mod.forward(op, self.backing_allocator);
         }
     }
 
@@ -940,14 +940,12 @@ pub const Graph = struct {
         }
     }
 
-    // 参数初始化、架构报告与 JSON 导出绑定 (来自 graph_init.zig)
+    // 参数初始化与架构报告绑定 (来自 graph_init.zig)
     pub const initWeights = graph_init.initWeights;
     pub const initSingleTensor = graph_init.initSingleTensor;
     pub const describeAutoGraphParam = graph_init.describeAutoGraphParam;
     pub const formatInitReport = graph_init.formatInitReport;
     pub const printInitReport = graph_init.printInitReport;
-    pub const formatJson = graph_init.formatJson;
-    pub const exportJson = graph_init.exportJson;
     pub const appendSingleTensorReport = graph_init.appendSingleTensorReport;
     pub const detectConsumerActivation = graph_init.detectConsumerActivation;
     pub const computeParamFans = graph_init.computeParamFans;
