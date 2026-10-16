@@ -11,7 +11,7 @@ pub const graph_init = @import("autodiff/graph_init.zig");
 
 pub const OpType = types.OpType;
 pub const OpContext = types.OpContext;
-pub const Op = op.Op;
+pub const Op = types.Op;
 pub const Graph = graph.Graph;
 
 test {

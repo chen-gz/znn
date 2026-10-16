@@ -2,8 +2,7 @@ const std = @import("std");
 const c = @import("../cblas.zig");
 const tensor = @import("../tensor.zig");
 const transposeShape = tensor.transposeShape;
-const op_mod = @import("op.zig");
-const Op = op_mod.Op;
+const Op = @import("types.zig").Op;
 
 extern fn erff(x: f32) f32;
 

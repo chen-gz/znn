@@ -2,6 +2,7 @@ const std = @import("std");
 const zig_ml = @import("zig_ml");
 const dataset = zig_ml.dataset;
 const nn = zig_ml.nn;
+const engine = zig_ml.engine;
 const autodiff = zig_ml.autodiff;
 const tensor = zig_ml.tensor;
 
@@ -138,7 +139,7 @@ fn runTraining(
             _ = train_loader.nextInto(x_batch, y_batch);
 
             // 使用通用分类训练单步 (自动从 targets.len 推导 batch_size，从 x_batch 长度推导 input_dim)
-            const step_res = try nn.trainClassificationStep(
+            const step_res = try engine.trainClassificationStep(
                 arena,
                 model,
                 &optimizer,
@@ -187,7 +188,7 @@ fn evaluateModel(
     model: anytype,
     arena: std.mem.Allocator,
     test_dataset: dataset.Dataset,
-) !nn.ClassificationEpochResult {
+) !engine.ClassificationEpochResult {
     const test_batch_size = 100;
 
     var test_loader = try dataset.DataLoader.init(arena, test_dataset, test_batch_size, .{
@@ -196,7 +197,7 @@ fn evaluateModel(
     });
     defer test_loader.deinit(arena);
 
-    return try nn.evaluateClassification(arena, model, &test_loader);
+    return try engine.evaluateClassification(arena, model, &test_loader);
 }
 
 fn printPredictions(
@@ -222,7 +223,7 @@ fn printPredictions(
         const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
         const preds = try logits.argmax(1, arena);
         const pred = @as(usize, @intFromFloat(preds.data[0]));
-        const probs = loss.creator.?.context.SoftmaxCrossEntropy.probs;
+        const probs = autodiff.Op.creatorOf(loss).?.context.SoftmaxCrossEntropy.probs;
         const max_val = probs[pred];
 
         const is_correct = (pred == actual_label);

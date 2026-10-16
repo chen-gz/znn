@@ -94,7 +94,7 @@ pub fn main(init: std.process.Init) !void {
                 y.setName("outputs.y");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&linear, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -113,7 +113,7 @@ pub fn main(init: std.process.Init) !void {
                 y.setName("outputs.logits");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&model, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -135,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
                 res.h_n.setName("outputs.h_n");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&rnn, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -158,7 +158,7 @@ pub fn main(init: std.process.Init) !void {
                 res.c_n.setName("outputs.c_n");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&lstm, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -182,7 +182,7 @@ pub fn main(init: std.process.Init) !void {
                 }
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&slstm, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -204,7 +204,7 @@ pub fn main(init: std.process.Init) !void {
                 res.h_n.setName("outputs.h_n");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&gru, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -224,7 +224,7 @@ pub fn main(init: std.process.Init) !void {
                 out.setName("outputs.embeddings");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&emb, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -243,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
                 out.setName("outputs.context");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&attn, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -262,7 +262,7 @@ pub fn main(init: std.process.Init) !void {
                 out.setName("outputs.block_out");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&block, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -289,7 +289,7 @@ pub fn main(init: std.process.Init) !void {
                 logits.setName("outputs.logits");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&gpt, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -308,7 +308,7 @@ pub fn main(init: std.process.Init) !void {
                 out.setName("outputs.swiglu_out");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&swiglu, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -327,7 +327,7 @@ pub fn main(init: std.process.Init) !void {
                 out.setName("outputs.adapted_out");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&lora, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -344,7 +344,7 @@ pub fn main(init: std.process.Init) !void {
                 x.setName("inputs.x");
                 const out = try ln.forward(g, x);
                 out.setName("outputs.normed");
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -363,7 +363,7 @@ pub fn main(init: std.process.Init) !void {
                 out.setName("outputs.mla_out");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&mla, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -382,7 +382,7 @@ pub fn main(init: std.process.Init) !void {
                 out.setName("outputs.moe_out");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&moe, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -415,7 +415,7 @@ pub fn main(init: std.process.Init) !void {
                 fake_x.setName("outputs.fake_x");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&net_g, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -448,7 +448,7 @@ pub fn main(init: std.process.Init) !void {
                 logits.setName("outputs.logits");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&net_d, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 
@@ -467,7 +467,7 @@ pub fn main(init: std.process.Init) !void {
                 out.setName("outputs.feature_map");
                 // 前向计算图建立后，依据图中各参数的下游激活函数初始化参数
                 try nn.initModel(&conv, g, rnd);
-                try g.exportJson(file_path);
+                try nn.exportJson(g, file_path, g.backing_allocator);
             }
         }.run, random, dir);
 

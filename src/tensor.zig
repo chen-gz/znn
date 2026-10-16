@@ -9,6 +9,7 @@ pub const reductions = @import("tensor/reductions.zig");
 pub const ops = @import("tensor/ops.zig");
 pub const static = @import("tensor/static.zig");
 pub const linalg = @import("tensor/linalg.zig");
+pub const weight_init = @import("tensor/weight_init.zig");
 
 // --- Re-export Linear Algebra Results ---
 pub const QRResult = linalg.QRResult;
@@ -47,6 +48,7 @@ pub const StaticTensor = static.StaticTensor;
 
 // --- Re-export core Tensor ---
 pub const Tensor = core.Tensor;
+pub const OpHandle = core.OpHandle;
 
 // --- Re-export operations & factory functions ---
 pub const array = ops.array;

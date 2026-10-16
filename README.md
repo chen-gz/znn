@@ -29,7 +29,8 @@
 ## Quick Start
 
 ```bash
-zig build test                          # all unit tests
+zig build test                          # all unit tests (includes check-layers)
+zig build check-layers                  # verify one-way package dependencies under src/
 zig build coverage                      # kcov coverage report (-- --fail-under=90, -- --open)
 just bench                              # benchmark suite in ReleaseFast
 just bench --suite gemm --filter conv   # suites: gemm, ops, activations, layers, models, optimizers, tokenizer

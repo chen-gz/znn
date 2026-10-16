@@ -20,7 +20,7 @@ pub const TSNEOptions = struct {
     }
 };
 
-const init_mod = @import("nn/init.zig");
+const init_mod = @import("tensor.zig").weight_init;
 
 /// Normal random generator using Box-Muller transform
 pub const normalRandom = init_mod.normalRandom;

@@ -20,7 +20,7 @@
 * **不支持高阶导数 (No Higher-Order Gradients)**：
   [`Tensor.grad`](../src/tensor/core.zig) 是一维切片 (`[]f32`)，反向传播由 [`Graph.backward`](../src/autodiff/graph.zig) 调度 [`backward_core.zig`](../src/autodiff/backward_core.zig)、[`backward_nn.zig`](../src/autodiff/backward_nn.zig) 与 [`backward_math.zig`](../src/autodiff/backward_math.zig) 执行单向链式传导，梯度计算本身不在图上注册为新节点，暂不支持二阶导数或 Hessian 向量积。
 * **就地操作 (In-place Ops) 版本计数器与前向零梯度内存优化**：
-  就地算子（如 [`mulScalar_`](../src/tensor/reductions.zig)、[`add_`](../src/tensor/reductions.zig)）目前通过 `assert(!requires_grad and creator == null)` 防御，尚缺计算图版本计数器（Version Counter）。无梯度推理图 (`Graph.initNoGrad`) 已不为中间张量分配 `grad` 缓冲，但也不记录 `Op` 节点，因此没有可供规划或重放的计算图；同时 `Op.forward` 与 `runAndRecordPreallocatedOp` 经 `copyFromEager` 先算到临时张量再拷贝，输出缓冲还会被预先清零，这些是降低推理内存与带宽开销的关键优化点。
+  就地算子（如 [`mulScalar_`](../src/tensor/reductions.zig)、[`add_`](../src/tensor/reductions.zig)）目前通过 `assert(!requires_grad and creator == null)` 防御，尚缺计算图版本计数器（Version Counter）。无梯度推理图 (`Graph.initNoGrad`) 已不为中间张量分配 `grad` 缓冲，但也不记录 `Op` 节点，因此没有可供规划或重放的计算图；同时 `op.forward` 与 `runAndRecordPreallocatedOp` 经 `copyFromEager` 先算到临时张量再拷贝，输出缓冲还会被预先清零，这些是降低推理内存与带宽开销的关键优化点。
 
 ### 3. 硬件加速与平台生态 (Hardware Acceleration & Parallelism)
 > 📐 **专项设计**：详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)（Apple Silicon Metal 优先；并发经 `io: std.Io` 注入；`eager` / `deferred` 双模式；按流有序命令队列；Phase 0–5 路线图），对应任务见第二部分 2.4 与 2.5。
@@ -137,6 +137,12 @@
   - [x] 将所有超 60 KB 的实现文件拆分为高内聚子模块：`src/tensor/{core,conv_pool,nn_kernels,reductions,linalg,static}.zig`、`src/autodiff/{op,backward_core,backward_nn,backward_math,graph,graph_nn,graph_init}.zig`、`src/nn/{attention,transformer,llm,visualization,graph_ir}.zig`、`src/models/{gemma4.zig}` 与 `src/bench/{suites.zig}`。
   - [x] 在 [`src/nn/core.zig`](../src/nn/core.zig) 中新增全模型训练/评估状态切换函数 `setTrainingModel`、`trainModel` 与 `evalModel`；在 [`src/nn/recurrent.zig`](../src/nn/recurrent.zig) 中定义具名返回结构体 `RNNResult`、`LSTMResult`、`StackedLSTMResult`、`GRUResult`；补齐全部配置结构体的默认值与 `defaultOptions()` / `initDefault()`。
 
+- [x] **1.7 包级单向依赖与分层检查 (Layered Package Dependencies)**
+  - [x] 消除全部跨包循环导入：`Tensor.creator` 改为张量层不透明句柄 `tensor.OpHandle`（经 `autodiff.Op.handle()` / `Op.creatorOf()` 转换）；权重初始化下沉为 `src/tensor/weight_init.zig`；计算图 JSON 导出从 `Graph` 移至 `nn.generateJson` / `nn.exportJson`；删除 `nn` 对 `engine` 训练函数的转导出。
+  - [x] 消除包内非方法型循环：`nn/core` ↔ `nn/module`（持久化参数张量分配移入 `module.zig`）、`nn/visualization` ↔ `nn/graph_ir`、`autodiff/op` ↔ `backward_*`（`Op` 数据结构移入 `types.zig`，`op.forward` / `op.backward` 改为分发函数）、`bench` ↔ `bench/suites`（运行器拆为 `bench/runner.zig`）；张量层测试不再依赖 `autodiff`。
+  - [x] 新增 [`tools/check_layers.zig`](../tools/check_layers.zig) 与 `zig build check-layers`（纳入 `zig build test`），逐文件检查跨包 `@import` 只指向更底层的包。
+  - [ ] （可选）以编译期 mixin（`pub fn Methods(comptime T: type) type`）重构 `Tensor` 与 `Graph` 的方法实现文件，消除 `tensor/core` ↔ `ops` / `linalg` / `reductions` / `nn_kernels` / `conv_pool` 与 `autodiff/graph` ↔ `graph_nn` / `graph_init` 的包内文件级循环。
+
 ---
 
 ### Phase 2 (P1): 泛型数据类型、多核执行器与 Apple Silicon Metal (Generic DTypes, Executor & Metal)
@@ -212,7 +218,7 @@
 - [ ] **3.4 计算图执行与内存优化 (Graph Execution & Memory)**
   - [ ] 激活重计算（Activation / Gradient Checkpointing）：前向释放中间激活，反向时重算，以计算换显存。
   - [x] 无梯度模式 (`Graph.initNoGrad`) 下不为中间张量分配 `grad` 缓冲（`tensorND`、`registerSingleOutputOp` 与张量层构造函数仅在需要梯度时分配）。
-  - [ ] 消除 `Op.forward` 与 `runAndRecordPreallocatedOp` 中 `copyFromEager` 的临时堆分配与输出预清零（并入设计 Phase 1 的 DPS 内核改造）。
+  - [ ] 消除 `op.forward` 与 `runAndRecordPreallocatedOp` 中 `copyFromEager` 的临时堆分配与输出预清零（并入设计 Phase 1 的 DPS 内核改造）。
   - [ ] 基于计算图生命周期分析的激活缓冲区复用（deferred 模式静态内存规划，设计 Phase 1）。
   - [ ] 将 [`StaticTensor`](../src/tensor/static.zig) 融入动态计算图，得到零分配、编译期校验形状的子图。
 

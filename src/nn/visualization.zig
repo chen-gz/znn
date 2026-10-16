@@ -131,7 +131,7 @@ pub fn opScope(op: *const Op) []const u8 {
 
 /// 张量所属模块：算子输出取其算子作用域；参数取其名称前缀；输入与常量取创建时的作用域
 pub fn tensorScope(t: *const Tensor) []const u8 {
-    if (t.creator) |op| return opScope(op);
+    if (Op.creatorOf(t)) |op| return opScope(op);
     if (t.requires_grad) {
         if (t.name) |n| {
             if (extractModuleScope(n)) |s| return s;
@@ -239,7 +239,7 @@ fn appendNodeData(
     const module = try allocator.dupe(u8, scope);
 
     // 1. 算子输出激活值
-    if (t.creator) |creator_op| {
+    if (Op.creatorOf(t)) |creator_op| {
         const op_name = @tagName(creator_op.op_type);
         const name = if (t.name) |n|
             try allocator.dupe(u8, n)
@@ -622,7 +622,7 @@ pub const LocalGraphBuilder = struct {
     }
 
     fn producerVertex(self: *const LocalGraphBuilder, t: *Tensor) Vertex {
-        if (t.creator) |op| return self.classifyOp(op);
+        if (Op.creatorOf(t)) |op| return self.classifyOp(op);
         return self.classifyLeaf(t);
     }
 
@@ -635,7 +635,7 @@ pub const LocalGraphBuilder = struct {
     fn walkBack(self: *LocalGraphBuilder, t: *Tensor) !Walk {
         var cur = t;
         var rev: std.ArrayList([]const u8) = .empty;
-        while (cur.creator) |op| {
+        while (Op.creatorOf(cur)) |op| {
             if (!isTransparentOp(op)) break;
             if (!std.mem.eql(u8, opScope(op), self.module.path)) break;
             const src = firstDataInput(op) orelse break;
@@ -661,11 +661,11 @@ pub const LocalGraphBuilder = struct {
     /// 输入端口的外部来源：越过透明算子找到真正的生产者，并在最近公共祖先作用域中解析
     fn producerRef(self: *LocalGraphBuilder, t0: *Tensor) ![]const u8 {
         var cur = t0;
-        while (cur.creator) |op| {
+        while (Op.creatorOf(cur)) |op| {
             if (!isTransparentOp(op)) break;
             cur = firstDataInput(op) orelse break;
         }
-        const op = cur.creator orelse return cur.name orelse "input";
+        const op = Op.creatorOf(cur) orelse return cur.name orelse "input";
         return self.opRefIn(op, commonScope(opScope(op), self.module.path));
     }
 
@@ -910,11 +910,3 @@ pub const ModelHierarchyGraph = struct {
         self.arena.deinit();
     }
 };
-
-// ============================================================================
-// 5. 模型计算图与模块层级提取器及顶层重导出
-// ============================================================================
-pub const graph_ir = @import("graph_ir.zig").graph_ir;
-pub const buildModelHierarchy = graph_ir.build;
-pub const generateJson = graph_ir.generateJson;
-pub const exportJson = graph_ir.exportJson;

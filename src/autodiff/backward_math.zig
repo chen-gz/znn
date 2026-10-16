@@ -1,8 +1,7 @@
 const std = @import("std");
 const tensor_mod = @import("../tensor.zig");
 const Tensor = tensor_mod.Tensor;
-const op_mod = @import("op.zig");
-const Op = op_mod.Op;
+const Op = @import("types.zig").Op;
 
 pub fn reduceSumMeanBackward(A: *Tensor, C: *Tensor, axis: ?usize, keepdims: bool, scale: f32) void {
     if (!A.requires_grad) return;

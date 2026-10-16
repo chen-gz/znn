@@ -70,7 +70,7 @@ pub fn main() !void {
     // 4. 导出计算图为独立的 JSON 文件
     const output_path = "examples/sample_model_graph.json";
     std.debug.print("[Step 3/4] Exporting Model Hierarchy & Graph JSON...\n", .{});
-    try graph.exportJson(output_path);
+    try nn.exportJson(&graph, output_path, graph.backing_allocator);
     std.debug.print("  * Graph written to: {s}\n\n", .{output_path});
 
     // 5. 导出单个 Linear 层的最小参考 JSON (可视化器 JSON 格式指南中的模板)
@@ -90,7 +90,7 @@ pub fn main() !void {
     try nn.initModel(&linear, &min_graph, random);
 
     const minimal_path = "examples/minimal_model_graph.json";
-    try min_graph.exportJson(minimal_path);
+    try nn.exportJson(&min_graph, minimal_path, min_graph.backing_allocator);
     std.debug.print("  * Graph written to: {s}\n\n", .{minimal_path});
 }
 

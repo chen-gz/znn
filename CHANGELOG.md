@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **异步执行与 Apple Silicon Metal 卸载设计 (`plan/ASYNC_OFFLOAD_DESIGN.md`, `plan/README.md`, `plan/TODO.md`, `doc/README.md`, `README.md`)**:
   - 新增面向 `v0.4.0`–`v0.5.x` 的设计文档：平台优先级为 Apple Silicon Metal > CPU 多核 > 其他 GPU；并发基于 Zig 0.16 `std.Io`，由应用创建 `std.Io.Threaded` 并经 `GraphOptions.io` 注入；`eager` / `deferred` 双执行模式与单一有序命令队列；统一内存零拷贝 `MetalAllocator`、Objective-C 运行时桥接与运行期编译 MSL；目标传入式 (DPS) 内核、`hostSlice` 宿主访问协议、静态内存规划与显式 `Attention` / `Q4MatMul` / `TopK` / `KVCacheAppend` 算子；Phase 0–5 路线图与验收标准。
+- **包级分层依赖检查 (`tools/check_layers.zig`, `build.zig`, `AGENTS.md`)**:
+  - 新增 `zig build check-layers`（同时纳入 `zig build test`）：扫描 `src/` 下全部 `@import`，要求跨包导入只指向更底层的包（`cblas` ← `tensor` / `dataset` ← `autodiff` / `regression` / `manifold` ← `nn` / `cross_validation` ← `optim` / `models` ← `engine` ← `bench` ← `root`），违规时报告文件与行号；`AGENTS.md` 新增第 6 节《包级单向依赖》。
+
+### Changed
+- **消除循环导入，包级依赖改为严格单向 (`src/tensor/`, `src/autodiff/`, `src/nn/`, `src/bench/`, `src/manifold.zig`, `examples/`)**:
+  - `Tensor.creator` 的类型由 `?*autodiff.Op` 改为张量层不透明句柄 `?*tensor.OpHandle`；写入使用 `op.handle()`，读取使用 `autodiff.Op.creatorOf(t)`，`tensor` 不再导入 `autodiff`。
+  - `autodiff.Op` 数据结构移入 `src/autodiff/types.zig`；`Op.forward` / `Op.backward` 方法改为分发函数 `autodiff.op.forward(op, allocator)` / `autodiff.op.backward(op)`，反向内核文件只依赖 `Op` 数据结构。
+  - 权重初始化模块 `src/nn/init.zig` 移至 `src/tensor/weight_init.zig`（`nn.init_mod` 及 `nn.InitMethod` 等导出不变），`Graph` 的自动初始化不再依赖 `nn`。
+  - 删除 `Graph.formatJson` / `Graph.exportJson`，计算图 JSON 导出统一使用 `nn.generateJson(&graph, allocator)` / `nn.exportJson(&graph, path, allocator)`；删除 `nn.visualization` 对 `graph_ir` 的转导出与未使用的 `buildModelHierarchy` 别名。
+  - 删除 `nn` 对 `engine` 训练与评估函数（`trainClassificationStep`、`evaluateClassification`、`trainStep` 等）的转导出，调用方改用 `engine.*`。
+  - `createPersistentTensor` / `freePersistentTensor` 的实现移入 `src/nn/module.zig`（`nn.core` 与 `nn` 导出不变）；基准运行器 `BenchmarkRunner` 等拆分至 `src/bench/runner.zig`（`bench` 门面导出不变）；依赖 `autodiff` 的两个张量互操作测试移至 `src/autodiff/tests.zig`。
 
 ### Fixed
 - **规划与架构文档同代码现状对齐 (`plan/TODO.md`, `plan/README.md`, `doc/architecture.md`)**:

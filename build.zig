@@ -152,6 +152,20 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run tests");
 
+    // 包级分层依赖检查 (zig build check-layers)：跨包 @import 只能指向更底层的包，同时纳入 zig build test
+    const check_layers_exe = b.addExecutable(.{
+        .name = "check_layers",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_layers.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const check_layers_run = b.addRunArtifact(check_layers_exe);
+    check_layers_run.addDirectoryArg(b.path("src"));
+    const check_layers_step = b.step("check-layers", "Verify that package-level @import dependencies under src/ are one-way");
+    check_layers_step.dependOn(&check_layers_run.step);
+    test_step.dependOn(&check_layers_run.step);
+
     const mod_tests = b.addTest(.{
         .root_module = mod,
         .name = "root_tests",

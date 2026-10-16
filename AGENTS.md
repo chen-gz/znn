@@ -32,7 +32,7 @@
   - deprecated aliases, re-exports, wrapper functions, or duplicated old/new code paths,
   - heuristics kept only to support a mechanism that has been replaced.
 - **Delete What Is Superseded (删除被取代的内容)**: Remove replaced code, tests and plan documents in the same change, and update the affected tests to the new behavior instead of keeping the old assertions. Leave no commented-out code behind. Documents describe the current design only; the history of a change belongs in commit messages and `CHANGELOG.md`.
-- **Upgrade Producer and Consumer Together (生产端与消费端同步升级)**: When a shared format changes (e.g. the model graph JSON produced by `graph_ir.serializeJson` / `Graph.exportJson` and consumed by the `web/` visualizer), in the same change:
+- **Upgrade Producer and Consumer Together (生产端与消费端同步升级)**: When a shared format changes (e.g. the model graph JSON produced by `graph_ir.serializeJson` / `nn.exportJson` and consumed by the `web/` visualizer), in the same change:
   - update the exporter and `src/nn/model_graph.schema.json` (field descriptions and `enum` lists matching the Zig enums),
   - regenerate `examples/sample_model_graph.json`, `examples/minimal_model_graph.json` (`zig build run-report`) and `examples/models/*.json` (`zig build run-book-models`),
   - update the `web/` visualizer consumers, tests (`cd web && npm test`), `doc/model-graph-visualization.md` and the full specification (`doc/visualization-model-edge-design.md`),
@@ -52,3 +52,8 @@
   - `均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)`
   - `直接偏好优化 (Direct Preference Optimization, DPO)` / `群组相对策略优化 (Group Relative Policy Optimization, GRPO)`
 
+## 6. Layered Package Dependencies (包级单向依赖)
+- Packages under `src/` form a strict one-way layering; a cross-package `@import` may only point to a lower layer:
+  `cblas` (0) ← `tensor`, `dataset` (1) ← `autodiff`, `regression`, `manifold` (2) ← `nn`, `cross_validation` (3) ← `optim`, `models` (4) ← `engine` (5) ← `bench` (6) ← `root` (7).
+- `zig build check-layers` ([`tools/check_layers.zig`](tools/check_layers.zig)) enforces this rule and also runs as part of `zig build test`. When adding a new package, register its layer in the `layers` table of that tool.
+- Imports between files of the same package are allowed. To break an upward dependency, move the shared code down to the lower layer or pass an opaque handle (e.g. `Tensor.creator: ?*tensor.OpHandle`, converted with `autodiff.Op.handle()` / `autodiff.Op.creatorOf()`); never re-export a higher-layer API from a lower-layer facade.

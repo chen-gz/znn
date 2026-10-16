@@ -1,7 +1,9 @@
 const std = @import("std");
 const tensor_mod = @import("../tensor.zig");
 const Tensor = tensor_mod.Tensor;
+const init_mod = tensor_mod.weight_init;
 const Graph = @import("graph.zig").Graph;
+const Op = @import("types.zig").Op;
 
 /// 从计算图中自动推导指定模块或节点的数学公式
 pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u8 {
@@ -85,8 +87,6 @@ pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u
 
 /// 在图建立完毕后，智能探查参数节点的下游消费者算子并自动初始化权重
 pub fn initWeights(self: *Graph, random: std.Random) void {
-    const init_mod = @import("../nn/init.zig");
-
     // 搜集图内所有 Ops 的输入参数节点与 registered tensors
     const allocator = self.arena.allocator();
     var visited = std.AutoHashMap(*Tensor, void).init(allocator);
@@ -97,7 +97,7 @@ pub fn initWeights(self: *Graph, random: std.Random) void {
         for (op.inputs) |t| {
             if (visited.contains(t)) continue;
             visited.put(t, {}) catch continue;
-            initSingleTensor(self, t, random, init_mod);
+            initSingleTensor(self, t, random);
         }
     }
 
@@ -105,7 +105,7 @@ pub fn initWeights(self: *Graph, random: std.Random) void {
     for (self.tensors.items) |t| {
         if (visited.contains(t)) continue;
         visited.put(t, {}) catch continue;
-        initSingleTensor(self, t, random, init_mod);
+        initSingleTensor(self, t, random);
     }
 }
 
@@ -136,7 +136,7 @@ pub fn isLoRABParam(self: *const Graph, t: *const Tensor) bool {
         if (op.op_type == .MatMul and op.inputs.len >= 2 and op.inputs[1] == t) {
             if (self.getModuleType(op.scope)) |m_type| {
                 if (std.mem.eql(u8, m_type, "LoRALinear")) {
-                    if (op.inputs[0].creator) |prev_op| {
+                    if (Op.creatorOf(op.inputs[0])) |prev_op| {
                         if (prev_op.op_type == .MatMul and std.mem.eql(u8, prev_op.scope, op.scope)) return true;
                     }
                 }
@@ -152,8 +152,6 @@ pub const AutoGraphParamInfo = struct {
 };
 
 pub fn describeAutoGraphParam(self: *Graph, t: *Tensor, strat_buf: *[64]u8) AutoGraphParamInfo {
-    const init_mod = @import("../nn/init.zig");
-
     if (t.shape.len == 1 or (t.shape.len == 2 and t.shape.dims[0] == 1)) {
         if (isNormScaleParam(self, t)) {
             return .{ .act_name = "scale", .strategy = "ones (1.0)" };
@@ -196,7 +194,7 @@ pub fn describeAutoGraphParam(self: *Graph, t: *Tensor, strat_buf: *[64]u8) Auto
     return .{ .act_name = act_name, .strategy = strat };
 }
 
-pub fn initSingleTensor(self: *Graph, t: *Tensor, random: std.Random, comptime init_mod: type) void {
+pub fn initSingleTensor(self: *Graph, t: *Tensor, random: std.Random) void {
     // 只对属于可训练参数（requires_grad=true 且非中间激活运算生成）的节点进行初始化
     // 如果已经被库外用户代码的 customInit 初始化过，则坚决跳过，绝不覆盖！
     if (!t.requires_grad or t.is_custom_initialized or t.creator != null) return;
@@ -318,7 +316,6 @@ pub fn shapeParamFans(t: *const Tensor) ParamFans {
 
 /// 格式化全图各节点（包括输入数据、模型参数及中间算子输出）的详情与初始化报告为分配的字符串
 pub fn formatInitReport(self: *Graph, allocator: std.mem.Allocator) ![]const u8 {
-    const init_mod = @import("../nn/init.zig");
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -342,19 +339,19 @@ pub fn formatInitReport(self: *Graph, allocator: std.mem.Allocator) ![]const u8 
         for (op.inputs) |t| {
             if (visited.contains(t)) continue;
             visited.put(t, {}) catch continue;
-            try appendSingleTensorReport(self, t, &param_idx, &input_idx, &op_idx, &buf, allocator, init_mod);
+            try appendSingleTensorReport(self, t, &param_idx, &input_idx, &op_idx, &buf, allocator);
         }
         for (op.outputs) |t| {
             if (visited.contains(t)) continue;
             visited.put(t, {}) catch continue;
-            try appendSingleTensorReport(self, t, &param_idx, &input_idx, &op_idx, &buf, allocator, init_mod);
+            try appendSingleTensorReport(self, t, &param_idx, &input_idx, &op_idx, &buf, allocator);
         }
     }
 
     for (self.tensors.items) |t| {
         if (visited.contains(t)) continue;
         visited.put(t, {}) catch continue;
-        try appendSingleTensorReport(self, t, &param_idx, &input_idx, &op_idx, &buf, allocator, init_mod);
+        try appendSingleTensorReport(self, t, &param_idx, &input_idx, &op_idx, &buf, allocator);
     }
     try buf.appendSlice(allocator, "=========================================================================================================\n\n");
     return buf.toOwnedSlice(allocator);
@@ -367,18 +364,6 @@ pub fn printInitReport(self: *Graph) void {
     std.debug.print("{s}", .{report});
 }
 
-/// 将计算图与模块层级结构序列化为递归的 JavaScript 对象表示法 (JavaScript Object Notation, JSON) 数据字符串 (供前端直接解析并构建完整模型拓扑)
-pub fn formatJson(self: *Graph, allocator: std.mem.Allocator) ![]const u8 {
-    const vis = @import("../nn/visualization.zig");
-    return vis.graph_ir.generateJson(self, allocator);
-}
-
-/// 将计算图与模块层级结构直接导出保存为独立的 JavaScript 对象表示法 (JavaScript Object Notation, JSON) 文件 (如 "model_graph.json")
-pub fn exportJson(self: *Graph, file_path: []const u8) !void {
-    const vis = @import("../nn/visualization.zig");
-    try vis.graph_ir.exportJson(self, file_path, self.backing_allocator);
-}
-
 pub fn appendSingleTensorReport(
     self: *Graph,
     t: *Tensor,
@@ -387,9 +372,7 @@ pub fn appendSingleTensorReport(
     op_idx: *usize,
     buf: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
-    comptime init_mod: type,
 ) !void {
-    _ = init_mod;
     var shape_buf: [64]u8 = undefined;
     var shape_len: usize = 0;
     shape_buf[0] = '[';
@@ -408,7 +391,7 @@ pub fn appendSingleTensorReport(
     const shape_str = shape_buf[0..shape_len];
 
     // 1. 算子生成的中间计算节点 / 激活输出
-    if (t.creator) |creator_op| {
+    if (Op.creatorOf(t)) |creator_op| {
         var name_buf: [48]u8 = undefined;
         const op_name = @tagName(creator_op.op_type);
         const name: []const u8 = if (t.name) |n| n else (std.fmt.bufPrint(&name_buf, "Node_{s}_{d}", .{ op_name, op_idx.* }) catch "Node_Op");
@@ -456,7 +439,7 @@ pub fn appendSingleTensorReport(
 }
 
 /// 顺着张量 t 往后在图的 Ops 列表中探查下游消费者的激活函数类型
-pub fn detectConsumerActivation(self: *Graph, target: *Tensor) @import("../nn/init.zig").Nonlinearity {
+pub fn detectConsumerActivation(self: *Graph, target: *Tensor) init_mod.Nonlinearity {
     var current: *Tensor = target;
     var passed_projection = false;
 
