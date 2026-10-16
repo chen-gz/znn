@@ -8,6 +8,7 @@
 
 | 文档名称 | 核心主题 | 重点内容 |
 | :--- | :--- | :--- |
+| **[ASYNC_OFFLOAD_DESIGN.md](ASYNC_OFFLOAD_DESIGN.md)** | **异步计算图执行与异构硬件算子 Offload 设计规划** | • 四层演进架构（API 层、无锁原子波前 DAG 调度层、CostRouter 算子分发层、异构后端抽象层）<br>• 算子内（Intra-op）多核分块并行 + 算子间（Inter-op）异步依赖流调度<br>• Apple Silicon 统一内存（CPU + AMX + Metal 零拷贝协同）与 Linux/CUDA 多流异构 Offload 蓝图<br>• Phase A 至 Phase D 四阶段落地方案与验收标准 |
 | **[TODO.md](TODO.md)** | **全面现状诊断与分阶段任务清单** | • 6 个核心技术维度的现状诊断与不成熟之处<br>• Phase 1 (P0) 至 Phase 4 (P3) 细分开发任务<br>• 已交付里程碑与待完成特性的最新跟踪状态 |
 | **[NUMPY_GAP_ANALYSIS.md](NUMPY_GAP_ANALYSIS.md)** | **现代 NumPy 2.x 深度对比与补齐规划** | • 科学计算底座 vs. 深度学习框架的定位差异<br>• 9 大能力维度的全景差距诊断表<br>• 泛型 Dtype、零拷贝切片、多轴归约、线性代数等具体演进方案 |
 
