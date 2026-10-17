@@ -43,7 +43,7 @@ fn exportModel(
     random: std.Random,
     output_dir: []const u8,
 ) !void {
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     var path_buf: [256]u8 = undefined;

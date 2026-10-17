@@ -243,7 +243,7 @@ pub const SwiGLU = struct {
 /// 2. 可选隔离常驻共享专家列表 (shared_experts, 均无条件激活)
 /// 3. 动态门控路由网络 gate: Linear(dim -> num_routed_experts)
 /// 4. 门控概率归一化与稀疏加权聚合输出
-/// 5. 基于计算图的前向与反向传播 (推理时传入 `Graph.initNoGrad` 构建的无梯度计算图)
+/// 5. 基于计算图的前向与反向传播 (推理时传入 `Graph.init(alloc, .{ .enable_grad = false })` 构建的无梯度计算图)
 pub const MoELayer = struct {
     dim: usize,
     num_routed_experts: usize,

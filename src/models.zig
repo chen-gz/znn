@@ -4,6 +4,7 @@
 const std = @import("std");
 
 pub const gemma4 = @import("models/gemma4.zig");
+pub const gemma4_q4 = @import("models/gemma4_q4.zig");
 
 test {
     std.testing.refAllDecls(@This());

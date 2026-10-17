@@ -21,7 +21,7 @@ pub fn solveGradientDescent(
     var b_data = [_]f32{0.0};
 
     for (1..(epochs + 1)) |epoch| {
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
 
         const x_node = try graph.tensorWithData(N, 1, x, false);

@@ -62,7 +62,7 @@ pub fn solveRidge1DGradientDescent(
     const lambda_l2 = 2.0 * lambda / N_f;
 
     for (1..(epochs + 1)) |epoch| {
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
 
         const x_node = try graph.tensorWithData(N, 1, x, false);
@@ -121,7 +121,7 @@ pub fn solveRidgeNDGradientDescent(
     const lambda_l2 = 2.0 * lambda / N_f;
 
     for (1..(epochs + 1)) |epoch| {
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
 
         const x_node = try graph.tensorWithData(N, D, x, false);

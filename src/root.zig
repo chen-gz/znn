@@ -12,8 +12,11 @@ pub const cv = @import("cross_validation.zig");
 pub const engine = @import("engine.zig");
 pub const bench = @import("bench.zig");
 pub const models = @import("models.zig");
+pub const backend = @import("backend.zig");
+pub const Executor = backend.Executor;
 
 pub const gemma4 = models.gemma4;
+pub const gemma4_q4 = models.gemma4_q4;
 
 pub const TSNE = manifold.TSNE;
 pub const TSNEOptions = manifold.TSNEOptions;

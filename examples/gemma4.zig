@@ -4,6 +4,7 @@ const zig_ml = @import("zig_ml");
 const nn = zig_ml.nn;
 const autodiff = zig_ml.autodiff;
 const gemma4 = zig_ml.models.gemma4;
+const gemma4_q4 = zig_ml.models.gemma4_q4;
 
 /// Gemma 4 官方 Tokenizer 规范与词表映射
 const Gemma4ChatTokenizer = struct {
@@ -114,7 +115,7 @@ pub fn main(init: std.process.Init) !void {
     defer std.posix.munmap(mmap_ptr);
 
     const magic = mmap_ptr[0..8];
-    if (!std.mem.eql(u8, magic, "ZNNQ4G01")) {
+    if (!std.mem.eql(u8, magic, "ZNNQ4G02")) {
         std.debug.print("❌ 错误: 模型文件魔数校验失败: {s}\n", .{magic});
         return;
     }
@@ -152,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
     var vocab = try gemma4.Gemma4Vocabulary.openFile(io, "gemma4_vocab.bin");
     defer vocab.deinit();
 
-    const model = try gemma4.DefaultGemma4Q4.loadFromMmap(allocator, mmap_ptr);
+    const model = try gemma4_q4.DefaultGemma4Q4.loadFromMmap(allocator, mmap_ptr);
     defer {
         var m_mut = model;
         m_mut.deinit(allocator);
@@ -175,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
 
     while (gen_count < max_new_tokens) : (gen_count += 1) {
         // 每步新建一个无梯度轻量级图，生成完毕立即释放中间张量，维持极限低内存
-        var step_graph = autodiff.Graph.initNoGrad(allocator);
+        var step_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
         defer step_graph.deinit();
 
         const next_tok = try model.generateNextToken(&step_graph, current_tokens.items, mmap_ptr);

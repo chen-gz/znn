@@ -198,5 +198,3 @@ test "cblas_sgemm_fallback matrix multiplication" {
     try std.testing.expectApproxEqAbs(expected00, C_nt[0], 1e-5);
     try std.testing.expectApproxEqAbs(expected01, C_nt[1], 1e-5);
 }
-
-

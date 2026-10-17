@@ -145,7 +145,7 @@ pub fn main() !void {
         // --------------------------------------------------------------------
         // Step 1: 训练判别器 Discriminator (D)
         // --------------------------------------------------------------------
-        var graph_d = autodiff.Graph.init(allocator);
+        var graph_d = autodiff.Graph.initDefault(allocator);
 
         // 真实数据样本 (Label = 1)
         const real_data = try sampleRealData(&graph_d, batch_size, random);
@@ -153,7 +153,7 @@ pub fn main() !void {
 
         // 生成器伪造样本 (Label = 0)
         const noise_d = try graph_d.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);
-        var fake_data_eager_graph = autodiff.Graph.initNoGrad(allocator);
+        var fake_data_eager_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
         defer fake_data_eager_graph.deinit();
         const fake_data_eager = try net_g.forward(&fake_data_eager_graph, noise_d);
 
@@ -180,7 +180,7 @@ pub fn main() !void {
         // --------------------------------------------------------------------
         // Step 2: 训练生成器 Generator (G)
         // --------------------------------------------------------------------
-        var graph_g = autodiff.Graph.init(allocator);
+        var graph_g = autodiff.Graph.initDefault(allocator);
 
         const noise_g = try graph_g.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);
         const g_generated = try net_g.forward(&graph_g, noise_g);
@@ -203,7 +203,7 @@ pub fn main() !void {
         // --------------------------------------------------------------------
         if (epoch % 50 == 0 or epoch == 1) {
             // 计算当前生成器的输出均值与标准差
-            var eval_graph = autodiff.Graph.init(allocator);
+            var eval_graph = autodiff.Graph.initDefault(allocator);
             defer eval_graph.deinit();
 
             const eval_noise = try eval_graph.randomNormal(&.{ 500, 2 }, random, 0.0, 1.0, false);

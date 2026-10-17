@@ -6,6 +6,8 @@ const nn = @import("../nn.zig");
 const autodiff = @import("../autodiff.zig");
 const optim = @import("../optim.zig");
 const dataset = @import("../dataset.zig");
+const backend = @import("../backend.zig");
+const models = @import("../models.zig");
 
 /// Suite 4: Layers (Forward & Backward)
 pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) !void {
@@ -41,7 +43,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                var out_graph = autodiff.Graph.initNoGrad(self.arena.allocator());
+                var out_graph = autodiff.Graph.init(self.arena.allocator(), .{ .enable_grad = false });
                 defer out_graph.deinit();
                 const out = try self.linear.forward(&out_graph, self.x);
                 std.mem.doNotOptimizeAway(out.data.ptr);
@@ -84,7 +86,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 64, 784 }, self.x_data, true);
@@ -132,7 +134,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                var out_graph = autodiff.Graph.initNoGrad(self.arena.allocator());
+                var out_graph = autodiff.Graph.init(self.arena.allocator(), .{ .enable_grad = false });
                 defer out_graph.deinit();
                 const out = try self.conv.forward(&out_graph, self.x);
                 std.mem.doNotOptimizeAway(out.data.ptr);
@@ -177,7 +179,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 32, 1, 28, 28 }, self.x_data, true);
@@ -220,7 +222,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 32, 16, 26, 26 }, self.x_data, true);
@@ -267,7 +269,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
@@ -314,7 +316,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
 
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
-                var out_graph = autodiff.Graph.initNoGrad(self.arena.allocator());
+                var out_graph = autodiff.Graph.init(self.arena.allocator(), .{ .enable_grad = false });
                 defer out_graph.deinit();
                 const out = try self.attn.forward(&out_graph, self.x);
                 std.mem.doNotOptimizeAway(out.data.ptr);
@@ -357,7 +359,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
@@ -405,7 +407,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
@@ -494,7 +496,7 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensor(64, 784, false);
@@ -596,7 +598,7 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensor(32, 784, false);
@@ -684,7 +686,7 @@ pub fn runModelBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 4, 64, 128 }, self.x_data, true);
@@ -905,5 +907,504 @@ pub fn runTokenizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
 
         const bytes: u64 = sample_text.len;
         try runner.benchmark("BPETokenizer Decode [Sample Text]", "Tokenizer", null, bytes, null, "", &ctx);
+    }
+}
+
+/// Suite 8: Executor (ParallelFor & ParallelReduce Dispatch Overhead)
+pub fn runExecutorBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) !void {
+    // 1. parallelFor serial [10k items]
+    {
+        const ForSerialCtx = struct {
+            data: []u32,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator) !@This() {
+                const data = try alloc.alloc(u32, 10_000);
+                @memset(data, 1);
+                return .{ .data = data, .allocator = alloc };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.allocator.free(self.data);
+            }
+
+            fn kernel(slice: []u32, start: usize, end: usize) void {
+                for (start..end) |i| {
+                    slice[i] = slice[i] *% 3 +% 1;
+                }
+            }
+
+            pub fn run(self: *@This()) !void {
+                try backend.Executor.serial.parallelFor(self.data.len, 100, self.data, kernel);
+                std.mem.doNotOptimizeAway(self.data.ptr);
+            }
+        };
+
+        var ctx = try ForSerialCtx.init(allocator);
+        defer ctx.deinit();
+        try runner.benchmark("parallelFor serial [10k, grain=100]", "Executor", null, 10_000 * @sizeOf(u32), 10_000, "items/s", &ctx);
+    }
+
+    // 2. parallelFor threaded [10k items, 4 workers]
+    {
+        const ForThreadedCtx = struct {
+            data: []u32,
+            threaded: std.Io.Threaded,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator) !@This() {
+                const data = try alloc.alloc(u32, 10_000);
+                @memset(data, 1);
+                return .{
+                    .data = data,
+                    .threaded = std.Io.Threaded.init(alloc, .{}),
+                    .allocator = alloc,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.threaded.deinit();
+                self.allocator.free(self.data);
+            }
+
+            fn kernel(slice: []u32, start: usize, end: usize) void {
+                for (start..end) |i| {
+                    slice[i] = slice[i] *% 3 +% 1;
+                }
+            }
+
+            pub fn run(self: *@This()) !void {
+                const exec = backend.Executor{ .io = self.threaded.io(), .max_tasks = 4 };
+                try exec.parallelFor(self.data.len, 2500, self.data, kernel);
+                std.mem.doNotOptimizeAway(self.data.ptr);
+            }
+        };
+
+        var ctx = try ForThreadedCtx.init(allocator);
+        defer ctx.deinit();
+        try runner.benchmark("parallelFor threaded [10k, 4 workers]", "Executor", null, 10_000 * @sizeOf(u32), 10_000, "items/s", &ctx);
+    }
+
+    // 3. parallelReduce serial [100k items]
+    {
+        const ReduceSerialCtx = struct {
+            data: []u32,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator) !@This() {
+                const data = try alloc.alloc(u32, 100_000);
+                for (data, 0..) |*v, i| v.* = @as(u32, @intCast(i % 100));
+                return .{ .data = data, .allocator = alloc };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.allocator.free(self.data);
+            }
+
+            fn map(slice: []const u32, start: usize, end: usize) u64 {
+                var s: u64 = 0;
+                for (start..end) |i| s += slice[i];
+                return s;
+            }
+
+            fn add(a: u64, b: u64) u64 {
+                return a + b;
+            }
+
+            pub fn run(self: *@This()) !void {
+                var total = try backend.Executor.serial.parallelReduce(u64, self.data.len, 1000, self.data, map, add, 0);
+                std.mem.doNotOptimizeAway(&total);
+            }
+        };
+
+        var ctx = try ReduceSerialCtx.init(allocator);
+        defer ctx.deinit();
+        try runner.benchmark("parallelReduce serial [100k, grain=1000]", "Executor", null, 100_000 * @sizeOf(u32), 100_000, "items/s", &ctx);
+    }
+
+    // 4. parallelReduce threaded [100k items, 4 workers]
+    {
+        const ReduceThreadedCtx = struct {
+            data: []u32,
+            threaded: std.Io.Threaded,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator) !@This() {
+                const data = try alloc.alloc(u32, 100_000);
+                for (data, 0..) |*v, i| v.* = @as(u32, @intCast(i % 100));
+                return .{
+                    .data = data,
+                    .threaded = std.Io.Threaded.init(alloc, .{}),
+                    .allocator = alloc,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.threaded.deinit();
+                self.allocator.free(self.data);
+            }
+
+            fn map(slice: []const u32, start: usize, end: usize) u64 {
+                var s: u64 = 0;
+                for (start..end) |i| s += slice[i];
+                return s;
+            }
+
+            fn add(a: u64, b: u64) u64 {
+                return a + b;
+            }
+
+            pub fn run(self: *@This()) !void {
+                const exec = backend.Executor{ .io = self.threaded.io(), .max_tasks = 4 };
+                var total = try exec.parallelReduce(u64, self.data.len, 10_000, self.data, map, add, 0);
+                std.mem.doNotOptimizeAway(&total);
+            }
+        };
+
+        var ctx = try ReduceThreadedCtx.init(allocator);
+        defer ctx.deinit();
+        try runner.benchmark("parallelReduce threaded [100k, 4 workers]", "Executor", null, 100_000 * @sizeOf(u32), 100_000, "items/s", &ctx);
+    }
+}
+
+/// Suite 9: Q4 (Quantized GEMV & GEMM Throughput)
+pub fn runQ4Benchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) !void {
+    // 1. Q4 GEMV serial [1x2048x2048]
+    {
+        const Q4GemvSerialCtx = struct {
+            blocks: []tensor.Q4Block,
+            x: *tensor.Tensor,
+            out: *tensor.Tensor,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator, in_f: usize, out_f: usize) !@This() {
+                const num_blocks = (in_f * out_f) / tensor.Q4Block.QK;
+                const raw_w = try alloc.alloc(f32, in_f * out_f);
+                defer alloc.free(raw_w);
+                for (raw_w, 0..) |*w, i| w.* = @sin(@as(f32, @floatFromInt(i))) * 1.5;
+
+                const blocks = try alloc.alloc(tensor.Q4Block, num_blocks);
+                errdefer alloc.free(blocks);
+                tensor.quant.quantizeSlice(blocks, raw_w);
+
+                const x = try tensor.zeros(alloc, &.{ 1, in_f });
+                errdefer x.deinit(alloc);
+                for (x.data, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i))) * 0.8;
+
+                const out = try tensor.zeros(alloc, &.{ 1, out_f });
+                errdefer out.deinit(alloc);
+
+                return .{
+                    .blocks = blocks,
+                    .x = x,
+                    .out = out,
+                    .allocator = alloc,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.allocator.free(self.blocks);
+                self.x.deinit(self.allocator);
+                self.out.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                try tensor.quant.q4MatMulInto(.serial, self.out, self.x, self.blocks, 2048, 2048);
+                std.mem.doNotOptimizeAway(self.out.data.ptr);
+            }
+        };
+
+        var ctx = try Q4GemvSerialCtx.init(allocator, 2048, 2048);
+        defer ctx.deinit();
+        const flops: f64 = 2.0 * 1.0 * 2048.0 * 2048.0;
+        const weight_bytes: u64 = ((2048 * 2048) / tensor.Q4Block.QK) * @sizeOf(tensor.Q4Block);
+        try runner.benchmark("Q4 GEMV serial [1x2048x2048]", "Q4", flops, weight_bytes, null, "", &ctx);
+    }
+
+    // 2. Q4 GEMV threaded [1x2048x2048, 4 workers]
+    {
+        const Q4GemvThreadedCtx = struct {
+            blocks: []tensor.Q4Block,
+            x: *tensor.Tensor,
+            out: *tensor.Tensor,
+            threaded: std.Io.Threaded,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator, in_f: usize, out_f: usize) !@This() {
+                const num_blocks = (in_f * out_f) / tensor.Q4Block.QK;
+                const raw_w = try alloc.alloc(f32, in_f * out_f);
+                defer alloc.free(raw_w);
+                for (raw_w, 0..) |*w, i| w.* = @sin(@as(f32, @floatFromInt(i))) * 1.5;
+
+                const blocks = try alloc.alloc(tensor.Q4Block, num_blocks);
+                errdefer alloc.free(blocks);
+                tensor.quant.quantizeSlice(blocks, raw_w);
+
+                const x = try tensor.zeros(alloc, &.{ 1, in_f });
+                errdefer x.deinit(alloc);
+                for (x.data, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i))) * 0.8;
+
+                const out = try tensor.zeros(alloc, &.{ 1, out_f });
+                errdefer out.deinit(alloc);
+
+                return .{
+                    .blocks = blocks,
+                    .x = x,
+                    .out = out,
+                    .threaded = std.Io.Threaded.init(alloc, .{}),
+                    .allocator = alloc,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.threaded.deinit();
+                self.allocator.free(self.blocks);
+                self.x.deinit(self.allocator);
+                self.out.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                const exec = backend.Executor{ .io = self.threaded.io(), .max_tasks = 4 };
+                try tensor.quant.q4MatMulInto(exec, self.out, self.x, self.blocks, 2048, 2048);
+                std.mem.doNotOptimizeAway(self.out.data.ptr);
+            }
+        };
+
+        var ctx = try Q4GemvThreadedCtx.init(allocator, 2048, 2048);
+        defer ctx.deinit();
+        const flops: f64 = 2.0 * 1.0 * 2048.0 * 2048.0;
+        const weight_bytes: u64 = ((2048 * 2048) / tensor.Q4Block.QK) * @sizeOf(tensor.Q4Block);
+        try runner.benchmark("Q4 GEMV threaded [1x2048x2048, 4 workers]", "Q4", flops, weight_bytes, null, "", &ctx);
+    }
+
+    // 3. Q4 GEMV serial [1x4096x4096]
+    {
+        const Q4GemvLargeCtx = struct {
+            blocks: []tensor.Q4Block,
+            x: *tensor.Tensor,
+            out: *tensor.Tensor,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator, in_f: usize, out_f: usize) !@This() {
+                const num_blocks = (in_f * out_f) / tensor.Q4Block.QK;
+                const raw_w = try alloc.alloc(f32, in_f * out_f);
+                defer alloc.free(raw_w);
+                for (raw_w, 0..) |*w, i| w.* = @sin(@as(f32, @floatFromInt(i))) * 1.5;
+
+                const blocks = try alloc.alloc(tensor.Q4Block, num_blocks);
+                errdefer alloc.free(blocks);
+                tensor.quant.quantizeSlice(blocks, raw_w);
+
+                const x = try tensor.zeros(alloc, &.{ 1, in_f });
+                errdefer x.deinit(alloc);
+                for (x.data, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i))) * 0.8;
+
+                const out = try tensor.zeros(alloc, &.{ 1, out_f });
+                errdefer out.deinit(alloc);
+
+                return .{
+                    .blocks = blocks,
+                    .x = x,
+                    .out = out,
+                    .allocator = alloc,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.allocator.free(self.blocks);
+                self.x.deinit(self.allocator);
+                self.out.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                try tensor.quant.q4MatMulInto(.serial, self.out, self.x, self.blocks, 4096, 4096);
+                std.mem.doNotOptimizeAway(self.out.data.ptr);
+            }
+        };
+
+        var ctx = try Q4GemvLargeCtx.init(allocator, 4096, 4096);
+        defer ctx.deinit();
+        const flops: f64 = 2.0 * 1.0 * 4096.0 * 4096.0;
+        const weight_bytes: u64 = ((4096 * 4096) / tensor.Q4Block.QK) * @sizeOf(tensor.Q4Block);
+        try runner.benchmark("Q4 GEMV serial [1x4096x4096]", "Q4", flops, weight_bytes, null, "", &ctx);
+    }
+
+    // 4. Q4 GEMM batched [16x2048x2048, 4 workers]
+    {
+        const Q4GemmBatchCtx = struct {
+            blocks: []tensor.Q4Block,
+            x: *tensor.Tensor,
+            out: *tensor.Tensor,
+            threaded: std.Io.Threaded,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator, m: usize, in_f: usize, out_f: usize) !@This() {
+                const num_blocks = (in_f * out_f) / tensor.Q4Block.QK;
+                const raw_w = try alloc.alloc(f32, in_f * out_f);
+                defer alloc.free(raw_w);
+                for (raw_w, 0..) |*w, i| w.* = @sin(@as(f32, @floatFromInt(i))) * 1.5;
+
+                const blocks = try alloc.alloc(tensor.Q4Block, num_blocks);
+                errdefer alloc.free(blocks);
+                tensor.quant.quantizeSlice(blocks, raw_w);
+
+                const x = try tensor.zeros(alloc, &.{ m, in_f });
+                errdefer x.deinit(alloc);
+                for (x.data, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i))) * 0.8;
+
+                const out = try tensor.zeros(alloc, &.{ m, out_f });
+                errdefer out.deinit(alloc);
+
+                return .{
+                    .blocks = blocks,
+                    .x = x,
+                    .out = out,
+                    .threaded = std.Io.Threaded.init(alloc, .{}),
+                    .allocator = alloc,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.threaded.deinit();
+                self.allocator.free(self.blocks);
+                self.x.deinit(self.allocator);
+                self.out.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                const exec = backend.Executor{ .io = self.threaded.io(), .max_tasks = 4 };
+                try tensor.quant.q4MatMulInto(exec, self.out, self.x, self.blocks, 2048, 2048);
+                std.mem.doNotOptimizeAway(self.out.data.ptr);
+            }
+        };
+
+        var ctx = try Q4GemmBatchCtx.init(allocator, 16, 2048, 2048);
+        defer ctx.deinit();
+        const flops: f64 = 2.0 * 16.0 * 2048.0 * 2048.0;
+        const weight_bytes: u64 = ((2048 * 2048) / tensor.Q4Block.QK) * @sizeOf(tensor.Q4Block);
+        try runner.benchmark("Q4 GEMM batched [16x2048x2048, 4 workers]", "Q4", flops, weight_bytes, null, "", &ctx);
+    }
+}
+
+/// Suite 10: Decode (Autoregressive Single-Step Generation Latency & Throughput)
+pub fn runDecodeBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) !void {
+    // 1. TinyGemma4 Decode Step [B=1, T=1]
+    {
+        const TinyGemmaDecodeCtx = struct {
+            model: models.gemma4.TinyGemma4,
+            token_ids: *tensor.Tensor,
+            arena: std.heap.ArenaAllocator,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator) !@This() {
+                const model = try models.gemma4.TinyGemma4.init(alloc);
+                const token_ids = try tensor.zeros(alloc, &.{ 1, 1 });
+                token_ids.data[0] = 42.0;
+                return .{
+                    .model = model,
+                    .token_ids = token_ids,
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .allocator = alloc,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                nn.deinitModel(&self.model, self.allocator);
+                self.token_ids.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                _ = self.arena.reset(.retain_capacity);
+                var g = autodiff.Graph.init(self.arena.allocator(), .{ .enable_grad = false });
+                defer g.deinit();
+                const logits = try self.model.forward(&g, self.token_ids);
+                std.mem.doNotOptimizeAway(logits.data.ptr);
+            }
+        };
+
+        var ctx = try TinyGemmaDecodeCtx.init(allocator);
+        defer ctx.deinit();
+        try runner.benchmark("TinyGemma4 Decode Step [B=1, T=1]", "Decode", null, null, 1, "tokens/s", &ctx);
+    }
+
+    // 2. TinyQ4Gemma4 Decode Step [B=1, T=1]
+    {
+        const TinyQ4DecodeCtx = struct {
+            model: models.gemma4_q4.TinyQ4Gemma4,
+            token_ids: *tensor.Tensor,
+            arena: std.heap.ArenaAllocator,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator) !@This() {
+                const model = try models.gemma4_q4.TinyQ4Gemma4.init(alloc);
+                const token_ids = try tensor.zeros(alloc, &.{ 1, 1 });
+                token_ids.data[0] = 42.0;
+                return .{
+                    .model = model,
+                    .token_ids = token_ids,
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .allocator = alloc,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                self.model.deinit(self.allocator);
+                self.token_ids.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                _ = self.arena.reset(.retain_capacity);
+                var g = autodiff.Graph.init(self.arena.allocator(), .{ .enable_grad = false });
+                defer g.deinit();
+                const logits = try self.model.forward(&g, self.token_ids);
+                std.mem.doNotOptimizeAway(logits.data.ptr);
+            }
+        };
+
+        var ctx = try TinyQ4DecodeCtx.init(allocator);
+        defer ctx.deinit();
+        try runner.benchmark("TinyQ4Gemma4 Decode Step [B=1, T=1]", "Decode", null, null, 1, "tokens/s", &ctx);
+    }
+
+    // 3. TinyQ4Gemma4 Prefill Step [B=1, T=16]
+    {
+        const TinyQ4PrefillCtx = struct {
+            model: models.gemma4_q4.TinyQ4Gemma4,
+            token_ids: *tensor.Tensor,
+            arena: std.heap.ArenaAllocator,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator) !@This() {
+                const model = try models.gemma4_q4.TinyQ4Gemma4.init(alloc);
+                const token_ids = try tensor.zeros(alloc, &.{ 1, 16 });
+                for (token_ids.data, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 128));
+                return .{
+                    .model = model,
+                    .token_ids = token_ids,
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .allocator = alloc,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                self.model.deinit(self.allocator);
+                self.token_ids.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                _ = self.arena.reset(.retain_capacity);
+                var g = autodiff.Graph.init(self.arena.allocator(), .{ .enable_grad = false });
+                defer g.deinit();
+                const logits = try self.model.forward(&g, self.token_ids);
+                std.mem.doNotOptimizeAway(logits.data.ptr);
+            }
+        };
+
+        var ctx = try TinyQ4PrefillCtx.init(allocator);
+        defer ctx.deinit();
+        try runner.benchmark("TinyQ4Gemma4 Prefill Step [B=1, T=16]", "Decode", null, null, 16, "tokens/s", &ctx);
     }
 }

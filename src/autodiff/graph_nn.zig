@@ -717,3 +717,29 @@ pub fn embedding(self: *Graph, W: *Tensor, X: anytype) !*Tensor {
         self.enable_grad and W.requires_grad,
     );
 }
+
+pub fn q4MatMul(
+    self: *Graph,
+    x: *Tensor,
+    blocks: []const tensor_mod.quant.Q4Block,
+    in_features: usize,
+    out_features: usize,
+) !*Tensor {
+    const allocator = self.arena.allocator();
+    const Y = try tensor_mod.quant.q4MatMul(x, blocks, in_features, out_features, allocator);
+    const ctx: OpContext = .{
+        .Q4MatMul = .{
+            .blocks = blocks,
+            .in_features = in_features,
+            .out_features = out_features,
+        },
+    };
+    return self.registerSingleOutputOp(
+        Y,
+        &.{x},
+        .Q4MatMul,
+        ctx,
+        false,
+    );
+}
+

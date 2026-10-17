@@ -22,7 +22,7 @@ const where = tensor.where;
 test "autodiff Graph enable_grad and setGradEnabled" {
     const allocator = std.testing.allocator;
 
-    var graph = Graph.init(allocator);
+    var graph = Graph.initDefault(allocator);
     defer graph.deinit();
 
     // 默认 enable_grad = true
@@ -38,7 +38,7 @@ test "autodiff Graph enable_grad and setGradEnabled" {
     try std.testing.expectEqual(@as(usize, 1), graph.ops.items.len);
 
     // 关闭梯度：setGradEnabled(false)
-    var graph_nograd = Graph.init(allocator);
+    var graph_nograd = Graph.initDefault(allocator);
     defer graph_nograd.deinit();
     graph_nograd.setGradEnabled(false);
     try std.testing.expect(!graph_nograd.enable_grad);
@@ -66,7 +66,7 @@ test "autodiff Graph enable_grad and setGradEnabled" {
 test "autodiff broadcasting add, sub, mul, div backward reduction" {
     const allocator = std.testing.allocator;
 
-    var graph = Graph.init(allocator);
+    var graph = Graph.initDefault(allocator);
     defer graph.deinit();
 
     // 1. Add broadcasting: A [2, 3] + B [1, 3] -> C [2, 3]
@@ -88,7 +88,7 @@ test "autodiff broadcasting add, sub, mul, div backward reduction" {
     }
 
     // 2. Mul broadcasting: A2 [2, 2] * B2 [1, 2] -> C2 [2, 2]
-    var graph2 = Graph.init(allocator);
+    var graph2 = Graph.initDefault(allocator);
     defer graph2.deinit();
 
     const a2 = try graph2.tensorWithData(2, 2, &.{ 1.0, 2.0, 3.0, 4.0 }, true);
@@ -109,7 +109,7 @@ test "autodiff broadcasting add, sub, mul, div backward reduction" {
     try std.testing.expectApproxEqAbs(@as(f32, 6.0), b2.grad[1], 1e-5);
 
     // 3. Sub broadcasting: A3 [2, 2] - B3 [1, 2] -> C3 [2, 2]
-    var graph3 = Graph.init(allocator);
+    var graph3 = Graph.initDefault(allocator);
     defer graph3.deinit();
 
     const a3 = try graph3.tensorWithData(2, 2, &.{ 10.0, 20.0, 30.0, 40.0 }, true);
@@ -129,7 +129,7 @@ test "autodiff broadcasting add, sub, mul, div backward reduction" {
     }
 
     // 4. Div broadcasting: A4 [2, 2] / B4 [1, 2] -> C4 [2, 2]
-    var graph4 = Graph.init(allocator);
+    var graph4 = Graph.initDefault(allocator);
     defer graph4.deinit();
 
     const a4 = try graph4.tensorWithData(2, 2, &.{ 10.0, 20.0, 30.0, 40.0 }, true);
@@ -155,7 +155,7 @@ test "autodiff broadcasting add, sub, mul, div backward reduction" {
 test "autodiff Graph.forward re-evaluates recorded ops consistently with initial forward" {
     const allocator = std.testing.allocator;
 
-    var graph = Graph.init(allocator);
+    var graph = Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x = try graph.tensorWithData(2, 2, &.{ 1.0, -1.0, 2.0, 0.5 }, true);
@@ -182,7 +182,7 @@ test "autodiff Graph.forward re-evaluates recorded ops consistently with initial
     const reevaluated_total = total.data[0];
     try std.testing.expect(@abs(reevaluated_total - initial_total) > 1e-4);
 
-    var fresh_graph = Graph.init(allocator);
+    var fresh_graph = Graph.initDefault(allocator);
     defer fresh_graph.deinit();
     const x2 = try fresh_graph.tensorWithData(2, 2, &.{ 3.0, -1.0, 2.0, -2.0 }, true);
     const w2 = try fresh_graph.tensorWithData(2, 2, &.{ 0.5, 1.5, -1.0, 2.0 }, true);
@@ -206,7 +206,7 @@ test "Autograd reductions, elementary math, where/maskedFill, and squeeze/unsque
 
     // 1. Elementary math (sqrt, exp, log, abs) + sum/mean backward
     {
-        var graph = Graph.init(allocator);
+        var graph = Graph.initDefault(allocator);
         defer graph.deinit();
 
         const x = try graph.array(&.{2}, &.{ 4.0, -9.0 }, true);
@@ -230,7 +230,7 @@ test "Autograd reductions, elementary math, where/maskedFill, and squeeze/unsque
 
     // 2. Axis sum, variance, squeeze, unsqueeze, slice, where, and maskedFill backward
     {
-        var graph = Graph.init(allocator);
+        var graph = Graph.initDefault(allocator);
         defer graph.deinit();
 
         // A: [2, 3] = [[1, 2, 3], [4, 5, 6]]
@@ -413,7 +413,7 @@ test "Direct tensor operations (eager and graph)" {
 
     // Graph Mode Test
     {
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
 
         const A = try graph.array(&.{2, 3}, &[_]f32{ 1, 2, 3, 4, 5, 6 }, true);
@@ -484,7 +484,7 @@ test "Tensor MSE loss forward and backward" {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var graph = autodiff.Graph.init(arena_allocator);
+    var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
     const y_pred = try graph.array(&.{2, 1}, &[_]f32{ 1.5, 2.5 }, true);
@@ -510,7 +510,7 @@ test "Tensor mulScalar and add autograd" {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var graph = autodiff.Graph.init(arena_allocator);
+    var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
     const A = try graph.array(&.{2, 2}, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, true);
@@ -558,7 +558,7 @@ test "Tensor static graph forward and backward" {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var graph = autodiff.Graph.init(arena_allocator);
+    var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
     // 1. Build the static graph template once
@@ -606,7 +606,7 @@ test "Softmax forward and backward" {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var graph = autodiff.Graph.init(arena_allocator);
+    var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
     // Input shape [2, 3]
@@ -660,7 +660,7 @@ test "RMSNorm forward and backward" {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var graph = autodiff.Graph.init(arena_allocator);
+    var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
     const X = try graph.array(&.{2, 3}, &[_]f32{
@@ -702,7 +702,7 @@ test "Embedding forward and backward" {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var graph = autodiff.Graph.init(arena_allocator);
+    var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
     const W = try graph.array(&.{3, 4}, &[_]f32{
@@ -749,7 +749,7 @@ test "BatchMatMul forward and backward" {
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var graph = autodiff.Graph.init(arena_allocator);
+    var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
     // Shape [2, 2, 2, 3]
@@ -822,7 +822,7 @@ test "BatchMatMul forward and backward" {
 
 test "GELU forward and backward" {
     const arena_allocator = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena_allocator);
+    var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
     const A = try graph.tensorNDWithData(&.{2, 2}, &.{ -1.0, 0.0, 1.0, 2.0 }, true);
@@ -850,7 +850,7 @@ test "GELU forward and backward" {
 
 test "Sigmoid forward and backward" {
     const arena_allocator = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena_allocator);
+    var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
     const A = try graph.tensorNDWithData(&.{2, 2}, &.{ -1.0, 0.0, 1.0, 2.0 }, true);
@@ -877,7 +877,7 @@ test "Sigmoid forward and backward" {
 
 test "SigmoidCrossEntropy forward and backward" {
     const arena_allocator = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena_allocator);
+    var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
     const logits = try graph.tensorNDWithData(&.{3}, &.{ -1.0, 0.0, 2.0 }, true);
@@ -915,7 +915,7 @@ test "RoPE forward, graph replay, and autograd backward for interleaved and spli
     for (modes) |mode| {
         // 1. 验证 requires_grad 继承与梯度流传递
         {
-            var graph = Graph.init(allocator);
+            var graph = Graph.initDefault(allocator);
             defer graph.deinit();
 
             const x = try graph.tensorNDWithData(&.{ 1, 2, 4 }, &.{
@@ -965,7 +965,7 @@ test "RoPE forward, graph replay, and autograd backward for interleaved and spli
 
         // 2. 验证静态图重演 (Graph Replay: graph.forward()) 精度与数值一致性
         {
-            var graph = Graph.init(allocator);
+            var graph = Graph.initDefault(allocator);
             defer graph.deinit();
 
             const x = try graph.tensorNDWithData(&.{ 1, 2, 4 }, &.{
@@ -1009,7 +1009,7 @@ test "RoPE forward, graph replay, and autograd backward for interleaved and spli
 
     // 3. 验证带 partial_rotary_factor (Proportional RoPE) 的反向传播与图重演
     {
-        var graph = Graph.init(allocator);
+        var graph = Graph.initDefault(allocator);
         defer graph.deinit();
 
         // 8 维输入，half = 4，factor = 0.5 -> 仅前 2 个角度 (4 维) 旋转，后 4 维直通
@@ -1057,7 +1057,7 @@ test "RoPE forward, graph replay, and autograd backward for interleaved and spli
 
 test "Graph.getModuleFormula / setModuleFormula" {
     const allocator = std.testing.allocator;
-    var graph = Graph.init(allocator);
+    var graph = Graph.initDefault(allocator);
     defer graph.deinit();
 
     // Verify null is returned for non-existent formula
@@ -1080,7 +1080,7 @@ test "Graph.getModuleFormula / setModuleFormula" {
 
 test "Graph.split autograd backward executes once without gradient multiplication" {
     const allocator = std.testing.allocator;
-    var graph = Graph.init(allocator);
+    var graph = Graph.initDefault(allocator);
     defer graph.deinit();
 
     // Input X of shape [2, 4] with requires_grad = true
@@ -1148,7 +1148,7 @@ test "Strided non-contiguous views in binary ops, reshape, and autograd backward
 
     // 2. Graph reshape and binary ops backward on non-contiguous views
     {
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
 
         const A = try graph.array(&.{ 2, 2 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, true);
@@ -1234,7 +1234,7 @@ test "GenericTensor core ops, BoolTensor where/maskedFill, and integer Embedding
     try std.testing.expectEqualSlices(f32, &[_]f32{ -99.0, 3.0, -99.0, 5.0 }, mf_out.data);
 
     // 3. Embedding with IntTensor and integer slice in both eager and autograd modes
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const w_emb = try graph.array(&.{ 4, 2 }, &[_]f32{

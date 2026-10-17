@@ -13,6 +13,8 @@ pub const OpType = types.OpType;
 pub const OpContext = types.OpContext;
 pub const Op = types.Op;
 pub const Graph = graph.Graph;
+pub const ExecutionMode = graph.ExecutionMode;
+pub const GraphOptions = graph.GraphOptions;
 
 test {
     std.testing.refAllDecls(@This());

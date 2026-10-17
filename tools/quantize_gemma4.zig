@@ -1,10 +1,10 @@
 const std = @import("std");
 const znn = @import("zig_ml");
 
-const Q4Block = znn.models.gemma4.Q4Block;
+const Q4Block = znn.tensor.quant.Q4Block;
 const bf16 = znn.tensor.bf16;
 
-const MAGIC = "ZNNQ4G01"; // 8 bytes magic header
+const MAGIC = "ZNNQ4G02"; // 8 bytes magic header
 
 fn getTensorRange(meta_obj: std.json.ObjectMap, name: []const u8) !struct { start: usize, end: usize, shape: []const usize } {
     const v = meta_obj.get(name) orelse return error.TensorNotFound;

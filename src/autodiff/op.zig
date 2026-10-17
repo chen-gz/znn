@@ -23,6 +23,10 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         .MatMul => {
             copyFromEager(self.outputs[0], try self.inputs[0].matmul(self.inputs[1], allocator), allocator);
         },
+        .Q4MatMul => {
+            const ctx = self.context.Q4MatMul;
+            try tensor_mod.quant.q4MatMulInto(.serial, self.outputs[0], self.inputs[0], ctx.blocks, ctx.in_features, ctx.out_features);
+        },
         .Relu => {
             copyFromEager(self.outputs[0], try self.inputs[0].relu(allocator), allocator);
         },
@@ -471,5 +475,7 @@ pub fn backward(self: *Op) !void {
         .MaskedFill,
         .Slice,
         => try backward_math.backwardMath(self),
+
+        .Q4MatMul => return error.UnsupportedBackward,
     }
 }

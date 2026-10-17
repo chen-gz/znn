@@ -119,7 +119,7 @@ test "Embedding Module" {
     x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
     x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
 
-    var y_eager_graph = autodiff.Graph.initNoGrad(arena);
+    var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try emb.forward(&y_eager_graph, x);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
@@ -134,7 +134,7 @@ test "Embedding Module Graph Mode" {
     emb.resetParameters(random, .{});
     defer nn.deinitModel(&emb, arena);
 
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const x = try graph.tensorND(&.{2, 3}, false);
@@ -169,12 +169,12 @@ test "RMSNorm Module" {
     x.data[0] = 1.0; x.data[1] = 2.0; x.data[2] = 3.0; x.data[3] = 4.0;
     x.data[4] = 5.0; x.data[5] = 6.0; x.data[6] = 7.0; x.data[7] = 8.0;
 
-    var y_eager_graph = autodiff.Graph.initNoGrad(arena);
+    var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try norm.forward(&y_eager_graph, x);
     try std.testing.expectEqualSlices(usize, &.{2, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
 
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const x_node = try graph.tensorND(&.{2, 4}, true);
@@ -222,12 +222,12 @@ test "MLP Module" {
         val.* = @as(f32, @floatFromInt(i)) * 0.1;
     }
 
-    var y_eager_graph = autodiff.Graph.initNoGrad(arena);
+    var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try mlp.forward(&y_eager_graph, x_3d);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
 
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const x_node = try graph.tensorND(&.{2, 3, 4}, true);
@@ -271,12 +271,12 @@ test "CausalSelfAttention Module" {
         val.* = @as(f32, @floatFromInt(i)) * 0.1;
     }
 
-    var y_eager_graph = autodiff.Graph.initNoGrad(arena);
+    var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try attn.forward(&y_eager_graph, x_3d);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 8}, y_eager.shape.dims[0..y_eager.shape.len]);
 
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const x_node = try graph.tensorND(&.{2, 3, 8}, true);
@@ -327,12 +327,12 @@ test "GPT Module" {
     x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
     x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
 
-    var y_eager_graph = autodiff.Graph.initNoGrad(arena);
+    var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try gpt.forward(&y_eager_graph, x);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 10}, y_eager.shape.dims[0..y_eager.shape.len]);
 
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const x_node = try graph.tensorND(&.{2, 3}, false);
@@ -395,7 +395,7 @@ test "Sequential container chaining" {
     defer nn.deinitModel(&seq, allocator);
     try testing_init.initFromOnes(&seq, allocator, random, &.{ 2, 10 });
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x = try graph.tensor(2, 10, false);
@@ -422,7 +422,7 @@ test "Sequential container chaining" {
     defer freePersistentTensor(allocator, eager_in);
     @memset(eager_in.data, 0.5);
 
-    var eager_out_graph = autodiff.Graph.initNoGrad(allocator);
+    var eager_out_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer eager_out_graph.deinit();
     const eager_out = try seq.forward(&eager_out_graph, eager_in);
     try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, eager_out.shape.dims[0..eager_out.shape.len]);
@@ -437,7 +437,7 @@ test "SwiGLU forward and backward autograd" {
     try testing_init.initFromOnes(&swiglu, allocator, random, &.{ 2, 4 });
     defer nn.deinitModel(&swiglu, allocator);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x = try graph.tensor(2, 4, true);
@@ -471,7 +471,7 @@ test "LoRALinear forward and fuse" {
     lora.resetParameters(random, .{});
     defer nn.deinitModel(&lora, allocator);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x = try graph.tensor(2, 4, false);
@@ -521,7 +521,7 @@ test "maskedCrossEntropyLoss and dpoLoss" {
     try std.testing.expect(loss > 0.0 and loss < 1.0);
 
     // Graph-integrated maskedCrossEntropyLoss
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const g_logits = try graph.tensorNDWithData(&.{ 3, 4 }, logits.data, true);
@@ -575,7 +575,7 @@ test "LayerNorm forward and backward autograd" {
     defer tensor.free(allocator, x);
     @memcpy(x.data, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0 });
 
-    var y_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_graph.deinit();
     const y = try ln.forward(&y_graph, x);
 
@@ -585,7 +585,7 @@ test "LayerNorm forward and backward autograd" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), sum / 4.0, 1e-4);
 
     // Graph mode forward + backward
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const gx = try graph.tensorNDWithData(&.{ 2, 4 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 1.0, 3.0 }, true);
@@ -619,14 +619,14 @@ test "BatchNorm2d forward and backward autograd" {
     defer tensor.free(allocator, x);
     for (x.data, 0..) |*p, i| p.* = @as(f32, @floatFromInt(i));
 
-    var y_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_graph.deinit();
     const y = try bn.forward(&y_graph, x);
 
     try std.testing.expectEqualSlices(usize, &.{ 2, 2, 2, 2 }, y.shape.dims[0..4]);
 
     // Graph mode forward + backward
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const gx = try graph.tensorND(&.{ 2, 2, 2, 2 }, true);
@@ -665,7 +665,7 @@ test "BatchNorm1d and GroupNorm forward and backward autograd" {
     var gn = try nn.GroupNorm.init(allocator, 2, 4, .{});
     defer nn.deinitModel(&gn, allocator);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const gx1 = try graph.tensorND(&.{ 2, 2, 3 }, true);
@@ -707,7 +707,7 @@ test "Dropout and AvgPool2D forward and backward passes" {
     defer tensor.free(allocator, x);
     @memset(x.data, 1.0);
 
-    var y_drop_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_drop_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_drop_graph.deinit();
     const y_drop = try drop.forward(&y_drop_graph, x, rand);
     try std.testing.expectEqual(10, y_drop.data.len);
@@ -717,14 +717,14 @@ test "Dropout and AvgPool2D forward and backward passes" {
     defer tensor.free(allocator, img);
     @memset(img.data, 4.0);
 
-    var pooled_graph = autodiff.Graph.initNoGrad(allocator);
+    var pooled_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer pooled_graph.deinit();
     const pooled = try pool.forward(&pooled_graph, img);
     try std.testing.expectEqualSlices(usize, &.{ 1, 1, 2, 2 }, pooled.shape.dims[0..4]);
     try std.testing.expectApproxEqAbs(@as(f32, 4.0), pooled.data[0], 1e-5);
 
     // Graph mode Dropout + AvgPool2D backward
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const g_img = try graph.tensorND(&.{ 1, 1, 4, 4 }, true);
@@ -786,7 +786,7 @@ test "RNNCell and RNN forward and backward autograd" {
     try testing_init.initRecurrent(&cell, allocator, random);
     defer nn.deinitModel(&cell, allocator);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x0 = try graph.tensorND(&.{ 2, 4 }, true);
@@ -808,7 +808,7 @@ test "RNNCell and RNN forward and backward autograd" {
     try testing_init.initRecurrent(&rnn, allocator, random);
     defer nn.deinitModel(&rnn, allocator);
 
-    var graph_seq = autodiff.Graph.init(allocator);
+    var graph_seq = autodiff.Graph.initDefault(allocator);
     defer graph_seq.deinit();
 
     const x_seq_0 = try graph_seq.tensorND(&.{ 2, 4 }, true);
@@ -846,7 +846,7 @@ test "LSTMCell and LSTM forward and backward autograd" {
         try std.testing.expectApproxEqAbs(@as(f32, 1.0), b, 1e-6);
     }
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x0 = try graph.tensorND(&.{ 2, 4 }, true);
@@ -870,7 +870,7 @@ test "LSTMCell and LSTM forward and backward autograd" {
     try testing_init.initRecurrent(&lstm, allocator, random);
     defer nn.deinitModel(&lstm, allocator);
 
-    var graph_seq = autodiff.Graph.init(allocator);
+    var graph_seq = autodiff.Graph.initDefault(allocator);
     defer graph_seq.deinit();
 
     const x_seq_0 = try graph_seq.tensorND(&.{ 2, 4 }, true);
@@ -905,7 +905,7 @@ test "StackedLSTM forward and backward autograd" {
 
     try std.testing.expectEqual(2, stacked.num_layers);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x0 = try graph.tensorND(&.{ 2, 4 }, true);
@@ -939,7 +939,7 @@ test "GRUCell and GRU forward and backward autograd" {
     try testing_init.initRecurrent(&cell, allocator, random);
     defer nn.deinitModel(&cell, allocator);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x0 = try graph.tensorND(&.{ 2, 4 }, true);
@@ -961,7 +961,7 @@ test "GRUCell and GRU forward and backward autograd" {
     try testing_init.initRecurrent(&gru, allocator, random);
     defer nn.deinitModel(&gru, allocator);
 
-    var graph_seq = autodiff.Graph.init(allocator);
+    var graph_seq = autodiff.Graph.initDefault(allocator);
     defer graph_seq.deinit();
 
     const x_seq_0 = try graph_seq.tensorND(&.{ 2, 4 }, true);
@@ -1046,7 +1046,7 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
     const x_zeros = try tensor.zeros(allocator, &.{ 1, 4 });
     defer tensor.free(allocator, x_zeros);
 
-    var rms_out_graph = autodiff.Graph.initNoGrad(allocator);
+    var rms_out_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer rms_out_graph.deinit();
     const rms_out = try rms.forward(&rms_out_graph, x_zeros);
 
@@ -1062,7 +1062,7 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
     defer tensor.free(allocator, x_uniform);
     @memset(x_uniform.data, 3.0);
 
-    var ln_out_graph = autodiff.Graph.initNoGrad(allocator);
+    var ln_out_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer ln_out_graph.deinit();
     const ln_out = try ln.forward(&ln_out_graph, x_uniform);
 
@@ -1079,7 +1079,7 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
     defer tensor.free(allocator, x_test);
     @memset(x_test.data, 2.5);
 
-    var y_drop0_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_drop0_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_drop0_graph.deinit();
     const y_drop0 = try drop0.forward(&y_drop0_graph, x_test, prng.random());
     try std.testing.expectEqual(x_test, y_drop0);
@@ -1087,7 +1087,7 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
         try std.testing.expectApproxEqAbs(@as(f32, 2.5), v, 1e-5);
     }
 
-    var y_heavy_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_heavy_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_heavy_graph.deinit();
     const y_heavy = try drop_heavy.forward(&y_heavy_graph, x_test, prng.random());
     for (y_heavy.data) |v| {
@@ -1219,7 +1219,7 @@ test "Recurrent and Transformer modules naming and Graph scope registration" {
     var prng = std.Random.DefaultPrng.init(1234);
     const random = prng.random();
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     var rnn = try RNN.init(allocator, 4, 4);
@@ -1288,7 +1288,7 @@ test "Conv2D with stride and padding forward and backward (im2col + sgemm)" {
     conv.bias.data[0] = 0.5;
     conv.bias.data[1] = -0.5;
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     // Input [1, 1, 4, 4] with kernel=3, stride=2, padding=1 -> Output [1, 2, 2, 2]
@@ -1332,7 +1332,7 @@ test "Conv1D with stride and padding forward and backward (im2col + sgemm)" {
     conv.bias.data[0] = 0.5;
     conv.bias.data[1] = -0.5;
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     // Input [1, 1, 4] = {1, 2, 3, 4} with kernel=3, stride=2, padding=1 -> Output [1, 2, 2]
@@ -1373,7 +1373,7 @@ test "ConvTranspose1D with stride and padding forward and backward" {
     deconv.bias.?.data[0] = 0.5;
     deconv.bias.?.data[1] = -0.5;
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     // Input [1, 1, 2] = {1, 2}, stride=2, padding=1, K=3 -> L_out = (2-1)*2 + 3 - 2 = 3
@@ -1419,7 +1419,7 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
     moe.gate.bias.data[1] = -10.0;
     moe.gate.bias.data[2] = -10.0;
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x = try graph.tensor(2, 4, true);
@@ -1443,7 +1443,7 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
     }
 
     // Eager mode forward should match Graph mode output
-    var out_e_graph = autodiff.Graph.initNoGrad(allocator);
+    var out_e_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer out_e_graph.deinit();
     const out_e = try moe.forward(&out_e_graph, x);
     for (out_g.data, out_e.data) |vg, ve| {
@@ -1477,7 +1477,7 @@ test "Recurrent zero initial states are named module buffers" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "lstm");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         var inps = [_]*Tensor{ try g.ones(&.{ 2, 4 }, false), try g.ones(&.{ 2, 4 }, false) };
         _ = try m.forward(&g, &inps, null, null);
@@ -1492,7 +1492,7 @@ test "Recurrent zero initial states are named module buffers" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "stacked_lstm");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         var inps = [_]*Tensor{ try g.ones(&.{ 2, 4 }, false), try g.ones(&.{ 2, 4 }, false) };
         _ = try m.forwardSequence(&g, &inps, null, null);
@@ -1504,7 +1504,7 @@ test "Recurrent zero initial states are named module buffers" {
 
 test "ScaledDotProductAttention standalone causal and non-causal forward and backward" {
     const allocator = std.testing.allocator;
-    var g = autodiff.Graph.init(allocator);
+    var g = autodiff.Graph.initDefault(allocator);
     defer g.deinit();
 
     const q = try g.tensorNDWithData(&.{ 1, 1, 2, 2 }, &.{ 1.0, 0.0, 0.0, 1.0 }, true);
@@ -1592,7 +1592,7 @@ test "Linear forward supports 3D and 1D inputs with autograd" {
     });
     @memcpy(linear.bias.data, &[_]f32{ 0.1, 0.2 });
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     // 1. 3D input: [B=2, T=2, C=3]
@@ -1613,7 +1613,7 @@ test "Linear forward supports 3D and 1D inputs with autograd" {
     try std.testing.expect(x_3d.grad.len == 12);
 
     // 2. 1D input: [C=3]
-    var g1 = autodiff.Graph.init(allocator);
+    var g1 = autodiff.Graph.initDefault(allocator);
     defer g1.deinit();
     const x_1d = try g1.tensorND(&.{3}, false);
     @memcpy(x_1d.data, &[_]f32{ 1.0, 1.0, 1.0 });

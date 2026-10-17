@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("../cblas.zig");
+const c = @import("../backend/cblas.zig");
 const core = @import("core.zig");
 const types = @import("types.zig");
 const conv_pool = @import("conv_pool.zig");

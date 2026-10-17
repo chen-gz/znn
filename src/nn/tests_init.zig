@@ -103,7 +103,7 @@ test "initModel infers per-layer initialization from the forward graph" {
     });
     defer nn.deinitModel(&model, allocator);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
     _ = try model.forward(&graph, try graph.ones(&.{ 2, 100 }, false));
     try nn.initModel(&model, &graph, random);
@@ -150,7 +150,7 @@ test "Graph.computeParamFans derives fan_in and fan_out from the consuming op" {
     var deconv = try nn.ConvTranspose2D.init(allocator, 6, 2, 3, .{});
     defer nn.deinitModel(&deconv, allocator);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     // MatMul 右操作数 y = x W，W: [in=5, out=7]
@@ -194,7 +194,7 @@ test "initModel uses the transposed-convolution kernel layout for ConvTranspose2
     var deconv = try nn.ConvTranspose2D.init(allocator, 32, 4, 3, .{});
     defer nn.deinitModel(&deconv, allocator);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
     _ = try deconv.forward(&graph, try graph.ones(&.{ 1, 32, 4, 4 }, false));
     try nn.initModel(&deconv, &graph, random);
@@ -216,7 +216,7 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     var prng = std.Random.DefaultPrng.init(999);
     const random = prng.random();
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     // 1. 各层通过 init 创建（只分配内存，参数保持全零）并设置人类可读名字
@@ -481,7 +481,7 @@ test "initModel runs external customInit first and initializes the rest from the
     defer nn.deinitModel(&custom.fc, allocator);
     defer nn.deinitModel(&custom.norm, allocator);
     {
-        var empty_graph = autodiff.Graph.init(allocator);
+        var empty_graph = autodiff.Graph.initDefault(allocator);
         defer empty_graph.deinit();
         try nn.initModel(&custom, &empty_graph, random);
     }
@@ -503,7 +503,7 @@ test "initModel runs external customInit first and initializes the rest from the
     defer nn.deinitModel(&plain.fc, allocator);
     defer nn.deinitModel(&plain.cell, allocator);
     {
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
         const x = try graph.ones(&.{ 1, 4 }, false);
         const h0 = try graph.zeros(&.{ 1, 4 }, false);
@@ -571,7 +571,7 @@ test "initModel runs external customInit first and initializes the rest from the
     defer nn.deinitModel(&outer.backbone, allocator);
     defer nn.deinitModel(&outer.head.fc, allocator);
     {
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
         const x = try graph.ones(&.{ 1, 4 }, false);
         _ = try outer.head.fc.forward(&graph, try graph.relu(try outer.backbone.forward(&graph, x)));
@@ -583,7 +583,7 @@ test "initModel runs external customInit first and initializes the rest from the
 
     // 5. 未开启梯度记录的计算图不记录算子，无法据此推导初始化
     {
-        var no_grad = autodiff.Graph.initNoGrad(allocator);
+        var no_grad = autodiff.Graph.init(allocator, .{ .enable_grad = false });
         defer no_grad.deinit();
         try std.testing.expectError(error.GraphNotRecordingOps, nn.initModel(&outer, &no_grad, random));
     }

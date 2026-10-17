@@ -10,12 +10,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **执行器与多核并行 (`src/backend/executor.zig`, `src/backend.zig`)**:
+  - 新增 `backend` 包（分层层级 0）及 `Executor` 执行器：支持串行执行器 `Executor.serial` 与基于 Zig 0.16 `std.Io` 的线程化执行器 `Executor{ .io = threaded.io(), .max_tasks = 4 }`。
+  - 提供分块数据并行 `parallelFor` 与按 chunk 索引写入、串行确定性规约的 `parallelReduce`，保证不同线程数下 100% 逐位确定性（Bitwise Determinism）。
+- **Q4 split-half 块格式与张量算子 (`src/tensor/quant.zig`, `src/tensor.zig`, `src/autodiff/types.zig`, `src/autodiff/op.zig`, `src/autodiff/graph_nn.zig`)**:
+  - 新增 split-half 排布的 `Q4Block`（低 4 位存储前 16 个权重，高 4 位存储后 16 个权重，对齐 ggml Q4_0 规范），大幅提升 SIMD 与向量连续访存效率；单线程 Q4 GEMV 吞吐从 1.7 GB/s 提升至 5.46 GB/s（提升 3.2 倍），多核并行达 18.7 GB/s（65.4 GFLOPS）。
+  - 新增 `Q4MatMul` 算子并挂载至 `Graph.q4MatMul`，前向分发至 `q4MatMulInto`，反向显式抛出 `error.UnsupportedBackward`。
+- **Gemma 4 Q4 模块化拆分 (`src/models/gemma4_q4.zig`, `src/models/gemma4.zig`, `src/models.zig`)**:
+  - 将超出 60 KB 限制的 `src/models/gemma4.zig` 拆分为 `src/models/gemma4.zig`（~25 KB）与 `src/models/gemma4_q4.zig`（~34 KB），严格保持所有非测试源码文件 `< 60 KB`。
+  - 导出 `Q4Linear`、`Gemma4Q4MLP`、`Gemma4Q4Attention`、`Gemma4Q4DecoderLayer`、`Gemma4Q4ForCausalLM`、`TinyQ4Gemma4` 与 `DefaultGemma4Q4`。
+- **计算图选项与执行模式配置 (`src/autodiff/graph.zig`, `src/autodiff.zig`)**:
+  - 新增 `GraphOptions`（包含 `enable_grad: bool = true`、`mode: ExecutionMode = .eager` 与 `io: ?std.Io = null`）。
+  - 新增 `Graph.init(backing, options)` 与 `Graph.initDefault(backing)`，提供 `graph.executor()` 获取注入的执行器。
+- **基准测试套件扩充 (`src/bench/suites.zig`, `src/bench.zig`, `examples/benchmark.zig`)**:
+  - 新增 `executor` 套件：测试 `parallelFor` 与 `parallelReduce` 在串行与 4 线程下的派发开销与吞吐。
+  - 新增 `q4` 套件：测试单行解码 GEMV 与多行预填充 GEMM 的吞吐量（GB/s 与 GFLOPS）。
+  - 新增 `decode` 套件：对比全精度 `TinyGemma4` 与量化 `TinyQ4Gemma4` 的单步自回归解码延迟与吞吐（tokens/s）。
 - **异步执行与 Apple Silicon Metal 卸载设计 (`plan/ASYNC_OFFLOAD_DESIGN.md`, `plan/README.md`, `plan/TODO.md`, `doc/README.md`, `README.md`)**:
   - 新增面向 `v0.4.0`–`v0.5.x` 的设计文档：平台优先级为 Apple Silicon Metal > CPU 多核 > 其他 GPU；并发基于 Zig 0.16 `std.Io`，由应用创建 `std.Io.Threaded` 并经 `GraphOptions.io` 注入；`eager` / `deferred` 双执行模式与单一有序命令队列；统一内存零拷贝 `MetalAllocator`、Objective-C 运行时桥接与运行期编译 MSL；目标传入式 (DPS) 内核、`hostSlice` 宿主访问协议、静态内存规划与显式 `Attention` / `Q4MatMul` / `TopK` / `KVCacheAppend` 算子；Phase 0–5 路线图与验收标准。
 - **包级分层依赖检查 (`tools/check_layers.zig`, `build.zig`, `AGENTS.md`)**:
-  - 新增 `zig build check-layers`（同时纳入 `zig build test`）：扫描 `src/` 下全部 `@import`，要求跨包导入只指向更底层的包（`cblas` ← `tensor` / `dataset` ← `autodiff` / `regression` / `manifold` ← `nn` / `cross_validation` ← `optim` / `models` ← `engine` ← `bench` ← `root`），违规时报告文件与行号；`AGENTS.md` 新增第 6 节《包级单向依赖》。
+  - 新增 `zig build check-layers`（同时纳入 `zig build test`）：扫描 `src/` 下全部 `@import`，要求跨包导入只指向更底层的包（`backend` ← `tensor` / `dataset` ← `autodiff` / `regression` / `manifold` ← `nn` / `cross_validation` ← `optim` / `models` ← `engine` ← `bench` ← `root`），违规时报告文件与行号；`AGENTS.md` 新增第 6 节《包级单向依赖》。
 
 ### Changed
+- **热路径消除瞬态线程派发 (`src/models/gemma4_q4.zig`)**:
+  - 将 `Q4Linear.forward` 与 LM head argmax 中每次调用 `std.Thread.spawn` 的实现全面替换为 `Executor.parallelFor` 与 `Executor.parallelReduce`，消除了高频创建/销毁 OS 线程的系统开销。
+- **二进制格式魔数升级 (`src/models/gemma4_q4.zig`, `tools/quantize_gemma4.zig`, `examples/gemma4.zig`)**:
+  - 随着 Q4 块排布升级为 split-half，二进制模型文件魔数直接升级为 `ZNNQ4G02`，量化工具与推理加载器同步升级（遵循 AGENTS.md §3 不保留旧版本向后兼容回退）。
+- **CBLAS 迁入 backend 包 (`src/backend/cblas.zig`, `tools/check_layers.zig`)**:
+  - 原 `src/cblas.zig` 迁入 `src/backend/cblas.zig`；`tools/check_layers.zig` 将 `backend` 注册为分层层级 0。
+- **全局统一计算图初始化入口与删除 `initNoGrad`**:
+  - 彻底删除 `Graph.initNoGrad`，全库（`src/`、`examples/`、`tools/`）统一迁移为 `Graph.init(allocator, .{ .enable_grad = false })` 或 `Graph.initDefault(allocator)`。
 - **消除循环导入，包级依赖改为严格单向 (`src/tensor/`, `src/autodiff/`, `src/nn/`, `src/bench/`, `src/manifold.zig`, `examples/`)**:
   - `Tensor.creator` 的类型由 `?*autodiff.Op` 改为张量层不透明句柄 `?*tensor.OpHandle`；写入使用 `op.handle()`，读取使用 `autodiff.Op.creatorOf(t)`，`tensor` 不再导入 `autodiff`。
   - `autodiff.Op` 数据结构移入 `src/autodiff/types.zig`；`Op.forward` / `Op.backward` 方法改为分发函数 `autodiff.op.forward(op, allocator)` / `autodiff.op.backward(op)`，反向内核文件只依赖 `Op` 数据结构。
@@ -23,6 +47,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 删除 `Graph.formatJson` / `Graph.exportJson`，计算图 JSON 导出统一使用 `nn.generateJson(&graph, allocator)` / `nn.exportJson(&graph, path, allocator)`；删除 `nn.visualization` 对 `graph_ir` 的转导出与未使用的 `buildModelHierarchy` 别名。
   - 删除 `nn` 对 `engine` 训练与评估函数（`trainClassificationStep`、`evaluateClassification`、`trainStep` 等）的转导出，调用方改用 `engine.*`。
   - `createPersistentTensor` / `freePersistentTensor` 的实现移入 `src/nn/module.zig`（`nn.core` 与 `nn` 导出不变）；基准运行器 `BenchmarkRunner` 等拆分至 `src/bench/runner.zig`（`bench` 门面导出不变）；依赖 `autodiff` 的两个张量互操作测试移至 `src/autodiff/tests.zig`。
+
+### Removed
+- 删除了 `src/cblas.zig`（迁入 `src/backend/cblas.zig`）。
+- 删除了 `Graph.initNoGrad`（统一为 `Graph.init` / `Graph.initDefault`）。
 
 ### Fixed
 - **规划与架构文档同代码现状对齐 (`plan/TODO.md`, `plan/README.md`, `doc/architecture.md`)**:

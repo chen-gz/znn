@@ -70,7 +70,7 @@ pub fn main() !void {
     const batch_size: usize = 2;
 
     for (1..6) |epoch| {
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
 
         const x = try graph.tensorND(&.{ batch_size, seq_len, dim }, true);
@@ -119,7 +119,7 @@ pub fn main() !void {
     lora_layer.resetParameters(random, .{});
     defer nn.deinitModel(&lora_layer, allocator);
 
-    var lora_graph = autodiff.Graph.init(allocator);
+    var lora_graph = autodiff.Graph.initDefault(allocator);
     defer lora_graph.deinit();
 
     const lora_in = try lora_graph.tensor(2, 16, false);

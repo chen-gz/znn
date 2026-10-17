@@ -165,13 +165,13 @@
   - [x] 增加 QR 分解 (`Tensor.qr`)、奇异值分解 (`Tensor.svd`) 与实对称特征值分解 (`Tensor.symeig`) 支持，提升病态矩阵求解稳定性。
 
 - [ ] **2.4 多核 CPU 并行化 (Multi-Threading，详见设计 Phase 0 / 1 / 5)**
-  - [ ] 基于 `std.Io`（应用创建 `std.Io.Threaded`，库内使用 `Io.Group`）实现固定粒度分块的确定性执行器 `parallelFor` / `parallelReduce`，经 `GraphOptions.io` 注入（Phase 0）。
-  - [ ] 用执行器替换 [`Q4Linear.forward`](../src/models/gemma4.zig) 与 Gemma 4 LM head argmax 中每次调用临时 spawn 线程的实现（Phase 0）。
+  - [x] 基于 `std.Io`（应用创建 `std.Io.Threaded`，库内使用 `Io.Group`）实现固定粒度分块的确定性执行器 `parallelFor` / `parallelReduce`，经 `GraphOptions.io` 注入（Phase 0）。
+  - [x] 用执行器替换 [`Q4Linear.forward`](../src/models/gemma4_q4.zig) 与 Gemma 4 LM head argmax 中每次调用临时 spawn 线程的实现（Phase 0）。
   - [ ] 将 `Softmax`、`LayerNorm`、`RMSNorm`、`RoPE`、`Conv2D` 及大张量逐元素算子改写为按行/按块并行（Phase 1，随 DPS 内核改造）。
   - [ ] Linux GEMM 寄存器/缓存分块微内核与多线程（Phase 5）。
 
 - [ ] **2.5 Apple Silicon Metal 异步执行与卸载（详见 [`ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)）**
-  - [ ] **Phase 0 执行器与基线**：`GraphOptions` 与 `Graph.init(backing, options)` / `Graph.initDefault`（删除 `initNoGrad`）；拆分 `src/models/gemma4.zig`（当前 64,336 B，超出 60 KB）；`Q4Block` 与内核下沉为 `src/tensor/quant.zig` 并新增 `Q4MatMul` 算子；Q4 块内 split-half 排布与文件魔数 `ZNNQ4G02`；`src/cblas.zig` 迁入 `src/backend/`；新增 `executor` / `q4` / `decode` 基准。
+  - [x] **Phase 0 执行器与基线**：`GraphOptions` 与 `Graph.init(backing, options)` / `Graph.initDefault`（删除 `initNoGrad` 并完成全库迁移）；拆分 `src/models/gemma4.zig` 为 `src/tensor/quant.zig` 与 `src/models/gemma4_q4.zig`（所有非测试源码文件均 `< 60 KB`）；`Q4Block` 与内核下沉为 `src/tensor/quant.zig` 并新增 `Q4MatMul` 算子；Q4 块内 split-half 排布与文件魔数 `ZNNQ4G02`（单线程 GEMV 吞吐从 1.7 GB/s 提升至 5.46 GB/s，多核达 18.7 GB/s）；`src/cblas.zig` 迁入 `src/backend/` 并更新分层检查；新增 `executor` / `q4` / `decode` 基准。
   - [ ] **Phase 1 DPS 内核与 deferred 图**：全部算子拆分为 `inferShape` + `xxxInto`；无梯度模式也记录 Op；`hostSlice` 宿主访问协议与 Debug NaN 毒化；`TopK` / `KVCacheAppend` 算子；`submit` / `sync` / `replay` 与静态内存规划。
   - [ ] **Phase 2 Metal 推理 MVP**：Objective-C 运行时桥接、统一内存 `MetalAllocator`、按流有序命令队列、运行期编译 MSL、MPS f32 GEMM、Q4 GEMV / GEMM、CPU 回退与 CPU / Metal 一致性测试。
   - [ ] **Phase 3 注意力、KV Cache 与融合**：显式 `Attention` 算子（统一三处注意力实现）、端到端 KV Cache、QKV 与 gate / up 权重融合、执行计划层融合、MoE 稀疏 Token 分发。

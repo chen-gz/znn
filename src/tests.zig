@@ -124,7 +124,7 @@ test "Tensor ND reshape and transpose autograd" {
     const std = @import("std");
 
     const arena = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     // Create a 2x3 tensor
@@ -174,7 +174,7 @@ test "Tensor matrix multiplication and bias addition autograd example" {
 
     const arena = std.testing.allocator;
     // 1. Initialize the computation graph
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     // 2. Create input tensor A (2x3) and weight B (3x2)
@@ -234,7 +234,7 @@ test "Tensor matrix multiplication and bias addition autograd example" {
 test "Conv2D autograd" {
     const std = @import("std");
     const arena = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const A = try graph.array(&.{ 1, 1, 3, 3 }, &[_]f32{
@@ -281,7 +281,7 @@ test "Conv2D autograd" {
 test "MaxPool2D autograd" {
     const std = @import("std");
     const arena = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const A = try graph.array(&.{ 1, 1, 4, 4 }, &[_]f32{
@@ -312,7 +312,7 @@ test "MaxPool2D autograd" {
 test "MaxPool1D and AvgPool1D autograd" {
     const std = @import("std");
     const arena = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const A = try graph.array(&.{ 1, 1, 4 }, &[_]f32{ 1.0, 4.0, 2.0, 6.0 }, true);
@@ -344,7 +344,7 @@ test "MaxPool1D and AvgPool1D autograd" {
 test "AdaptiveAvgPool1D and AdaptiveAvgPool2D autograd" {
     const std = @import("std");
     const arena = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const A = try graph.array(&.{ 1, 1, 4 }, &[_]f32{ 1.0, 3.0, 2.0, 6.0 }, true);
@@ -379,7 +379,7 @@ test "AdaptiveAvgPool1D and AdaptiveAvgPool2D autograd" {
 test "Sigmoid and Tanh autograd" {
     const std = @import("std");
     const arena = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const A = try graph.array(&.{ 1, 2 }, &[_]f32{ 0.0, 2.0 }, true);
@@ -402,7 +402,7 @@ test "Sigmoid and Tanh autograd" {
 test "LeakyReLU autograd" {
     const std = @import("std");
     const arena = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const A = try graph.array(&.{ 1, 2 }, &[_]f32{ -2.0, 3.0 }, true);
@@ -421,7 +421,7 @@ test "LeakyReLU autograd" {
 test "BCEWithLogitsLoss autograd" {
     const std = @import("std");
     const arena = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     const logits = try graph.array(&.{ 1, 2 }, &[_]f32{ 0.0, 2.0 }, true);
@@ -467,7 +467,7 @@ test "AdamOptimizer model parameter updates" {
 test "L2Loss and RidgeLoss autograd" {
     const std = @import("std");
     const arena = std.testing.allocator;
-    var graph = autodiff.Graph.init(arena);
+    var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
     // Weight tensor: [2.0, -3.0]
@@ -532,7 +532,7 @@ test "L1Loss and LassoLoss autograd" {
     const std = @import("std");
     const allocator = std.testing.allocator;
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const w = try graph.tensorWithData(1, 3, &[_]f32{ -2.0, 0.0, 3.0 }, true);
@@ -621,7 +621,7 @@ test "SiLU and Mul autograd in Graph" {
     const std = @import("std");
     const allocator = std.testing.allocator;
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const A = try graph.tensor(2, 2, true);
@@ -658,7 +658,7 @@ test "SiLU and Mul autograd in Graph" {
 test "SwiGLU forward operator" {
     const std = @import("std");
     const allocator = std.testing.allocator;
-    var graph = autodiff.Graph.initNoGrad(allocator);
+    var graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer graph.deinit();
 
     const gate = try graph.tensorNDWithData(&.{ 1, 2 }, &[_]f32{ 0.0, 2.0 }, false);
@@ -705,7 +705,7 @@ test "End-to-End LLM Pipeline integration demo" {
 
     const sched = optim.CosineScheduler.init(1e-3, 1e-5, 5, 20);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x = try graph.tensorND(&.{ 2, 4, 8 }, true);
@@ -734,7 +734,7 @@ test "Tensor concat and split autograd" {
     const std = @import("std");
     const allocator = std.testing.allocator;
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     // 1. Test Concat on dim 1 for 2D tensors [2, 2] and [2, 3] -> [2, 5]
@@ -763,7 +763,7 @@ test "Tensor concat and split autograd" {
     }
 
     // 2. Test Split on dim 2 for 3D tensor [1, 2, 6] -> 3 x [1, 2, 2]
-    var graph2 = autodiff.Graph.init(allocator);
+    var graph2 = autodiff.Graph.initDefault(allocator);
     defer graph2.deinit();
 
     const X = try graph2.tensorND(&.{ 1, 2, 6 }, true);
@@ -825,7 +825,7 @@ test "GQA CausalSelfAttention and KVCache forwardInference" {
     defer nn.deinitModel(&gqa_attn, allocator);
 
     // 1. Test Autograd Forward and Backward with GQA
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const B: usize = 2;
@@ -857,7 +857,7 @@ test "GQA CausalSelfAttention and KVCache forwardInference" {
     defer tensor.free(allocator, x_eager);
     @memcpy(x_eager.data, x_node.data);
 
-    var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_eager_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try gqa_attn.forward(&y_eager_graph, x_eager);
     try std.testing.expectEqualSlices(usize, &.{ B, T, n_embd }, y_eager.shape.dims[0..y_eager.shape.len]);
@@ -918,7 +918,7 @@ test "GRPO group advantages and loss" {
     try std.testing.expect(!std.math.isNan(loss_eval));
 
     // 3. Test grpoLoss with autograd and verify gradient direction
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const old_t = try graph.tensorND(&.{4}, false);
@@ -987,13 +987,13 @@ test "MoELayer Top-K routing and autograd" {
         v.* = @as(f32, @floatFromInt(i % 5)) * 0.2;
     }
 
-    var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_eager_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try moe.forward(&y_eager_graph, x_eager);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, dim }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     // 2. Autograd Graph mode test on 3D input [2, 3, 8]
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x_node = try graph.tensorND(&.{ 2, 3, dim }, true);
@@ -1052,13 +1052,13 @@ test "MLALayer with MLACache matrix absorption inference" {
         v.* = @as(f32, @floatFromInt(i % 7)) * 0.1;
     }
 
-    var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_eager_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try mla.forward(&y_eager_graph, x_eager);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, dim }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     // 2. Autograd Graph mode full forward & backward
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x_node = try graph.tensorND(&.{ 2, 3, dim }, true);
@@ -1107,7 +1107,7 @@ test "MLALayer with MLACache matrix absorption inference" {
             seq_x.data[step * dim + i] = @as(f32, @floatFromInt(step + i)) * 0.05;
         }
     }
-    var full_out_graph = autodiff.Graph.initNoGrad(allocator);
+    var full_out_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer full_out_graph.deinit();
     const full_out = try mla.forward(&full_out_graph, seq_x);
 
@@ -1155,13 +1155,13 @@ test "ConvTranspose2D eager and autograd backward" {
     defer tensor.free(allocator, x_eager);
     @memcpy(x_eager.data, &[_]f32{ 1.0, 2.0, 3.0, 4.0 });
 
-    var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_eager_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try conv_t.forward(&y_eager_graph, x_eager);
     try std.testing.expectEqualSlices(usize, &.{ 1, 2, 4, 4 }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     // 2. Autograd Graph mode
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x_node = try graph.tensorND(&.{ 1, in_channels, 2, 2 }, true);
@@ -1209,7 +1209,7 @@ test "ConvTranspose2D eager and autograd backward" {
     defer tensor.free(allocator, x_up);
     @memset(x_up.data, 1.0);
 
-    var y_up_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_up_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_up_graph.deinit();
     const y_up = try upsample_conv.forward(&y_up_graph, x_up);
     // H_out = (3 - 1) * 2 + 4 - 2 = 6, W_out = 6
@@ -1297,14 +1297,14 @@ test "GAN adversarial training step" {
     // 执行 5 步对抗训练
     for (0..5) |_| {
         // Step D: 训练判别器
-        var graph_d = autodiff.Graph.init(allocator);
+        var graph_d = autodiff.Graph.initDefault(allocator);
         defer graph_d.deinit();
 
         const real_data = try graph_d.randomNormal(&.{ batch_size, 2 }, random, 3.0, 0.5, false);
         const real_targets = try graph_d.ones(&.{ batch_size, 1 }, false);
 
         const noise_d = try graph_d.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);
-        var fake_eager_graph = autodiff.Graph.initNoGrad(allocator);
+        var fake_eager_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
         defer fake_eager_graph.deinit();
         const fake_eager = try gen.forward(&fake_eager_graph, noise_d);
 
@@ -1326,7 +1326,7 @@ test "GAN adversarial training step" {
         try std.testing.expect(!std.math.isNan(loss_d.data[0]));
 
         // Step G: 训练生成器
-        var graph_g = autodiff.Graph.init(allocator);
+        var graph_g = autodiff.Graph.initDefault(allocator);
         defer graph_g.deinit();
 
         const noise_g = try graph_g.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);

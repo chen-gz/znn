@@ -1106,7 +1106,7 @@ test "Optimizer checkpoint error conditions and corruption resilience" {
         });
         defer nn.deinitModel(&seq, allocator);
         {
-            var init_graph = @import("autodiff.zig").Graph.init(allocator);
+            var init_graph = @import("autodiff.zig").Graph.initDefault(allocator);
             defer init_graph.deinit();
             _ = try seq.forward(&init_graph, try init_graph.ones(&.{ 1, 2 }, false));
             try nn.initModel(&seq, &init_graph, prng.random());

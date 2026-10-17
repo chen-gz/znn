@@ -414,19 +414,20 @@ flowchart LR
     P4 --> P5["Phase 5 (可选): 并发与扩展"]
 ```
 
-### Phase 0（`v0.3.x`）：执行器与基线
+### Phase 0（`v0.3.x`）：执行器与基线 [已完成]
 * **开发内容**：
-  1. `src/backend/executor.zig`（基于 `std.Io` 的 `parallelFor` / `parallelReduce`）；`GraphOptions` 与 `Graph.init(backing, options)` / `Graph.initDefault`，删除 `initNoGrad` 并迁移全部调用方；
-  2. 用执行器替换 `Q4Linear.forward` 与 LM head argmax 中每次调用 spawn 线程的实现；
-  3. 拆分 `gemma4.zig`：`Q4Block` 与内核下沉为 `src/tensor/quant.zig`，Q4 模型拆为 `src/models/gemma4_q4.zig`，新增 `Q4MatMul` 算子并经 `Graph` 记录；
-  4. Q4 split-half 块内排布 + 文件魔数 `ZNNQ4G02`，量化工具与加载器同步升级；
-  5. `src/cblas.zig` 迁入 `src/backend/cblas.zig`，并在 `tools/check_layers.zig` 中以 `backend` 包（层级 0）替换 `cblas`；
-  6. 新增 `executor`、`q4`、`decode` 基准并记录基线。
-* **验收标准**：
-  * `zig build test` 全部通过，所有非测试源码文件 `< 60 KB`；
-  * 热路径中不再出现 `std.Thread.spawn`；
-  * Q4 GEMV 在 `io = null` 与 `io = threaded` 下逐位一致；
-  * 单线程 Q4 GEMV 吞吐相对 `v0.3.0` 基线（本机 1.7 GB/s）的提升记录在 `q4` 基准中。
+  1. [x] `src/backend/executor.zig`（基于 `std.Io` 的 `parallelFor` / `parallelReduce`）；`GraphOptions` 与 `Graph.init(backing, options)` / `Graph.initDefault`，删除 `initNoGrad` 并迁移全部调用方；
+  2. [x] 用执行器替换 `Q4Linear.forward` 与 LM head argmax 中每次调用 spawn 线程的实现；
+  3. [x] 拆分 `gemma4.zig`：`Q4Block` 与内核下沉为 `src/tensor/quant.zig`，Q4 模型拆为 `src/models/gemma4_q4.zig`，新增 `Q4MatMul` 算子并经 `Graph` 记录；
+  4. [x] Q4 split-half 块内排布 + 文件魔数 `ZNNQ4G02`，量化工具与加载器同步升级；
+  5. [x] `src/cblas.zig` 迁入 `src/backend/cblas.zig`，并在 `tools/check_layers.zig` 中以 `backend` 包（层级 0）替换 `cblas`；
+  6. [x] 新增 `executor`、`q4`、`decode` 基准并记录基线。
+* **验收结果**：
+  * `zig build test` 全部通过（188/188 tests passed），所有非测试源码文件 `< 60 KB`；
+  * 热路径中彻底移除 `std.Thread.spawn`；
+  * Q4 GEMV 在 `io = null`（串行）与 `io = threaded`（多核）下逐位完全一致（Bitwise Equivalence）；
+  * 单线程 Q4 GEMV 吞吐达 **5.46 GB/s** (19.39 GFLOPS, 0.432 ms/step for 2048x2048)，相对 `v0.3.0` 基线（1.7 GB/s）取得 **3.2 倍** 性能提升；多核并行达 **18.7 GB/s** (65.43 GFLOPS, 0.126 ms/step)；
+  * 自回归单步解码延迟：`TinyGemma4` 0.023 ms/step (43.5k tokens/s)，`TinyQ4Gemma4` 0.020 ms/step (49.0k tokens/s)。
 
 ### Phase 1（`v0.4.0`）：DPS 内核与 deferred 图（CPU）
 * **开发内容**：

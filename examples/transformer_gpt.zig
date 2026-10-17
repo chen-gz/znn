@@ -82,7 +82,7 @@ pub fn main() !void {
 
     std.debug.print("\nStarting training for {} epochs...\n", .{epochs});
     for (0..epochs) |epoch| {
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
 
         const x_node = try graph.tensorND(&.{ batch_size, block_size }, false);
@@ -122,7 +122,7 @@ pub fn main() !void {
         const start_idx = gen_buf.items.len - seq_len;
         const input_slice = gen_buf.items[start_idx..];
 
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
 
         const x_node = try graph.tensorND(&.{ 1, seq_len }, false);

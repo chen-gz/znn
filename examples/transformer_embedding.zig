@@ -57,14 +57,14 @@ pub fn main() !void {
     emb.weight.print();
 
     std.debug.print("\n--- 1. Inference Forward (no-grad graph) ---\n", .{});
-    var y_eager_graph = autodiff.Graph.initNoGrad(allocator);
+    var y_eager_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try emb.forward(&y_eager_graph, x);
     std.debug.print("Output (Shape: [2, 3, 4]):\n", .{});
     y_eager.print();
 
     std.debug.print("\n--- 2. Graph Mode Forward & Backward ---\n", .{});
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x_node = try graph.tensorND(&.{2, 3}, false);

@@ -1,5 +1,5 @@
 const std = @import("std");
-const c = @import("../cblas.zig");
+const c = @import("../backend/cblas.zig");
 const Op = @import("types.zig").Op;
 
 pub fn backwardNN(self: *Op) !void {

@@ -7,7 +7,7 @@ const recurrent = @import("recurrent.zig");
 
 /// 以形状为 `shape` 的全 1 样本输入执行 `model.forward(graph, x)`，然后按计算图初始化参数
 pub fn initFromOnes(model: anytype, allocator: std.mem.Allocator, random: std.Random, shape: []const usize) !void {
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
     const x = try graph.ones(shape, false);
     _ = try model.forward(&graph, x);
@@ -16,7 +16,7 @@ pub fn initFromOnes(model: anytype, allocator: std.mem.Allocator, random: std.Ra
 
 /// 以批大小为 1、序列长度为 1 的全 1 样本输入执行循环网络前向，然后按计算图初始化参数
 pub fn initRecurrent(model: anytype, allocator: std.mem.Allocator, random: std.Random) !void {
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
     const T = @TypeOf(model.*);
     const x = try graph.ones(&.{ 1, model.input_dim }, false);
