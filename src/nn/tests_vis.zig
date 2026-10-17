@@ -38,7 +38,7 @@ test "Hierarchical module naming and interactive HTML report export" {
     var prng = std.Random.DefaultPrng.init(13579);
     const random = prng.random();
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     // 1. 创建 Embedding 模块并设置顶级层次命名
@@ -223,7 +223,7 @@ test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivit
     defer names.deinit();
     try nn.nameModules(&gpt, names.allocator(), "gpt");
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     // 2. 构造输入张量并执行前向传播
@@ -364,7 +364,7 @@ test "Explicit module scopes attribute ops and tensors to the executing module" 
     defer names.deinit();
     try nn.nameModules(&gpt, names.allocator(), "gpt");
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     var token_data: [2 * 8]f32 = undefined;
@@ -436,7 +436,7 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     defer names.deinit();
     try nn.nameModules(&gpt, names.allocator(), "gpt");
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     var token_data: [2 * 8]f32 = undefined;
@@ -678,7 +678,7 @@ test "Model graph JSON export conforms to the published JSON Schema" {
         defer names.deinit();
         try nn.nameModules(&gpt, names.allocator(), "gpt");
 
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
         var token_data: [2 * 4]f32 = undefined;
         for (&token_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i % 50));
@@ -701,7 +701,7 @@ test "Model graph JSON export conforms to the published JSON Schema" {
         defer names.deinit();
         try nn.nameModules(&linear, names.allocator(), "linear");
 
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
         var x_data: [2 * 8]f32 = undefined;
         for (&x_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i)) * 0.1;
@@ -795,7 +795,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "linear");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 16 }, false);
         x.setName("inputs.x");
@@ -840,7 +840,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "mlp");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 16 }, false);
         x.setName("inputs.x");
@@ -859,7 +859,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "rnn");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         var inps: [4]*Tensor = undefined;
         for (0..4) |t| {
@@ -881,7 +881,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "lstm");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         var inps: [4]*Tensor = undefined;
         for (0..4) |t| {
@@ -904,7 +904,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "stacked_lstm");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         var inps: [4]*Tensor = undefined;
         for (0..4) |t| {
@@ -926,7 +926,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "gru");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         var inps: [4]*Tensor = undefined;
         for (0..4) |t| {
@@ -948,7 +948,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "embedding");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const tokens = try g.zeros(&.{ 2, 8 }, false);
         tokens.setName("inputs.token_ids");
@@ -968,7 +968,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "causal_self_attention");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 4, 32 }, false);
         x.setName("inputs.x");
@@ -987,7 +987,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "transformer_block");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 4, 32 }, false);
         x.setName("inputs.x");
@@ -1013,7 +1013,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "gpt");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const tokens = try g.zeros(&.{ 2, 16 }, false);
         tokens.setName("inputs.token_ids");
@@ -1033,7 +1033,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "swiglu");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 4, 32 }, false);
         x.setName("inputs.x");
@@ -1052,7 +1052,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "lora_linear");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 4, 32 }, false);
         x.setName("inputs.x");
@@ -1070,7 +1070,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "layernorm");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 4, 32 }, false);
         x.setName("inputs.x");
@@ -1089,7 +1089,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "mla");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 4, 32 }, false);
         x.setName("inputs.x");
@@ -1108,7 +1108,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "deepseek_moe");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 4, 32 }, false);
         x.setName("inputs.x");
@@ -1140,7 +1140,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
             l3,
         });
         defer nn.deinitModel(&net_g, allocator);
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const z = try g.ones(&.{ 4, 2 }, false);
         z.setName("inputs.z");
@@ -1174,7 +1174,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
             d3,
         });
         defer nn.deinitModel(&net_d, allocator);
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 4, 2 }, false);
         x.setName("inputs.x");
@@ -1195,7 +1195,7 @@ test "All 18 canonical models export conforming schema and valid ports" {
         var names = std.heap.ArenaAllocator.init(allocator);
         defer names.deinit();
         try nn.nameModules(&m, names.allocator(), "conv2d");
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 1, 1, 8, 8 }, false);
         x.setName("inputs.x");

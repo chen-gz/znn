@@ -280,7 +280,7 @@ pub const CausalSelfAttention = struct {
         const kv_dim = n_kv * hs;
 
         // 单步推理使用局部无梯度计算图承载中间张量，函数返回时整体释放
-        var step_g = autodiff.Graph.initNoGrad(allocator);
+        var step_g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
         defer step_g.deinit();
 
         // 1. 获取二维 (2-Dimensional, 2D) 输入 [B, C]
@@ -561,7 +561,7 @@ pub const MLALayer = struct {
         const dr = self.d_r;
 
         // 单步推理使用局部无梯度计算图承载中间张量，函数返回时整体释放
-        var step_g = autodiff.Graph.initNoGrad(allocator);
+        var step_g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
         defer step_g.deinit();
         const step_alloc = step_g.arenaAllocator();
 

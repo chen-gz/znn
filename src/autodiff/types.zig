@@ -23,6 +23,7 @@ pub const OpType = enum {
     MaskedFill, // 按掩码张量填充标量值
     MatMul, // 矩阵乘法
     BatchMatMul, // 批量矩阵乘法 (Batched Matrix Multiplication)
+    Q4MatMul, // 4-bit 量化矩阵乘法 (4-bit Quantized Matrix Multiplication)
 
     // --- 形状与维度变换 (Shape & Dimension Transforms) ---
     Reshape, // 形状变换
@@ -94,6 +95,7 @@ pub const OpType = enum {
             .MaskedFill => "y_i = \\begin{cases} v & m_i \\\\ x_i & \\neg m_i \\end{cases}",
             .MatMul => "C = A \\cdot B",
             .BatchMatMul => "C_{b, h} = A_{b, h} \\cdot B_{b, h}",
+            .Q4MatMul => "y = x W_{Q4}^T",
             .Reshape => "y = \\text{reshape}(x, \\text{new\\_shape})",
             .Transpose => "y = x^T",
             .Concat => "y = [x_1, x_2, \\dots, x_k]",
@@ -176,6 +178,11 @@ pub const OpContext = union(enum) {
     },
     MatMul: void,
     BatchMatMul: void,
+    Q4MatMul: struct {
+        blocks: []const tensor_mod.quant.Q4Block,
+        in_features: usize,
+        out_features: usize,
+    },
 
     // --- 形状与维度变换 ---
     Reshape: void,

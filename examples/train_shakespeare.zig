@@ -112,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
             y_target[i] = @as(u8, @intCast(batch.y[i] % vocab_size));
         }
 
-        var graph = autodiff.Graph.init(allocator);
+        var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
 
         const x_node = try graph.tensorND(&.{ batch_size, block_size }, false);
@@ -161,7 +161,7 @@ pub fn main(init: std.process.Init) !void {
         const start_idx = gen_tokens.items.len - cur_len;
         const cur_slice = gen_tokens.items[start_idx..];
 
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
 
         const x_eval = try g.tensorND(&.{ 1, cur_len }, false);

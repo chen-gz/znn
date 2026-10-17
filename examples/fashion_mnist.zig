@@ -29,7 +29,7 @@ pub const MLP = struct {
 
     // 用户只需专注定义前向数据流逻辑，所有算子都通过传入的计算图执行。
     // 【内存管理说明】：前向计算产生的中间张量（x1, a1, x2, a2）全部挂载在计算图上，由调用方在批次结束调用 graph.deinit() 统一释放。
-    // 训练时使用 `Graph.init` 记录反向传播所需的算子；推理时使用 `Graph.initNoGrad`，只执行前向计算，不分配梯度缓冲区。
+    // 训练时使用 `Graph.initDefault` 记录反向传播所需的算子；推理时使用 `Graph.init(allocator, .{ .enable_grad = false })`，只执行前向计算，不分配梯度缓冲区。
     pub fn forward(self: *const MLP, graph: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
         const x1 = try self.fc1.forward(graph, x);
         const a1 = try graph.relu(x1);
@@ -208,7 +208,7 @@ fn printPredictions(
         const img_slice = test_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim];
         const actual_label = test_dataset.labels.data[idx];
 
-        var graph = autodiff.Graph.init(arena);
+        var graph = autodiff.Graph.initDefault(arena);
         defer graph.deinit();
 
         const x_tensor = try graph.tensor(1, input_dim, false);
@@ -256,7 +256,7 @@ test "MLP model initialization and forward passes (no-grad & gradient graphs)" {
         const arena_allocator = arena.allocator();
 
         const x_tensor = try tensor.array(arena_allocator, &.{ 2, 784 }, x_data);
-        var logits_graph = autodiff.Graph.initNoGrad(arena_allocator);
+        var logits_graph = autodiff.Graph.init(arena_allocator, .{ .enable_grad = false });
         defer logits_graph.deinit();
         const logits = try model.forward(&logits_graph, x_tensor);
 
@@ -270,7 +270,7 @@ test "MLP model initialization and forward passes (no-grad & gradient graphs)" {
         defer arena.deinit();
         const arena_allocator = arena.allocator();
 
-        var graph = autodiff.Graph.init(arena_allocator);
+        var graph = autodiff.Graph.initDefault(arena_allocator);
         defer graph.deinit();
 
         const x_tensor = try graph.tensor(2, 784, false);

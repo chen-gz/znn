@@ -10,6 +10,29 @@ const op_mod = @import("op.zig");
 pub const Op = types.Op;
 const graph_nn = @import("graph_nn.zig");
 const graph_init = @import("graph_init.zig");
+const backend = @import("../backend.zig");
+pub const Executor = backend.Executor;
+
+/// 计算图执行模式
+pub const ExecutionMode = enum {
+    /// 即时模式（默认）：算子在记录时立即派发；CPU 上同步完成
+    eager,
+    /// 延迟模式：只记录算子，统一规划后派发重放
+    deferred,
+};
+
+/// 计算图配置（遵循 AGENTS.md §4：所有字段均有默认值）
+pub const GraphOptions = struct {
+    io: ?std.Io = null, // 由应用注入的输入输出接口；null 表示串行执行
+    enable_grad: bool = true,
+    mode: ExecutionMode = .eager,
+    max_tasks: ?usize = null,
+
+    pub const default: GraphOptions = .{};
+    pub fn defaultOptions() GraphOptions {
+        return .{};
+    }
+};
 
 // 计算图（Graph）结构体
 // 追踪所有的张量节点与算子节点，管理内存生命周期并负责反向传播调度
@@ -19,30 +42,37 @@ pub const Graph = struct {
     tensors: std.ArrayList(*Tensor), // 追踪计算图中的所有张量指针
     ops: std.ArrayList(*Op), // 追踪计算图中的所有算子指针
     enable_grad: bool, // 梯度使能开关（类似 torch.set_grad_enabled），为 false 时不分配梯度缓冲区亦不记录 Op 节点
+    options: GraphOptions, // 计算图运行选项配置
     module_formulas: std.StringHashMap([]const u8), // 存储模块在代码中声明的显式数学运算公式 (如 "y = x W^T + b")
     module_types: std.StringHashMap([]const u8), // 存储模块在代码中声明的显式模块类型 (如 "Linear", "RMSNorm", "GPT")
     scope_stack: std.ArrayList([]const u8), // 当前正在执行 forward 的模块作用域栈 (栈顶为最内层模块的完整路径)
 
-    // 初始化计算图，传入底层通用内存分配器
-    pub fn init(backing_allocator: std.mem.Allocator) Graph {
+    /// 初始化计算图，传入底层通用内存分配器与运行配置选项
+    pub fn init(backing_allocator: std.mem.Allocator, options: GraphOptions) Graph {
         return Graph{
             .backing_allocator = backing_allocator,
             .arena = std.heap.ArenaAllocator.init(backing_allocator),
             .tensors = .empty,
             .ops = .empty,
-            .enable_grad = true,
+            .enable_grad = options.enable_grad,
+            .options = options,
             .module_formulas = std.StringHashMap([]const u8).init(backing_allocator),
             .module_types = std.StringHashMap([]const u8).init(backing_allocator),
             .scope_stack = .empty,
         };
     }
 
-    /// 初始化一个不记录梯度的计算图 (推理 / 评估模式)：
-    /// 算子仍在图的 Arena 中分配并执行前向计算，但不分配梯度缓冲区，也不记录 Op 节点
-    pub fn initNoGrad(backing_allocator: std.mem.Allocator) Graph {
-        var g = Graph.init(backing_allocator);
-        g.enable_grad = false;
-        return g;
+    /// 使用默认配置初始化计算图：等价于 `Graph.init(backing_allocator, .{})`
+    pub fn initDefault(backing_allocator: std.mem.Allocator) Graph {
+        return Graph.init(backing_allocator, .{});
+    }
+
+    /// 获取当前计算图关联的数据并行执行器
+    pub fn executor(self: *const Graph) Executor {
+        return .{
+            .io = self.options.io,
+            .max_tasks = self.options.max_tasks,
+        };
     }
 
     /// 计算图 Arena 分配器：其上分配的张量在 `deinit` 时随计算图一并释放
@@ -131,6 +161,7 @@ pub const Graph = struct {
     // 设置梯度追踪开关
     pub fn setGradEnabled(self: *Graph, enabled: bool) void {
         self.enable_grad = enabled;
+        self.options.enable_grad = enabled;
     }
 
     // 释放整个计算图的内存（包括所有张量与算子节点的前向/反向缓冲区）
@@ -673,6 +704,7 @@ pub const Graph = struct {
     pub const rope = graph_nn.rope;
     pub const batchMatMul = graph_nn.batchMatMul;
     pub const embedding = graph_nn.embedding;
+    pub const q4MatMul = graph_nn.q4MatMul;
 
     pub fn sqrt(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();

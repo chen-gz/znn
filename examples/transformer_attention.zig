@@ -58,7 +58,7 @@ pub fn main() !void {
     try nn.initModelWithSample(&att, allocator, random, .{x});
 
     std.debug.print("\n--- Graph Mode Forward ---\n", .{});
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x_node = try graph.tensorND(&.{1, 3, 8}, false);

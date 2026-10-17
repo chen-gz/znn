@@ -42,7 +42,7 @@ pub fn main() !void {
 
     // 3. 构建计算图并执行前向推理
     std.debug.print("[Step 2/4] Constructing Autodiff Graph and Running Forward Pass...\n", .{});
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     // 构造批次输入张量 [batch_size=2, seq_len=16]
@@ -79,7 +79,7 @@ pub fn main() !void {
     defer nn.deinitModel(&linear, allocator);
     try nn.nameModules(&linear, names.allocator(), "linear");
 
-    var min_graph = autodiff.Graph.init(allocator);
+    var min_graph = autodiff.Graph.initDefault(allocator);
     defer min_graph.deinit();
     var x_data: [2 * 8]f32 = undefined;
     for (&x_data, 0..) |*val, i| val.* = @as(f32, @floatFromInt(i)) * 0.1;

@@ -51,7 +51,7 @@ pub fn trainClassificationStepWithClip(
     std.debug.assert(x_data.len % batch_size == 0);
     const input_dim = x_data.len / batch_size;
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
     const x_tensor = try graph.tensor(batch_size, input_dim, false);
@@ -91,7 +91,7 @@ pub fn trainClassificationStep(
 }
 
 /// 通用分类评估单步 (Classification Eval Step)
-/// 前向推理模式：使用无梯度计算图 (`Graph.initNoGrad`) 一次性管理评估内存，不分配梯度缓冲区、不记录算子
+/// 前向推理模式：使用无梯度计算图 (`Graph.init(allocator, .{ .enable_grad = false })`) 一次性管理评估内存，不分配梯度缓冲区、不记录算子
 pub fn evalClassificationStep(
     allocator: std.mem.Allocator,
     model: anytype,
@@ -103,7 +103,7 @@ pub fn evalClassificationStep(
     std.debug.assert(x_data.len % batch_size == 0);
     const input_dim = x_data.len / batch_size;
 
-    var graph = autodiff.Graph.initNoGrad(allocator);
+    var graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer graph.deinit();
 
     const x_tensor = try graph.array(&.{ batch_size, input_dim }, x_data, false);
@@ -251,7 +251,7 @@ test "engine trainClassificationStep and evalClassificationStep" {
     const Model = nn.Module(SimpleMLP);
     var model = try Model.init(arena, try SimpleMLP.init(arena));
     {
-        var init_graph = autodiff.Graph.init(arena);
+        var init_graph = autodiff.Graph.initDefault(arena);
         defer init_graph.deinit();
         _ = try model.forward(&init_graph, try init_graph.ones(&.{ 1, 4 }, false));
         try model.initParameters(&init_graph, random);
@@ -307,7 +307,7 @@ test "engine trainClassificationStep learning" {
     const Model = nn.Module(SimpleMLP);
     var model = try Model.init(arena, try SimpleMLP.init(arena));
     {
-        var init_graph = autodiff.Graph.init(arena);
+        var init_graph = autodiff.Graph.initDefault(arena);
         defer init_graph.deinit();
         _ = try model.forward(&init_graph, try init_graph.ones(&.{ 1, 2 }, false));
         try model.initParameters(&init_graph, random);
@@ -379,7 +379,7 @@ test "engine trainClassificationEpoch and evaluateClassification with DataLoader
     const Model = nn.Module(SimpleMLP);
     var model = try Model.init(arena, try SimpleMLP.init(arena));
     {
-        var init_graph = autodiff.Graph.init(arena);
+        var init_graph = autodiff.Graph.initDefault(arena);
         defer init_graph.deinit();
         _ = try model.forward(&init_graph, try init_graph.ones(&.{ 1, 4 }, false));
         try model.initParameters(&init_graph, random);
@@ -440,7 +440,7 @@ test "engine evaluateClassification standalone" {
     const Model = nn.Module(SimpleMLP);
     var model = try Model.init(arena, try SimpleMLP.init(arena));
     {
-        var init_graph = autodiff.Graph.init(arena);
+        var init_graph = autodiff.Graph.initDefault(arena);
         defer init_graph.deinit();
         _ = try model.forward(&init_graph, try init_graph.ones(&.{ 1, 4 }, false));
         try model.initParameters(&init_graph, random);
@@ -486,7 +486,7 @@ test "engine evaluateClassification empty dataloader" {
     const Model = nn.Module(SimpleMLP);
     var model = try Model.init(arena, try SimpleMLP.init(arena));
     {
-        var init_graph = autodiff.Graph.init(arena);
+        var init_graph = autodiff.Graph.initDefault(arena);
         defer init_graph.deinit();
         _ = try model.forward(&init_graph, try init_graph.ones(&.{ 1, 4 }, false));
         try model.initParameters(&init_graph, random);

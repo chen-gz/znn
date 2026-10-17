@@ -6,6 +6,7 @@ const models = @import("../models.zig");
 
 const Tensor = tensor.Tensor;
 const gemma4 = models.gemma4;
+const gemma4_q4 = models.gemma4_q4;
 
 test "Gemma 4 specialized operators, modules, and CausalLM forward" {
     const allocator = std.testing.allocator;
@@ -16,7 +17,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
     {
         var norm = try gemma4.GemmaRMSNorm.init(allocator, 4, 1e-6);
         defer nn.deinitModel(&norm, allocator);
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
 
         const x = try g.tensorNDWithData(&.{ 1, 4 }, &.{ 2.0, 2.0, 2.0, 2.0 }, false);
@@ -28,7 +29,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
 
     // 2. Gemma 专用 Split-Half RoPE 算子单测
     {
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 1, 2, 8 }, false);
         const x_rot = try gemma4.ropeSplitHalf(&g, x, 0, 1.0, 10000.0);
@@ -44,7 +45,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         mlp.down_proj.resetParameters(random, .{});
         defer nn.deinitModel(&mlp, allocator);
 
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 2, 8 }, false);
         const out = try mlp.forward(&g, x);
@@ -71,7 +72,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         attn.o_proj.resetParameters(random, .{});
         defer nn.deinitModel(&attn, allocator);
 
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 1, 3, 16 }, false);
         const y = try attn.forward(&g, x);
@@ -90,7 +91,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         defer names.deinit();
         try nn.nameModules(&model, names.allocator(), "gemma4");
 
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
 
         const token_ids = try g.zeros(&.{ 2, 4 }, false);
@@ -112,7 +113,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
 
     // 6. 4-bit (Q4) 分块量化与 Q4Linear 推理测试
     {
-        var q4_layer = try gemma4.Q4Linear.init(allocator, 32, 64);
+        var q4_layer = try gemma4_q4.Q4Linear.init(allocator, 32, 64);
         defer q4_layer.deinit(allocator);
 
         // 构造浮点权重并量化
@@ -123,7 +124,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         }
         q4_layer.quantizeFromF32(weights);
 
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
 
         const x = try g.ones(&.{ 1, 32 }, false);
@@ -135,10 +136,10 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
 
     // 7. 端到端 TinyQ4Gemma4 模型推理测试
     {
-        var model = try gemma4.TinyQ4Gemma4.init(allocator);
+        var model = try gemma4_q4.TinyQ4Gemma4.init(allocator);
         defer model.deinit(allocator);
 
-        var g = autodiff.Graph.init(allocator);
+        var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
 
         const token_ids = try g.zeros(&.{ 1, 4 }, false);

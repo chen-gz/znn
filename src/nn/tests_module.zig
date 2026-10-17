@@ -91,7 +91,7 @@ test "Module forwards a single input or a tuple of inputs to the wrapped model" 
     defer gru.deinit();
     try testing_init.initRecurrent(&gru.inner, allocator, random);
 
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
     const x0 = try graph.ones(&.{ 2, 3 }, false);
     const x1 = try graph.ones(&.{ 2, 3 }, false);

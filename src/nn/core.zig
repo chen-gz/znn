@@ -453,7 +453,7 @@ pub fn initModel(model: anytype, graph: *autodiff.Graph, random: std.Random) !vo
 /// 便捷入口：用样本输入建立一次前向计算图，再调用 `initModel` 完成依据计算图的参数初始化。
 /// `sample_args` 为传给 `model.forward(graph, ...)` 的除计算图外的参数：单个值 (如 `x`) 或元组 (如 `.{ x, h_0 }`)。
 pub fn initModelWithSample(model: anytype, allocator: std.mem.Allocator, random: std.Random, sample_args: anytype) !void {
-    var graph = autodiff.Graph.init(allocator);
+    var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
     const T = @TypeOf(model.*);
     const result = @call(.auto, T.forward, .{ forwardSelf(model), &graph } ++ forwardArgs(sample_args));

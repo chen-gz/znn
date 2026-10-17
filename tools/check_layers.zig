@@ -12,7 +12,7 @@ const Layer = struct {
 };
 
 const layers = [_]Layer{
-    .{ .name = "cblas", .rank = 0 },
+    .{ .name = "backend", .rank = 0 },
     .{ .name = "tensor", .rank = 1 },
     .{ .name = "dataset", .rank = 1 },
     .{ .name = "autodiff", .rank = 2 },

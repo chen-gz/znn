@@ -463,7 +463,7 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 32, 512 }, self.x_data, true);
@@ -508,7 +508,7 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
             pub fn run(self: *@This()) !void {
                 _ = self.arena.reset(.retain_capacity);
                 const alloc = self.arena.allocator();
-                var graph = autodiff.Graph.init(alloc);
+                var graph = autodiff.Graph.initDefault(alloc);
                 defer graph.deinit();
 
                 const x = try graph.tensorNDWithData(&.{ 32, 512 }, self.x_data, true);
@@ -530,6 +530,9 @@ pub const runLayerBenchmarks = suites.runLayerBenchmarks;
 pub const runModelBenchmarks = suites.runModelBenchmarks;
 pub const runOptimizerBenchmarks = suites.runOptimizerBenchmarks;
 pub const runTokenizerBenchmarks = suites.runTokenizerBenchmarks;
+pub const runExecutorBenchmarks = suites.runExecutorBenchmarks;
+pub const runQ4Benchmarks = suites.runQ4Benchmarks;
+pub const runDecodeBenchmarks = suites.runDecodeBenchmarks;
 
 /// Run all benchmark suites
 pub fn runAllBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) !void {
@@ -540,6 +543,9 @@ pub fn runAllBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
     try runModelBenchmarks(runner, allocator);
     try runOptimizerBenchmarks(runner, allocator);
     try runTokenizerBenchmarks(runner, allocator);
+    try runExecutorBenchmarks(runner, allocator);
+    try runQ4Benchmarks(runner, allocator);
+    try runDecodeBenchmarks(runner, allocator);
 }
 
 test "bench runner basic execution" {
