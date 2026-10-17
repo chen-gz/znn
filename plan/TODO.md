@@ -171,7 +171,7 @@
   - [ ] Linux GEMM 寄存器/缓存分块微内核与多线程（Phase 5）。
 
 - [ ] **2.5 Apple Silicon Metal 异步执行与卸载（详见 [`ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)）**
-  - [x] **Phase 0 执行器与基线**：`GraphOptions` 与 `Graph.init(backing, options)` / `Graph.initDefault`（删除 `initNoGrad` 并完成全库迁移）；拆分 `src/models/gemma4.zig` 为 `src/tensor/quant.zig` 与 `src/models/gemma4_q4.zig`（所有非测试源码文件均 `< 60 KB`）；`Q4Block` 与内核下沉为 `src/tensor/quant.zig` 并新增 `Q4MatMul` 算子；Q4 块内 split-half 排布与文件魔数 `ZNNQ4G02`（单线程 GEMV 吞吐从 1.7 GB/s 提升至 5.46 GB/s，多核达 18.7 GB/s）；`src/cblas.zig` 迁入 `src/backend/` 并更新分层检查；新增 `executor` / `q4` / `decode` 基准。
+  - [x] **Phase 0 执行器与基线**：`GraphOptions` 与 `Graph.init(backing, options)` / `Graph.initDefault`（删除 `initNoGrad` 并完成全库迁移）；拆分 `src/models/gemma4.zig` 为 `src/tensor/quant.zig` 与 `src/models/gemma4_q4.zig`（所有非测试源码文件均 `< 60 KB`）；`Q4Block` 与内核下沉为 `src/tensor/quant.zig` 并新增 `Q4MatMul` 算子；Q4 块内 split-half 排布与文件魔数 `ZNNQ4G02`（128 核 Linux 虚拟机、3840×15360：单线程 19.7 ms → 约 11.6 ms，经 `Graph.q4MatMul` 用满全部核心约 0.9 ms）；Q4 矩阵乘按（8 行 × 128 列）二维分块并复用已解包的权重块；`src/cblas.zig` 迁入 `src/backend/` 并更新分层检查；新增 `executor` / `q4` / `decode` 基准。
   - [ ] **Phase 1 DPS 内核与 deferred 图**：全部算子拆分为 `inferShape` + `xxxInto`；无梯度模式也记录 Op；`hostSlice` 宿主访问协议与 Debug NaN 毒化；`TopK` / `KVCacheAppend` 算子；`submit` / `sync` / `replay` 与静态内存规划。
   - [ ] **Phase 2 Metal 推理 MVP**：Objective-C 运行时桥接、统一内存 `MetalAllocator`、按流有序命令队列、运行期编译 MSL、MPS f32 GEMM、Q4 GEMV / GEMM、CPU 回退与 CPU / Metal 一致性测试。
   - [ ] **Phase 3 注意力、KV Cache 与融合**：显式 `Attention` 算子（统一三处注意力实现）、端到端 KV Cache、QKV 与 gate / up 权重融合、执行计划层融合、MoE 稀疏 Token 分发。

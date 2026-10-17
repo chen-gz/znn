@@ -1281,3 +1281,44 @@ test "GenericTensor core ops, BoolTensor where/maskedFill, and integer Embedding
     try std.testing.expectEqual(@as(i32, 3), trans_int.get(&.{ 2, 0 }));
     try std.testing.expectError(error.InvalidDimension, rect_int.transposeView(0, 2, allocator));
 }
+
+test "Graph.q4MatMul runs through the graph executor and matches serial execution bitwise" {
+    const allocator = std.testing.allocator;
+    const quant = tensor.quant;
+    const in_f = 128;
+    const out_f = 520;
+
+    const raw_w = try allocator.alloc(f32, in_f * out_f);
+    defer allocator.free(raw_w);
+    for (raw_w, 0..) |*w, i| w.* = @sin(@as(f32, @floatFromInt(i)) * 0.29);
+    const blocks = try allocator.alloc(quant.Q4Block, (in_f * out_f) / quant.Q4Block.QK);
+    defer allocator.free(blocks);
+    quant.quantizeSlice(blocks, raw_w);
+
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+
+    // 单行解码输入 [1, in] 与三维预填充输入 [2, 5, in]
+    const shapes = [_][]const usize{ &.{ 1, in_f }, &.{ 2, 5, in_f } };
+    for (shapes) |shape| {
+        var g_serial = Graph.init(allocator, .{ .enable_grad = false });
+        defer g_serial.deinit();
+        var g_threaded = Graph.init(allocator, .{ .enable_grad = false, .io = threaded.io(), .max_tasks = 4 });
+        defer g_threaded.deinit();
+        try std.testing.expect(g_threaded.executor().io != null);
+
+        const x_s = try g_serial.zeros(shape, false);
+        const x_t = try g_threaded.zeros(shape, false);
+        for (x_s.data, x_t.data, 0..) |*a, *b, i| {
+            const v = @cos(@as(f32, @floatFromInt(i)) * 0.17);
+            a.* = v;
+            b.* = v;
+        }
+
+        const y_s = try g_serial.q4MatMul(x_s, blocks, in_f, out_f);
+        const y_t = try g_threaded.q4MatMul(x_t, blocks, in_f, out_f);
+        try std.testing.expectEqual(shape.len, y_t.shape.len);
+        try std.testing.expectEqual(out_f, y_t.shape.dims[shape.len - 1]);
+        try std.testing.expectEqualSlices(f32, y_s.data, y_t.data);
+    }
+}

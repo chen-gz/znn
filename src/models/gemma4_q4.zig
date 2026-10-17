@@ -786,7 +786,8 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             };
 
             const exec = graph.executor();
-            const grain: usize = (config.vocab_size + 7) / 8;
+            // 固定粒度切块（与线程数无关，结果可复现）：262144 词表约切为 64 块，可用满多核
+            const grain: usize = 4096;
             const best = try exec.parallelReduce(
                 BestToken,
                 config.vocab_size,

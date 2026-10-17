@@ -176,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
 
     while (gen_count < max_new_tokens) : (gen_count += 1) {
         // 每步新建一个无梯度轻量级图，生成完毕立即释放中间张量，维持极限低内存
-        var step_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+        var step_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false, .io = io });
         defer step_graph.deinit();
 
         const next_tok = try model.generateNextToken(&step_graph, current_tokens.items, mmap_ptr);
