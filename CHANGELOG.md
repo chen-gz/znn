@@ -14,8 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 新增 `backend` 包（分层层级 0）及 `Executor` 执行器：支持串行执行器 `Executor.serial` 与基于 Zig 0.16 `std.Io` 的线程化执行器 `Executor{ .io = threaded.io(), .max_tasks = 4 }`。
   - 提供分块数据并行 `parallelFor` 与按 chunk 索引写入、串行确定性规约的 `parallelReduce`，保证不同线程数下 100% 逐位确定性（Bitwise Determinism）。
 - **Q4 split-half 块格式与张量算子 (`src/tensor/quant.zig`, `src/tensor.zig`, `src/autodiff/types.zig`, `src/autodiff/op.zig`, `src/autodiff/graph_nn.zig`)**:
-  - 新增 split-half 排布的 `Q4Block`（低 4 位存储前 16 个权重，高 4 位存储后 16 个权重，对齐 ggml Q4_0 规范），大幅提升 SIMD 与向量连续访存效率；单线程 Q4 GEMV 吞吐从 1.7 GB/s 提升至 5.46 GB/s（提升 3.2 倍），多核并行达 18.7 GB/s（65.4 GFLOPS）。
-  - 新增 `Q4MatMul` 算子并挂载至 `Graph.q4MatMul`，前向分发至 `q4MatMulInto`，反向显式抛出 `error.UnsupportedBackward`。
+  - 新增 split-half 排布的 `Q4Block`（低 4 位存储前 16 个权重，高 4 位存储后 16 个权重，对齐 ggml Q4_0 规范），激活可按连续向量加载、半字节以 16 路向量一次解包。128 核 Linux 虚拟机、Gemma 4 12B MLP 形状（3840×15360，权重 33 MB）实测：单线程 Q4 GEMV 由 v0.3.0 的 19.7 ms（1.7 GB/s）降至约 11.6 ms（2.8 GB/s，约 1.7 倍）；经执行器用满全部核心约 0.9–1.2 ms（28–36 GB/s）。
+  - 新增 `Q4MatMul` 算子并挂载至 `Graph.q4MatMul`，前向经计算图注入的执行器分发至 `q4MatMulInto`，反向显式抛出 `error.UnsupportedBackward`。
+  - `q4MatMulInto` 按（8 行 × 128 列）二维分块并行，分块内每个权重块只解包一次并复用于各行；每个输出元素由单一分块按固定块序累加，串行、多线程与逐行计算结果逐位一致。实测（同上形状、全部核心）T=4 / 16 / 64 行分别为 1.3 / 2.8 / 7.4 ms（每行 320 / 176 / 116 µs）；单线程多行时每行约 6.7 ms（单行 11.6 ms）。
 - **Gemma 4 Q4 模块化拆分 (`src/models/gemma4_q4.zig`, `src/models/gemma4.zig`, `src/models.zig`)**:
   - 将超出 60 KB 限制的 `src/models/gemma4.zig` 拆分为 `src/models/gemma4.zig`（~25 KB）与 `src/models/gemma4_q4.zig`（~34 KB），严格保持所有非测试源码文件 `< 60 KB`。
   - 导出 `Q4Linear`、`Gemma4Q4MLP`、`Gemma4Q4Attention`、`Gemma4Q4DecoderLayer`、`Gemma4Q4ForCausalLM`、`TinyQ4Gemma4` 与 `DefaultGemma4Q4`。
@@ -33,7 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **热路径消除瞬态线程派发 (`src/models/gemma4_q4.zig`)**:
-  - 将 `Q4Linear.forward` 与 LM head argmax 中每次调用 `std.Thread.spawn` 的实现全面替换为 `Executor.parallelFor` 与 `Executor.parallelReduce`，消除了高频创建/销毁 OS 线程的系统开销。
+  - 将 `Q4Linear.forward` 与 LM head argmax 中每次调用 `std.Thread.spawn` 的实现替换为经 `GraphOptions.io` 注入的 `Executor.parallelFor` / `Executor.parallelReduce`，消除了高频创建/销毁 OS 线程的系统开销（v0.3.0 每次调用约 1.9 ms）。
 - **二进制格式魔数升级 (`src/models/gemma4_q4.zig`, `tools/quantize_gemma4.zig`, `examples/gemma4.zig`)**:
   - 随着 Q4 块排布升级为 split-half，二进制模型文件魔数直接升级为 `ZNNQ4G02`，量化工具与推理加载器同步升级（遵循 AGENTS.md §3 不保留旧版本向后兼容回退）。
 - **CBLAS 迁入 backend 包 (`src/backend/cblas.zig`, `tools/check_layers.zig`)**:
@@ -53,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 删除了 `Graph.initNoGrad`（统一为 `Graph.init` / `Graph.initDefault`）。
 
 ### Fixed
+- **Q4 推理路径的并行与健壮性 (`src/autodiff/graph_nn.zig`, `src/autodiff/op.zig`, `src/tensor/quant.zig`, `src/backend/executor.zig`, `src/models/gemma4_q4.zig`, `examples/gemma4.zig`, `src/bench/suites.zig`)**:
+  - `Graph.q4MatMul`（`Q4Linear.forward` 的实际路径）此前固定以串行执行器计算，忽略 `GraphOptions.io`；现改为使用 `graph.executor()`。同一形状下由 11.7 ms 降至约 0.9 ms；新增 `Graph.q4MatMul` 串行/多线程逐位一致测试与 `Q4 GEMV Graph.q4MatMul` 基准，防止回归。
+  - `examples/gemma4.zig` 未把 `init.io` 传入 `GraphOptions`，整个生成过程为单线程；现传入 `.io = io`。
+  - `q4MatMulInto` 改按 `shape.numel()` 推算行数并校验输入/输出连续性与形状（切片视图的 `data.len` 大于逻辑元素数），非连续输入由分配式 `q4MatMul` 与静态图重演先物化为连续副本；`q4MatMul` 改为接收执行器参数。
+  - LM head argmax 改为固定 4096 词的切块粒度（262144 词表约 64 块），不再固定切 8 块。
+  - `Executor` 缓存逻辑核心数，避免每次派发发起系统调用；`parallelReduce` 块数超过 256 时分批计算，局部结果保存在栈上，不再使用 `std.heap.page_allocator`（返回错误集不再包含 `OutOfMemory`）。
 - **规划与架构文档同代码现状对齐 (`plan/TODO.md`, `plan/README.md`, `doc/architecture.md`)**:
   - 更正 `MoELayer` “稀疏激活”的不实描述：当前仅以 Top-K 掩码置零非选中专家的门控概率，专家前向仍为稠密计算，稀疏 Token 分发另列任务。
   - 标注 `src/models/gemma4.zig`（64,336 B）超出 60 KB 规则，并将拆分列入 Phase 0。

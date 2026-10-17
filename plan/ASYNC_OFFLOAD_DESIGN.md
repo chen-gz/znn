@@ -422,12 +422,14 @@ flowchart LR
   4. [x] Q4 split-half 块内排布 + 文件魔数 `ZNNQ4G02`，量化工具与加载器同步升级；
   5. [x] `src/cblas.zig` 迁入 `src/backend/cblas.zig`，并在 `tools/check_layers.zig` 中以 `backend` 包（层级 0）替换 `cblas`；
   6. [x] 新增 `executor`、`q4`、`decode` 基准并记录基线。
-* **验收结果**：
-  * `zig build test` 全部通过（188/188 tests passed），所有非测试源码文件 `< 60 KB`；
-  * 热路径中彻底移除 `std.Thread.spawn`；
-  * Q4 GEMV 在 `io = null`（串行）与 `io = threaded`（多核）下逐位完全一致（Bitwise Equivalence）；
-  * 单线程 Q4 GEMV 吞吐达 **5.46 GB/s** (19.39 GFLOPS, 0.432 ms/step for 2048x2048)，相对 `v0.3.0` 基线（1.7 GB/s）取得 **3.2 倍** 性能提升；多核并行达 **18.7 GB/s** (65.43 GFLOPS, 0.126 ms/step)；
-  * 自回归单步解码延迟：`TinyGemma4` 0.023 ms/step (43.5k tokens/s)，`TinyQ4Gemma4` 0.020 ms/step (49.0k tokens/s)。
+* **验收结果**（以下数据均在同一台 128 核 Linux 虚拟机上以 `-Doptimize=ReleaseFast` 测得）：
+  * `zig build test` 全部通过（192/192），所有非测试源码文件 `< 60 KB`；
+  * 热路径中彻底移除 `std.Thread.spawn`；`Graph.q4MatMul`（`Q4Linear.forward` 的实际路径）经 `graph.executor()` 并行；
+  * Q4 矩阵乘在 `io = null`（串行）与 `io = threaded`（多核）下逐位一致，多行输入中每一行也与单行计算逐位一致；
+  * Gemma 4 12B MLP 形状（3840×15360，权重 33 MB）：单线程由 v0.3.0 的 19.7 ms（1.7 GB/s）降至约 11.6 ms（2.8 GB/s）；用满全部核心约 0.9–1.2 ms（28–36 GB/s）；多行输入 T=4 / 16 / 64 分别约 1.3 / 2.8 / 7.4 ms；
+  * `q4` 基准（2048×2048）：串行 0.84 ms，4 线程 0.29 ms，经 `Graph.q4MatMul` 4 线程 0.28 ms，16 行批量 4 线程 2.05 ms；
+  * `decode` 基准：`TinyGemma4` 0.037 ms/step（约 27.0k tokens/s），`TinyQ4Gemma4` 0.035 ms/step（约 28.8k tokens/s），`TinyQ4Gemma4` T=16 预填充 0.215 ms。
+  * 同时落地第 8 节中的 Q4 多行分块：16 路向量解包与（8 行 × 128 列）二维分块，分块内复用已解包的权重块。
 
 ### Phase 1（`v0.4.0`）：DPS 内核与 deferred 图（CPU）
 * **开发内容**：

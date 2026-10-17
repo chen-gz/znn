@@ -3,6 +3,17 @@
 
 const std = @import("std");
 
+/// 逻辑核心数缓存：首次查询后复用，避免每次派发都发起系统调用
+var cached_cpu_count = std.atomic.Value(usize).init(0);
+
+fn cpuCount() usize {
+    const cached = cached_cpu_count.load(.monotonic);
+    if (cached != 0) return cached;
+    const n = @max(1, std.Thread.getCpuCount() catch 1);
+    cached_cpu_count.store(n, .monotonic);
+    return n;
+}
+
 /// 数据并行执行器 (Executor)
 ///
 /// 遵循 AGENTS.md §4 规范：所有字段均有默认值，可以直接使用 `.{}` 或 `defaultOptions()` 构造；
@@ -10,13 +21,21 @@ const std = @import("std");
 pub const Executor = struct {
     /// 注入的输入输出并发接口；为 null 时完全串行执行，不引入任何多线程开销
     io: ?std.Io = null,
-    /// 最大并发任务数上限；为 null 时自动查询逻辑核心数
+    /// 最大并发任务数上限；为 null 时使用逻辑核心数
     max_tasks: ?usize = null,
 
     pub const serial: Executor = .{};
 
     pub fn defaultOptions() Executor {
         return .{};
+    }
+
+    /// `parallelReduce` 每批最多并行计算的块数（局部结果保存在栈上，不进行堆分配）
+    pub const max_reduce_batch: usize = 256;
+
+    fn taskLimit(self: Executor) usize {
+        if (self.io == null) return 1;
+        return @max(1, self.max_tasks orelse cpuCount());
     }
 
     /// 将区间 [0, n) 按固定粒度 `grain` 切块并行调用 `body(ctx, begin, end)`。
@@ -31,26 +50,12 @@ pub const Executor = struct {
         if (n == 0) return;
         const effective_grain = if (grain == 0) n else grain;
         const chunks = (n + effective_grain - 1) / effective_grain;
-
-        if (self.io == null or chunks <= 1) {
-            for (0..chunks) |c| {
-                const start = c * effective_grain;
-                const end = @min(start + effective_grain, n);
-                body(ctx, start, end);
-            }
-            return;
-        }
-
-        const io = self.io.?;
-        const cpu_count = std.Thread.getCpuCount() catch 1;
-        const max_allowed = self.max_tasks orelse cpu_count;
-        const tasks = @max(1, @min(chunks, max_allowed));
+        const tasks = @min(chunks, self.taskLimit());
 
         if (tasks <= 1) {
             for (0..chunks) |c| {
                 const start = c * effective_grain;
-                const end = @min(start + effective_grain, n);
-                body(ctx, start, end);
+                body(ctx, start, @min(start + effective_grain, n));
             }
             return;
         }
@@ -68,12 +73,12 @@ pub const Executor = struct {
                     const c = next_ptr.fetchAdd(1, .monotonic);
                     if (c >= total_chunks) break;
                     const start = c * g_size;
-                    const end = @min(start + g_size, total_n);
-                    body(worker_ctx, start, end);
+                    body(worker_ctx, start, @min(start + g_size, total_n));
                 }
             }
         };
 
+        const io = self.io.?;
         var group: std.Io.Group = .init;
         for (1..tasks) |_| {
             group.async(io, Worker.run, .{ &next_chunk, chunks, effective_grain, n, ctx });
@@ -82,7 +87,8 @@ pub const Executor = struct {
         try group.await(io);
     }
 
-    /// 有序归约：每块写入 `partials[chunk]`，由调用线程按块序合并，保证确定性。
+    /// 有序归约：块边界只取决于 n 与 grain；各块结果按块序由调用线程合并，保证结果与线程数无关、逐位可复现。
+    /// 块数超过 `max_reduce_batch` 时分批并行计算，每批的局部结果保存在栈上，不进行堆分配。
     pub fn parallelReduce(
         self: Executor,
         comptime T: type,
@@ -92,70 +98,50 @@ pub const Executor = struct {
         comptime map_fn: fn (@TypeOf(ctx), usize, usize) T,
         comptime reduce_fn: fn (T, T) T,
         identity: T,
-    ) (std.Io.Cancelable || error{OutOfMemory})!T {
+    ) std.Io.Cancelable!T {
         if (n == 0) return identity;
         const effective_grain = if (grain == 0) n else grain;
         const chunks = (n + effective_grain - 1) / effective_grain;
 
-        if (self.io == null or chunks <= 1) {
-            var acc = identity;
+        var acc = identity;
+        if (chunks <= 1 or self.taskLimit() <= 1) {
             for (0..chunks) |c| {
                 const start = c * effective_grain;
-                const end = @min(start + effective_grain, n);
-                acc = reduce_fn(acc, map_fn(ctx, start, end));
+                acc = reduce_fn(acc, map_fn(ctx, start, @min(start + effective_grain, n)));
             }
             return acc;
         }
 
-        var stack_buf: [256]T = undefined;
-        var heap_buf: ?[]T = null;
-        var partials: []T = undefined;
+        const Batch = struct {
+            map_ctx: @TypeOf(ctx),
+            g_size: usize,
+            total_n: usize,
+            first_chunk: usize,
+            out_partials: []T,
 
-        if (chunks <= stack_buf.len) {
-            partials = stack_buf[0..chunks];
-        } else {
-            heap_buf = try std.heap.page_allocator.alloc(T, chunks);
-            partials = heap_buf.?;
-        }
-        defer if (heap_buf) |h| std.heap.page_allocator.free(h);
-
-        const io = self.io.?;
-        const cpu_count = std.Thread.getCpuCount() catch 1;
-        const max_allowed = self.max_tasks orelse cpu_count;
-        const tasks = @max(1, @min(chunks, max_allowed));
-
-        var next_chunk = std.atomic.Value(usize).init(0);
-        const Worker = struct {
-            fn run(
-                next_ptr: *std.atomic.Value(usize),
-                total_chunks: usize,
-                g_size: usize,
-                total_n: usize,
-                worker_ctx: @TypeOf(ctx),
-                out_partials: []T,
-            ) void {
-                while (true) {
-                    const c = next_ptr.fetchAdd(1, .monotonic);
-                    if (c >= total_chunks) break;
-                    const start = c * g_size;
-                    const end = @min(start + g_size, total_n);
-                    out_partials[c] = map_fn(worker_ctx, start, end);
+            fn run(batch: @This(), begin: usize, end: usize) void {
+                for (begin..end) |i| {
+                    const start = (batch.first_chunk + i) * batch.g_size;
+                    batch.out_partials[i] = map_fn(batch.map_ctx, start, @min(start + batch.g_size, batch.total_n));
                 }
             }
         };
 
-        var group: std.Io.Group = .init;
-        for (1..tasks) |_| {
-            group.async(io, Worker.run, .{ &next_chunk, chunks, effective_grain, n, ctx, partials });
+        var partials: [max_reduce_batch]T = undefined;
+        var first: usize = 0;
+        while (first < chunks) : (first += max_reduce_batch) {
+            const count = @min(max_reduce_batch, chunks - first);
+            const batch = Batch{
+                .map_ctx = ctx,
+                .g_size = effective_grain,
+                .total_n = n,
+                .first_chunk = first,
+                .out_partials = partials[0..count],
+            };
+            try self.parallelFor(count, 1, batch, Batch.run);
+            for (partials[0..count]) |p| acc = reduce_fn(acc, p);
         }
-        Worker.run(&next_chunk, chunks, effective_grain, n, ctx, partials);
-        try group.await(io);
-
-        var final_acc = identity;
-        for (partials) |p| {
-            final_acc = reduce_fn(final_acc, p);
-        }
-        return final_acc;
+        return acc;
     }
 };
 
@@ -225,4 +211,30 @@ test "Executor multi-task execution with std.Io.Threaded" {
     const total = try exec.parallelReduce(u64, 1000, 25, MapReduce{ .arr = &data }, MapReduce.map, MapReduce.add, 0);
     // sum of 1..1000 = 1000 * 1001 / 2 = 500500
     try std.testing.expectEqual(@as(u64, 500500), total);
+}
+
+test "Executor parallelReduce with more chunks than one batch stays deterministic" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+
+    const data = try allocator.alloc(f32, 10_000);
+    defer allocator.free(data);
+    for (data, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i))) * 3.0;
+
+    const MapReduce = struct {
+        arr: []const f32,
+        fn map(ctx: @This(), begin: usize, end: usize) f32 {
+            var s: f32 = 0.0;
+            for (ctx.arr[begin..end]) |v| s += v;
+            return s;
+        }
+        fn add(a: f32, b: f32) f32 {
+            return a + b;
+        }
+    };
+    // grain = 7 → 1429 块，超过单批上限 256，需要分批归约
+    const serial_sum = try Executor.serial.parallelReduce(f32, data.len, 7, MapReduce{ .arr = data }, MapReduce.map, MapReduce.add, 0.0);
+    const threaded_sum = try (Executor{ .io = threaded.io(), .max_tasks = 6 }).parallelReduce(f32, data.len, 7, MapReduce{ .arr = data }, MapReduce.map, MapReduce.add, 0.0);
+    try std.testing.expectEqual(serial_sum, threaded_sum);
 }

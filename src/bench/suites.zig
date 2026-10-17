@@ -1177,6 +1177,61 @@ pub fn runQ4Benchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) !
         try runner.benchmark("Q4 GEMV threaded [1x2048x2048, 4 workers]", "Q4", flops, weight_bytes, null, "", &ctx);
     }
 
+    // 2b. Q4 GEMV through Graph.q4MatMul (the Q4Linear.forward path) [1x2048x2048, 4 workers]
+    {
+        const Q4GraphCtx = struct {
+            blocks: []tensor.Q4Block,
+            x: *tensor.Tensor,
+            threaded: std.Io.Threaded,
+            arena: std.heap.ArenaAllocator,
+            allocator: std.mem.Allocator,
+
+            pub fn init(alloc: std.mem.Allocator, in_f: usize, out_f: usize) !@This() {
+                const num_blocks = (in_f * out_f) / tensor.Q4Block.QK;
+                const raw_w = try alloc.alloc(f32, in_f * out_f);
+                defer alloc.free(raw_w);
+                for (raw_w, 0..) |*w, i| w.* = @sin(@as(f32, @floatFromInt(i))) * 1.5;
+
+                const blocks = try alloc.alloc(tensor.Q4Block, num_blocks);
+                errdefer alloc.free(blocks);
+                tensor.quant.quantizeSlice(blocks, raw_w);
+
+                const x = try tensor.zeros(alloc, &.{ 1, in_f });
+                errdefer x.deinit(alloc);
+                for (x.data, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i))) * 0.8;
+
+                return .{
+                    .blocks = blocks,
+                    .x = x,
+                    .threaded = std.Io.Threaded.init(alloc, .{}),
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .allocator = alloc,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                self.threaded.deinit();
+                self.allocator.free(self.blocks);
+                self.x.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                _ = self.arena.reset(.retain_capacity);
+                var g = autodiff.Graph.init(self.arena.allocator(), .{ .enable_grad = false, .io = self.threaded.io(), .max_tasks = 4 });
+                defer g.deinit();
+                const y = try g.q4MatMul(self.x, self.blocks, 2048, 2048);
+                std.mem.doNotOptimizeAway(y.data.ptr);
+            }
+        };
+
+        var ctx = try Q4GraphCtx.init(allocator, 2048, 2048);
+        defer ctx.deinit();
+        const flops: f64 = 2.0 * 1.0 * 2048.0 * 2048.0;
+        const weight_bytes: u64 = ((2048 * 2048) / tensor.Q4Block.QK) * @sizeOf(tensor.Q4Block);
+        try runner.benchmark("Q4 GEMV Graph.q4MatMul [1x2048x2048, 4 workers]", "Q4", flops, weight_bytes, null, "", &ctx);
+    }
+
     // 3. Q4 GEMV serial [1x4096x4096]
     {
         const Q4GemvLargeCtx = struct {

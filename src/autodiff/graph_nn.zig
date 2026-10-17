@@ -718,6 +718,8 @@ pub fn embedding(self: *Graph, W: *Tensor, X: anytype) !*Tensor {
     );
 }
 
+/// 4-bit 量化矩阵乘法 (4-bit Quantized Matrix Multiplication) 前向：经计算图注入的执行器 (`GraphOptions.io`) 多核并行，
+/// 仅用于推理（反向传播返回 `error.UnsupportedBackward`）
 pub fn q4MatMul(
     self: *Graph,
     x: *Tensor,
@@ -726,7 +728,7 @@ pub fn q4MatMul(
     out_features: usize,
 ) !*Tensor {
     const allocator = self.arena.allocator();
-    const Y = try tensor_mod.quant.q4MatMul(x, blocks, in_features, out_features, allocator);
+    const Y = try tensor_mod.quant.q4MatMul(self.executor(), x, blocks, in_features, out_features, allocator);
     const ctx: OpContext = .{
         .Q4MatMul = .{
             .blocks = blocks,
@@ -742,4 +744,3 @@ pub fn q4MatMul(
         false,
     );
 }
-

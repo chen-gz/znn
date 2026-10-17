@@ -25,7 +25,10 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         },
         .Q4MatMul => {
             const ctx = self.context.Q4MatMul;
-            try tensor_mod.quant.q4MatMulInto(.serial, self.outputs[0], self.inputs[0], ctx.blocks, ctx.in_features, ctx.out_features);
+            const x = self.inputs[0];
+            const x_contig = if (x.isContiguous()) x else try x.contiguous(allocator);
+            defer if (x_contig != x) x_contig.deinit(allocator);
+            try tensor_mod.quant.q4MatMulInto(.serial, self.outputs[0], x_contig, ctx.blocks, ctx.in_features, ctx.out_features);
         },
         .Relu => {
             copyFromEager(self.outputs[0], try self.inputs[0].relu(allocator), allocator);
