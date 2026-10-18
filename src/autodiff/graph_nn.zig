@@ -664,6 +664,30 @@ pub fn dropout(self: *Graph, X: *Tensor, p: f32, random: std.Random) !*Tensor {
 }
 
 pub fn rope(self: *Graph, X: *Tensor, start_pos: usize, options: tensor_mod.RopeOptions) !*Tensor {
+    if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad and options.rotary_offset == 0 and options.partial_rotary_factor == 1.0) {
+        const D = X.shape.dims[X.shape.len - 1];
+        if (D % 2 == 0) {
+            var x_mlx = try X.toMlxArrayZeroCopy();
+            defer x_mlx.deinit();
+
+            const traditional = (options.mode == .interleaved);
+            var y_mlx = try backend.mlx.Array.fastRoPE(
+                x_mlx,
+                D,
+                traditional,
+                options.base,
+                1.0,
+                start_pos,
+                self.options.mlx_stream,
+            );
+            defer y_mlx.deinit();
+
+            const Y = try self.tensorND(X.shape.dims[0..X.shape.len], false);
+            try y_mlx.copyToSlice(Y.data);
+            return Y;
+        }
+    }
+
     const allocator = self.arena.allocator();
     const Y = try X.rope(start_pos, options, allocator);
     return self.registerSingleOutputOp(

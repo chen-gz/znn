@@ -283,27 +283,35 @@ pub const Gemma4Q4Attention = struct {
             v_final = try graph.repeatKV(v, groups);
         }
 
-        // 6. 注意力计算 (官方实现中 scaling = 1.0)
-        const k_trans = try graph.transposeND(k, 2, 3);
-        var scores = try graph.batchMatMul(q_rot, k_trans);
+        // 6. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0)
+        // 当为全局注意力层 (full_attention) 或时间步不超过滑动窗口跨度时，等价于标准因果注意力，
+        // 直接分发至 scaledDotProductAttention（无求导 GPU 模式直通融合 FlashAttention Metal 内核）；
+        // 否则回退至带滑动窗口截断的分解计算图。
+        const is_pure_causal = (self.attn_type == .full_attention or T <= self.sliding_window);
+        const y_4d = if (is_pure_causal)
+            try graph.scaledDotProductAttention(q_rot, k, v_final, 1.0, true)
+        else blk: {
+            const k_trans = try graph.transposeND(k, 2, 3);
+            var scores = try graph.batchMatMul(q_rot, k_trans);
 
-        const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
-        mask_node.is_buffer = true;
-        for (0..T) |i| {
-            for (0..T) |j| {
-                if (j > i) {
-                    mask_node.data[i * T + j] = -1e9;
-                } else if (self.attn_type == .sliding_attention and i >= j + self.sliding_window) {
-                    mask_node.data[i * T + j] = -1e9;
-                } else {
-                    mask_node.data[i * T + j] = 0.0;
+            const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
+            mask_node.is_buffer = true;
+            for (0..T) |i| {
+                for (0..T) |j| {
+                    if (j > i) {
+                        mask_node.data[i * T + j] = -1e9;
+                    } else if (self.attn_type == .sliding_attention and i >= j + self.sliding_window) {
+                        mask_node.data[i * T + j] = -1e9;
+                    } else {
+                        mask_node.data[i * T + j] = 0.0;
+                    }
                 }
             }
-        }
-        scores = try graph.add(scores, mask_node);
+            scores = try graph.add(scores, mask_node);
 
-        const att_sm = try graph.softmax(scores);
-        const y_4d = try graph.batchMatMul(att_sm, v_final);
+            const att_sm = try graph.softmax(scores);
+            break :blk try graph.batchMatMul(att_sm, v_final);
+        };
 
         // 7. 转置并输出投影
         const y_trans = try graph.transposeND(y_4d, 1, 2);
