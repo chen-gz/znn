@@ -1379,8 +1379,8 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
     // 3. 验证缩放点积注意力 GPU 卸载 (FlashAttention SDPA)
     const B: usize = 1;
     const H: usize = 2;
-    const T: usize = 4;
-    const D: usize = 8;
+    const T: usize = 16;
+    const D: usize = 64;
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(D)));
 
     const q_cpu = try g_cpu.tensorND(&.{ B, H, T, D }, false);
@@ -1402,6 +1402,7 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
 
     const sdpa_cpu = try g_cpu.scaledDotProductAttention(q_cpu, k_cpu, v_cpu, scale, true);
     const sdpa_gpu = try g_gpu.scaledDotProductAttention(q_gpu, k_gpu, v_gpu, scale, true);
+
     for (sdpa_cpu.data, sdpa_gpu.data) |c_val, g_val| {
         try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
     }

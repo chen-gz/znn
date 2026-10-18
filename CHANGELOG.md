@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 在 `backend.mlx.Array` 上直接提供跨包零依赖鸭子类型桥接（`Array.fromTensor`、`Array.fromTensorZeroCopy`、`arr.copyToTensor`）并在 `Tensor` 上提供快捷包装，消除冗余独立桥接文件，保持底层 `backend` 包为零依赖最底层。
   - `GraphOptions` 支持硬件设备配置：`device: backend.mlx.DeviceType = .cpu` 与 `mlx_stream: ?backend.mlx.Stream = null`。无求导执行时，`graph.matmul`、`graph.batchMatMul`、`graph.rmsNorm` 以及 `graph.scaledDotProductAttention` 自动下沉至 Apple Silicon GPU 流上并发执行。
   - `ScaledDotProductAttention.forwardCore` 与 `CausalSelfAttention` 模块在 GPU 模式下直通融合 FlashAttention 硬件内核。
-  - 新增 `mlx` 基准测试套件 (`src/bench/mlx_suite.zig`)：实测 Apple Silicon GPU 矩阵乘法达到 **1.51 TFLOPS**，因果 SDPA 达到 **1.31 TFLOPS**，RMSNorm 吞吐达到 **35.88 GB/s**。
+  - 新增完整的 Apple Silicon CPU (AMX CBLAS) vs MLX GPU 性能基准测试与精度验证套件 (`src/bench/mlx_suite.zig`, `examples/benchmark.zig`)：包含 GEMM `[1024x1024]`、因果 SDPA `[1, 8, 512, 64]`、长上下文 SDPA `[1, 8, 1024, 64]`、RMSNorm `[1024x2048]` 与端到端因果自注意力模块 `CausalSelfAttention` `[B=4, T=128, D=256, H=4]`。实测因果 SDPA 取得 **12.77x** 延迟加速，长上下文 SDPA 取得 **22.62x** 延迟加速（GPU 1188.4 GFLOPS vs CPU 52.5 GFLOPS），RMSNorm 达到 **12.6 GB/s** (1.64x 加速)，所有算子与模块精度误差控制在 $\le 4 \times 10^{-6}$ 并通过数值校验。
 - **执行器与多核并行 (`src/backend/executor.zig`, `src/backend.zig`)**:
   - 新增 `backend` 包（分层层级 0）及 `Executor` 执行器：支持串行执行器 `Executor.serial` 与基于 Zig 0.16 `std.Io` 的线程化执行器 `Executor{ .io = threaded.io(), .max_tasks = 4 }`。
   - 提供分块数据并行 `parallelFor` 与按 chunk 索引写入、串行确定性规约的 `parallelReduce`，保证不同线程数下 100% 逐位确定性（Bitwise Determinism）。
@@ -63,6 +63,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 删除了 `Graph.initNoGrad`（统一为 `Graph.init` / `Graph.initDefault`）。
 
 ### Fixed
+- **因果自注意力掩码内存未初始化清零修复 (`src/autodiff/graph_nn.zig`, `src/nn/attention.zig`)**:
+  - 修复 `graph_nn.scaledDotProductAttention` 与 `attention.forwardCore` 中创建的因果掩码 `[1, 1, T, T]` 下三角未做 `@memset(mask_node.data, 0.0)` 清零导致残留脏内存的问题。
+- **MLX 数组跨步与非连续缓冲区重排修复 (`src/backend/mlx.zig`)**:
+  - 新增 `Array.isContiguousRowMajor` 与步长感知 `Array.copyToSlice`：修复 Apple MLX 融合 FlashAttention Steel Metal 内核底层输出为 `[B, T, H, D]` 物理排列但携带非连续步长导致回写 CPU 错位的问题，支持 4D 注意力快速块复制与任意维度通用步长重排，实现 CPU 与 MLX GPU 数值 $100\%$ 精确吻合。
 - **Q4 推理路径的并行与健壮性 (`src/autodiff/graph_nn.zig`, `src/autodiff/op.zig`, `src/tensor/quant.zig`, `src/backend/executor.zig`, `src/models/gemma4_q4.zig`, `examples/gemma4.zig`, `src/bench/suites.zig`)**:
   - `Graph.q4MatMul`（`Q4Linear.forward` 的实际路径）此前固定以串行执行器计算，忽略 `GraphOptions.io`；现改为使用 `graph.executor()`。同一形状下由 11.7 ms 降至约 0.9 ms；新增 `Graph.q4MatMul` 串行/多线程逐位一致测试与 `Q4 GEMV Graph.q4MatMul` 基准，防止回归。
   - `examples/gemma4.zig` 未把 `init.io` 传入 `GraphOptions`，整个生成过程为单线程；现传入 `.io = io`。

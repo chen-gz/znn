@@ -727,11 +727,11 @@ pub fn scaledDotProductAttention(
     is_causal: bool,
 ) !*Tensor {
     if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad) {
-        var q_mlx = try q.toMlxArrayZeroCopy();
+        var q_mlx = try q.toMlxArray();
         defer q_mlx.deinit();
-        var k_mlx = try k.toMlxArrayZeroCopy();
+        var k_mlx = try k.toMlxArray();
         defer k_mlx.deinit();
-        var v_mlx = try v.toMlxArrayZeroCopy();
+        var v_mlx = try v.toMlxArray();
         defer v_mlx.deinit();
 
         var out_mlx = try backend.mlx.Array.fastScaledDotProductAttention(
@@ -761,6 +761,7 @@ pub fn scaledDotProductAttention(
     if (is_causal) {
         const mask_node = try self.tensorND(&.{ 1, 1, T, T }, false);
         mask_node.is_buffer = true;
+        @memset(mask_node.data, 0.0);
         for (0..T) |i| {
             for (i + 1..T) |j| {
                 mask_node.data[i * T + j] = -1e9;
