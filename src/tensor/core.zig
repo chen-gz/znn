@@ -1,5 +1,7 @@
 const std = @import("std");
+const backend = @import("../backend.zig");
 const c = @import("../backend/cblas.zig");
+const mlx_bridge = @import("mlx_bridge.zig");
 const shape_mod = @import("shape.zig");
 pub const Shape = shape_mod.Shape;
 pub const computeContiguousStrides = shape_mod.computeContiguousStrides;
@@ -175,6 +177,28 @@ pub const Tensor = struct {
         }
         std.debug.print("]", .{});
     }
+
+    // ============================================================================
+    // Apple MLX 硬件加速桥接 (MLX Bridge)
+    // ============================================================================
+
+    /// 将只读张量转换为 MLX 数组 (Apple Machine Learning Explore, MLX)
+    pub fn toMlxArray(self: *const Tensor) !backend.mlx.Array {
+        return mlx_bridge.toMlxArray(self);
+    }
+
+    /// 将张量以零拷贝 (Zero-Copy) 方式映射为 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
+    pub fn toMlxArrayZeroCopy(self: *Tensor) !backend.mlx.Array {
+        return mlx_bridge.toMlxArrayZeroCopy(self);
+    }
+
+    /// 将 MLX 数组计算完成后的数据拷贝回张量
+    pub fn copyFromMlxArray(self: *Tensor, arr: backend.mlx.Array) !void {
+        return mlx_bridge.copyFromMlxArray(self, arr);
+    }
+
+    /// 从已求值的 MLX 数组新建分配一个张量
+    pub const fromMlxArray = mlx_bridge.fromMlxArray;
 
     // ============================================================================
     // Eager tensor operations (pure numerical kernels, no graph recording)

@@ -27,6 +27,8 @@ pub const GraphOptions = struct {
     enable_grad: bool = true,
     mode: ExecutionMode = .eager,
     max_tasks: ?usize = null,
+    device: backend.mlx.DeviceType = .cpu, // 目标计算设备：.cpu (默认) 或 .gpu (Apple Silicon MLX 硬件加速)
+    mlx_stream: ?backend.mlx.Stream = null, // 可选注入的 MLX 执行流 (Stream)；为 null 时使用默认流
 
     pub const default: GraphOptions = .{};
     pub fn defaultOptions() GraphOptions {
@@ -472,6 +474,22 @@ pub const Graph = struct {
     // 矩阵乘法算子前向传播：C = A * B
     pub fn matmul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
+        if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad) {
+            var a_mlx = try A.toMlxArrayZeroCopy();
+            defer a_mlx.deinit();
+            var b_mlx = try B.toMlxArrayZeroCopy();
+            defer b_mlx.deinit();
+
+            var c_mlx = try backend.mlx.Array.matmul(a_mlx, b_mlx, self.options.mlx_stream);
+            defer c_mlx.deinit();
+
+            const M = A.shape.dims[0];
+            const N = B.shape.dims[1];
+            const C = try self.tensorND(&.{ M, N }, false);
+            try c_mlx.copyToSlice(C.data);
+            return C;
+        }
+
         const C = try A.matmul(B, allocator);
         return self.registerSingleOutputOp(
             C,
@@ -705,6 +723,7 @@ pub const Graph = struct {
     pub const batchMatMul = graph_nn.batchMatMul;
     pub const embedding = graph_nn.embedding;
     pub const q4MatMul = graph_nn.q4MatMul;
+    pub const scaledDotProductAttention = graph_nn.scaledDotProductAttention;
 
     pub fn sqrt(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();

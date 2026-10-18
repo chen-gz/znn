@@ -1250,3 +1250,43 @@ test "Tensor linear algebra: One-Sided Jacobi SVD decomposition" {
     }
 }
 
+test "Tensor to MLX Array bridge zero-copy and conversion" {
+    const backend = @import("../backend.zig");
+    if (!backend.mlx.has_mlx) return;
+
+    const allocator = std.testing.allocator;
+
+    var t = try tensor.zeros(allocator, &.{ 2, 3 });
+    defer tensor.free(allocator, t);
+    for (t.data, 0..) |*val, i| {
+        val.* = @as(f32, @floatFromInt(i + 1));
+    }
+
+    // 1. 验证常规复制转换为 MLX 数组 (toMlxArray)
+    var arr = try t.toMlxArray();
+    defer arr.deinit();
+    try std.testing.expectEqual(@as(usize, 6), arr.size());
+    try std.testing.expectEqual(@as(usize, 2), arr.ndim());
+    try std.testing.expectEqualSlices(f32, t.data, arr.dataFloat32());
+
+    // 2. 验证从 MLX 数组新建分配张量 (fromMlxArray)
+    const t_restored = try Tensor.fromMlxArray(allocator, arr);
+    defer tensor.free(allocator, t_restored);
+    try std.testing.expectEqualSlices(usize, t.shape.dims[0..t.shape.len], t_restored.shape.dims[0..t_restored.shape.len]);
+    try std.testing.expectEqualSlices(f32, t.data, t_restored.data);
+
+    // 3. 验证零拷贝映射与回写 (toMlxArrayZeroCopy & copyFromMlxArray)
+    var arr_zc = try t.toMlxArrayZeroCopy();
+    defer arr_zc.deinit();
+    try std.testing.expectEqual(@as(usize, 6), arr_zc.size());
+
+    // 对原张量底层数据原地修改，统一内存下由 MLX 阵列可见
+    t.data[0] = 999.0;
+    try std.testing.expectApproxEqAbs(@as(f32, 999.0), arr_zc.dataFloat32()[0], 1e-4);
+
+    // 验证 copyFromMlxArray
+    t_restored.data[0] = 0.0;
+    try t_restored.copyFromMlxArray(arr_zc);
+    try std.testing.expectApproxEqAbs(@as(f32, 999.0), t_restored.data[0], 1e-4);
+}
+

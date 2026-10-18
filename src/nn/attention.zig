@@ -100,8 +100,15 @@ pub const ScaledDotProductAttention = struct {
     /// 在当前计算图作用域内直接执行四维 (4-Dimensional, 4D) 缩放点积注意力计算：
     /// K^T -> Q * K^T -> 1/sqrt(d_k) 缩放 -> 可选因果掩码 (Causal Mask) -> 归一化指数函数 (Softmax) -> 乘 V
     pub fn forwardCore(self: *const ScaledDotProductAttention, graph: *autodiff.Graph, q: *Tensor, k: *Tensor, v: *Tensor) !*Tensor {
-        const T = q.shape.dims[2];
         const d_k = q.shape.dims[3];
+        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_k)));
+
+        // 若计算图配置为 GPU 硬件加速且无需求导，委托给融合算子 fastScaledDotProductAttention 执行
+        if (graph.options.device == .gpu and !graph.enable_grad) {
+            return try graph.scaledDotProductAttention(q, k, v, scale, self.causal);
+        }
+
+        const T = q.shape.dims[2];
 
         // 1. 转置键张量 (Key, K) 用于计算点积注意力: [B, H, T, d_k] -> [B, H, d_k, T]
         const k_t = try graph.transposeND(k, 2, 3);
@@ -110,7 +117,6 @@ pub const ScaledDotProductAttention = struct {
         const att = try graph.batchMatMul(q, k_t);
 
         // 3. 缩放得分，除以 sqrt(d_k) 避免点积方差随维度增大导致梯度消失: score = (Q * K^T) / sqrt(d_k)
-        const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(d_k)));
         var scores = try graph.mulScalar(att, scale);
 
         // 4. 构造因果掩码 (Causal Mask) 矩阵 [1, 1, T, T] (通过多维广播作用于 [B, H, T, T])
