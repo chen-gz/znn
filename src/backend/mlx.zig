@@ -164,11 +164,90 @@ pub const Array = struct {
         return n;
     }
 
-    /// 将 GPU 计算完毕后的浮点数据安全复制到目标切片中
+    /// 检查张量在显存中是否为标准严格行主序连续存储 (C-contiguous / Row-Major)
+    pub fn isContiguousRowMajor(self: Array) bool {
+        if (!has_mlx or self.handle.ctx == null) return false;
+        const n = self.ndim();
+        if (n == 0) return true;
+        const c_shape = c.mlx_array_shape(self.handle);
+        const c_strides = c.mlx_array_strides(self.handle);
+        if (c_strides[n - 1] != 1) return false;
+        var expected_stride: usize = 1;
+        var i: usize = n - 1;
+        while (i > 0) {
+            expected_stride *= @intCast(c_shape[i]);
+            i -= 1;
+            if (c_strides[i] != expected_stride) return false;
+        }
+        return true;
+    }
+
+    /// 将数组重整为标准行主序连续存储 (Row-Major Contiguous)
+    pub fn contiguous(self: Array, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+        const rc = c.mlx_contiguous(&res.handle, self.handle, false, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 将 GPU 计算完毕后的浮点数据安全复制到目标切片中（自动感知并处理非连续与转置布局）
     pub fn copyToSlice(self: Array, dest: []f32) !void {
         const src = self.dataFloat32();
         if (dest.len != src.len) return error.ShapeMismatch;
-        @memcpy(dest, src);
+
+        if (self.isContiguousRowMajor()) {
+            @memcpy(dest, src);
+            return;
+        }
+
+        const n = self.ndim();
+        const c_shape = c.mlx_array_shape(self.handle);
+        const c_strides = c.mlx_array_strides(self.handle);
+
+        // 针对注意力算子常见的 4D 张量 (Batch, Head, SeqLen, HeadDim) 极速分块复制 (底层 HeadDim 连续)
+        if (n == 4 and c_strides[3] == 1) {
+            const B = @as(usize, @intCast(c_shape[0]));
+            const H = @as(usize, @intCast(c_shape[1]));
+            const T = @as(usize, @intCast(c_shape[2]));
+            const D = @as(usize, @intCast(c_shape[3]));
+            const sB = c_strides[0];
+            const sH = c_strides[1];
+            const sT = c_strides[2];
+
+            for (0..B) |b| {
+                for (0..H) |h| {
+                    for (0..T) |t| {
+                        const in_off = b * sB + h * sH + t * sT;
+                        const out_off = b * (H * T * D) + h * (T * D) + t * D;
+                        @memcpy(dest[out_off .. out_off + D], src[in_off .. in_off + D]);
+                    }
+                }
+            }
+            return;
+        }
+
+        // 通用 N 维非连续步长重排回写
+        var coord = [_]usize{0} ** 8;
+        for (0..src.len) |out_idx| {
+            var in_idx: usize = 0;
+            for (0..n) |d| {
+                in_idx += coord[d] * c_strides[d];
+            }
+            dest[out_idx] = src[in_idx];
+
+            var dim_idx = n;
+            while (dim_idx > 0) {
+                dim_idx -= 1;
+                coord[dim_idx] += 1;
+                if (coord[dim_idx] < @as(usize, @intCast(c_shape[dim_idx]))) {
+                    break;
+                }
+                coord[dim_idx] = 0;
+            }
+        }
     }
 
     /// 从任意张量对象复制创建 MLX 数组 (鸭子类型，保持 backend 为最底层包而不产生反向导入)

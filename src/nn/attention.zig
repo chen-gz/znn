@@ -124,6 +124,7 @@ pub const ScaledDotProductAttention = struct {
         if (self.causal) {
             const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
             mask_node.is_buffer = true;
+            @memset(mask_node.data, 0.0);
             for (0..T) |i| {
                 for (i + 1..T) |j| {
                     mask_node.data[i * T + j] = -1e9;
