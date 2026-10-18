@@ -1284,9 +1284,18 @@ test "Tensor to MLX Array bridge zero-copy and conversion" {
     t.data[0] = 999.0;
     try std.testing.expectApproxEqAbs(@as(f32, 999.0), arr_zc.dataFloat32()[0], 1e-4);
 
-    // 验证 copyFromMlxArray
+    // 验证 copyFromMlxArray 与 backend.mlx.Array.copyToTensor
     t_restored.data[0] = 0.0;
     try t_restored.copyFromMlxArray(arr_zc);
     try std.testing.expectApproxEqAbs(@as(f32, 999.0), t_restored.data[0], 1e-4);
+
+    // 4. 验证直接从 backend.mlx.Array 静态方法调用 (Array.fromTensor / Array.fromTensorZeroCopy / arr.copyToTensor)
+    var arr_direct = try backend.mlx.Array.fromTensorZeroCopy(t);
+    defer arr_direct.deinit();
+    try std.testing.expectEqual(@as(usize, 6), arr_direct.size());
+    t.data[1] = 777.0;
+    try std.testing.expectApproxEqAbs(@as(f32, 777.0), arr_direct.dataFloat32()[1], 1e-4);
+    try arr_direct.copyToTensor(t_restored);
+    try std.testing.expectApproxEqAbs(@as(f32, 777.0), t_restored.data[1], 1e-4);
 }
 

@@ -21,6 +21,7 @@ pub const MlxError = error{
     InvalidShape,
     OutOfMemory,
     ShapeMismatch,
+    NonContiguousTensor,
 };
 
 /// 硬件计算设备类型：图形处理器 (Graphics Processing Unit, GPU) 与中央处理器 (Central Processing Unit, CPU)
@@ -168,6 +169,27 @@ pub const Array = struct {
         const src = self.dataFloat32();
         if (dest.len != src.len) return error.ShapeMismatch;
         @memcpy(dest, src);
+    }
+
+    /// 从任意张量对象复制创建 MLX 数组 (鸭子类型，保持 backend 为最底层包而不产生反向导入)
+    pub fn fromTensor(t: anytype) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (!t.isContiguous()) return error.NonContiguousTensor;
+        return fromSlice(t.data[0..t.shape.numel()], t.shape.dims[0..t.shape.len]);
+    }
+
+    /// 从任意张量对象零拷贝创建 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
+    pub fn fromTensorZeroCopy(t: anytype) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (!t.isContiguous()) return error.NonContiguousTensor;
+        return fromSliceZeroCopy(t.data[0..t.shape.numel()], t.shape.dims[0..t.shape.len]);
+    }
+
+    /// 将 MLX 数组中的计算结果写回任意张量对象
+    pub fn copyToTensor(self: Array, t: anytype) !void {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (!t.isContiguous()) return error.NonContiguousTensor;
+        return self.copyToSlice(t.data[0..t.shape.numel()]);
     }
 
     /// 释放数组显存与内部引用
