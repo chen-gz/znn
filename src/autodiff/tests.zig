@@ -1322,3 +1322,87 @@ test "Graph.q4MatMul runs through the graph executor and matches serial executio
         try std.testing.expectEqualSlices(f32, y_s.data, y_t.data);
     }
 }
+
+test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" {
+    const backend = @import("../backend.zig");
+    if (!backend.mlx.has_mlx) return;
+
+    const allocator = std.testing.allocator;
+
+    var g_cpu = Graph.init(allocator, .{ .enable_grad = false, .device = .cpu });
+    defer g_cpu.deinit();
+
+    var g_gpu = Graph.init(allocator, .{ .enable_grad = false, .device = .gpu });
+    defer g_gpu.deinit();
+
+    // 1. 验证矩阵乘法 GPU 卸载 (MatMul)
+    const a_cpu = try g_cpu.tensor(2, 3, false);
+    const a_gpu = try g_gpu.tensor(2, 3, false);
+    for (a_cpu.data, a_gpu.data, 0..) |*c, *g, i| {
+        const val = @as(f32, @floatFromInt(i + 1));
+        c.* = val;
+        g.* = val;
+    }
+    const b_cpu = try g_cpu.tensor(3, 2, false);
+    const b_gpu = try g_gpu.tensor(3, 2, false);
+    for (b_cpu.data, b_gpu.data, 0..) |*c, *g, i| {
+        const val = @as(f32, @floatFromInt((i + 1) * 2));
+        c.* = val;
+        g.* = val;
+    }
+
+    const c_cpu = try g_cpu.matmul(a_cpu, b_cpu);
+    const c_gpu = try g_gpu.matmul(a_gpu, b_gpu);
+    for (c_cpu.data, c_gpu.data) |c_val, g_val| {
+        try std.testing.expectApproxEqAbs(c_val, g_val, 1e-4);
+    }
+
+    // 2. 验证均方根层归一化 GPU 卸载 (RMSNorm)
+    const x_cpu = try g_cpu.tensor(2, 4, false);
+    const x_gpu = try g_gpu.tensor(2, 4, false);
+    for (x_cpu.data, x_gpu.data, 0..) |*c, *g, i| {
+        const val = @as(f32, @floatFromInt(i + 1)) * 0.5;
+        c.* = val;
+        g.* = val;
+    }
+    const w_cpu = try g_cpu.tensor(1, 4, false);
+    const w_gpu = try g_gpu.tensor(1, 4, false);
+    @memset(w_cpu.data, 1.0);
+    @memset(w_gpu.data, 1.0);
+
+    const norm_cpu = try g_cpu.rmsNorm(x_cpu, w_cpu, 1e-5);
+    const norm_gpu = try g_gpu.rmsNorm(x_gpu, w_gpu, 1e-5);
+    for (norm_cpu.data, norm_gpu.data) |c_val, g_val| {
+        try std.testing.expectApproxEqAbs(c_val, g_val, 1e-4);
+    }
+
+    // 3. 验证缩放点积注意力 GPU 卸载 (FlashAttention SDPA)
+    const B: usize = 1;
+    const H: usize = 2;
+    const T: usize = 4;
+    const D: usize = 8;
+    const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(D)));
+
+    const q_cpu = try g_cpu.tensorND(&.{ B, H, T, D }, false);
+    const q_gpu = try g_gpu.tensorND(&.{ B, H, T, D }, false);
+    const k_cpu = try g_cpu.tensorND(&.{ B, H, T, D }, false);
+    const k_gpu = try g_gpu.tensorND(&.{ B, H, T, D }, false);
+    const v_cpu = try g_cpu.tensorND(&.{ B, H, T, D }, false);
+    const v_gpu = try g_gpu.tensorND(&.{ B, H, T, D }, false);
+
+    for (0..B * H * T * D) |i| {
+        const val = @sin(@as(f32, @floatFromInt(i)) * 0.2);
+        q_cpu.data[i] = val;
+        q_gpu.data[i] = val;
+        k_cpu.data[i] = val * 0.8;
+        k_gpu.data[i] = val * 0.8;
+        v_cpu.data[i] = val * 1.2;
+        v_gpu.data[i] = val * 1.2;
+    }
+
+    const sdpa_cpu = try g_cpu.scaledDotProductAttention(q_cpu, k_cpu, v_cpu, scale, true);
+    const sdpa_gpu = try g_gpu.scaledDotProductAttention(q_gpu, k_gpu, v_gpu, scale, true);
+    for (sdpa_cpu.data, sdpa_gpu.data) |c_val, g_val| {
+        try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
+    }
+}

@@ -20,6 +20,7 @@ pub const MlxError = error{
     MlxOperationFailed,
     InvalidShape,
     OutOfMemory,
+    ShapeMismatch,
 };
 
 /// 硬件计算设备类型：图形处理器 (Graphics Processing Unit, GPU) 与中央处理器 (Central Processing Unit, CPU)
@@ -116,6 +117,57 @@ pub const Array = struct {
         );
         if (arr.ctx == null) return error.MlxOperationFailed;
         return .{ .handle = arr };
+    }
+
+    fn noopDtor(_: ?*anyopaque) callconv(.c) void {}
+
+    /// 从外部已分配内存零拷贝 (Zero-Copy) 创建单精度浮点 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
+    pub fn fromSliceZeroCopy(slice: []f32, shape_dims: []const usize) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (shape_dims.len == 0 or shape_dims.len > 8) return error.InvalidShape;
+
+        var c_shape: [8]c_int = undefined;
+        var total_numel: usize = 1;
+        for (shape_dims, 0..) |dim, i| {
+            c_shape[i] = @intCast(dim);
+            total_numel *= dim;
+        }
+        if (total_numel != slice.len) return error.InvalidShape;
+
+        const arr = c.mlx_array_new_data_managed(
+            slice.ptr,
+            &c_shape,
+            @intCast(shape_dims.len),
+            c.MLX_FLOAT32,
+            &noopDtor,
+        );
+        if (arr.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = arr };
+    }
+
+    /// 获取数组元素总数
+    pub fn size(self: Array) usize {
+        if (!has_mlx or self.handle.ctx == null) return 0;
+        return c.mlx_array_size(self.handle);
+    }
+
+    /// 获取数组形状切片到输出缓冲区中，返回实际维度数量
+    pub fn shape(self: Array, out_dims: []usize) !usize {
+        if (!has_mlx or self.handle.ctx == null) return 0;
+        const n = self.ndim();
+        if (out_dims.len < n) return error.InvalidShape;
+        const c_shape = c.mlx_array_shape(self.handle);
+        for (0..n) |i| {
+            out_dims[i] = @intCast(c_shape[i]);
+        }
+        return n;
+    }
+
+    /// 将 GPU 计算完毕后的浮点数据安全复制到目标切片中
+    pub fn copyToSlice(self: Array, dest: []f32) !void {
+        const src = self.dataFloat32();
+        if (dest.len != src.len) return error.ShapeMismatch;
+        @memcpy(dest, src);
     }
 
     /// 释放数组显存与内部引用
@@ -338,4 +390,20 @@ test "MLX GPU backend matmul and fast kernels" {
     const sdpa_out = sdpa_res.dataFloat32();
     try std.testing.expectEqual(@as(usize, 64), sdpa_out.len);
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), sdpa_out[0], 1e-4);
+
+    // 4. 验证零拷贝创建与形状查询 (Zero-Copy & Shape Query)
+    var host_buf = [_]f32{ 10.0, 20.0, 30.0, 40.0, 50.0, 60.0 };
+    var zc_arr = try Array.fromSliceZeroCopy(&host_buf, &.{ 2, 3 });
+    defer zc_arr.deinit();
+    try std.testing.expectEqual(@as(usize, 6), zc_arr.size());
+    try std.testing.expectEqual(@as(usize, 2), zc_arr.ndim());
+    var dims: [4]usize = undefined;
+    const n = try zc_arr.shape(&dims);
+    try std.testing.expectEqual(@as(usize, 2), n);
+    try std.testing.expectEqual(@as(usize, 2), dims[0]);
+    try std.testing.expectEqual(@as(usize, 3), dims[1]);
+
+    var copy_dest = [_]f32{0.0} ** 6;
+    try zc_arr.copyToSlice(&copy_dest);
+    try std.testing.expectEqualSlices(f32, &host_buf, &copy_dest);
 }

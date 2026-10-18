@@ -276,6 +276,17 @@ test "CausalSelfAttention Module" {
     const y_eager = try attn.forward(&y_eager_graph, x_3d);
     try std.testing.expectEqualSlices(usize, &.{2, 3, 8}, y_eager.shape.dims[0..y_eager.shape.len]);
 
+    const backend = @import("../backend.zig");
+    if (backend.mlx.has_mlx) {
+        var y_gpu_graph = autodiff.Graph.init(arena, .{ .enable_grad = false, .device = .gpu });
+        defer y_gpu_graph.deinit();
+        const y_gpu = try attn.forward(&y_gpu_graph, x_3d);
+        try std.testing.expectEqualSlices(usize, &.{2, 3, 8}, y_gpu.shape.dims[0..y_gpu.shape.len]);
+        for (y_eager.data, y_gpu.data) |e_val, g_val| {
+            try std.testing.expectApproxEqAbs(e_val, g_val, 1e-3);
+        }
+    }
+
     var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 

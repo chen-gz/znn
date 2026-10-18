@@ -1,4 +1,5 @@
 const std = @import("std");
+const backend = @import("../backend.zig");
 const tensor_mod = @import("../tensor.zig");
 const Tensor = tensor_mod.Tensor;
 const types = @import("types.zig");
@@ -454,6 +455,27 @@ pub fn softmax(self: *Graph, A: *Tensor) !*Tensor {
 
 pub fn rmsNorm(self: *Graph, X: *Tensor, G: *Tensor, eps: f32) !*Tensor {
     const allocator = self.arena.allocator();
+    if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad) {
+        var x_mlx = try X.toMlxArrayZeroCopy();
+        defer x_mlx.deinit();
+        const D = X.shape.dims[X.shape.len - 1];
+        var g_shape = [_]usize{D};
+        var g_mlx = try backend.mlx.Array.fromSliceZeroCopy(G.data[0..D], &g_shape);
+        defer g_mlx.deinit();
+
+        var out_mlx = try backend.mlx.Array.fastRmsNorm(
+            x_mlx,
+            g_mlx,
+            eps,
+            self.options.mlx_stream,
+        );
+        defer out_mlx.deinit();
+
+        const Y = try self.tensorND(X.shape.dims[0..X.shape.len], false);
+        try out_mlx.copyToSlice(Y.data);
+        return Y;
+    }
+
     const Y = try X.rmsNorm(G, eps, allocator);
     return self.registerSingleOutputOp(
         Y,
@@ -661,6 +683,28 @@ pub fn rope(self: *Graph, X: *Tensor, start_pos: usize, options: tensor_mod.Rope
 
 pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
     const allocator = self.arena.allocator();
+    if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad) {
+        var a_mlx = try A.toMlxArrayZeroCopy();
+        defer a_mlx.deinit();
+        var b_mlx = try B.toMlxArrayZeroCopy();
+        defer b_mlx.deinit();
+
+        var c_mlx = try backend.mlx.Array.matmul(a_mlx, b_mlx, self.options.mlx_stream);
+        defer c_mlx.deinit();
+
+        const ndim = A.shape.len;
+        var out_shape: [8]usize = undefined;
+        for (0..ndim - 2) |i| {
+            out_shape[i] = A.shape.dims[i];
+        }
+        out_shape[ndim - 2] = A.shape.dims[ndim - 2];
+        out_shape[ndim - 1] = B.shape.dims[B.shape.len - 1];
+
+        const C = try self.tensorND(out_shape[0..ndim], false);
+        try c_mlx.copyToSlice(C.data);
+        return C;
+    }
+
     const C = try A.batchMatMul(B, allocator);
     return self.registerSingleOutputOp(
         C,
@@ -669,6 +713,67 @@ pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         .{ .BatchMatMul = {} },
         self.enable_grad and (A.requires_grad or B.requires_grad),
     );
+}
+
+/// 缩放点积注意力 (Scaled Dot-Product Attention, SDPA) 算子：
+/// 在开启 Apple Silicon GPU 硬件加速且无需求导时，卸载至 MLX FlashAttention Metal 融合内核执行；
+/// 否则回退至通用多维计算图分解求值（支持端到端自动微分 Autograd）。
+pub fn scaledDotProductAttention(
+    self: *Graph,
+    q: *Tensor,
+    k: *Tensor,
+    v: *Tensor,
+    scale: f32,
+    is_causal: bool,
+) !*Tensor {
+    if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad) {
+        var q_mlx = try q.toMlxArrayZeroCopy();
+        defer q_mlx.deinit();
+        var k_mlx = try k.toMlxArrayZeroCopy();
+        defer k_mlx.deinit();
+        var v_mlx = try v.toMlxArrayZeroCopy();
+        defer v_mlx.deinit();
+
+        var out_mlx = try backend.mlx.Array.fastScaledDotProductAttention(
+            q_mlx,
+            k_mlx,
+            v_mlx,
+            scale,
+            is_causal,
+            self.options.mlx_stream,
+        );
+        defer out_mlx.deinit();
+
+        const B = q.shape.dims[0];
+        const H = q.shape.dims[1];
+        const T = q.shape.dims[2];
+        const d_v = v.shape.dims[3];
+        const out_tensor = try self.tensorND(&.{ B, H, T, d_v }, false);
+        try out_mlx.copyToSlice(out_tensor.data);
+        return out_tensor;
+    }
+
+    // 通用计算图分解路径
+    const k_t = try self.transposeND(k, 2, 3);
+    const att = try self.batchMatMul(q, k_t);
+    var scores = try self.mulScalar(att, scale);
+    const T = q.shape.dims[2];
+    if (is_causal) {
+        const mask_node = try self.tensorND(&.{ 1, 1, T, T }, false);
+        mask_node.is_buffer = true;
+        for (0..T) |i| {
+            for (i + 1..T) |j| {
+                mask_node.data[i * T + j] = -1e9;
+            }
+        }
+        const scope = self.currentScope();
+        if (scope.len > 0) {
+            mask_node.name = try std.fmt.allocPrint(self.arenaAllocator(), "{s}.causal_mask", .{scope});
+        }
+        scores = try self.add(scores, mask_node);
+    }
+    const att_sm = try self.softmax(scores);
+    return try self.batchMatMul(att_sm, v);
 }
 
 pub fn embedding(self: *Graph, W: *Tensor, X: anytype) !*Tensor {

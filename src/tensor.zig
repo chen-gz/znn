@@ -12,6 +12,7 @@ pub const linalg = @import("tensor/linalg.zig");
 pub const weight_init = @import("tensor/weight_init.zig");
 pub const quant = @import("tensor/quant.zig");
 pub const Q4Block = quant.Q4Block;
+pub const mlx_bridge = @import("tensor/mlx_bridge.zig");
 
 // --- Re-export Linear Algebra Results ---
 pub const QRResult = linalg.QRResult;
