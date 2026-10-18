@@ -10,7 +10,7 @@ fn printHelp() void {
         \\Options:
         \\  -h, --help               Show this help message
         \\  -f, --filter <pattern>   Run benchmarks matching pattern (case-insensitive substring)
-        \\  -s, --suite <name>       Run specific suite (gemm, ops, activations, layers, models, optimizers, tokenizer, executor, q4, decode, all)
+        \\  -s, --suite <name>       Run specific suite (gemm, ops, activations, layers, models, optimizers, tokenizer, executor, q4, decode, mlx, all)
         \\  -i, --iter <count>       Number of measurement iterations (default: 10)
         \\  -w, --warmup <count>     Number of warmup iterations (default: 3)
         \\  -q, --quiet              Only print the final summary table
