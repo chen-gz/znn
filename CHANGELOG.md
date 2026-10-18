@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `GraphOptions` 支持硬件设备配置：`device: backend.mlx.DeviceType = .cpu` 与 `mlx_stream: ?backend.mlx.Stream = null`。无求导执行时，`graph.matmul`、`graph.batchMatMul`、`graph.rmsNorm` 以及 `graph.scaledDotProductAttention` 自动下沉至 Apple Silicon GPU 流上并发执行。
   - `ScaledDotProductAttention.forwardCore` 与 `CausalSelfAttention` 模块在 GPU 模式下直通融合 FlashAttention 硬件内核。
   - 新增完整的 Apple Silicon CPU (AMX CBLAS) vs MLX GPU 性能基准测试与精度验证套件 (`src/bench/mlx_suite.zig`, `examples/benchmark.zig`)：包含 GEMM `[1024x1024]`、因果 SDPA `[1, 8, 512, 64]`、长上下文 SDPA `[1, 8, 1024, 64]`、RMSNorm `[1024x2048]` 与端到端因果自注意力模块 `CausalSelfAttention` `[B=4, T=128, D=256, H=4]`。实测因果 SDPA 取得 **12.77x** 延迟加速，长上下文 SDPA 取得 **22.62x** 延迟加速（GPU 1188.4 GFLOPS vs CPU 52.5 GFLOPS），RMSNorm 达到 **12.6 GB/s** (1.64x 加速)，所有算子与模块精度误差控制在 $\le 4 \times 10^{-6}$ 并通过数值校验。
+- **Gemma 4 混合注意力与旋转位置编码硬件加速卸载 (`src/models/gemma4.zig`, `src/models/gemma4_q4.zig`, `src/autodiff/graph_nn.zig`, `src/models/tests.zig`)**:
+  - `graph.rope` 算子接入 Apple MLX `fastRoPE` GPU 快速内核：在硬件设备为 GPU 且无梯度模式下，针对全旋转因子的滑动窗口层及标准 Transformer 自动下沉至 Metal GPU 执行，非全旋转因子安全回退至精确 CPU 算子，保证数学等价。
+  - `Gemma4Attention` 与 `Gemma4Q4Attention` 混合注意力机制重构：在全局注意力层（`full_attention`）或序列长度不超过滑动窗口跨度（$T \le \text{sliding\_window}$，如 Prompt 预填充阶段）时，证明其与标准因果注意力具有严格数学等价性，直接分发至 `graph.scaledDotProductAttention`（GPU 模式下直通融合 FlashAttention Metal Steel 内核，实现最高 22.6x 的计算加速）；超出滑动窗口时自动降级分解计算图。
+  - 在 `src/models/tests.zig` 中新增端到端 `TinyGemma4` 与量化 `TinyQ4Gemma4` 的 Apple MLX GPU 推理数值等价性验证，确保 GPU 卸载模式与 CPU 模式输出对数几率（logits）绝对误差控制在 $10^{-3}$ 以内。
 - **执行器与多核并行 (`src/backend/executor.zig`, `src/backend.zig`)**:
   - 新增 `backend` 包（分层层级 0）及 `Executor` 执行器：支持串行执行器 `Executor.serial` 与基于 Zig 0.16 `std.Io` 的线程化执行器 `Executor{ .io = threaded.io(), .max_tasks = 4 }`。
   - 提供分块数据并行 `parallelFor` 与按 chunk 索引写入、串行确定性规约的 `parallelReduce`，保证不同线程数下 100% 逐位确定性（Bitwise Determinism）。

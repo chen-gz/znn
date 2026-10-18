@@ -1,4 +1,5 @@
 const std = @import("std");
+const backend = @import("../backend.zig");
 const autodiff = @import("../autodiff.zig");
 const tensor = @import("../tensor.zig");
 const nn = @import("../nn.zig");
@@ -109,6 +110,25 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         for (logits.data) |v| {
             try std.testing.expect(v >= -30.01 and v <= 30.01);
         }
+
+        // 验证 Apple MLX GPU 加速模式输出精度等价性
+        if (backend.mlx.has_mlx) {
+            var g_gpu = autodiff.Graph.init(allocator, .{ .device = .gpu });
+            defer g_gpu.deinit();
+
+            const token_ids_gpu = try g_gpu.zeros(&.{ 2, 4 }, false);
+            @memcpy(token_ids_gpu.data, token_ids.data);
+
+            const logits_gpu = try model.forward(&g_gpu, token_ids_gpu);
+            try std.testing.expectEqual(@as(usize, 3), logits_gpu.shape.len);
+            try std.testing.expectEqual(@as(usize, 2), logits_gpu.shape.dims[0]);
+            try std.testing.expectEqual(@as(usize, 4), logits_gpu.shape.dims[1]);
+            try std.testing.expectEqual(@as(usize, 128), logits_gpu.shape.dims[2]);
+
+            for (logits.data, logits_gpu.data) |c_val, g_val| {
+                try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
+            }
+        }
     }
 
     // 6. 4-bit (Q4) 分块量化与 Q4Linear 推理测试
@@ -152,5 +172,24 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         try std.testing.expectEqual(@as(usize, 1), logits.shape.dims[0]); // B
         try std.testing.expectEqual(@as(usize, 4), logits.shape.dims[1]); // T
         try std.testing.expectEqual(@as(usize, 128), logits.shape.dims[2]); // V (vocab_size)
+
+        // 验证 TinyQ4Gemma4 在 Apple MLX GPU 模式下的等价性
+        if (backend.mlx.has_mlx) {
+            var g_gpu = autodiff.Graph.init(allocator, .{ .device = .gpu });
+            defer g_gpu.deinit();
+
+            const token_ids_gpu = try g_gpu.zeros(&.{ 1, 4 }, false);
+            @memcpy(token_ids_gpu.data, token_ids.data);
+
+            const logits_gpu = try model.forward(&g_gpu, token_ids_gpu);
+            try std.testing.expectEqual(@as(usize, 3), logits_gpu.shape.len);
+            try std.testing.expectEqual(@as(usize, 1), logits_gpu.shape.dims[0]);
+            try std.testing.expectEqual(@as(usize, 4), logits_gpu.shape.dims[1]);
+            try std.testing.expectEqual(@as(usize, 128), logits_gpu.shape.dims[2]);
+
+            for (logits.data, logits_gpu.data) |c_val, g_val| {
+                try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
+            }
+        }
     }
 }

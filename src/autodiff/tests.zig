@@ -1406,4 +1406,33 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
     for (sdpa_cpu.data, sdpa_gpu.data) |c_val, g_val| {
         try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
     }
+
+    // 4. 验证旋转位置编码 GPU 卸载 (RoPE)
+    const rope_cpu = try g_cpu.tensorND(&.{ B, H, T, D }, false);
+    const rope_gpu = try g_gpu.tensorND(&.{ B, H, T, D }, false);
+    for (rope_cpu.data, rope_gpu.data, 0..) |*c, *g, i| {
+        const val = @sin(@as(f32, @floatFromInt(i)) * 0.15);
+        c.* = val;
+        g.* = val;
+    }
+
+    const r_out_cpu = try g_cpu.rope(rope_cpu, 0, .{ .mode = .split_half, .partial_rotary_factor = 1.0, .base = 10000.0 });
+    const r_out_gpu = try g_gpu.rope(rope_gpu, 0, .{ .mode = .split_half, .partial_rotary_factor = 1.0, .base = 10000.0 });
+    for (r_out_cpu.data, r_out_gpu.data) |c_val, g_val| {
+        try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
+    }
+
+    const r_part_cpu = try g_cpu.rope(rope_cpu, 0, .{ .mode = .split_half, .partial_rotary_factor = 0.5, .base = 10000.0 });
+    const r_part_gpu = try g_gpu.rope(rope_gpu, 0, .{ .mode = .split_half, .partial_rotary_factor = 0.5, .base = 10000.0 });
+    for (r_part_cpu.data, r_part_gpu.data) |c_val, g_val| {
+        try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
+    }
+
+    const r_intl_cpu = try g_cpu.rope(rope_cpu, 0, .{ .mode = .interleaved, .partial_rotary_factor = 1.0, .base = 10000.0 });
+    const r_intl_gpu = try g_gpu.rope(rope_gpu, 0, .{ .mode = .interleaved, .partial_rotary_factor = 1.0, .base = 10000.0 });
+    for (r_intl_cpu.data, r_intl_gpu.data) |c_val, g_val| {
+        try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
+    }
 }
+
+
