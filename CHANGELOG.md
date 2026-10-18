@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Apple 机器学习拓展 (Machine Learning Explore, MLX) 硬件加速后端 (`src/backend/mlx.zig`, `src/backend.zig`, `deps/mlx-c/`, `build.zig`)**:
+  - 新增 `backend.mlx` 模块，通过 C API 直接接入 Apple 官方 MLX 深度学习引擎，提供对 Apple Silicon 统一内存图形处理器 (Graphics Processing Unit, GPU) 的直接硬件加速调用。
+  - 将 `mlx-c` 完整源码与预构建 C-API 库集成在 `deps/mlx-c/` 子项目中，配置 `@rpath` 相对路径寻址，实现构建期零外部 Homebrew 依赖。
+  - 实现 `MlxStream`（GPU/CPU 流及同步）与 `MlxArray`，支持从切片创建张量、数据就绪提取 (`dataFloat32`)、GPU 矩阵乘法 (`matmul`)、逐元素算子及 Softmax。
+  - 接入 Apple MLX 官方手写优化的原生快速内核：`fastRmsNorm`、`fastRoPE` 旋转位置编码与 `fastScaledDotProductAttention`（FlashAttention）。
+  - 新增 `mlx` 基准测试套件 (`src/bench/mlx_suite.zig`)：实测 Apple Silicon GPU 矩阵乘法达到 **1.24 TFLOPS**，因果 SDPA 达到 **891.8 GFLOPS**。
 - **执行器与多核并行 (`src/backend/executor.zig`, `src/backend.zig`)**:
   - 新增 `backend` 包（分层层级 0）及 `Executor` 执行器：支持串行执行器 `Executor.serial` 与基于 Zig 0.16 `std.Io` 的线程化执行器 `Executor{ .io = threaded.io(), .max_tasks = 4 }`。
   - 提供分块数据并行 `parallelFor` 与按 chunk 索引写入、串行确定性规约的 `parallelReduce`，保证不同线程数下 100% 逐位确定性（Bitwise Determinism）。

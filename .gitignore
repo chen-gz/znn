@@ -35,6 +35,7 @@ venv/
 *.so
 *.exe
 *.bin
+*.metallib
 *.tar.gz
 *.zip
 

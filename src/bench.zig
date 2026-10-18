@@ -533,6 +533,7 @@ pub const runTokenizerBenchmarks = suites.runTokenizerBenchmarks;
 pub const runExecutorBenchmarks = suites.runExecutorBenchmarks;
 pub const runQ4Benchmarks = suites.runQ4Benchmarks;
 pub const runDecodeBenchmarks = suites.runDecodeBenchmarks;
+pub const runMlxBenchmarks = @import("bench/mlx_suite.zig").runMlxBenchmarks;
 
 /// Run all benchmark suites
 pub fn runAllBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) !void {
@@ -546,6 +547,7 @@ pub fn runAllBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
     try runExecutorBenchmarks(runner, allocator);
     try runQ4Benchmarks(runner, allocator);
     try runDecodeBenchmarks(runner, allocator);
+    try runMlxBenchmarks(runner, allocator);
 }
 
 test "bench runner basic execution" {

@@ -148,6 +148,16 @@ pub fn build(b: *std.Build) void {
     });
     if (target.result.os.tag == .macos) {
         mod.linkFramework("Accelerate", .{});
+        if (target.result.cpu.arch == .aarch64) {
+            mod.addIncludePath(b.path("deps/mlx-c/include"));
+            mod.addLibraryPath(b.path("deps/mlx-c/lib"));
+            mod.addRPath(b.path("deps/mlx-c/lib"));
+            mod.linkSystemLibrary("mlxc", .{});
+            mod.linkSystemLibrary("mlx", .{});
+            mod.linkFramework("Metal", .{});
+            mod.linkFramework("Foundation", .{});
+            mod.linkFramework("QuartzCore", .{});
+        }
     }
 
     const test_step = b.step("test", "Run tests");
@@ -190,6 +200,16 @@ pub fn build(b: *std.Build) void {
         });
         if (target.result.os.tag == .macos) {
             exe.root_module.linkFramework("Accelerate", .{});
+            if (target.result.cpu.arch == .aarch64) {
+                exe.root_module.addIncludePath(b.path("deps/mlx-c/include"));
+                exe.root_module.addLibraryPath(b.path("deps/mlx-c/lib"));
+                exe.root_module.addRPath(b.path("deps/mlx-c/lib"));
+                exe.root_module.linkSystemLibrary("mlxc", .{});
+                exe.root_module.linkSystemLibrary("mlx", .{});
+                exe.root_module.linkFramework("Metal", .{});
+                exe.root_module.linkFramework("Foundation", .{});
+                exe.root_module.linkFramework("QuartzCore", .{});
+            }
         }
         b.installArtifact(exe);
 
