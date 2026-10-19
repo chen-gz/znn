@@ -523,6 +523,46 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
         defer ctx.deinit();
         try runner.benchmark("RMSNorm Fwd+Bwd [32, 512]", "Activations", null, (32 * 512 * 4) * @sizeOf(f32), null, "", &ctx);
     }
+
+    // RoPE Split-Half Forward [1, 16, 64, 256]
+    {
+        const RopeContext = struct {
+            allocator: std.mem.Allocator,
+            arena: std.heap.ArenaAllocator,
+            x: *tensor.Tensor,
+
+            pub fn init(alloc: std.mem.Allocator) !@This() {
+                var prng = std.Random.DefaultPrng.init(42);
+                const x = try tensor.zeros(alloc, &.{ 1, 16, 64, 256 });
+                x.fillNormal(prng.random(), 0.0, 1.0);
+                return .{
+                    .allocator = alloc,
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .x = x,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                tensor.free(self.allocator, self.x);
+            }
+
+            pub fn run(self: *@This()) !void {
+                _ = self.arena.reset(.retain_capacity);
+                const out = try self.x.rope(0, .{
+                    .mode = .split_half,
+                    .partial_rotary_factor = 0.25,
+                    .base = 1_000_000.0,
+                }, self.arena.allocator());
+                std.mem.doNotOptimizeAway(out.data.ptr);
+            }
+        };
+
+        var ctx = try RopeContext.init(allocator);
+        defer ctx.deinit();
+        const bytes: u64 = (1 * 16 * 64 * 256 * 2) * @sizeOf(f32);
+        try runner.benchmark("RoPE Split-Half [1, 16, 64, 256]", "Activations", null, bytes, null, "", &ctx);
+    }
 }
 
 pub const suites = @import("bench/suites.zig");
@@ -566,4 +606,19 @@ test "bench runner basic execution" {
     try std.testing.expect(res.min_ns > 0);
     try std.testing.expect(res.avg_ns >= res.min_ns);
     try std.testing.expect(res.gflops() != null);
+
+    var decode_runner = BenchmarkRunner.init(test_alloc, .{
+        .warmup = 0,
+        .iterations = 1,
+        .filter = "Gemma4Q4-6L",
+        .quiet = true,
+    });
+    defer decode_runner.deinit();
+
+    try runDecodeBenchmarks(&decode_runner, test_alloc);
+    try std.testing.expectEqual(@as(usize, 3), decode_runner.results.items.len);
+    for (decode_runner.results.items) |st| {
+        try std.testing.expect(st.throughputItems() != null);
+        try std.testing.expect(st.throughputItems().? > 0.0);
+    }
 }

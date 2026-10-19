@@ -917,7 +917,12 @@ pub const GpuModelContext = struct {
         for (self.layers, 0..) |lw, l_idx| {
             const num_kv = lw.num_kv_heads;
             const hd = lw.head_dim;
-            const packed_len = num_kv * cached_len * hd;
+            const start_pos: usize = if (lw.attn_type == 0 and cached_len > lw.sliding_window)
+                cached_len - lw.sliding_window
+            else
+                0;
+            const eff_len = cached_len - start_pos;
+            const packed_len = num_kv * eff_len * hd;
             const pack_buf_k = try self.allocator.alloc(f32, packed_len);
             defer self.allocator.free(pack_buf_k);
             const pack_buf_v = try self.allocator.alloc(f32, packed_len);
@@ -927,18 +932,18 @@ pub const GpuModelContext = struct {
             const cpu_v = v_slices[l_idx];
             const cache_stride = cpu_k.len / num_kv;
             for (0..num_kv) |kv_h| {
-                const src_k = cpu_k[kv_h * cache_stride .. kv_h * cache_stride + cached_len * hd];
-                const dest_k = pack_buf_k[kv_h * cached_len * hd .. (kv_h + 1) * cached_len * hd];
+                const src_k = cpu_k[kv_h * cache_stride + start_pos * hd .. kv_h * cache_stride + cached_len * hd];
+                const dest_k = pack_buf_k[kv_h * eff_len * hd .. (kv_h + 1) * eff_len * hd];
                 @memcpy(dest_k, src_k);
 
-                const src_v = cpu_v[kv_h * cache_stride .. kv_h * cache_stride + cached_len * hd];
-                const dest_v = pack_buf_v[kv_h * cached_len * hd .. (kv_h + 1) * cached_len * hd];
+                const src_v = cpu_v[kv_h * cache_stride + start_pos * hd .. kv_h * cache_stride + cached_len * hd];
+                const dest_v = pack_buf_v[kv_h * eff_len * hd .. (kv_h + 1) * eff_len * hd];
                 @memcpy(dest_v, src_v);
             }
 
-            var k_arr = try mlx.Array.fromSlice(pack_buf_k, &.{ 1, num_kv, cached_len, hd });
+            var k_arr = try mlx.Array.fromSlice(pack_buf_k, &.{ 1, num_kv, eff_len, hd });
             k_arr.eval();
-            var v_arr = try mlx.Array.fromSlice(pack_buf_v, &.{ 1, num_kv, cached_len, hd });
+            var v_arr = try mlx.Array.fromSlice(pack_buf_v, &.{ 1, num_kv, eff_len, hd });
             v_arr.eval();
 
             self.gpu_k[l_idx] = k_arr;
@@ -1234,8 +1239,8 @@ pub const GpuModelContext = struct {
 
                 const k_len = pos + 1;
                 if (lw.attn_type == 0 and k_len > lw.sliding_window) {
-                    const sliced_k = try new_k.sliceAxis(2, k_len - lw.sliding_window, k_len, s);
-                    const sliced_v = try new_v.sliceAxis(2, k_len - lw.sliding_window, k_len, s);
+                    const sliced_k = try new_k.sliceAxis(2, 1, lw.sliding_window + 1, s);
+                    const sliced_v = try new_v.sliceAxis(2, 1, lw.sliding_window + 1, s);
                     new_k.deinit();
                     new_v.deinit();
                     new_k = sliced_k;

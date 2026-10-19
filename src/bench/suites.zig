@@ -426,6 +426,122 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
         const flops_block: f64 = 3.0 * (attn_fwd + mlp_fwd);
         try runner.benchmark("TransformerBlock Fwd+Bwd [4, 64, 128]", "Layers", flops_block, null, null, "", &ctx);
     }
+
+    // 10. Scaled Dot-Product Attention Causal [B=1, H=8, L=256, D=64]
+    {
+        const SdpaCausalContext = struct {
+            allocator: std.mem.Allocator,
+            arena: std.heap.ArenaAllocator,
+            q_raw: []f32,
+            k_raw: []f32,
+            v_raw: []f32,
+
+            pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
+                const total = 1 * 8 * 256 * 64;
+                const q_raw = try alloc.alloc(f32, total);
+                errdefer alloc.free(q_raw);
+                const k_raw = try alloc.alloc(f32, total);
+                errdefer alloc.free(k_raw);
+                const v_raw = try alloc.alloc(f32, total);
+                errdefer alloc.free(v_raw);
+
+                for (0..total) |i| {
+                    q_raw[i] = (rnd.float(f32) - 0.5) * 0.2;
+                    k_raw[i] = (rnd.float(f32) - 0.5) * 0.2;
+                    v_raw[i] = (rnd.float(f32) - 0.5) * 0.2;
+                }
+
+                return .{
+                    .allocator = alloc,
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .q_raw = q_raw,
+                    .k_raw = k_raw,
+                    .v_raw = v_raw,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                self.allocator.free(self.q_raw);
+                self.allocator.free(self.k_raw);
+                self.allocator.free(self.v_raw);
+            }
+
+            pub fn run(self: *@This()) !void {
+                _ = self.arena.reset(.retain_capacity);
+                var g = autodiff.Graph.init(self.arena.allocator(), .{ .enable_grad = false });
+                defer g.deinit();
+
+                const q = try g.tensorNDWithData(&.{ 1, 8, 256, 64 }, self.q_raw, false);
+                const k = try g.tensorNDWithData(&.{ 1, 8, 256, 64 }, self.k_raw, false);
+                const v = try g.tensorNDWithData(&.{ 1, 8, 256, 64 }, self.v_raw, false);
+                const out = try g.scaledDotProductAttention(q, k, v, 0.125, true);
+                std.mem.doNotOptimizeAway(out.data.ptr);
+            }
+        };
+
+        var ctx = try SdpaCausalContext.init(allocator, random);
+        defer ctx.deinit();
+        const flops_sdpa: f64 = 4.0 * 1.0 * 8.0 * 256.0 * 256.0 * 64.0;
+        try runner.benchmark("SDPA Causal [1, 8, 256, 64]", "Layers", flops_sdpa, null, null, "", &ctx);
+    }
+
+    // 11. Gemma4Attention Sliding-Window GQA Forward [B=1, T=32, D=256, H=8, KV=2]
+    {
+        const Gemma4AttnContext = struct {
+            allocator: std.mem.Allocator,
+            arena: std.heap.ArenaAllocator,
+            attn: models.gemma4.Gemma4Attention,
+            x: *tensor.Tensor,
+
+            pub fn init(alloc: std.mem.Allocator, rnd: std.Random) !@This() {
+                var attn = try models.gemma4.Gemma4Attention.init(
+                    alloc,
+                    .sliding_attention,
+                    256,
+                    8,
+                    2,
+                    32,
+                    16,
+                    1e-6,
+                );
+                errdefer nn.deinitModel(&attn, alloc);
+                attn.q_proj.resetParameters(rnd, .{});
+                attn.k_proj.resetParameters(rnd, .{});
+                if (attn.v_proj) |*vp| vp.resetParameters(rnd, .{});
+                attn.o_proj.resetParameters(rnd, .{});
+
+                const x = try tensor.zeros(alloc, &.{ 1, 32, 256 });
+                x.fillNormal(rnd, 0.0, 0.2);
+
+                return .{
+                    .allocator = alloc,
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .attn = attn,
+                    .x = x,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                nn.deinitModel(&self.attn, self.allocator);
+                tensor.free(self.allocator, self.x);
+            }
+
+            pub fn run(self: *@This()) !void {
+                _ = self.arena.reset(.retain_capacity);
+                var g = autodiff.Graph.init(self.arena.allocator(), .{ .enable_grad = false });
+                defer g.deinit();
+
+                const out = try self.attn.forward(&g, self.x);
+                std.mem.doNotOptimizeAway(out.data.ptr);
+            }
+        };
+
+        var ctx = try Gemma4AttnContext.init(allocator, random);
+        defer ctx.deinit();
+        try runner.benchmark("Gemma4Attention GQA [1, 32, 256, 8/2]", "Layers", null, null, 32, "tokens/s", &ctx);
+    }
 }
 
 /// Suite 5: End-to-End Model Training Pipeline Step Benchmarks
@@ -1341,7 +1457,74 @@ pub fn runQ4Benchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) !
     }
 }
 
-/// Suite 10: Decode (Autoregressive Single-Step Generation Latency & Throughput)
+/// 构造符合 ZNNQ4G02 二进制布局规范的合成随机量化模型内存切片（无需外部磁盘权重文件）
+fn allocSyntheticGemma4Q4Mmap(
+    comptime cfg: models.gemma4.Gemma4Config,
+    allocator: std.mem.Allocator,
+    seed: u64,
+) ![]align(std.heap.page_size_min) u8 {
+    const ModelType = models.gemma4_q4.Gemma4Q4ForCausalLM(cfg);
+    const expected_bytes = ModelType.computeExpectedFileSize();
+    const buf = try allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), expected_bytes);
+    errdefer allocator.free(buf);
+
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rnd = prng.random();
+
+    @memcpy(buf[0..8], "ZNNQ4G02");
+    var cursor: usize = 8;
+
+    // 1. 最终层 RMSNorm (BF16)
+    const final_norm_u16: []u16 = @alignCast(std.mem.bytesAsSlice(u16, buf[cursor .. cursor + cfg.hidden_size * 2]));
+    for (final_norm_u16) |*w| {
+        w.* = tensor.bf16.fromF32((rnd.float(f32) - 0.5) * 0.1).bits;
+    }
+    cursor += cfg.hidden_size * 2;
+
+    // 2. 词表嵌入矩阵 (BF16)
+    const embed_len = cfg.vocab_size * cfg.hidden_size;
+    const embed_u16: []u16 = @alignCast(std.mem.bytesAsSlice(u16, buf[cursor .. cursor + embed_len * 2]));
+    for (embed_u16) |*w| {
+        w.* = tensor.bf16.fromF32((rnd.float(f32) - 0.5) * 0.1).bits;
+    }
+    cursor += embed_len * 2;
+
+    // 3. 逐层填充 RMSNorm、layer_scalar 与 Q4Block 权重
+    for (0..cfg.num_hidden_layers) |layer_idx| {
+        const is_full = ((layer_idx + 1) % 6 == 0);
+        const head_dim = if (is_full) cfg.global_head_dim else cfg.head_dim;
+        const num_kv = if (is_full) cfg.num_global_key_value_heads else cfg.num_key_value_heads;
+
+        const norms_count = cfg.hidden_size * 4 + head_dim * 2;
+        const norms_u16: []u16 = @alignCast(std.mem.bytesAsSlice(u16, buf[cursor .. cursor + norms_count * 2]));
+        for (norms_u16) |*w| {
+            w.* = tensor.bf16.fromF32((rnd.float(f32) - 0.5) * 0.1).bits;
+        }
+        cursor += norms_count * 2;
+
+        // layer_scalar = 1.0 (BF16 0x3F80)
+        std.mem.writeInt(u16, buf[cursor .. cursor + 2][0..2], 0x3F80, .little);
+        cursor += 2;
+
+        const q_blocks = (cfg.hidden_size * cfg.num_attention_heads * head_dim) / tensor.Q4Block.QK;
+        const k_blocks = (cfg.hidden_size * num_kv * head_dim) / tensor.Q4Block.QK;
+        const v_blocks = if (is_full) 0 else (cfg.hidden_size * num_kv * head_dim) / tensor.Q4Block.QK;
+        const o_blocks = (cfg.num_attention_heads * head_dim * cfg.hidden_size) / tensor.Q4Block.QK;
+        const mlp_blocks = (cfg.hidden_size * cfg.intermediate_size * 3) / tensor.Q4Block.QK;
+        const total_blocks = q_blocks + k_blocks + v_blocks + o_blocks + mlp_blocks;
+
+        for (0..total_blocks) |_| {
+            std.mem.writeInt(u16, buf[cursor .. cursor + 2][0..2], 0x2800, .little);
+            rnd.bytes(buf[cursor + 2 .. cursor + 18]);
+            cursor += @sizeOf(tensor.Q4Block);
+        }
+    }
+
+    std.debug.assert(cursor == expected_bytes);
+    return buf;
+}
+
+/// Suite 10: Decode (Autoregressive Single-Step & End-to-End Whole-Model Generation Throughput)
 pub fn runDecodeBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) !void {
     // 1. TinyGemma4 Decode Step [B=1, T=1]
     {
@@ -1461,5 +1644,368 @@ pub fn runDecodeBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocato
         var ctx = try TinyQ4PrefillCtx.init(allocator);
         defer ctx.deinit();
         try runner.benchmark("TinyQ4Gemma4 Prefill Step [B=1, T=16]", "Decode", null, null, 16, "tokens/s", &ctx);
+    }
+
+    // 4~9. 6 层异构整网模型对比：未量化全精度 (F32) vs 4-bit 量化 (Q4)
+    const BenchGemma4Config = models.gemma4.Gemma4Config{
+        .vocab_size = 4096,
+        .hidden_size = 256,
+        .intermediate_size = 1024,
+        .num_hidden_layers = 6,
+        .num_attention_heads = 8,
+        .num_key_value_heads = 4,
+        .num_global_key_value_heads = 1,
+        .head_dim = 32,
+        .global_head_dim = 64,
+        .sliding_window = 16,
+        .rms_norm_eps = 1e-6,
+        .final_logit_softcapping = 30.0,
+        .max_position_embeddings = 128,
+    };
+    const BenchF32Model = models.gemma4.Gemma4ForCausalLM(BenchGemma4Config);
+    const BenchQ4Model = models.gemma4_q4.Gemma4Q4ForCausalLM(BenchGemma4Config);
+
+    // 4~6. 未量化全精度 (F32) 6 层异构整网基准测试 (Prefill / DecodeStep / E2E Generate)
+    {
+        const WholeF32BenchCtx = struct {
+            model: BenchF32Model,
+            cache: models.gemma4.Gemma4KVCache,
+            threaded: std.Io.Threaded,
+            arena: std.heap.ArenaAllocator,
+            allocator: std.mem.Allocator,
+            prompt16: [16]usize,
+            prompt8: [8]usize,
+
+            pub fn init(alloc: std.mem.Allocator) !@This() {
+                var model = try BenchF32Model.init(alloc);
+                errdefer nn.deinitModel(&model, alloc);
+
+                var prng = std.Random.DefaultPrng.init(20261019);
+                const rnd = prng.random();
+                model.embed_tokens.weight.fillNormal(rnd, 0.0, 0.02);
+                for (model.layers) |*layer| {
+                    layer.self_attn.q_proj.resetParameters(rnd, .{});
+                    layer.self_attn.k_proj.resetParameters(rnd, .{});
+                    if (layer.self_attn.v_proj) |*vp| vp.resetParameters(rnd, .{});
+                    layer.self_attn.o_proj.resetParameters(rnd, .{});
+                    layer.mlp.gate_proj.resetParameters(rnd, .{});
+                    layer.mlp.up_proj.resetParameters(rnd, .{});
+                    layer.mlp.down_proj.resetParameters(rnd, .{});
+                }
+
+                var cache = try models.gemma4.Gemma4KVCache.init(alloc, BenchGemma4Config, .{ .max_seq_len = 64 });
+                errdefer cache.deinit(alloc);
+
+                var p16: [16]usize = undefined;
+                for (&p16, 0..) |*t, i| t.* = (i * 17 + 3) % BenchGemma4Config.vocab_size;
+                var p8: [8]usize = undefined;
+                for (&p8, 0..) |*t, i| t.* = (i * 23 + 2) % BenchGemma4Config.vocab_size;
+
+                return .{
+                    .model = model,
+                    .cache = cache,
+                    .threaded = std.Io.Threaded.init(alloc, .{}),
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .allocator = alloc,
+                    .prompt16 = p16,
+                    .prompt8 = p8,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                self.threaded.deinit();
+                self.cache.deinit(self.allocator);
+                nn.deinitModel(&self.model, self.allocator);
+            }
+        };
+
+        var shared = try WholeF32BenchCtx.init(allocator);
+        defer shared.deinit();
+
+        const F32PrefillRunner = struct {
+            s: *WholeF32BenchCtx,
+            pub fn run(self: *@This()) !void {
+                _ = self.s.arena.reset(.retain_capacity);
+                var g = autodiff.Graph.init(self.s.arena.allocator(), .{
+                    .enable_grad = false,
+                    .io = self.s.threaded.io(),
+                    .max_tasks = 4,
+                });
+                defer g.deinit();
+                var next_tok = try self.s.model.prefill(&g, &self.s.prompt16, &self.s.cache, 1.25);
+                std.mem.doNotOptimizeAway(&next_tok);
+            }
+        };
+        var prefill_r = F32PrefillRunner{ .s = &shared };
+        try runner.benchmark("Gemma4F32-6L Prefill KVCache [T=16]", "Decode", null, null, 16, "tokens/s", &prefill_r);
+
+        // 预先填充 8 个词元供单步 DecodeStep 测试
+        {
+            _ = shared.arena.reset(.retain_capacity);
+            var g_init = autodiff.Graph.init(shared.arena.allocator(), .{ .enable_grad = false });
+            defer g_init.deinit();
+            _ = try shared.model.prefill(&g_init, &shared.prompt8, &shared.cache, 1.25);
+        }
+
+        const F32DecodeRunner = struct {
+            s: *WholeF32BenchCtx,
+            pub fn run(self: *@This()) !void {
+                _ = self.s.arena.reset(.retain_capacity);
+                for (self.s.cache.layers) |*cl| cl.curr_len = 8;
+                var g = autodiff.Graph.init(self.s.arena.allocator(), .{
+                    .enable_grad = false,
+                    .io = self.s.threaded.io(),
+                    .max_tasks = 4,
+                });
+                defer g.deinit();
+                var next_tok = try self.s.model.decodeStep(&g, 42, &self.s.cache, &self.s.prompt16, 1.25);
+                std.mem.doNotOptimizeAway(&next_tok);
+            }
+        };
+        var decode_r = F32DecodeRunner{ .s = &shared };
+        try runner.benchmark("Gemma4F32-6L DecodeStep KVCache [T=1]", "Decode", null, null, 1, "tokens/s", &decode_r);
+
+        const F32E2ERunner = struct {
+            s: *WholeF32BenchCtx,
+            pub fn run(self: *@This()) !void {
+                const gen_tokens: usize = 16;
+                var history_buf: [8 + gen_tokens]usize = undefined;
+                @memcpy(history_buf[0..8], &self.s.prompt8);
+                var history_len: usize = 8;
+
+                _ = self.s.arena.reset(.retain_capacity);
+                {
+                    var g_pre = autodiff.Graph.init(self.s.arena.allocator(), .{
+                        .enable_grad = false,
+                        .io = self.s.threaded.io(),
+                        .max_tasks = 4,
+                    });
+                    defer g_pre.deinit();
+                    const first_tok = try self.s.model.prefill(&g_pre, history_buf[0..history_len], &self.s.cache, 1.25);
+                    history_buf[history_len] = first_tok;
+                    history_len += 1;
+                }
+
+                var cur_tok = history_buf[history_len - 1];
+                for (1..gen_tokens) |_| {
+                    _ = self.s.arena.reset(.retain_capacity);
+                    var g_dec = autodiff.Graph.init(self.s.arena.allocator(), .{
+                        .enable_grad = false,
+                        .io = self.s.threaded.io(),
+                        .max_tasks = 4,
+                    });
+                    defer g_dec.deinit();
+                    cur_tok = try self.s.model.decodeStep(&g_dec, cur_tok, &self.s.cache, history_buf[0..history_len], 1.25);
+                    history_buf[history_len] = cur_tok;
+                    history_len += 1;
+                }
+                std.mem.doNotOptimizeAway(&cur_tok);
+            }
+        };
+        var e2e_r = F32E2ERunner{ .s = &shared };
+        try runner.benchmark("Gemma4F32-6L E2E Generate [Gen=16]", "Decode", null, null, 16, "tokens/s", &e2e_r);
+    }
+
+    const synthetic_mmap = try allocSyntheticGemma4Q4Mmap(BenchGemma4Config, allocator, 20261019);
+    defer allocator.free(synthetic_mmap);
+
+    // 4. 整网 KVCache 预填充吞吐测试 (Gemma4Q4-6L Prefill KVCache [Prompt=16, 4 workers])
+    {
+        const WholePrefillCtx = struct {
+            model: BenchQ4Model,
+            cache: models.gemma4.Gemma4KVCache,
+            mmap_bytes: []const u8,
+            threaded: std.Io.Threaded,
+            arena: std.heap.ArenaAllocator,
+            allocator: std.mem.Allocator,
+            prompt: [16]usize,
+
+            pub fn init(alloc: std.mem.Allocator, mmap_slice: []const u8) !@This() {
+                var model = try BenchQ4Model.loadFromMmap(alloc, mmap_slice);
+                errdefer model.deinit(alloc);
+                var cache = try models.gemma4.Gemma4KVCache.init(alloc, BenchGemma4Config, .{ .max_seq_len = 64 });
+                errdefer cache.deinit(alloc);
+
+                var prompt: [16]usize = undefined;
+                for (&prompt, 0..) |*t, i| t.* = (i * 17 + 3) % BenchGemma4Config.vocab_size;
+
+                return .{
+                    .model = model,
+                    .cache = cache,
+                    .mmap_bytes = mmap_slice,
+                    .threaded = std.Io.Threaded.init(alloc, .{}),
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .allocator = alloc,
+                    .prompt = prompt,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                self.threaded.deinit();
+                self.cache.deinit(self.allocator);
+                self.model.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                _ = self.arena.reset(.retain_capacity);
+                var g = autodiff.Graph.init(self.arena.allocator(), .{
+                    .enable_grad = false,
+                    .io = self.threaded.io(),
+                    .max_tasks = 4,
+                });
+                defer g.deinit();
+                var next_tok = try self.model.prefill(&g, &self.prompt, &self.cache, self.mmap_bytes, 1.25);
+                std.mem.doNotOptimizeAway(&next_tok);
+            }
+        };
+
+        var ctx = try WholePrefillCtx.init(allocator, synthetic_mmap);
+        defer ctx.deinit();
+        try runner.benchmark("Gemma4Q4-6L Prefill KVCache [T=16]", "Decode", null, null, 16, "tokens/s", &ctx);
+    }
+
+    // 5. 整网 KVCache 单步增量解码吞吐测试 (Gemma4Q4-6L DecodeStep KVCache [T=1, 4 workers])
+    {
+        const WholeDecodeStepCtx = struct {
+            model: BenchQ4Model,
+            cache: models.gemma4.Gemma4KVCache,
+            mmap_bytes: []const u8,
+            threaded: std.Io.Threaded,
+            arena: std.heap.ArenaAllocator,
+            allocator: std.mem.Allocator,
+            recent_tokens: [16]usize,
+
+            pub fn init(alloc: std.mem.Allocator, mmap_slice: []const u8) !@This() {
+                var model = try BenchQ4Model.loadFromMmap(alloc, mmap_slice);
+                errdefer model.deinit(alloc);
+                var cache = try models.gemma4.Gemma4KVCache.init(alloc, BenchGemma4Config, .{ .max_seq_len = 64 });
+                errdefer cache.deinit(alloc);
+
+                var recent: [16]usize = undefined;
+                for (&recent, 0..) |*t, i| t.* = (i * 13 + 5) % BenchGemma4Config.vocab_size;
+
+                var g_init = autodiff.Graph.init(alloc, .{ .enable_grad = false });
+                defer g_init.deinit();
+                _ = try model.prefill(&g_init, recent[0..8], &cache, mmap_slice, 1.25);
+
+                return .{
+                    .model = model,
+                    .cache = cache,
+                    .mmap_bytes = mmap_slice,
+                    .threaded = std.Io.Threaded.init(alloc, .{}),
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .allocator = alloc,
+                    .recent_tokens = recent,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                self.threaded.deinit();
+                self.cache.deinit(self.allocator);
+                self.model.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                _ = self.arena.reset(.retain_capacity);
+                // 保持缓存游标稳定在 8 个上下文词元处，持续测试单步增量解码延迟
+                for (self.cache.layers) |*cl| cl.curr_len = 8;
+                var g = autodiff.Graph.init(self.arena.allocator(), .{
+                    .enable_grad = false,
+                    .io = self.threaded.io(),
+                    .max_tasks = 4,
+                });
+                defer g.deinit();
+                var next_tok = try self.model.decodeStep(&g, 42, &self.cache, self.mmap_bytes, &self.recent_tokens, 1.25);
+                std.mem.doNotOptimizeAway(&next_tok);
+            }
+        };
+
+        var ctx = try WholeDecodeStepCtx.init(allocator, synthetic_mmap);
+        defer ctx.deinit();
+        try runner.benchmark("Gemma4Q4-6L DecodeStep KVCache [T=1]", "Decode", null, null, 1, "tokens/s", &ctx);
+    }
+
+    // 6. 整网端到端连续多 Token 自回归生成测试 (Prompt=8 + 连续生成 16 个 Token，覆盖滑动窗口淘汰与全局注意力)
+    {
+        const WholeE2EGenerateCtx = struct {
+            model: BenchQ4Model,
+            cache: models.gemma4.Gemma4KVCache,
+            mmap_bytes: []const u8,
+            threaded: std.Io.Threaded,
+            arena: std.heap.ArenaAllocator,
+            allocator: std.mem.Allocator,
+            prompt: [8]usize,
+
+            pub fn init(alloc: std.mem.Allocator, mmap_slice: []const u8) !@This() {
+                var model = try BenchQ4Model.loadFromMmap(alloc, mmap_slice);
+                errdefer model.deinit(alloc);
+                var cache = try models.gemma4.Gemma4KVCache.init(alloc, BenchGemma4Config, .{ .max_seq_len = 64 });
+                errdefer cache.deinit(alloc);
+
+                var prompt: [8]usize = undefined;
+                for (&prompt, 0..) |*t, i| t.* = (i * 23 + 2) % BenchGemma4Config.vocab_size;
+
+                return .{
+                    .model = model,
+                    .cache = cache,
+                    .mmap_bytes = mmap_slice,
+                    .threaded = std.Io.Threaded.init(alloc, .{}),
+                    .arena = std.heap.ArenaAllocator.init(alloc),
+                    .allocator = alloc,
+                    .prompt = prompt,
+                };
+            }
+
+            pub fn deinit(self: *@This()) void {
+                self.arena.deinit();
+                self.threaded.deinit();
+                self.cache.deinit(self.allocator);
+                self.model.deinit(self.allocator);
+            }
+
+            pub fn run(self: *@This()) !void {
+                const gen_tokens: usize = 16;
+                var history_buf: [8 + gen_tokens]usize = undefined;
+                @memcpy(history_buf[0..8], &self.prompt);
+                var history_len: usize = 8;
+
+                // 1) Prefill 生成第 1 个新词元
+                _ = self.arena.reset(.retain_capacity);
+                {
+                    var g_pre = autodiff.Graph.init(self.arena.allocator(), .{
+                        .enable_grad = false,
+                        .io = self.threaded.io(),
+                        .max_tasks = 4,
+                    });
+                    defer g_pre.deinit();
+                    const first_tok = try self.model.prefill(&g_pre, history_buf[0..history_len], &self.cache, self.mmap_bytes, 1.25);
+                    history_buf[history_len] = first_tok;
+                    history_len += 1;
+                }
+
+                // 2) 连续 15 步增量 Decode 生成剩余 15 个词元（共生成 16 个词元）
+                var cur_tok = history_buf[history_len - 1];
+                for (1..gen_tokens) |_| {
+                    _ = self.arena.reset(.retain_capacity);
+                    var g_dec = autodiff.Graph.init(self.arena.allocator(), .{
+                        .enable_grad = false,
+                        .io = self.threaded.io(),
+                        .max_tasks = 4,
+                    });
+                    defer g_dec.deinit();
+                    cur_tok = try self.model.decodeStep(&g_dec, cur_tok, &self.cache, self.mmap_bytes, history_buf[0..history_len], 1.25);
+                    history_buf[history_len] = cur_tok;
+                    history_len += 1;
+                }
+                std.mem.doNotOptimizeAway(&cur_tok);
+            }
+        };
+
+        var ctx = try WholeE2EGenerateCtx.init(allocator, synthetic_mmap);
+        defer ctx.deinit();
+        try runner.benchmark("Gemma4Q4-6L E2E Generate [Gen=16]", "Decode", null, null, 16, "tokens/s", &ctx);
     }
 }
