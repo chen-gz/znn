@@ -60,8 +60,10 @@ flowchart TD
    * **PyTorch 风格模块协议与大模型支持**：基于 `nn.walk` 的统一反射、两阶段 `nn.initModel` 计算图初始化、GQA/MLA/MoE/LoRA/DPO/GRPO、Gemma 4 架构与 4-bit (`Q4_0`) 量化推理，以及内聚的 Schema 2.0 Web 可视化器 (`web/`)。
    * **测试与覆盖率保障**：182 项 Zig 单元/集成测试与 203 项前端 Vitest 测试 100% 通过，基于 `kcov` 的端到端代码覆盖率超 **91.7%**。
 
-2. **下一阶段攻坚 (Immediate Next Steps)**，按 [`ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md) 推进，Apple Silicon Metal 优先：
-   * **Phase 0 执行器与基线**：基于 `io: std.Io` 的确定性执行器，`Graph.init(backing, options)` 统一入口，替换 Gemma 4 Q4 中每次调用都 spawn 线程的实现，拆分 `gemma4.zig` 并将 Q4 下沉为 `Q4MatMul` 算子。
+2. **下一阶段攻坚 (Immediate Next Steps)**，按 [`ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md) 与 [`TODO.md`](TODO.md) 推进，Apple Silicon 硬件加速优先：
+   * **Gemma 4 12B 本地推理加速专项 (从 0.14 tokens/s 跃升至 15~25+ tokens/s)**：
+     - **LM Head 262K 词表采样 GPU 卸载**：通过 Apple MLX / Metal GPU 流并发计算 GEMV，将单步 2.3 秒延迟消除至 5~10 ms。
+     - **Q4 GEMV Metal 专用硬件内核**：释放 Apple Silicon 100~400 GB/s 统一显存带宽，将全模 48 层 7.59 GB 权重解码计算耗时从 5.5 秒压至 40~60 ms，实现 15~25 tokens/s 实时交互生成。
    * **Phase 1 DPS 内核与 deferred 图**：算子拆分为 `inferShape` + `xxxInto`，`hostSlice` 宿主访问协议，录制-重放与静态内存规划。
    * **Phase 2 Metal 推理 MVP**：统一内存零拷贝、按流有序命令队列、运行期编译 MSL，跑通 Gemma 4 Q4 前向。
-   * **Phase 3 注意力与 KV Cache**：显式 `Attention` 算子（FlashAttention、原生 GQA）、端到端 KV Cache 与交互式 Chat REPL；Cholesky 求解器并行推进。
+   * **Phase 3 注意力与交互**：交互式多轮对话 CLI (Chat REPL) 与流式打字机输出；Cholesky 求解器并行推进。

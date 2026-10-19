@@ -189,7 +189,25 @@
     - [x] **修复 `requires_grad` 硬编码为 `false` 导致的训练梯度断流**：在 [`src/autodiff/graph_nn.zig`](../src/autodiff/graph_nn.zig) 中，统一 RoPE 继承 `self.enable_grad and X.requires_grad`，彻底修复反向传播梯度断流问题。
     - [x] **修复 `op.zig` 中 `.RoPE` 静态图重演（`graph.forward()`）结果错误**：在 [`OpContext.RoPE`](../src/autodiff/types.zig) 中保存 `mode` 与 `partial_rotary_factor`，并在 [`Op.forward(.RoPE)`](../src/autodiff/op.zig) 重演时传入完整配置，实现 100% 数值一致的图重演。
     - [x] **补全 `backward_nn.zig` 中 `.RoPE` 反向传播对 `split_half` 与 `partial_rotary_factor` 的伴随正交逆旋转**：在 [`src/autodiff/backward_nn.zig`](../src/autodiff/backward_nn.zig) 中实现正交伴随逆旋转求导内核 $\mathbf{R}^T$，完整支持 `interleaved` 与 `split_half` 模式及部分旋转因子，并通过有限差分数值梯度检验。
-  - [ ] 为 [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`GPTConfig`](../src/nn/transformer.zig) 增加可选 RoPE 位置编码开关，并将单层 `KVCache` 串联至 `TransformerBlock` / `GPT.forwardInference` 以及 [`Gemma4ForCausalLM`](../src/models/gemma4.zig) / [`Gemma4Q4ForCausalLM`](../src/models/gemma4.zig) 实现端到端 $O(T)$ 增量生成（Gemma 4 解码从每步重算整段序列改为单 Token 增量计算；这是 Metal 解码延迟的前置条件，设计 Phase 3）。
+  - [x] **Gemma 4 专用异构连续 `Gemma4KVCache` 与端到端增量自回归解码管线 (`models/gemma4.zig`, `models/gemma4_q4.zig`, `examples/gemma4.zig`)**：
+    - [x] 为 40 层滑动窗口注意力 (`head_dim=256, num_kv=8`) 与 8 层全局全注意力 (`head_dim=512, num_kv=1`) 设计专用的连续块内存布局，1024 上下文仅占 ~700 MB 显存/内存。
+    - [x] 在 `Gemma4Q4Attention` 与 `Gemma4Q4DecoderLayer` 中实现 `forwardPrefill` 与 `forwardDecode`，在 `Gemma4Q4ForCausalLM` 中暴露高效 `prefill` 与 `decodeStep` 接口。
+    - [x] 在 `examples/gemma4.zig` 中接入完整的流式生成管线，通过实测确认输出词元流（`hello world!\n\n* 1.\n* 2.\n*`）与全量重算基线 100% 逐位精确一致。
+  - [ ] **3.1.1 Gemma 4 12B 本地推理极致提速路线 (Speedup Roadmap: 0.14 → 15~25+ tokens/s)**：
+    - [ ] **路径 1：LM Head 262K 词表采样 GPU / BLAS 卸载（消除 2.3 秒单步延迟）**：
+      - 当前单步中遍历 262,144 个 3840 维 BF16 向量耗时约 2.3 秒（约占解码总耗时 30%）。
+      - 方案 A (Apple MLX / Metal GPU 卸载)：将 `last_row` [1, 3840] 与 `embed_weight` [262144, 3840] 传入 GPU 流并发计算 GEMV，在 Apple Silicon 统一内存架构下预计仅耗时 **5~10 ms**（直接取得 200x 加速）。
+      - 方案 B (CPU Accelerate CBLAS / NEON 向量化)：使用 `cblas_sgemv` 或 ARM64 NEON 内建向量指令，消除逐标量解包开销。
+      - 方案 C (Top-K 候选词剪枝)：基于词频或前缀划分候选空间，先缩小至 Top 4096 候选再做精确打分。
+    - [ ] **路径 2：Q4 矩阵向量乘 (GEMV) 的 Apple Silicon Metal / MLX 硬件加速（消除 5.5 秒单步延迟）**：
+      - 当前 48 层 Transformer 增量解码耗时 ~5.5 秒，瓶颈在于 CPU 单核/多核访问 7.59 GB 权重的有效内存带宽仅约 1.38 GB/s。
+      - 编写原生 Metal Compute Shader（或通过 MLX 算子内核）执行专用 Q4 GEMV：每个线程组负责若干输出特征通道，利用 Apple Silicon 硬件专属的 100~400 GB/s 统一显存带宽并行读取 Q4Block 并快速解包点积。
+      - 在 200 GB/s 显存带宽下，单步读取并计算全模 48 层 7.59 GB 权重仅需 **~38 ms**，理论解码速度可直接从 0.14 tokens/s 跃升至 **15 ~ 25 tokens/s**（提升 100x 以上！）。
+    - [ ] **路径 3：静态解码图与零临时堆分配 (Static Decode Graph & Zero-Allocation)**：
+      - 消除自回归循环中每步调用 `autodiff.Graph.init` 的图构建与节点释放开销，维护固定的解码执行上下文（复用静态中间张量缓冲区）。
+      - 融合 RMSNorm 与后续投影算子，减少中间特征进出内存的往返开销。
+    - [ ] **路径 4：ARM64 NEON 汇编级 CPU Q4Block 解包微内核**：
+      - 在纯 CPU 执行模式下，手写 ARM64 NEON 16 路并行解包点积微内核，进一步压榨 CPU 多核算力。
   - [ ] 为 [`examples/gemma4.zig`](../examples/gemma4.zig) 增加多轮对话交互式 CLI (Chat REPL) 与流式 Token 实时打字机输出。
   - [ ] `KVCache` 支持动态扩容与分页块分配（Paged KV Cache），提升自回归解码吞吐。
   - [x] 在 [`CausalSelfAttention`](../src/nn/attention.zig) 中支持 **Grouped-Query Attention (GQA)** 与 **Multi-Query Attention (MQA)**。
