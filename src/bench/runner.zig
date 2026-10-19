@@ -161,15 +161,42 @@ pub const BenchmarkRunner = struct {
         items_unit: []const u8,
         context: anytype,
     ) !void {
+        return self.benchmarkWithCap(
+            name,
+            category,
+            flops,
+            bytes_processed,
+            items_count,
+            items_unit,
+            self.config.warmup,
+            self.config.iterations,
+            context,
+        );
+    }
+
+    pub fn benchmarkWithCap(
+        self: *BenchmarkRunner,
+        name: []const u8,
+        category: []const u8,
+        flops: ?f64,
+        bytes_processed: ?u64,
+        items_count: ?usize,
+        items_unit: []const u8,
+        max_warmup: usize,
+        max_iterations: usize,
+        context: anytype,
+    ) !void {
         if (!self.shouldRun(name, category)) return;
 
+        const warmup = @min(self.config.warmup, max_warmup);
+        const iters = @max(@as(usize, 1), @min(self.config.iterations, max_iterations));
+
         // Warmup
-        for (0..self.config.warmup) |_| {
+        for (0..warmup) |_| {
             try context.run();
         }
 
         // Measurement iterations
-        const iters = self.config.iterations;
         var times = try self.allocator.alloc(u64, iters);
         defer self.allocator.free(times);
 

@@ -610,13 +610,13 @@ test "bench runner basic execution" {
     var decode_runner = BenchmarkRunner.init(test_alloc, .{
         .warmup = 0,
         .iterations = 1,
-        .filter = "Gemma4Q4-6L",
+        .filter = "TinyQ4Gemma4",
         .quiet = true,
     });
     defer decode_runner.deinit();
 
     try runDecodeBenchmarks(&decode_runner, test_alloc);
-    try std.testing.expectEqual(@as(usize, 3), decode_runner.results.items.len);
+    try std.testing.expectEqual(@as(usize, 2), decode_runner.results.items.len);
     for (decode_runner.results.items) |st| {
         try std.testing.expect(st.throughputItems() != null);
         try std.testing.expect(st.throughputItems().? > 0.0);

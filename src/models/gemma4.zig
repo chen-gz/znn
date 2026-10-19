@@ -748,7 +748,8 @@ pub const Gemma4DecoderLayer = struct {
         const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
         const mlp_out = try self.mlp.forward(graph, pre_mlp);
         const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
-        return try graph.add(x1, post_mlp);
+        const x2 = try graph.add(x1, post_mlp);
+        return try graph.mulScalar(x2, self.layer_scalar.data[0]);
     }
 
     pub fn forwardDecode(
@@ -768,7 +769,8 @@ pub const Gemma4DecoderLayer = struct {
         const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
         const mlp_out = try self.mlp.forward(graph, pre_mlp);
         const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
-        return try graph.add(x1, post_mlp);
+        const x2 = try graph.add(x1, post_mlp);
+        return try graph.mulScalar(x2, self.layer_scalar.data[0]);
     }
 };
 
@@ -784,13 +786,38 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
         name: ?[]const u8 = null,
         module_type: []const u8 = "Gemma4ForCausalLM",
 
+        fn releaseModuleGrads(module_ptr: anytype, allocator: std.mem.Allocator) void {
+            const Visitor = struct {
+                alloc: std.mem.Allocator,
+                pub fn visitTensor(self: *@This(), _: []const u8, t: *Tensor) !void {
+                    if (t.grad.len > 0) {
+                        self.alloc.free(t.grad);
+                        t.grad = &.{};
+                    }
+                    t.requires_grad = false;
+                }
+            };
+            var v = Visitor{ .alloc = allocator };
+            nn.walk(module_ptr, &v) catch {};
+        }
+
         pub fn initDefault(allocator: std.mem.Allocator) !Self {
             return init(allocator);
         }
 
         pub fn init(allocator: std.mem.Allocator) !Self {
-            const embed_tokens = try Embedding.init(allocator, config.vocab_size, config.hidden_size);
+            return initWithOptions(allocator, true);
+        }
+
+        /// 推理专用模型初始化：逐层释放未使用的梯度缓冲区 (.grad)，将 12B 全精度模型的内存占用减半 (从 ~91 GB 降至 ~45.5 GB)
+        pub fn initInference(allocator: std.mem.Allocator) !Self {
+            return initWithOptions(allocator, false);
+        }
+
+        fn initWithOptions(allocator: std.mem.Allocator, keep_grad: bool) !Self {
+            var embed_tokens = try Embedding.init(allocator, config.vocab_size, config.hidden_size);
             errdefer deinitModel(&embed_tokens, allocator);
+            if (!keep_grad) releaseModuleGrads(&embed_tokens, allocator);
 
             const layers = try allocator.alloc(Gemma4DecoderLayer, config.num_hidden_layers);
             var initialized_layers: usize = 0;
@@ -819,11 +846,13 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
                     config.sliding_window,
                     config.rms_norm_eps,
                 );
+                if (!keep_grad) releaseModuleGrads(&layers[i], allocator);
                 initialized_layers += 1;
             }
 
-            const norm = try GemmaRMSNorm.init(allocator, config.hidden_size, config.rms_norm_eps);
+            var norm = try GemmaRMSNorm.init(allocator, config.hidden_size, config.rms_norm_eps);
             errdefer deinitModel(&norm, allocator);
+            if (!keep_grad) releaseModuleGrads(&norm, allocator);
 
             return Self{
                 .embed_tokens = embed_tokens,
