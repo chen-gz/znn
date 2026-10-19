@@ -35,6 +35,7 @@ const Gemma4ChatTokenizer = struct {
         .{ .id = 733, .text = "are" },
         .{ .id = 740, .text = " can" },
         .{ .id = 993, .text = " there" },
+        .{ .id = 1015, .text = " who" },
         .{ .id = 1601, .text = " help" },
         .{ .id = 1717, .text = " !" },
         .{ .id = 1902, .text = " world" },
@@ -124,15 +125,16 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("   - 包含模块: 最终层 RMSNorm + 262K 词表嵌入矩阵 (1.92 GB) + 48 层 Transformer 4-bit Q4Block 权重\n\n", .{});
 
     // 3. 构建 Gemma 4 Instruct 官方标准对话上下文:
-    // <bos><|turn>user\nhello world<turn|>\n<|turn>model\n
+    // <bos><|turn>user\nwho are you<turn|>\n<|turn>model\n
     std.debug.print("3. [Gemma 4 Instruct 对话模板 (Chat Template)]:\n", .{});
     const prompt_tokens = [_]usize{
         Gemma4ChatTokenizer.BOS, // <bos>
         Gemma4ChatTokenizer.SOT, // <|turn>
         Gemma4ChatTokenizer.USER, // user
         Gemma4ChatTokenizer.NL, // \n
-        29104, //  hello
-        1902, //  world
+        1015, //  who
+        659, //  are
+        611, //  you
         Gemma4ChatTokenizer.EOT, // <turn|>
         Gemma4ChatTokenizer.NL, // \n
         Gemma4ChatTokenizer.SOT, // <|turn>
@@ -140,7 +142,7 @@ pub fn main(init: std.process.Init) !void {
         Gemma4ChatTokenizer.NL, // \n
     };
 
-    std.debug.print("   - 输入 Prompt 文本: \"<bos><|turn>user\\nhello world<turn|>\\n<|turn>model\\n\"\n", .{});
+    std.debug.print("   - 输入 Prompt 文本: \"<bos><|turn>user\\nwho are you<turn|>\\n<|turn>model\\n\"\n", .{});
     std.debug.print("   - Prompt Tokens ({} 个词元): [", .{prompt_tokens.len});
     for (prompt_tokens, 0..) |tid, i| {
         if (i > 0) std.debug.print(", ", .{});
@@ -169,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("   - 硬件加速: CPU 多核并行\n", .{});
     }
     std.debug.print("   -------------------------------------------------------------\n", .{});
-    std.debug.print("   User  : hello world\n", .{});
+    std.debug.print("   User  : who are you\n", .{});
     std.debug.print("   Model : ", .{});
 
     var current_tokens: std.ArrayList(usize) = .empty;
@@ -178,8 +180,8 @@ pub fn main(init: std.process.Init) !void {
         try current_tokens.append(allocator, tok);
     }
 
-    // 运行真实自回归生成循环（最多生成 15 个 token，或遇到 <turn|> / <eos> 结束）
-    const max_new_tokens: usize = 15;
+    // 运行真实自回归生成循环（最多生成 40 个 token，或遇到 <turn|> / <eos> 结束）
+    const max_new_tokens: usize = 40;
     var gen_count: usize = 0;
 
     var timer_ts: std.posix.system.timespec = undefined;
