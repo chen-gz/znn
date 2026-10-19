@@ -171,15 +171,30 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // 运行真实自回归生成循环（最多生成 15 个 token，或遇到 <turn|> / <eos> 结束）
-    const max_new_tokens: usize = 15;
+    const max_new_tokens: usize = 5;
     var gen_count: usize = 0;
+
+    var timer_ts: std.posix.system.timespec = undefined;
+    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
+    const start_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
+    var first_token_ns: u64 = 0;
 
     while (gen_count < max_new_tokens) : (gen_count += 1) {
         // 每步新建一个无梯度轻量级图，生成完毕立即释放中间张量，维持极限低内存
         var step_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false, .io = io });
         defer step_graph.deinit();
 
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
+        const step_start_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
+
         const next_tok = try model.generateNextToken(&step_graph, current_tokens.items, mmap_ptr);
+
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
+        const step_end_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
+        if (gen_count == 0) {
+            first_token_ns = step_end_ns - step_start_ns;
+        }
+
         try current_tokens.append(allocator, next_tok);
 
         // 使用库内完整的 262K 词表解码器直接打印真实字符串内容
@@ -194,10 +209,20 @@ pub fn main(init: std.process.Init) !void {
             break;
         }
     }
+    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
+    const end_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
+    const total_gen_s = @as(f64, @floatFromInt(end_ns - start_ns)) / 1e9;
+    const prefill_s = @as(f64, @floatFromInt(first_token_ns)) / 1e9;
+    const tokens_per_sec = if (total_gen_s > 0) @as(f64, @floatFromInt(gen_count)) / total_gen_s else 0.0;
+
     std.debug.print("\n   -------------------------------------------------------------\n\n", .{});
 
-    std.debug.print("5. [推理验证总结]:\n", .{});
-    std.debug.print("   - 成功执行了真实 48 层 4-bit 量化 Gemma 4 权重的端到端前向传播与贪婪自回归采样！\n", .{});
+    std.debug.print("5. [推理验证与性能测试总结]:\n", .{});
+    std.debug.print("   - 模型规格: 完整 48 层 Gemma 4 12B Instruct (Q4 量化, 7.59 GB)\n", .{});
+    std.debug.print("   - 生成词元: {} 个 token\n", .{gen_count});
+    std.debug.print("   - 首字延迟 (TTFT / Prefill 耗时): {d:.2} 秒 (含 {} 个输入词元处理)\n", .{ prefill_s, prompt_tokens.len });
+    std.debug.print("   - 总生成时间: {d:.2} 秒\n", .{total_gen_s});
+    std.debug.print("   - 全局平均吞吐: {d:.2} tokens/s (当前为无 KV Cache 序列全量重算模式)\n", .{tokens_per_sec});
     std.debug.print("   - 4-bit 量化权重 `gemma-4-12B-q4.bin` 使得 12B 完整参数量可在 Apple Silicon 上顺畅运行。\n\n", .{});
 
     std.debug.print("================================================================================\n", .{});
