@@ -731,6 +731,217 @@ pub const GpuModelContext = struct {
         self.curr_len = cached_len;
     }
 
+    /// 执行全 GPU 序列级并行预填充 (Prefill)，一次性完成整个 Prompt 词元序列的矩阵乘法与 KVCache 初始化
+    pub fn prefill(
+        self: *GpuModelContext,
+        prompt_tokens: []const usize,
+        embed_u16: []const u16,
+        repetition_penalty: f32,
+        stream: ?Stream,
+    ) !usize {
+        const T = prompt_tokens.len;
+        if (T == 0) return 0;
+        if (T >= self.max_seq_len) return error.ContextWindowExceeded;
+
+        const s = if (stream) |st| st else self.stream;
+
+        // 重置 GPU 键值缓存 (Reset GPU KVCache)
+        for (self.gpu_k, 0..) |_, idx| {
+            if (self.gpu_k[idx]) |*arr| arr.deinit();
+            if (self.gpu_v[idx]) |*arr| arr.deinit();
+            self.gpu_k[idx] = null;
+            self.gpu_v[idx] = null;
+        }
+        self.curr_len = 0;
+
+        // 1. 构建 Prompt 词元嵌入 [1, T, hidden_size]
+        const tok_emb_buf = try self.allocator.alloc(f32, T * self.hidden_size);
+        defer self.allocator.free(tok_emb_buf);
+
+        const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(self.hidden_size)));
+        for (prompt_tokens, 0..) |tok, t_idx| {
+            const emb_row = embed_u16[tok * self.hidden_size .. (tok + 1) * self.hidden_size];
+            const dest = tok_emb_buf[t_idx * self.hidden_size .. (t_idx + 1) * self.hidden_size];
+            for (0..self.hidden_size) |d| {
+                const u: u32 = @as(u32, emb_row[d]) << 16;
+                dest[d] = @as(f32, @bitCast(u)) * sqrt_d;
+            }
+        }
+
+        var x_cur = try mlx.Array.fromSlice(tok_emb_buf, &.{ 1, T, self.hidden_size });
+
+        for (self.layers, 0..) |lw, l| {
+            // (1) 输入均方根层归一化 [1, T, hidden_size]
+            var in_norm = try mlx.Array.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
+            defer in_norm.deinit();
+
+            // (2) QKV 量化投影 [1, T, total_dim] (GEMM 并行加速)
+            var q_raw = try lw.q_proj.forwardArray(in_norm, s);
+            defer q_raw.deinit();
+            var k_raw = try lw.k_proj.forwardArray(in_norm, s);
+            defer k_raw.deinit();
+            var v_raw = if (lw.v_proj) |vp|
+                try vp.forwardArray(in_norm, s)
+            else
+                try lw.k_proj.forwardArray(in_norm, s);
+            defer v_raw.deinit();
+
+            // (3) 重构形状与转置至 [1, heads, T, head_dim]
+            var q_4d_raw = try q_raw.reshape(&.{ 1, T, lw.num_heads, lw.head_dim }, s);
+            defer q_4d_raw.deinit();
+            var q_4d = try q_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer q_4d.deinit();
+
+            var k_4d_raw = try k_raw.reshape(&.{ 1, T, lw.num_kv_heads, lw.head_dim }, s);
+            defer k_4d_raw.deinit();
+            var k_4d = try k_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer k_4d.deinit();
+
+            var v_4d_raw = try v_raw.reshape(&.{ 1, T, lw.num_kv_heads, lw.head_dim }, s);
+            defer v_4d_raw.deinit();
+            var v_4d = try v_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer v_4d.deinit();
+
+            // (4) Q-Norm, K-Norm 与无参数 V-Norm
+            var q_normed = try mlx.Array.fastRmsNorm(q_4d, lw.q_norm_w, lw.rms_norm_eps, s);
+            defer q_normed.deinit();
+            var k_normed = try mlx.Array.fastRmsNorm(k_4d, lw.k_norm_w, lw.rms_norm_eps, s);
+            defer k_normed.deinit();
+            var v_normed = try mlx.Array.fastRmsNorm(v_4d, null, lw.rms_norm_eps, s);
+            defer v_normed.deinit();
+
+            // (5) 旋转位置编码 (Rotary Position Embedding, RoPE)
+            const rot_dim = @as(usize, @intFromFloat(@as(f32, @floatFromInt(lw.head_dim)) * lw.partial_rotary_factor));
+            var q_rot = try mlx.Array.fastRoPE(q_normed, rot_dim, false, lw.rope_theta, 1.0, 0, s);
+            defer q_rot.deinit();
+            var k_rot = try mlx.Array.fastRoPE(k_normed, rot_dim, false, lw.rope_theta, 1.0, 0, s);
+            defer k_rot.deinit();
+
+            // (6) 写入 GPU 键值缓存 (Initial KVCache on GPU)
+            if (lw.attn_type == 0 and T > lw.sliding_window) {
+                self.gpu_k[l] = try k_rot.sliceAxis(2, T - lw.sliding_window, T, s);
+                self.gpu_v[l] = try v_normed.sliceAxis(2, T - lw.sliding_window, T, s);
+            } else {
+                self.gpu_k[l] = try k_rot.mulScalar(1.0, s);
+                self.gpu_v[l] = try v_normed.mulScalar(1.0, s);
+            }
+
+            // (7) 带因果掩码的快速缩放点积注意力 (Causal SDPA)
+            var attn_out = try mlx.Array.fastScaledDotProductAttention(
+                q_rot,
+                k_rot,
+                v_normed,
+                1.0,
+                true,
+                s,
+            );
+            defer attn_out.deinit();
+
+            // (8) 输出投影 (O-projection)
+            var attn_t = try attn_out.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer attn_t.deinit();
+            var attn_2d = try attn_t.reshape(&.{ 1, T, lw.num_heads * lw.head_dim }, s);
+            defer attn_2d.deinit();
+            var o_out = try lw.o_proj.forwardArray(attn_2d, s);
+            defer o_out.deinit();
+
+            // (9) 注意力后层归一化与残差相加
+            var post_attn = try mlx.Array.fastRmsNorm(o_out, lw.post_attn_w, lw.rms_norm_eps, s);
+            defer post_attn.deinit();
+            var x1 = try mlx.Array.add(x_cur, post_attn, s);
+            defer x1.deinit();
+
+            // (10) 门控多层感知机 (MLP) (GEMM 并行加速)
+            var pre_mlp = try mlx.Array.fastRmsNorm(x1, lw.pre_mlp_w, lw.rms_norm_eps, s);
+            defer pre_mlp.deinit();
+            var gate = try lw.gate_proj.forwardArray(pre_mlp, s);
+            defer gate.deinit();
+            var up = try lw.up_proj.forwardArray(pre_mlp, s);
+            defer up.deinit();
+            var act = try gate.gelu(s);
+            defer act.deinit();
+            var fused = try mlx.Array.multiply(act, up, s);
+            defer fused.deinit();
+            var down = try lw.down_proj.forwardArray(fused, s);
+            defer down.deinit();
+
+            // (11) 前馈后层归一化、残差相加与层缩放
+            var post_mlp = try mlx.Array.fastRmsNorm(down, lw.post_mlp_w, lw.rms_norm_eps, s);
+            defer post_mlp.deinit();
+            var x2 = try mlx.Array.add(x1, post_mlp, s);
+            defer x2.deinit();
+
+            var next_x: mlx.Array = undefined;
+            if (lw.layer_scalar != 1.0) {
+                next_x = try x2.mulScalar(lw.layer_scalar, s);
+            } else {
+                next_x = try x2.mulScalar(1.0, s);
+            }
+
+            var old_x = x_cur;
+            x_cur = next_x;
+            old_x.deinit();
+        }
+
+        // 3. 提取最终词元向量并执行 LM Head 投影
+        var last_row_3d = try x_cur.sliceAxis(1, T - 1, T, s);
+        defer last_row_3d.deinit();
+        var last_row_2d = try last_row_3d.reshape(&.{ 1, self.hidden_size }, s);
+        defer last_row_2d.deinit();
+        x_cur.deinit();
+
+        var h_norm = try mlx.Array.fastRmsNorm(last_row_2d, self.final_norm_w, self.final_eps, s);
+        defer h_norm.deinit();
+
+        var h_bf16 = try h_norm.astype(.bfloat16, s);
+        defer h_bf16.deinit();
+
+        var logits_bf16 = try mlx.Array.matmul(h_bf16, self.lm_head.w_t, s);
+        defer logits_bf16.deinit();
+
+        var logits = try logits_bf16.astype(.float32, s);
+        defer logits.deinit();
+
+        logits.eval();
+
+        const logits_slice = logits.dataFloat32();
+        if (logits_slice.len != self.vocab_size) return error.ShapeMismatch;
+
+        // 位图去重采样
+        var recent_bitset = [_]u64{0} ** (262144 / 64);
+        if (repetition_penalty > 1.0) {
+            for (prompt_tokens) |rec| {
+                if (rec < self.vocab_size) {
+                    recent_bitset[rec / 64] |= (@as(u64, 1) << @intCast(rec % 64));
+                }
+            }
+        }
+
+        var max_val: f32 = -1e30;
+        var max_id: usize = 0;
+
+        for (0..self.vocab_size) |v| {
+            if (v == 0 or (v >= 258880 and v <= 258884)) continue;
+
+            var dot = logits_slice[v];
+            if (repetition_penalty > 1.0 and (recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
+                if (dot > 0.0) {
+                    dot /= repetition_penalty;
+                } else {
+                    dot *= repetition_penalty;
+                }
+            }
+
+            if (dot > max_val) {
+                max_val = dot;
+                max_id = v;
+            }
+        }
+
+        self.curr_len = T;
+        return max_id;
+    }
+
     /// 执行单步端到端整网自回归增量解码 (Decode Step)，全程在 GPU 计算图中完成惰性调度
     pub fn decodeStep(
         self: *GpuModelContext,

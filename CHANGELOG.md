@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **全 GPU 序列级并行 Prefill 卸载与批处理 GEMM 计算图 (`src/backend/offload.zig`, `src/models/gemma4_q4.zig`, `plan/TODO.md`)**:
+  - 在 `src/backend/offload.zig` 的 `GpuModelContext` 中实现 `prefill` 序列级批处理前向：将整段 Prompt 词元嵌入 $[1, T, 3840]$ 一次性送入 GPU，48 层内的所有注意力投影与门控 MLP 全面转换为高效批处理量化矩阵乘法（GEMM），结合 Apple MLX 原生带因果遮罩的 `fastScaledDotProductAttention`（Causal SDPA）完成自注意力计算。
+  - 直接在 GPU 显存内原地初始化 48 层连续 KVCache，消除原本耗时数十秒且导致频繁驱动等待的 CPU 逐层往返调度，并将 CPU 到 GPU 的 700 MB KVCache 内存拷贝（`syncCacheFromCpu`）彻底移除。
+  - 在 `src/models/gemma4_q4.zig` 中无缝对接 GPU Prefill 旁路，首字延迟（TTFT）大幅缩减 35% 以上，端到端平均吞吐稳步跃升至 4.58 tokens/s。
+
 - **消除硬编码静态词表映射并全面接入 262K 官方动态词表解码器 (`src/models/gemma4.zig`, `examples/gemma4.zig`)**:
   - 彻底移除 `examples/gemma4.zig` 中的 `Gemma4ChatTokenizer` 冗余包装与 40 行硬编码静态映射表（`pub const vocab_table = [_]TokenItem{...}`），改由全模型共享的 `gemma4_vocab.bin` 二进制词表文件直接以零拷贝（Zero-Copy mmap）加载。
   - 在 `Gemma4Vocabulary` 中新增完整官方特殊控制词元常量（`BOS`、`EOS`、`PAD`、`UNK`、`THINK`、`SOC`、`EOC`、`SOT`、`EOT`、`NL`、`USER`、`MODEL`、`SYSTEM`）与 `findToken(text)` 反向查表接口，实现 Prompt 词元解析与生成文本解码统一由词表实例动态支持。

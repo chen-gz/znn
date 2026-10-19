@@ -1248,12 +1248,18 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const T = prompt_tokens.len;
             if (T == 0) return 0;
             cache.reset();
-            self.gpu_needs_sync = true;
 
             const embed_u16: []const u16 = @alignCast(std.mem.bytesAsSlice(
                 u16,
                 mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
             ));
+
+            if (graph.options.device == .gpu and self.gpu_context != null) {
+                self.gpu_needs_sync = false;
+                return self.gpu_context.?.prefill(prompt_tokens, embed_u16, repetition_penalty, graph.options.mlx_stream);
+            }
+
+            self.gpu_needs_sync = true;
 
             // 1. 词表嵌入查表
             const tok_emb = try graph.tensorND(&.{ 1, T, config.hidden_size }, false);

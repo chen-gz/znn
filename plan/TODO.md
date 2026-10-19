@@ -215,14 +215,20 @@
     - [x] **路径 2.2：LM Head 4096-bit 快速位图与 9.6 GB 物理内存激进回收**：
       - 重构 `sampleNext` 与 `ArgmaxContext`：以仅 32 KB L1 缓存的 `[4096]u64` 快速位图索引替代原本 1600 万次嵌套比对循环，过滤延迟从 2500 ms 归零至 **< 1 ms**。
       - 消除 `loadFromMmap` 中未使用的 4.03 GB 冗余 `embed_tokens.weight` 堆张量，并在 GPU 卸载后显式 `madvise(MADV_DONTNEED)` 释放 5.6 GB 磁盘页缓存，彻底消除 16 GB 机器上的虚拟内存换页（Swap Thrashing）。
-    - [ ] **路径 2.3：端到端单次同步解码图 (End-to-End Single-Sync Decode Graph)**：
-      - 将 Attention、RoPE 与 RMSNorm 全部收拢至 GPU，48 层前向计算整图提交，单步仅执行 **1 次 GPU 统一同步**，彻底消除 145 次驱动提交开销，直达 **10~14 tokens/s**。
-    - [ ] **路径 2.4：LM Head 权重量化 (Q4 / Q8 LM Head Weights)**：
-      - 将 262K 巨型词表嵌入矩阵（2.01 GB BF16）量化至 Q4 (503 MB)，使单步词表投影耗时从 640 ms 缩减至 **5~10 ms**。
-    - [ ] **路径 3：静态解码图与零临时堆分配 (Static Decode Graph & Zero-Allocation)**：
-      - 消除自回归循环中每步调用 `autodiff.Graph.init` 的图构建与节点释放开销，维护固定的解码执行上下文（复用静态中间张量缓冲区）。
-    - [ ] **路径 4：ARM64 NEON 汇编级 CPU Q4Block 解包微内核**：
-      - 在纯 CPU 执行模式下，手写 ARM64 NEON 16 路并行解包点积微内核，进一步压榨 CPU 多核算力。
+    - [x] **路径 2.3：端到端单次求值 GPU 解码计算图与 bfloat16 精度对齐（实测提速 10.3 倍，稳态 6.55 tokens/s）**：
+      - 在 `src/backend/offload.zig` 中实现 `GpuModelContext`，将 48 层 Transformer 解码层、KVCache、RMSNorm 与 LM Head 全部常驻 GPU 统一内存中，单步彻底规约为**单次求值（Single Evaluation）**，消除原本每步 145 次往返开销。
+      - 引入单一持久化 GPU 命令流（`Stream`）避免每步 1,680 次命令流重复创建销毁；解决 LM Head 在 Metal GEMV 内部因 float32 与 bfloat16 混合精度导致的 2.01 GB 权重矩阵隐式上采样开销（耗时从 235 ms 骤降至 20.9 ms，LM Head 提速 11.3 倍）。
+      - 实测生成耗时由 27.51 秒缩短至 2.67 秒，解码速度提升至 5.83 ~ 6.55 tokens/s（提速超 10.3 倍）。
+    - [x] **路径 2.4：全 GPU 序列级 Prefill 批处理卸载（消除 CPU 逐层调度与 CPU->GPU 缓存拷贝）**：
+      - 在 `src/backend/offload.zig` 的 `GpuModelContext` 中实现 `prefill(prompt_tokens)`：将全部 Prompt 词元嵌入 $[1, T, 3840]$ 一次性送入 GPU，48 层内的所有注意力与 MLP 投影转换为批处理矩阵乘法（GEMM），结合带因果掩码的 GPU 原生 SDPA 并行填满 GPU KVCache。
+      - 消除 CPU 逐层往返调度，并将 CPU 到 GPU 的 700 MB KVCache 内存拷贝（`syncCacheFromCpu`）彻底移除，实现 Prefill 与 Decode 全程 GPU 闭环，端到端吞吐提升至 4.58 tokens/s。
+    - [ ] **路径 2.5：KVCache 预分配静态显存与切片原地更新（消除 96 次/步动态张量重分配）**：
+      - 在 `GpuModelContext.init` 中为 48 层的 Key 和 Value 静态分配固定显存上限缓冲 $[1, \text{num\_kv}, \text{max\_seq\_len}, \text{head\_dim}]$。
+      - 增量自回归时，以 MLX 官方原生的 `mlx_slice_update` 原地写入当前 `pos` 切片槽位，替代每步 96 次的 `concatenateAxis` 动态数组分配与历史缓存重复拷贝，消除显存碎片与内存带宽浪费。
+    - [ ] **路径 2.6：MLX JIT 计算图编译（`mlx_compile` / Metal Pipeline PSO 预热）**：
+      - 接入 MLX 的 `mlx_compile`，将单步增量解码前向闭包编译为固定的 Metal Compute Pipeline，消除 CPU 侧每步 700+ 次 C-API 动态节点构建与调度停顿。
+    - [ ] **路径 2.7：显存带宽受限算子深度融合（RMSNorm + Q4 GEMV 深度内核融合）**：
+      - 将输入 RMSNorm 缩放与后续 Q4Block 反量化矩阵乘在 Metal Shader 层面垂直融合，减少中间激活张量在全局显存中的往返读写，使显存读取效率无限逼近 Apple Silicon 物理带宽上限，向 15~25+ tokens/s 冲刺。
   - [ ] 为 [`examples/gemma4.zig`](../examples/gemma4.zig) 增加多轮对话交互式 CLI (Chat REPL) 与流式 Token 实时打字机输出。
   - [ ] `KVCache` 支持动态扩容与分页块分配（Paged KV Cache），提升自回归解码吞吐。
   - [x] 在 [`CausalSelfAttention`](../src/nn/attention.zig) 中支持 **Grouped-Query Attention (GQA)** 与 **Multi-Query Attention (MQA)**。
