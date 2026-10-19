@@ -429,6 +429,24 @@ pub const Gemma4Attention = struct {
     pub const formula = "\\text{Attn}(Q, K, V) = \\text{softmax}\\left(Q K^T + M\\right) V W_o";
 
     pub fn forward(self: *const Gemma4Attention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        return self.forwardPrefillOptional(graph, x, null);
+    }
+
+    pub fn forwardPrefill(
+        self: *const Gemma4Attention,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: *Gemma4KVCache.LayerCache,
+    ) !*Tensor {
+        return self.forwardPrefillOptional(graph, x, layer_cache);
+    }
+
+    fn forwardPrefillOptional(
+        self: *const Gemma4Attention,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: ?*Gemma4KVCache.LayerCache,
+    ) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
@@ -468,7 +486,25 @@ pub const Gemma4Attention = struct {
         const q_rot = try ropeSplitHalf(graph, q, 0, self.partial_rotary_factor, self.rope_theta);
         const k_rot = try ropeSplitHalf(graph, k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
 
-        // 5. GQA 广播扩展至 nh 个头
+        // 5. 写入键值缓存 (Key-Value Cache, KVCache)
+        if (layer_cache) |cache| {
+            std.debug.assert(B == 1);
+            std.debug.assert(T <= cache.max_seq_len);
+            const max_len = cache.max_seq_len;
+            for (0..n_kv) |kv_h| {
+                for (0..T) |t| {
+                    const dest_k = cache.k[(kv_h * max_len + t) * hd .. (kv_h * max_len + t + 1) * hd];
+                    const dest_v = cache.v[(kv_h * max_len + t) * hd .. (kv_h * max_len + t + 1) * hd];
+                    const src_k = k_rot.data[(kv_h * T + t) * hd .. (kv_h * T + t + 1) * hd];
+                    const src_v = v.data[(kv_h * T + t) * hd .. (kv_h * T + t + 1) * hd];
+                    @memcpy(dest_k, src_k);
+                    @memcpy(dest_v, src_v);
+                }
+            }
+            cache.curr_len = T;
+        }
+
+        // 6. GQA 广播扩展至 nh 个头
         var k = k_rot;
         var v_final = v;
         if (groups > 1) {
@@ -476,10 +512,7 @@ pub const Gemma4Attention = struct {
             v_final = try graph.repeatKV(v, groups);
         }
 
-        // 6. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0)
-        // 当为全局注意力层 (full_attention) 或时间步不超过滑动窗口跨度时，等价于标准因果注意力，
-        // 直接分发至 scaledDotProductAttention（无求导 GPU 模式直通融合 FlashAttention Metal 内核）；
-        // 否则回退至带滑动窗口截断的分解计算图。
+        // 7. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0)
         const is_pure_causal = (self.attn_type == .full_attention or T <= self.sliding_window);
         const y_4d = if (is_pure_causal)
             try graph.scaledDotProductAttention(q_rot, k, v_final, 1.0, true)
@@ -506,12 +539,108 @@ pub const Gemma4Attention = struct {
             break :blk try graph.batchMatMul(att_sm, v_final);
         };
 
-        // 7. 转置并融合输出
+        // 8. 转置并融合输出
         const y_trans = try graph.transposeND(y_4d, 1, 2);
         const y_2d = try graph.reshape(y_trans, &.{ B * T, nh * hd });
         const out_2d = try self.o_proj.forward(graph, y_2d);
 
         return try graph.reshape(out_2d, &.{ B, T, C });
+    }
+
+    pub fn forwardDecode(
+        self: *const Gemma4Attention,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: *Gemma4KVCache.LayerCache,
+    ) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+
+        const C = self.hidden_size;
+        const nh = self.num_heads;
+        const n_kv = self.num_kv_heads;
+        const hd = self.head_dim;
+        const groups = nh / n_kv;
+        const pos = layer_cache.curr_len;
+        const max_len = layer_cache.max_seq_len;
+        if (pos >= max_len) return error.ContextWindowExceeded;
+
+        const x_2d = if (x.shape.len == 2) x else try graph.reshape(x, &.{ 1, C });
+
+        const q_raw = try self.q_proj.forward(graph, x_2d);
+        const k_raw = try self.k_proj.forward(graph, x_2d);
+        const v_raw = if (self.v_proj) |*vp| try vp.forward(graph, x_2d) else k_raw;
+
+        const q_heads = try graph.reshape(q_raw, &.{ nh, hd });
+        const q_normed = try self.q_norm.forward(graph, q_heads);
+        const k_heads = try graph.reshape(k_raw, &.{ n_kv, hd });
+        const k_normed = try self.k_norm.forward(graph, k_heads);
+        const v_heads = try graph.reshape(v_raw, &.{ n_kv, hd });
+        const v_normed = try self.v_norm.forward(graph, v_heads);
+
+        const q_4d = try graph.reshape(q_normed, &.{ 1, nh, 1, hd });
+        const k_4d = try graph.reshape(k_normed, &.{ 1, n_kv, 1, hd });
+        const q_rot = try ropeSplitHalf(graph, q_4d, pos, self.partial_rotary_factor, self.rope_theta);
+        const k_rot = try ropeSplitHalf(graph, k_4d, pos, self.partial_rotary_factor, self.rope_theta);
+
+        for (0..n_kv) |kv_h| {
+            const dest_k = layer_cache.k[(kv_h * max_len + pos) * hd .. (kv_h * max_len + pos + 1) * hd];
+            const dest_v = layer_cache.v[(kv_h * max_len + pos) * hd .. (kv_h * max_len + pos + 1) * hd];
+            const src_k = k_rot.data[kv_h * hd .. (kv_h + 1) * hd];
+            const src_v = v_normed.data[kv_h * hd .. (kv_h + 1) * hd];
+            @memcpy(dest_k, src_k);
+            @memcpy(dest_v, src_v);
+        }
+        layer_cache.curr_len = pos + 1;
+        const curr_len = layer_cache.curr_len;
+
+        const y_2d = try graph.zeros(&.{ 1, nh * hd }, false);
+        const start_idx: usize = if (self.attn_type == .sliding_attention and curr_len > self.sliding_window)
+            curr_len - self.sliding_window
+        else
+            0;
+        const valid_len = curr_len - start_idx;
+        const scores = try graph.arenaAllocator().alloc(f32, valid_len);
+
+        for (0..nh) |h| {
+            const kv_h = h / groups;
+            const q_head = q_rot.data[h * hd .. (h + 1) * hd];
+            var max_score: f32 = -1e30;
+
+            for (start_idx..curr_len) |j| {
+                const k_cached = layer_cache.k[(kv_h * max_len + j) * hd .. (kv_h * max_len + j + 1) * hd];
+                var dot: f32 = 0.0;
+                for (q_head, k_cached) |qv, kv| {
+                    dot += qv * kv;
+                }
+                scores[j - start_idx] = dot;
+                if (dot > max_score) max_score = dot;
+            }
+
+            var exp_sum: f32 = 0.0;
+            for (scores) |*s| {
+                const e = @exp(s.* - max_score);
+                s.* = e;
+                exp_sum += e;
+            }
+            const inv_sum = 1.0 / exp_sum;
+            for (scores) |*s| {
+                s.* *= inv_sum;
+            }
+
+            const y_head = y_2d.data[h * hd .. (h + 1) * hd];
+            @memset(y_head, 0.0);
+            for (start_idx..curr_len) |j| {
+                const v_cached = layer_cache.v[(kv_h * max_len + j) * hd .. (kv_h * max_len + j + 1) * hd];
+                const weight = scores[j - start_idx];
+                for (y_head, v_cached) |*yv, vv| {
+                    yv.* += weight * vv;
+                }
+            }
+        }
+
+        const out_2d = try self.o_proj.forward(graph, y_2d);
+        return try graph.reshape(out_2d, &.{ 1, 1, C });
     }
 };
 
@@ -596,6 +725,46 @@ pub const Gemma4DecoderLayer = struct {
         const x1 = try graph.add(x, post_attn);
 
         // 2. 前馈网络分支: PreMLPLN -> MLP -> PostMLPLN -> + x1
+        const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
+        const mlp_out = try self.mlp.forward(graph, pre_mlp);
+        const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
+        return try graph.add(x1, post_mlp);
+    }
+
+    pub fn forwardPrefill(
+        self: *const Gemma4DecoderLayer,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: *Gemma4KVCache.LayerCache,
+    ) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+
+        const in_norm = try self.input_layernorm.forward(graph, x);
+        const attn_out = try self.self_attn.forwardPrefill(graph, in_norm, layer_cache);
+        const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
+        const x1 = try graph.add(x, post_attn);
+
+        const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
+        const mlp_out = try self.mlp.forward(graph, pre_mlp);
+        const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
+        return try graph.add(x1, post_mlp);
+    }
+
+    pub fn forwardDecode(
+        self: *const Gemma4DecoderLayer,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: *Gemma4KVCache.LayerCache,
+    ) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+
+        const in_norm = try self.input_layernorm.forward(graph, x);
+        const attn_out = try self.self_attn.forwardDecode(graph, in_norm, layer_cache);
+        const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
+        const x1 = try graph.add(x, post_attn);
+
         const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
         const mlp_out = try self.mlp.forward(graph, pre_mlp);
         const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
@@ -697,6 +866,151 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             const capped_logits_2d = try graph.mulScalar(tanh_logits, cap);
 
             return try graph.reshape(capped_logits_2d, &.{ B, T, config.vocab_size });
+        }
+
+        const BestToken = struct {
+            id: usize,
+            val: f32,
+        };
+
+        const F32ArgmaxContext = struct {
+            embed_f32: []const f32,
+            h_last: []const f32,
+            hidden_size: usize,
+            recent_bitset: []const u64,
+            repetition_penalty: f32,
+
+            fn mapFn(ctx: @This(), start_v: usize, end_v: usize) BestToken {
+                var max_val: f32 = -1e30;
+                var max_id: usize = start_v;
+                const hidden = ctx.hidden_size;
+
+                for (start_v..end_v) |v| {
+                    if (v == 0 or (v >= 258880 and v <= 258884)) continue;
+
+                    const row = ctx.embed_f32[v * hidden .. (v + 1) * hidden];
+                    var dot: f32 = 0.0;
+                    for (0..hidden) |d| {
+                        dot += ctx.h_last[d] * row[d];
+                    }
+
+                    if (ctx.repetition_penalty > 1.0 and (v / 64) < ctx.recent_bitset.len and (ctx.recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
+                        if (dot > 0.0) {
+                            dot /= ctx.repetition_penalty;
+                        } else {
+                            dot *= ctx.repetition_penalty;
+                        }
+                    }
+
+                    if (dot > max_val) {
+                        max_val = dot;
+                        max_id = v;
+                    }
+                }
+
+                return .{ .id = max_id, .val = max_val };
+            }
+
+            fn reduceFn(a: BestToken, b: BestToken) BestToken {
+                return if (b.val > a.val) b else a;
+            }
+        };
+
+        fn sampleNextTokenF32(
+            self: *const Self,
+            h_last: []const f32,
+            recent_tokens: []const usize,
+            repetition_penalty: f32,
+            graph: *autodiff.Graph,
+        ) !usize {
+            const recent_window = if (recent_tokens.len > 64) recent_tokens[recent_tokens.len - 64 ..] else recent_tokens;
+            const bitset_words = (config.vocab_size + 63) / 64;
+            var recent_bitset = [_]u64{0} ** bitset_words;
+            if (repetition_penalty > 1.0) {
+                for (recent_window) |rec| {
+                    if (rec < config.vocab_size) {
+                        recent_bitset[rec / 64] |= (@as(u64, 1) << @intCast(rec % 64));
+                    }
+                }
+            }
+
+            const ctx = F32ArgmaxContext{
+                .embed_f32 = self.embed_tokens.weight.data,
+                .h_last = h_last,
+                .hidden_size = config.hidden_size,
+                .recent_bitset = &recent_bitset,
+                .repetition_penalty = repetition_penalty,
+            };
+
+            const best = try graph.executor().parallelReduce(
+                BestToken,
+                config.vocab_size,
+                4096,
+                ctx,
+                F32ArgmaxContext.mapFn,
+                F32ArgmaxContext.reduceFn,
+                BestToken{ .id = 0, .val = -1e30 },
+            );
+            return best.id;
+        }
+
+        /// 全精度 (F32) 预填充阶段 (Prefill)：处理 Prompt 词元序列并写入 KVCache，返回首个预测词元
+        pub fn prefill(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            prompt_tokens: []const usize,
+            cache: *Gemma4KVCache,
+            repetition_penalty: f32,
+        ) !usize {
+            const T = prompt_tokens.len;
+            if (T == 0) return 0;
+            cache.reset();
+
+            const tok_emb = try graph.tensorND(&.{ 1, T, config.hidden_size }, false);
+            const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
+            const embed_f32 = self.embed_tokens.weight.data;
+            for (prompt_tokens, 0..) |tok, t_idx| {
+                const emb_row = embed_f32[tok * config.hidden_size .. (tok + 1) * config.hidden_size];
+                const dest = tok_emb.data[t_idx * config.hidden_size .. (t_idx + 1) * config.hidden_size];
+                for (0..config.hidden_size) |d| {
+                    dest[d] = emb_row[d] * sqrt_d;
+                }
+            }
+
+            var h = tok_emb;
+            for (self.layers, 0..) |*layer, l_idx| {
+                h = try layer.forwardPrefill(graph, h, &cache.layers[l_idx]);
+            }
+
+            const h_norm = try self.norm.forward(graph, h);
+            const last_row = h_norm.data[(T - 1) * config.hidden_size .. T * config.hidden_size];
+            return self.sampleNextTokenF32(last_row, prompt_tokens, repetition_penalty, graph);
+        }
+
+        /// 全精度 (F32) 增量解码单步 (Decode Step)：基于 KVCache 处理单个增量词元并返回下一个预测词元
+        pub fn decodeStep(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            token: usize,
+            cache: *Gemma4KVCache,
+            recent_tokens: []const usize,
+            repetition_penalty: f32,
+        ) !usize {
+            const tok_emb = try graph.tensorND(&.{ 1, 1, config.hidden_size }, false);
+            const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
+            const emb_row = self.embed_tokens.weight.data[token * config.hidden_size .. (token + 1) * config.hidden_size];
+            for (0..config.hidden_size) |d| {
+                tok_emb.data[d] = emb_row[d] * sqrt_d;
+            }
+
+            var h = tok_emb;
+            for (self.layers, 0..) |*layer, l_idx| {
+                h = try layer.forwardDecode(graph, h, &cache.layers[l_idx]);
+            }
+
+            const h_norm = try self.norm.forward(graph, h);
+            const last_row = h_norm.data[0..config.hidden_size];
+            return self.sampleNextTokenF32(last_row, recent_tokens, repetition_penalty, graph);
         }
     };
 }
