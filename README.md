@@ -36,6 +36,17 @@ just bench                              # benchmark suite in ReleaseFast
 just bench --suite gemm --filter conv   # suites: gemm, ops, activations, layers, models, optimizers, tokenizer
 ```
 
+To run unit tests directly via the `zig test` CLI (e.g. for IDE integrations / ZLS) with Apple MLX and macOS system frameworks:
+
+```bash
+zig test src/root.zig \
+  -I deps/mlx-c/include \
+  -L deps/mlx-c/lib \
+  -lmlxc -lmlx \
+  -framework Metal -framework Foundation -framework QuartzCore -framework Accelerate \
+  -lc
+```
+
 Datasets are downloaded on demand:
 
 ```bash
