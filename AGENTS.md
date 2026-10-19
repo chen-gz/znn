@@ -52,8 +52,9 @@
   - `均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)`
   - `直接偏好优化 (Direct Preference Optimization, DPO)` / `群组相对策略优化 (Group Relative Policy Optimization, GRPO)`
 
-## 6. Layered Package Dependencies (包级单向依赖)
+## 6. Modularity & Layered Package Dependencies (模块化清晰与包级单向依赖)
+- **Clear Modularity (保持文件模块化清晰)**: Organize source files by cohesive domain and single responsibility so module boundaries stay clear and maintainable; do not enforce an arbitrary per-file byte size limit (such as `< 60 KB`).
 - Packages under `src/` form a strict one-way layering; a cross-package `@import` may only point to a lower layer:
-  `cblas` (0) ← `tensor`, `dataset` (1) ← `autodiff`, `regression`, `manifold` (2) ← `nn`, `cross_validation` (3) ← `optim`, `models` (4) ← `engine` (5) ← `bench` (6) ← `root` (7).
+  `backend` (0) ← `tensor`, `dataset` (1) ← `autodiff`, `regression`, `manifold` (2) ← `nn`, `cross_validation` (3) ← `optim`, `models` (4) ← `engine` (5) ← `bench` (6) ← `root` (7).
 - `zig build check-layers` ([`tools/check_layers.zig`](tools/check_layers.zig)) enforces this rule and also runs as part of `zig build test`. When adding a new package, register its layer in the `layers` table of that tool.
 - Imports between files of the same package are allowed. To break an upward dependency, move the shared code down to the lower layer or pass an opaque handle (e.g. `Tensor.creator: ?*tensor.OpHandle`, converted with `autodiff.Op.handle()` / `autodiff.Op.creatorOf()`); never re-export a higher-layer API from a lower-layer facade.

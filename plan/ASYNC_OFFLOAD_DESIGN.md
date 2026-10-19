@@ -14,7 +14,7 @@
 3. **异步但语义清晰**：设备上的算子按提交顺序执行（按流有序，stream-ordered），宿主机仅在读取张量数值时同步；不引入通用的无锁有向无环图 (Directed Acyclic Graph, DAG) 调度器。
 4. **零第三方依赖**：macOS 上仅在构建期链接系统框架（`Metal`、`Foundation`、`MetalPerformanceShaders`）与 `libobjc`；Metal 着色语言 (Metal Shading Language, MSL) 源码通过 `@embedFile` 嵌入并在运行期编译，不需要 Xcode 构建期工具链。非 macOS 平台在编译期剔除 Metal 后端。
 5. **正确且可复现**：CPU 并行采用与线程数无关的固定粒度分块；同一后端上 `eager` 与 `deferred` 结果逐位一致；CPU 与 Metal 之间以相对容差做一致性测试。
-6. **遵守 [`AGENTS.md`](../AGENTS.md)**：配置结构体字段均有默认值并提供 `defaultOptions()` / `initDefault()`；非测试源码文件 `< 60 KB`；注释中的缩写先写全称；可视化格式的生产端与消费端同步升级；不保留向后兼容层。
+6. **遵守 [`AGENTS.md`](../AGENTS.md)**：配置结构体字段均有默认值并提供 `defaultOptions()` / `initDefault()`；保持文件模块化清晰与职责单一；注释中的缩写先写全称；可视化格式的生产端与消费端同步升级；不保留向后兼容层。
 
 ### 1.2 非目标（本设计范围外）
 * CUDA / Vulkan / WebGPU 后端；Intel Mac（Metal 后端仅支持 arm64）。
@@ -33,7 +33,7 @@
 | 宿主机读写 | `nn` / `models` 非测试代码在 forward 中直接读写 `.data`，如 [`MoELayer.forward`](../src/nn/transformer.zig#L344-L392) 的宿主机 Top-K、[`CausalSelfAttention.forwardInference`](../src/nn/attention.zig#L299-L359) 的 KV Cache 循环、[`generateNextTokenWithPenalty`](../src/models/gemma4.zig#L1428-L1500) 的采样 | 需要宿主访问协议，并把依赖数据的逻辑改为图算子 |
 | Q4 推理线程 | [`Q4Linear.forward`](../src/models/gemma4.zig#L768-L813) 对每一行输入、每次调用 spawn 8 个 OS 线程，LM head argmax 同样如此（[L1465-L1487](../src/models/gemma4.zig#L1465-L1487)） | 128 核 Linux 虚拟机实测：spawn + join 8 线程约 **1928 µs/次**，`std.Io.Group` 派发 8 任务约 **32 µs/次** |
 | Q4 内核 | 单线程 Q4 GEMV（3840×15360）约 19.7 ms（**1.7 GB/s**，受计算限制）；8 块并行 2.6 ms（12.8 GB/s）；块内低/高半字节存放相邻权重 `(2i, 2i+1)`，激活需跨步收集；多行输入逐行 GEMV，prefill 重复扫描权重 | 先优化内核与数据排布，再谈带宽上限 |
-| Q4 归属 | `Q4Linear` 不是 autodiff Op；代码位于 [`gemma4.zig`](../src/models/gemma4.zig)（64,336 B，**超出 60 KB 规则**） | 下沉为张量层 `Q4MatMul` 算子并拆分文件 |
+| Q4 归属 | `Q4Linear` 不是 autodiff Op；代码位于 [`gemma4.zig`](../src/models/gemma4.zig) | 下沉为张量层 `Q4MatMul` 算子并按模块职责拆分文件 |
 | 注意力 | [`ScaledDotProductAttention.forwardCore`](../src/nn/attention.zig#L102-L139) 与 [`Gemma4Attention.forward`](../src/models/gemma4.zig#L317-L394) 是两套实现；后者物化 `repeatKV` 与多次转置 | 以显式 `Attention` 算子统一 |
 | MoE | [`MoELayer.forward`](../src/nn/transformer.zig#L402-L410) 对所有路由专家、所有 Token 稠密计算，仅以 Top-K 掩码置零门控概率 | 稀疏 Token 分发是独立任务（Phase 3） |
 | BLAS | macOS 通过 `@extern` + 构建期 `linkFramework("Accelerate")` 调用（[`cblas.zig`](../src/cblas.zig#L11-L35)），编译期按操作系统选择；Linux 为单线程纯 Zig 后备 | Accelerate 内部自行调度 AMX，不应再套一层线程 |
@@ -90,7 +90,7 @@ flowchart TD
     L2 --> L1
 ```
 
-### 4.1 新增模块（每个非测试源码文件 `< 60 KB`）
+### 4.1 新增模块（按职责保持模块化清晰）
 
 | 路径 | 预估体积 | 职责 |
 | :--- | :--- | :--- |
@@ -423,7 +423,7 @@ flowchart LR
   5. [x] `src/cblas.zig` 迁入 `src/backend/cblas.zig`，并在 `tools/check_layers.zig` 中以 `backend` 包（层级 0）替换 `cblas`；
   6. [x] 新增 `executor`、`q4`、`decode` 基准并记录基线。
 * **验收结果**（以下数据均在同一台 128 核 Linux 虚拟机上以 `-Doptimize=ReleaseFast` 测得）：
-  * `zig build test` 全部通过（192/192），所有非测试源码文件 `< 60 KB`；
+  * `zig build test` 全部通过（192/192），模块职责边界清晰；
   * 热路径中彻底移除 `std.Thread.spawn`；`Graph.q4MatMul`（`Q4Linear.forward` 的实际路径）经 `graph.executor()` 并行；
   * Q4 矩阵乘在 `io = null`（串行）与 `io = threaded`（多核）下逐位一致，多行输入中每一行也与单行计算逐位一致；
   * Gemma 4 12B MLP 形状（3840×15360，权重 33 MB）：单线程由 v0.3.0 的 19.7 ms（1.7 GB/s）降至约 11.6 ms（2.8 GB/s）；用满全部核心约 0.9–1.2 ms（28–36 GB/s）；多行输入 T=4 / 16 / 64 分别约 1.3 / 2.8 / 7.4 ms；

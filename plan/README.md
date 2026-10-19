@@ -55,7 +55,7 @@ flowchart TD
 ## 📌 当前交付重点与近期优先级
 
 1. **已交付核心成果 (`v0.3.0` Milestone)**:
-   * **全库模块化重构与单源解耦**：除 `src/models/gemma4.zig`（64,336 B，拆分已列入设计 Phase 0）外，所有非测试源码文件均 `< 60 KB`；建立 `cblas` ← `tensor` ← `autodiff` ← `nn` ← `optim` / `models` ← `engine` ← `bench` 的包级单向依赖（`zig build check-layers` 检查，并纳入 `zig build test`）与算子级逆拓扑自动微分引擎 (`topologicalSortOps`)。
+   * **全库模块化重构与单源解耦**：各子系统按领域职责保持清晰的模块化边界；建立 `backend` ← `tensor` ← `autodiff` ← `nn` ← `optim` / `models` ← `engine` ← `bench` 的包级单向依赖（`zig build check-layers` 检查，并纳入 `zig build test`）与算子级逆拓扑自动微分引擎 (`topologicalSortOps`)。
    * **三层张量与线性代数系统**：`Tensor`、`GenericTensor(T)` 与编译期 `StaticTensor(T, dims)`；全维度 `sum`/`mean`/`var`/`std`/`min`/`max`/`argmin`/`argmax`；Householder `qr`、Jacobi `symeig` 与单边 Jacobi `svd`。
    * **PyTorch 风格模块协议与大模型支持**：基于 `nn.walk` 的统一反射、两阶段 `nn.initModel` 计算图初始化、GQA/MLA/MoE/LoRA/DPO/GRPO、Gemma 4 架构与 4-bit (`Q4_0`) 量化推理，以及内聚的 Schema 2.0 Web 可视化器 (`web/`)。
    * **测试与覆盖率保障**：182 项 Zig 单元/集成测试与 203 项前端 Vitest 测试 100% 通过，基于 `kcov` 的端到端代码覆盖率超 **91.7%**。

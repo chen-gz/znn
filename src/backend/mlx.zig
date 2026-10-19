@@ -755,11 +755,16 @@ pub const Array = struct {
     pub fn evalMultiple(arrays: []const Array) void {
         if (!has_mlx or arrays.len == 0) return;
         var buf: [32]c.mlx_array = undefined;
-        const count = @min(arrays.len, buf.len);
-        for (0..count) |i| {
-            buf[i] = arrays[i].handle;
+        const raw_handles = if (arrays.len <= buf.len)
+            buf[0..arrays.len]
+        else
+            std.heap.c_allocator.alloc(c.mlx_array, arrays.len) catch return;
+        defer if (arrays.len > buf.len) std.heap.c_allocator.free(raw_handles);
+
+        for (arrays, 0..) |arr, i| {
+            raw_handles[i] = arr.handle;
         }
-        const vec = c.mlx_vector_array_new_data(&buf, count);
+        const vec = c.mlx_vector_array_new_data(raw_handles.ptr, raw_handles.len);
         defer _ = c.mlx_vector_array_free(vec);
         _ = c.mlx_eval(vec);
     }
@@ -771,8 +776,7 @@ pub const Array = struct {
         const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
         defer maybeFreeStream(s, stream);
 
-        var axes = [_]c_int{axis};
-        const rc = c.mlx_softmax(&res.handle, a.handle, &axes, 1, s);
+        const rc = c.mlx_softmax_axis(&res.handle, a.handle, axis, false, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
         return res;
     }

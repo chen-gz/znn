@@ -276,6 +276,57 @@ pub const LmHeadWeights = struct {
         }
     }
 
+    /// 在已计算的词表对数几率切片上执行位图重复惩罚与贪婪采样 (Greedy Argmax with Bitset Repetition Penalty)
+    pub fn argmaxWithPenalty(
+        logits_slice: []const f32,
+        vocab_size: usize,
+        recent_tokens: []const usize,
+        repetition_penalty: f32,
+    ) usize {
+        var stack_bitset = [_]u64{0} ** 4096;
+        const num_words = (vocab_size + 63) / 64;
+        const recent_bitset: []u64 = if (num_words <= stack_bitset.len)
+            stack_bitset[0..num_words]
+        else
+            std.heap.c_allocator.alloc(u64, num_words) catch stack_bitset[0..];
+        defer if (num_words > stack_bitset.len and recent_bitset.ptr != &stack_bitset) std.heap.c_allocator.free(recent_bitset);
+        if (num_words > stack_bitset.len and recent_bitset.ptr != &stack_bitset) {
+            @memset(recent_bitset, 0);
+        }
+
+        if (repetition_penalty > 1.0) {
+            for (recent_tokens) |rec| {
+                if (rec < vocab_size and (rec / 64) < recent_bitset.len) {
+                    recent_bitset[rec / 64] |= (@as(u64, 1) << @intCast(rec % 64));
+                }
+            }
+        }
+
+        var max_val: f32 = -1e30;
+        var max_id: usize = 0;
+
+        for (0..vocab_size) |v| {
+            // 屏蔽特殊保留词元（Gemma 4 约定：0 号 padding，258880..258884 为控制词元）
+            if (v == 0 or (v >= 258880 and v <= 258884)) continue;
+
+            var dot = logits_slice[v];
+            if (repetition_penalty > 1.0 and (v / 64) < recent_bitset.len and (recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
+                if (dot > 0.0) {
+                    dot /= repetition_penalty;
+                } else {
+                    dot *= repetition_penalty;
+                }
+            }
+
+            if (dot > max_val) {
+                max_val = dot;
+                max_id = v;
+            }
+        }
+
+        return max_id;
+    }
+
     /// 执行单步词表投影并贪婪采样最佳词元 ID
     pub fn sampleNext(
         self: LmHeadWeights,
@@ -297,39 +348,7 @@ pub const LmHeadWeights = struct {
         const logits_slice = logits.dataFloat32();
         if (logits_slice.len != self.vocab_size) return error.ShapeMismatch;
 
-        // 3. 构建最近词元快速位图 (Bitset)，消除 O(V * R) 1600 万次嵌套循环
-        var recent_bitset = [_]u64{0} ** (262144 / 64);
-        if (repetition_penalty > 1.0) {
-            for (recent_tokens) |rec| {
-                if (rec < self.vocab_size) {
-                    recent_bitset[rec / 64] |= (@as(u64, 1) << @intCast(rec % 64));
-                }
-            }
-        }
-
-        var max_val: f32 = -1e30;
-        var max_id: usize = 0;
-
-        for (0..self.vocab_size) |v| {
-            // 屏蔽特殊保留词元（Gemma 4 约定：0 号 padding，258880..258884 为控制词元）
-            if (v == 0 or (v >= 258880 and v <= 258884)) continue;
-
-            var dot = logits_slice[v];
-            if (repetition_penalty > 1.0 and (recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
-                if (dot > 0.0) {
-                    dot /= repetition_penalty;
-                } else {
-                    dot *= repetition_penalty;
-                }
-            }
-
-            if (dot > max_val) {
-                max_val = dot;
-                max_id = v;
-            }
-        }
-
-        return max_id;
+        return argmaxWithPenalty(logits_slice, self.vocab_size, recent_tokens, repetition_penalty);
     }
 };
 
@@ -426,8 +445,11 @@ pub const Q4Weights = struct {
         const sb_dims = [_]usize{ total_out_features, in_features / 32 };
 
         var w_q = try mlx.Array.fromRawData(@ptrCast(w_q_buf.ptr), &w_dims, .uint32);
+        errdefer w_q.deinit();
         var scales = try mlx.Array.fromRawData(@ptrCast(scales_buf.ptr), &sb_dims, .float16);
+        errdefer scales.deinit();
         var biases = try mlx.Array.fromRawData(@ptrCast(biases_buf.ptr), &sb_dims, .float16);
+        errdefer biases.deinit();
 
         w_q.eval();
         scales.eval();
@@ -686,20 +708,26 @@ pub const GpuLayerWeights = struct {
         stream: ?Stream,
     ) !GpuLayerWeights {
         var in_w = try mlx.Array.fromSlice(in_w_data, &.{in_w_data.len});
+        errdefer in_w.deinit();
         in_w.eval();
         var qn_w = try mlx.Array.fromSlice(qn_w_data, &.{qn_w_data.len});
+        errdefer qn_w.deinit();
         qn_w.eval();
         var kn_w = try mlx.Array.fromSlice(kn_w_data, &.{kn_w_data.len});
+        errdefer kn_w.deinit();
         kn_w.eval();
         var pa_w = try mlx.Array.fromSlice(pa_w_data, &.{pa_w_data.len});
+        errdefer pa_w.deinit();
         pa_w.eval();
         var pm_w = try mlx.Array.fromSlice(pm_w_data, &.{pm_w_data.len});
+        errdefer pm_w.deinit();
         pm_w.eval();
         var pom_w = try mlx.Array.fromSlice(pom_w_data, &.{pom_w_data.len});
+        errdefer pom_w.deinit();
         pom_w.eval();
 
         const v_dim = if (v_bytes != null) kv_dim else 0;
-        const fused_qkv = if (v_bytes) |vb|
+        var fused_qkv = if (v_bytes) |vb|
             try Q4Weights.initFromBlockSlices(
                 allocator,
                 &.{ q_bytes, k_bytes, vb },
@@ -715,30 +743,34 @@ pub const GpuLayerWeights = struct {
                 &.{ q_dim, kv_dim },
                 stream,
             );
+        errdefer fused_qkv.deinit();
 
-        const o_proj = try Q4Weights.initFromBlocks(
+        var o_proj = try Q4Weights.initFromBlocks(
             allocator,
             o_bytes,
             q_dim,
             hidden_size,
             stream,
         );
+        errdefer o_proj.deinit();
 
-        const fused_gate_up = try Q4Weights.initFromBlockSlices(
+        var fused_gate_up = try Q4Weights.initFromBlockSlices(
             allocator,
             &.{ gate_bytes, up_bytes },
             hidden_size,
             &.{ intermediate_size, intermediate_size },
             stream,
         );
+        errdefer fused_gate_up.deinit();
 
-        const down_proj = try Q4Weights.initFromBlocks(
+        var down_proj = try Q4Weights.initFromBlocks(
             allocator,
             down_bytes,
             intermediate_size,
             hidden_size,
             stream,
         );
+        errdefer down_proj.deinit();
 
         const rot_dim = @as(usize, @intFromFloat(@as(f32, @floatFromInt(head_dim)) * partial_rotary_factor));
         const attn_dim = num_heads * head_dim;
@@ -820,10 +852,13 @@ pub const GpuModelContext = struct {
         if (!isAvailable()) return error.OffloadNotSupported;
 
         var final_norm_w = try mlx.Array.fromSlice(final_norm_data, &.{hidden_size});
+        errdefer final_norm_w.deinit();
         final_norm_w.eval();
 
         const gpu_k = try allocator.alloc(?mlx.Array, layers.len);
+        errdefer allocator.free(gpu_k);
         const gpu_v = try allocator.alloc(?mlx.Array, layers.len);
+        errdefer allocator.free(gpu_v);
         @memset(gpu_k, null);
         @memset(gpu_v, null);
 
@@ -1003,15 +1038,64 @@ pub const GpuModelContext = struct {
                 self.gpu_v[l] = try v_normed.mulScalar(1.0, s);
             }
 
-            // (7) 带因果掩码的快速缩放点积注意力 (Causal SDPA)
-            var attn_out = try mlx.Array.fastScaledDotProductAttention(
-                q_rot,
-                k_rot,
-                v_normed,
-                1.0,
-                true,
-                s,
-            );
+            // (7) 带因果与滑动窗口掩码的缩放点积注意力 (Causal / Sliding Window SDPA)
+            var attn_out = if (lw.attn_type == 1 or T <= lw.sliding_window)
+                try mlx.Array.fastScaledDotProductAttention(
+                    q_rot,
+                    k_rot,
+                    v_normed,
+                    1.0,
+                    true,
+                    s,
+                )
+            else blk: {
+                var k_trans = try k_rot.transposeAxes(&.{ 0, 1, 3, 2 }, s);
+                defer k_trans.deinit();
+                const groups = lw.num_heads / lw.num_kv_heads;
+                var q_grouped = if (groups > 1)
+                    try q_rot.reshape(&.{ 1, lw.num_kv_heads, groups * T, lw.head_dim }, s)
+                else
+                    try q_rot.mulScalar(1.0, s);
+                defer q_grouped.deinit();
+
+                var scores_grouped = try mlx.Array.matmul(q_grouped, k_trans, s);
+                defer scores_grouped.deinit();
+                var scores_4d = if (groups > 1)
+                    try scores_grouped.reshape(&.{ 1, lw.num_heads, T, T }, s)
+                else
+                    try scores_grouped.mulScalar(1.0, s);
+                defer scores_4d.deinit();
+
+                const mask_buf = try self.allocator.alloc(f32, T * T);
+                defer self.allocator.free(mask_buf);
+                for (0..T) |i| {
+                    for (0..T) |j| {
+                        if (j > i or i >= j + lw.sliding_window) {
+                            mask_buf[i * T + j] = -1e9;
+                        } else {
+                            mask_buf[i * T + j] = 0.0;
+                        }
+                    }
+                }
+                var mask_arr = try mlx.Array.fromSlice(mask_buf, &.{ 1, 1, T, T });
+                defer mask_arr.deinit();
+                var masked_scores = try mlx.Array.add(scores_4d, mask_arr, s);
+                defer masked_scores.deinit();
+                var probs = try mlx.Array.softmax(masked_scores, 3, s);
+                defer probs.deinit();
+
+                var probs_grouped = if (groups > 1)
+                    try probs.reshape(&.{ 1, lw.num_kv_heads, groups * T, T }, s)
+                else
+                    try probs.mulScalar(1.0, s);
+                defer probs_grouped.deinit();
+                var out_grouped = try mlx.Array.matmul(probs_grouped, v_normed, s);
+                defer out_grouped.deinit();
+                break :blk if (groups > 1)
+                    try out_grouped.reshape(&.{ 1, lw.num_heads, T, lw.head_dim }, s)
+                else
+                    try out_grouped.mulScalar(1.0, s);
+            };
             defer attn_out.deinit();
 
             // (8) 输出投影 (O-projection)
@@ -1080,37 +1164,7 @@ pub const GpuModelContext = struct {
         const logits_slice = logits.dataFloat32();
         if (logits_slice.len != self.vocab_size) return error.ShapeMismatch;
 
-        // 位图去重采样
-        var recent_bitset = [_]u64{0} ** (262144 / 64);
-        if (repetition_penalty > 1.0) {
-            for (prompt_tokens) |rec| {
-                if (rec < self.vocab_size) {
-                    recent_bitset[rec / 64] |= (@as(u64, 1) << @intCast(rec % 64));
-                }
-            }
-        }
-
-        var max_val: f32 = -1e30;
-        var max_id: usize = 0;
-
-        for (0..self.vocab_size) |v| {
-            if (v == 0 or (v >= 258880 and v <= 258884)) continue;
-
-            var dot = logits_slice[v];
-            if (repetition_penalty > 1.0 and (recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
-                if (dot > 0.0) {
-                    dot /= repetition_penalty;
-                } else {
-                    dot *= repetition_penalty;
-                }
-            }
-
-            if (dot > max_val) {
-                max_val = dot;
-                max_id = v;
-            }
-        }
-
+        const max_id = LmHeadWeights.argmaxWithPenalty(logits_slice, self.vocab_size, prompt_tokens, repetition_penalty);
         self.curr_len = T;
         return max_id;
     }
@@ -1271,37 +1325,7 @@ pub const GpuModelContext = struct {
         const logits_slice = logits.dataFloat32();
         if (logits_slice.len != self.vocab_size) return error.ShapeMismatch;
 
-        // 位图去重采样
-        var recent_bitset = [_]u64{0} ** (262144 / 64);
-        if (repetition_penalty > 1.0) {
-            for (recent_tokens) |rec| {
-                if (rec < self.vocab_size) {
-                    recent_bitset[rec / 64] |= (@as(u64, 1) << @intCast(rec % 64));
-                }
-            }
-        }
-
-        var max_val: f32 = -1e30;
-        var max_id: usize = 0;
-
-        for (0..self.vocab_size) |v| {
-            if (v == 0 or (v >= 258880 and v <= 258884)) continue;
-
-            var dot = logits_slice[v];
-            if (repetition_penalty > 1.0 and (recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
-                if (dot > 0.0) {
-                    dot /= repetition_penalty;
-                } else {
-                    dot *= repetition_penalty;
-                }
-            }
-
-            if (dot > max_val) {
-                max_val = dot;
-                max_id = v;
-            }
-        }
-
+        const max_id = LmHeadWeights.argmaxWithPenalty(logits_slice, self.vocab_size, recent_tokens, repetition_penalty);
         self.curr_len += 1;
         return max_id;
     }
@@ -1427,5 +1451,15 @@ test "backend offload infrastructure" {
     const f_data = fused_out.dataFloat32();
     try std.testing.expectApproxEqAbs(@as(f32, 64.0), f_data[0], 1e-2);
     try std.testing.expectApproxEqAbs(@as(f32, 96.0), f_data[1], 1e-2);
+}
 
+test "LmHeadWeights argmaxWithPenalty dynamic vocab and negative logits" {
+    const logits = [_]f32{ 1.0, 2.0, 6.0, -0.5 };
+    // 无重复惩罚时，token 2 (6.0) 最大
+    try std.testing.expectEqual(@as(usize, 2), LmHeadWeights.argmaxWithPenalty(&logits, 4, &.{}, 1.0));
+    // 对 token 2 施加 10.0 惩罚 -> 6.0 / 10.0 = 0.6，此时 token 1 (2.0) 最大
+    try std.testing.expectEqual(@as(usize, 1), LmHeadWeights.argmaxWithPenalty(&logits, 4, &.{2}, 10.0));
+    // 对正数与负数同时施加惩罚，验证负数乘以 penalty 的分支与越界 token 过滤
+    const neg_logits = [_]f32{ -2.0, -1.0, -0.5, -3.0 };
+    try std.testing.expectEqual(@as(usize, 1), LmHeadWeights.argmaxWithPenalty(&neg_logits, 4, &.{ 2, 999999 }, 4.0));
 }

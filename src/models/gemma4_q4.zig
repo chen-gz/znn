@@ -750,6 +750,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         const Self = @This();
 
         embed_tokens: Embedding,
+        embed_u16_mmap: ?[]const u16 = null,
         layers: []Gemma4Q4DecoderLayer,
         norm: GemmaRMSNorm,
         lm_head_weights: ?backend.offload.LmHeadWeights = null,
@@ -819,7 +820,21 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const T = token_ids.shape.dims[1];
 
             // 1. 词表嵌入查找
-            const tok_emb = try self.embed_tokens.forward(graph, token_ids);
+            const tok_emb = if (self.embed_u16_mmap) |embed_u16| blk: {
+                const out_emb = try graph.tensorND(&.{ B, T, config.hidden_size }, false);
+                for (0..B * T) |idx| {
+                    const raw_id = token_ids.data[idx];
+                    const tok: usize = if (raw_id >= 0.0) @intFromFloat(raw_id) else 0;
+                    const safe_tok = @min(tok, config.vocab_size - 1);
+                    const emb_row = embed_u16[safe_tok * config.hidden_size .. (safe_tok + 1) * config.hidden_size];
+                    const dest = out_emb.data[idx * config.hidden_size .. (idx + 1) * config.hidden_size];
+                    for (0..config.hidden_size) |d| {
+                        const b: tensor.bf16 = .{ .bits = emb_row[d] };
+                        dest[d] = b.toF32();
+                    }
+                }
+                break :blk out_emb;
+            } else try self.embed_tokens.forward(graph, token_ids);
             const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
             var h = try graph.mulScalar(tok_emb, sqrt_d);
 
@@ -833,8 +848,26 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             // 4. 绑定权重投影 (Tie Word Embeddings: h * embed_tokens.weight^T)
             const h_2d = try graph.reshape(h_norm, &.{ B * T, config.hidden_size });
-            const embed_t = try graph.transposeND(self.embed_tokens.weight, 0, 1);
-            const logits_raw_2d = try graph.matmul(h_2d, embed_t);
+            const logits_raw_2d = if (self.embed_u16_mmap) |embed_u16| blk: {
+                const out_logits = try graph.tensorND(&.{ B * T, config.vocab_size }, false);
+                for (0..B * T) |r| {
+                    const h_row = h_2d.data[r * config.hidden_size .. (r + 1) * config.hidden_size];
+                    const out_row = out_logits.data[r * config.vocab_size .. (r + 1) * config.vocab_size];
+                    for (0..config.vocab_size) |v| {
+                        const w_row = embed_u16[v * config.hidden_size .. (v + 1) * config.hidden_size];
+                        var dot: f32 = 0.0;
+                        for (0..config.hidden_size) |d| {
+                            const b: tensor.bf16 = .{ .bits = w_row[d] };
+                            dot += h_row[d] * b.toF32();
+                        }
+                        out_row[v] = dot;
+                    }
+                }
+                break :blk out_logits;
+            } else blk: {
+                const embed_t = try graph.transposeND(self.embed_tokens.weight, 0, 1);
+                break :blk try graph.matmul(h_2d, embed_t);
+            };
 
             // 5. 对数几率截断 (Logit Softcapping, Gemma 官方标尺 30.0)
             const cap = config.final_logit_softcapping;
@@ -968,17 +1001,18 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 layers[i] = layer;
             }
 
+            const embed_u16_slice: []const u16 = @alignCast(std.mem.bytesAsSlice(
+                u16,
+                mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
+            ));
             var lm_head_weights: ?backend.offload.LmHeadWeights = null;
             if (backend.offload.isAvailable()) {
-                const embed_u16_slice: []const u16 = @alignCast(std.mem.bytesAsSlice(
-                    u16,
-                    mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
-                ));
                 lm_head_weights = backend.offload.LmHeadWeights.init(embed_u16_slice, config.vocab_size, config.hidden_size, null) catch null;
             }
 
             var res = Self{
                 .embed_tokens = embed_tokens,
+                .embed_u16_mmap = embed_u16_slice,
                 .layers = layers,
                 .norm = norm,
                 .lm_head_weights = lm_head_weights,
@@ -988,11 +1022,15 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             if (backend.offload.isAvailable() and res.gpu_context != null) {
                 // 通知操作系统内核丢弃已卸载至 GPU 显存的 4-bit 权重文件页缓存，防止 7.59 GB 物理内存重复驻留造成 macOS Swap 严重换页
                 const q4_weights_start = 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2;
-                const page_size: usize = 16384;
-                const aligned_start = (q4_weights_start / page_size) * page_size;
-                const aligned_len = ((mmap_bytes.len - aligned_start) / page_size) * page_size;
-                if (aligned_len > 0) {
-                    const ptr: *align(16384) anyopaque = @ptrCast(@alignCast(@constCast(mmap_bytes.ptr + aligned_start)));
+                const page_size: usize = std.heap.page_size_min;
+                const base_addr = @intFromPtr(mmap_bytes.ptr);
+                const start_addr = base_addr + q4_weights_start;
+                const end_addr = base_addr + mmap_bytes.len;
+                const aligned_start_addr = std.mem.alignForward(usize, start_addr, page_size);
+                const aligned_end_addr = std.mem.alignBackward(usize, end_addr, page_size);
+                if (aligned_end_addr > aligned_start_addr) {
+                    const aligned_len = aligned_end_addr - aligned_start_addr;
+                    const ptr: *align(std.heap.page_size_min) anyopaque = @ptrFromInt(aligned_start_addr);
                     _ = std.posix.system.madvise(ptr, aligned_len, std.posix.MADV.DONTNEED);
                 }
             }
@@ -1003,6 +1041,10 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         /// 初始化图形处理器 (Graphics Processing Unit, GPU) 端到端整网自回归增量解码上下文
         pub fn initGpuContext(self: *Self, allocator: std.mem.Allocator) !void {
             if (!backend.offload.isAvailable() or self.lm_head_weights == null) return;
+            if (self.gpu_context) |*ctx| {
+                ctx.deinit();
+                self.gpu_context = null;
+            }
 
             const gpu_layers = try allocator.alloc(backend.offload.GpuLayerWeights, self.layers.len);
             var init_idx: usize = 0;
@@ -1088,7 +1130,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             embed_u16: []const u16,
             h_last: []const f32,
             hidden_size: usize,
-            recent_bitset: *const [4096]u64,
+            recent_bitset: []const u64,
             repetition_penalty: f32,
 
             fn mapFn(ctx: @This(), start_v: usize, end_v: usize) BestToken {
@@ -1106,7 +1148,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                         dot += ctx.h_last[d] * b.toF32();
                     }
 
-                    if (ctx.repetition_penalty > 1.0 and (ctx.recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
+                    if (ctx.repetition_penalty > 1.0 and (v / 64) < ctx.recent_bitset.len and (ctx.recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
                         if (dot > 0.0) {
                             dot /= ctx.repetition_penalty;
                         } else {
@@ -1143,21 +1185,17 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 if (self.lm_head_weights) |weights| {
                     if (weights.sampleNext(h_last, recent_window, repetition_penalty, graph.options.mlx_stream)) |tok| {
                         return tok;
-                    } else |err| {
-                        std.debug.print(" [LM_HEAD_WEIGHTS_ERROR: {}] ", .{err});
-                    }
+                    } else |_| {}
                 } else {
-                    std.debug.print(" [LM_HEAD_WEIGHTS_IS_NULL!] ", .{});
                     if (backend.offload.lmHeadArgmax(h_last, embed_u16, config.vocab_size, config.hidden_size, recent_window, repetition_penalty, graph.options.mlx_stream)) |tok| {
                         return tok;
-                    } else |err| {
-                        std.debug.print(" [LM_HEAD_ARGMAX_ERROR: {}] ", .{err});
-                    }
+                    } else |_| {}
                 }
             }
 
             // 2. CPU 确定性多核并行回退路径
-            var recent_bitset = [_]u64{0} ** (262144 / 64);
+            const bitset_words = (config.vocab_size + 63) / 64;
+            var recent_bitset = [_]u64{0} ** bitset_words;
             if (repetition_penalty > 1.0) {
                 for (recent_window) |rec| {
                     if (rec < config.vocab_size) {
@@ -1263,7 +1301,11 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             if (graph.options.device == .gpu and self.gpu_context != null) {
                 self.gpu_needs_sync = false;
-                return self.gpu_context.?.prefill(prompt_tokens, embed_u16, repetition_penalty, graph.options.mlx_stream);
+                const next_tok = try self.gpu_context.?.prefill(prompt_tokens, embed_u16, repetition_penalty, graph.options.mlx_stream);
+                for (cache.layers) |*cl| {
+                    cl.curr_len = T;
+                }
+                return next_tok;
             }
 
             self.gpu_needs_sync = true;
