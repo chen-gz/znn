@@ -143,6 +143,30 @@ pub const Array = struct {
         return .{ .handle = arr };
     }
 
+    /// 从原始数据指针与形状维度创建 MLX 数组 (Raw Pointer Array Creation)
+    pub fn fromRawData(
+        data: *const anyopaque,
+        shape_dims: []const usize,
+        dtype: DType,
+    ) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (shape_dims.len == 0 or shape_dims.len > 8) return error.InvalidShape;
+
+        var c_shape: [8]c_int = undefined;
+        for (shape_dims, 0..) |dim, i| {
+            c_shape[i] = @intCast(dim);
+        }
+
+        const arr = c.mlx_array_new_data(
+            data,
+            &c_shape,
+            @intCast(shape_dims.len),
+            @intFromEnum(dtype),
+        );
+        if (arr.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = arr };
+    }
+
     /// 创建全零数组 (Zeros)
     pub fn zeros(shape_dims: []const usize, dtype: DType, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
