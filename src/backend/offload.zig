@@ -337,6 +337,26 @@ pub const Q4Weights = struct {
         self.biases.deinit();
     }
 
+    /// 惰性量化矩阵乘法数组分发 (Quantized Matrix Multiplication, QMM)
+    /// 保持结果在图形处理器 (Graphics Processing Unit, GPU) 显存中，支持算子融合与流水线批处理调度
+    pub fn forwardArray(
+        self: Q4Weights,
+        x_mlx: mlx.Array,
+        stream: ?Stream,
+    ) OffloadError!mlx.Array {
+        if (!isAvailable()) return error.OffloadNotSupported;
+        return x_mlx.quantizedMatmul(
+            self.w_q,
+            self.scales,
+            self.biases,
+            true, // transpose
+            32,
+            4,
+            "affine",
+            stream,
+        );
+    }
+
     /// 前向量化矩阵乘法 (Quantized Matrix Multiplication, QMM)：out = X * W^T
     pub fn forward(
         self: Q4Weights,
@@ -356,16 +376,7 @@ pub const Q4Weights = struct {
         var x_mlx = try mlx.Array.fromSliceZeroCopy(X.data[0..total_elements], &.{ rows, in_f });
         defer x_mlx.deinit();
 
-        var res_mlx = try x_mlx.quantizedMatmul(
-            self.w_q,
-            self.scales,
-            self.biases,
-            true, // transpose
-            32,
-            4,
-            "affine",
-            stream,
-        );
+        var res_mlx = try self.forwardArray(x_mlx, stream);
         defer res_mlx.deinit();
         res_mlx.eval();
 
@@ -374,6 +385,104 @@ pub const Q4Weights = struct {
         @memcpy(out.data[0..rows * out_f], res_data);
     }
 };
+
+/// 门控多层感知机硬件算子融合与异步执行 (Multilayer Perceptron, MLP)
+/// 在图形处理器 (Graphics Processing Unit, GPU) 上连续调度门控投影 (gate_proj)、上升投影 (up_proj)、
+/// 高斯误差线性单元激活 (Gaussian Error Linear Unit, GELU)、逐元素点乘与下降投影 (down_proj)。
+/// 中间激活值常驻显存，将三次独立内核同步合并为一次最终求值，消除驱动管线等待。
+pub fn mlpForwardOffload(
+    gate_qw: *const Q4Weights,
+    up_qw: *const Q4Weights,
+    down_qw: *const Q4Weights,
+    X: anytype,
+    out: anytype,
+    stream: ?Stream,
+) OffloadError!void {
+    if (!isAvailable()) return error.OffloadNotSupported;
+    var total_elements: usize = 1;
+    for (0..X.shape.len) |d| {
+        total_elements *= X.shape.dims[d];
+    }
+    const in_f = gate_qw.in_features;
+    const rows = total_elements / in_f;
+
+    var x_mlx = try mlx.Array.fromSliceZeroCopy(X.data[0..total_elements], &.{ rows, in_f });
+    defer x_mlx.deinit();
+
+    var gate_arr = try gate_qw.forwardArray(x_mlx, stream);
+    defer gate_arr.deinit();
+
+    var up_arr = try up_qw.forwardArray(x_mlx, stream);
+    defer up_arr.deinit();
+
+    var act_arr = try gate_arr.gelu(stream);
+    defer act_arr.deinit();
+
+    var fused_arr = try mlx.Array.multiply(act_arr, up_arr, stream);
+    defer fused_arr.deinit();
+
+    var down_arr = try down_qw.forwardArray(fused_arr, stream);
+    defer down_arr.deinit();
+
+    down_arr.eval();
+
+    const res_data = down_arr.dataFloat32();
+    if (res_data.len != rows * in_f) return error.ShapeMismatch;
+    @memcpy(out.data[0..rows * in_f], res_data);
+}
+
+/// 查询键值多头投影硬件并发执行 (Query-Key-Value, QKV)
+/// 在图形处理器 (Graphics Processing Unit, GPU) 上统一批处理分发 Q、K、V 三路量化投影，
+/// 并通过多张量统一求值一次性完成计算，消除重复的主机-设备同步停顿。
+pub fn qkvForwardOffload(
+    q_qw: *const Q4Weights,
+    k_qw: *const Q4Weights,
+    v_qw: ?*const Q4Weights,
+    X: anytype,
+    q_out: anytype,
+    k_out: anytype,
+    v_out: anytype,
+    stream: ?Stream,
+) OffloadError!void {
+    if (!isAvailable()) return error.OffloadNotSupported;
+    var total_elements: usize = 1;
+    for (0..X.shape.len) |d| {
+        total_elements *= X.shape.dims[d];
+    }
+    const in_f = q_qw.in_features;
+    const rows = total_elements / in_f;
+
+    var x_mlx = try mlx.Array.fromSliceZeroCopy(X.data[0..total_elements], &.{ rows, in_f });
+    defer x_mlx.deinit();
+
+    var q_arr = try q_qw.forwardArray(x_mlx, stream);
+    defer q_arr.deinit();
+
+    var k_arr = try k_qw.forwardArray(x_mlx, stream);
+    defer k_arr.deinit();
+
+    if (v_qw) |vw| {
+        var v_arr = try vw.forwardArray(x_mlx, stream);
+        defer v_arr.deinit();
+
+        mlx.Array.evalMultiple(&.{ q_arr, k_arr, v_arr });
+
+        const q_data = q_arr.dataFloat32();
+        const k_data = k_arr.dataFloat32();
+        const v_data = v_arr.dataFloat32();
+        @memcpy(q_out.data[0..rows * q_qw.out_features], q_data);
+        @memcpy(k_out.data[0..rows * k_qw.out_features], k_data);
+        @memcpy(v_out.data[0..rows * vw.out_features], v_data);
+    } else {
+        mlx.Array.evalMultiple(&.{ q_arr, k_arr });
+
+        const q_data = q_arr.dataFloat32();
+        const k_data = k_arr.dataFloat32();
+        @memcpy(q_out.data[0..rows * q_qw.out_features], q_data);
+        @memcpy(k_out.data[0..rows * k_qw.out_features], k_data);
+        @memcpy(v_out.data[0..rows * k_qw.out_features], k_data);
+    }
+}
 
 /// 4-bit 量化矩阵乘法硬件加速便捷入口 (Quantized Matrix Multiplication, QMM)
 pub fn q4MatMul(

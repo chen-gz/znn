@@ -181,6 +181,28 @@ pub const Gemma4Q4MLP = struct {
             x_2d = try graph.reshape(x, &.{ B * T, D });
         }
 
+        if (graph.options.device == .gpu and !graph.enable_grad) {
+            if (self.gate_proj.q4_weights != null and self.up_proj.q4_weights != null and self.down_proj.q4_weights != null) {
+                const out_2d = try graph.zeros(&.{ x_2d.shape.dims[0], self.gate_proj.in_features }, false);
+                if (backend.offload.mlpForwardOffload(
+                    &self.gate_proj.q4_weights.?,
+                    &self.up_proj.q4_weights.?,
+                    &self.down_proj.q4_weights.?,
+                    x_2d,
+                    out_2d,
+                    graph.options.mlx_stream,
+                )) {
+                    if (is_3d) {
+                        const B = old_shape.dims[0];
+                        const T = old_shape.dims[1];
+                        const D = old_shape.dims[2];
+                        return try graph.reshape(out_2d, &.{ B, T, D });
+                    }
+                    return out_2d;
+                } else |_| {}
+            }
+        }
+
         const gate = try self.gate_proj.forward(graph, x_2d);
         const up = try self.up_proj.forward(graph, x_2d);
         const gelu_gate = try graph.gelu(gate);
@@ -294,6 +316,60 @@ pub const Gemma4Q4Attention = struct {
         return self.forwardPrefillOptional(graph, x, layer_cache);
     }
 
+    const QKVResult = struct {
+        q: *Tensor,
+        k: *Tensor,
+        v: *Tensor,
+    };
+
+    /// 查询键值多头投影分发 (Query-Key-Value, QKV)
+    /// 优先利用图形处理器 (Graphics Processing Unit, GPU) 批量分发量化矩阵乘法 (Quantized Matrix Multiplication, QMM)，
+    /// 并执行单次多张量统一求值，降低主机-设备往返同步停顿。
+    fn projectQKV(
+        self: *const Gemma4Q4Attention,
+        graph: *autodiff.Graph,
+        x_2d: *Tensor,
+    ) !QKVResult {
+        const rows = x_2d.shape.dims[0];
+        const nh = self.num_heads;
+        const n_kv = self.num_kv_heads;
+        const hd = self.head_dim;
+
+        const q_raw = try graph.zeros(&.{ rows, nh * hd }, false);
+        const k_raw = try graph.zeros(&.{ rows, n_kv * hd }, false);
+        const v_raw = try graph.zeros(&.{ rows, n_kv * hd }, false);
+
+        if (graph.options.device == .gpu and !graph.enable_grad) {
+            if (self.q_proj.q4_weights != null and self.k_proj.q4_weights != null) {
+                const v_qw = if (self.v_proj) |*vp| (if (vp.q4_weights) |*w| w else null) else null;
+                if (backend.offload.qkvForwardOffload(
+                    &self.q_proj.q4_weights.?,
+                    &self.k_proj.q4_weights.?,
+                    v_qw,
+                    x_2d,
+                    q_raw,
+                    k_raw,
+                    v_raw,
+                    graph.options.mlx_stream,
+                )) {
+                    return .{ .q = q_raw, .k = k_raw, .v = v_raw };
+                } else |_| {}
+            }
+        }
+
+        const q_tmp = try self.q_proj.forward(graph, x_2d);
+        @memcpy(q_raw.data, q_tmp.data);
+        const k_tmp = try self.k_proj.forward(graph, x_2d);
+        @memcpy(k_raw.data, k_tmp.data);
+        if (self.v_proj) |*vp| {
+            const v_tmp = try vp.forward(graph, x_2d);
+            @memcpy(v_raw.data, v_tmp.data);
+        } else {
+            @memcpy(v_raw.data, k_tmp.data);
+        }
+        return .{ .q = q_raw, .k = k_raw, .v = v_raw };
+    }
+
     fn forwardPrefillOptional(
         self: *const Gemma4Q4Attention,
         graph: *autodiff.Graph,
@@ -314,9 +390,10 @@ pub const Gemma4Q4Attention = struct {
         const x_2d = try graph.reshape(x, &.{ B * T, C });
 
         // 1. Q4 投影 Q, K, V (在 full_attention 下 attention_k_eq_v 为 true，V 与 K 共享投影权重)
-        const q_raw = try self.q_proj.forward(graph, x_2d);
-        const k_raw = try self.k_proj.forward(graph, x_2d);
-        const v_raw = if (self.v_proj) |*vp| try vp.forward(graph, x_2d) else k_raw;
+        const qkv = try self.projectQKV(graph, x_2d);
+        const q_raw = qkv.q;
+        const k_raw = qkv.k;
+        const v_raw = qkv.v;
 
         // 2. Q-Norm 与 K-Norm，以及无参数 v_norm
         const q_heads = try graph.reshape(q_raw, &.{ B * T * nh, hd });
@@ -403,9 +480,9 @@ pub const Gemma4Q4Attention = struct {
         return try graph.reshape(out_2d, &.{ B, T, C });
     }
 
-    /// 增量解码阶段 (Decode Phase)：基于键值缓存 (Key-Value Cache, KVCache) 处理单个增量词元 (Token)，
-    /// 计算复杂度从 O(T^2) 降至 O(T)，单步矩阵乘变为单行矩阵向量乘 (GEMV)
-    pub fn forwardDecode(
+    /// 增量解码注意力特征图计算 (Decode Attention Feature Extraction)
+    /// 输出投影前的原始注意力聚合特征图 y_2d [1, num_heads * head_dim]
+    pub fn forwardDecodeAttention(
         self: *const Gemma4Q4Attention,
         graph: *autodiff.Graph,
         x: *Tensor,
@@ -426,9 +503,10 @@ pub const Gemma4Q4Attention = struct {
         const x_2d = if (x.shape.len == 2) x else try graph.reshape(x, &.{ 1, C });
 
         // 1. Q4 投影单行向量 (GEMV)
-        const q_raw = try self.q_proj.forward(graph, x_2d);
-        const k_raw = try self.k_proj.forward(graph, x_2d);
-        const v_raw = if (self.v_proj) |*vp| try vp.forward(graph, x_2d) else k_raw;
+        const qkv = try self.projectQKV(graph, x_2d);
+        const q_raw = qkv.q;
+        const k_raw = qkv.k;
+        const v_raw = qkv.v;
 
         // 2. Q-Norm 与 K-Norm，以及无参数 v_norm
         const q_heads = try graph.reshape(q_raw, &.{ nh, hd });
@@ -502,9 +580,19 @@ pub const Gemma4Q4Attention = struct {
             }
         }
 
-        // 6. 输出投影
+        return y_2d;
+    }
+
+    /// 增量解码阶段 (Decode Phase)：基于键值缓存 (Key-Value Cache, KVCache) 处理单个增量词元 (Token)
+    pub fn forwardDecode(
+        self: *const Gemma4Q4Attention,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: *Gemma4KVCache.LayerCache,
+    ) !*Tensor {
+        const y_2d = try self.forwardDecodeAttention(graph, x, layer_cache);
         const out_2d = try self.o_proj.forward(graph, y_2d);
-        return try graph.reshape(out_2d, &.{ 1, 1, C });
+        return try graph.reshape(out_2d, &.{ 1, 1, self.hidden_size });
     }
 };
 
@@ -908,14 +996,31 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 ));
                 lm_head_weights = backend.offload.LmHeadWeights.init(embed_u16_slice, config.vocab_size, config.hidden_size, null) catch null;
 
+                var offloaded_count: usize = 0;
+                var failed_count: usize = 0;
                 for (layers) |*layer| {
-                    layer.self_attn.q_proj.enableOffload(allocator, null) catch {};
-                    layer.self_attn.k_proj.enableOffload(allocator, null) catch {};
-                    if (layer.self_attn.v_proj) |*vp| vp.enableOffload(allocator, null) catch {};
-                    layer.self_attn.o_proj.enableOffload(allocator, null) catch {};
-                    layer.mlp.gate_proj.enableOffload(allocator, null) catch {};
-                    layer.mlp.up_proj.enableOffload(allocator, null) catch {};
-                    layer.mlp.down_proj.enableOffload(allocator, null) catch {};
+                    layer.self_attn.q_proj.enableOffload(allocator, null) catch { failed_count += 1; };
+                    if (layer.self_attn.q_proj.q4_weights != null) offloaded_count += 1;
+
+                    layer.self_attn.k_proj.enableOffload(allocator, null) catch { failed_count += 1; };
+                    if (layer.self_attn.k_proj.q4_weights != null) offloaded_count += 1;
+
+                    if (layer.self_attn.v_proj) |*vp| {
+                        vp.enableOffload(allocator, null) catch { failed_count += 1; };
+                        if (vp.q4_weights != null) offloaded_count += 1;
+                    }
+
+                    layer.self_attn.o_proj.enableOffload(allocator, null) catch { failed_count += 1; };
+                    if (layer.self_attn.o_proj.q4_weights != null) offloaded_count += 1;
+
+                    layer.mlp.gate_proj.enableOffload(allocator, null) catch { failed_count += 1; };
+                    if (layer.mlp.gate_proj.q4_weights != null) offloaded_count += 1;
+
+                    layer.mlp.up_proj.enableOffload(allocator, null) catch { failed_count += 1; };
+                    if (layer.mlp.up_proj.q4_weights != null) offloaded_count += 1;
+
+                    layer.mlp.down_proj.enableOffload(allocator, null) catch { failed_count += 1; };
+                    if (layer.mlp.down_proj.q4_weights != null) offloaded_count += 1;
                 }
             }
 
