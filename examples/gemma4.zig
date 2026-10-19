@@ -72,8 +72,11 @@ const Gemma4ChatTokenizer = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    const io = init.io;
     const allocator = std.heap.page_allocator;
+    var threaded = std.Io.Threaded.init(allocator);
+    defer threaded.deinit();
+    const io = threaded.io();
+    _ = init;
     const q4_model_path = "gemma-4-12B-q4.bin";
 
     std.debug.print("================================================================================\n", .{});
@@ -160,6 +163,11 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("   - 模型已成功零拷贝加载: 48 层 Transformer (40 层滑动窗口 + 8 层全局注意力)\n", .{});
     std.debug.print("   - 词表解码器已就绪: 262,144 个完整官方 Token 文本，支持任意词元实时直接还原！\n", .{});
+
+    // 初始化 Gemma 4 专用混合键值缓存 (Key-Value Cache, KVCache)
+    var cache = try gemma4.Gemma4KVCache.init(allocator, gemma4_q4.DefaultGemma4Q4.config, .{ .max_seq_len = 1024 });
+    defer cache.deinit(allocator);
+    std.debug.print("   - 键值缓存已初始化: 48 层异构连续 KVCache (最大序列长度: 1024)\n", .{});
     std.debug.print("   -------------------------------------------------------------\n", .{});
     std.debug.print("   User  : hello world\n", .{});
     std.debug.print("   Model :", .{});
@@ -171,59 +179,81 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // 运行真实自回归生成循环（最多生成 15 个 token，或遇到 <turn|> / <eos> 结束）
-    const max_new_tokens: usize = 5;
+    const max_new_tokens: usize = 15;
     var gen_count: usize = 0;
 
     var timer_ts: std.posix.system.timespec = undefined;
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
     const start_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
     var first_token_ns: u64 = 0;
+    var decode_start_ns: u64 = 0;
 
+    // 1. 预填充阶段 (Prefill)：一次性处理全部 Prompt 词元并写入 KVCache，获取首个词元
+    {
+        var prefill_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false, .io = io });
+        defer prefill_graph.deinit();
+
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
+        const p_start = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
+
+        const first_tok = try model.prefill(&prefill_graph, prompt_tokens[0..], &cache, mmap_ptr, 1.25);
+
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
+        const p_end = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
+        first_token_ns = p_end - p_start;
+        decode_start_ns = p_end;
+
+        gen_count += 1;
+        try current_tokens.append(allocator, first_tok);
+        const piece1 = vocab.decode(first_tok);
+        if (piece1.len > 0) {
+            std.debug.print("{s}", .{piece1});
+        } else {
+            std.debug.print("[#{}]", .{first_tok});
+        }
+    }
+
+    // 2. 增量解码阶段 (Decode Loop)：每步仅处理 1 个增量词元，复用 KVCache
+    var current_tok = current_tokens.items[current_tokens.items.len - 1];
     while (gen_count < max_new_tokens) : (gen_count += 1) {
-        // 每步新建一个无梯度轻量级图，生成完毕立即释放中间张量，维持极限低内存
+        if (current_tok == Gemma4ChatTokenizer.EOS or current_tok == Gemma4ChatTokenizer.EOT) {
+            break;
+        }
+
         var step_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false, .io = io });
         defer step_graph.deinit();
 
-        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
-        const step_start_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
-
-        const next_tok = try model.generateNextToken(&step_graph, current_tokens.items, mmap_ptr);
-
-        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
-        const step_end_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
-        if (gen_count == 0) {
-            first_token_ns = step_end_ns - step_start_ns;
-        }
-
+        const next_tok = try model.decodeStep(&step_graph, current_tok, &cache, mmap_ptr, current_tokens.items, 1.25);
+        current_tok = next_tok;
         try current_tokens.append(allocator, next_tok);
 
-        // 使用库内完整的 262K 词表解码器直接打印真实字符串内容
         const piece = vocab.decode(next_tok);
         if (piece.len > 0) {
             std.debug.print("{s}", .{piece});
         } else {
             std.debug.print("[#{}]", .{next_tok});
         }
-
-        if (next_tok == Gemma4ChatTokenizer.EOS or next_tok == Gemma4ChatTokenizer.EOT) {
-            break;
-        }
     }
+
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
     const end_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
     const total_gen_s = @as(f64, @floatFromInt(end_ns - start_ns)) / 1e9;
     const prefill_s = @as(f64, @floatFromInt(first_token_ns)) / 1e9;
-    const tokens_per_sec = if (total_gen_s > 0) @as(f64, @floatFromInt(gen_count)) / total_gen_s else 0.0;
+    const decode_total_s = @as(f64, @floatFromInt(end_ns - decode_start_ns)) / 1e9;
+    const decode_tokens = if (gen_count > 1) gen_count - 1 else 0;
+    const decode_tokens_per_sec = if (decode_total_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_total_s else 0.0;
+    const global_tokens_per_sec = if (total_gen_s > 0) @as(f64, @floatFromInt(gen_count)) / total_gen_s else 0.0;
 
     std.debug.print("\n   -------------------------------------------------------------\n\n", .{});
 
     std.debug.print("5. [推理验证与性能测试总结]:\n", .{});
     std.debug.print("   - 模型规格: 完整 48 层 Gemma 4 12B Instruct (Q4 量化, 7.59 GB)\n", .{});
     std.debug.print("   - 生成词元: {} 个 token\n", .{gen_count});
-    std.debug.print("   - 首字延迟 (TTFT / Prefill 耗时): {d:.2} 秒 (含 {} 个输入词元处理)\n", .{ prefill_s, prompt_tokens.len });
-    std.debug.print("   - 总生成时间: {d:.2} 秒\n", .{total_gen_s});
-    std.debug.print("   - 全局平均吞吐: {d:.2} tokens/s (当前为无 KV Cache 序列全量重算模式)\n", .{tokens_per_sec});
-    std.debug.print("   - 4-bit 量化权重 `gemma-4-12B-q4.bin` 使得 12B 完整参数量可在 Apple Silicon 上顺畅运行。\n\n", .{});
+    std.debug.print("   - 首字延迟 (TTFT / Prefill 耗时): {d:.2} 秒 (含 {} 个输入词元并行处理与 KVCache 预热)\n", .{ prefill_s, prompt_tokens.len });
+    std.debug.print("   - 解码生成耗时: {d:.2} 秒 (生成 {} 个新词元)\n", .{ decode_total_s, decode_tokens });
+    std.debug.print("   - 增量解码速度 (Decode Speed): {d:.2} tokens/s (基于 KVCache 的 O(1) 增量运算)\n", .{decode_tokens_per_sec});
+    std.debug.print("   - 全局平均吞吐 (含 Prefill): {d:.2} tokens/s\n", .{global_tokens_per_sec});
+    std.debug.print("   - 4-bit 量化结合键值缓存使 12B 大模型在本地设备上具备了实用的实时交互生成能力。\n\n", .{});
 
     std.debug.print("================================================================================\n", .{});
     std.debug.print("✨ 运行完毕！\n", .{});

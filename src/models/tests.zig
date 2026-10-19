@@ -192,4 +192,41 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
             }
         }
     }
-}
+
+    // 8. 验证 Gemma4KVCache 键值缓存初始化、预填充与增量解码
+    {
+            var cache = try gemma4.Gemma4KVCache.initDefault(allocator, gemma4_q4.TinyQ4Gemma4.config);
+            defer cache.deinit(allocator);
+            try std.testing.expectEqual(@as(usize, 2), cache.layers.len);
+            try std.testing.expectEqual(@as(usize, 0), cache.layers[0].curr_len);
+
+            // 构造合法的 TinyQ4Gemma4 二进制内存切片
+            const expected_bytes = gemma4_q4.TinyQ4Gemma4.computeExpectedFileSize();
+            const mock_mmap = try allocator.alloc(u8, expected_bytes);
+            defer allocator.free(mock_mmap);
+            @memset(mock_mmap, 0);
+            @memcpy(mock_mmap[0..8], "ZNNQ4G02");
+
+            var mmap_model = try gemma4_q4.TinyQ4Gemma4.loadFromMmap(allocator, mock_mmap);
+            defer mmap_model.deinit(allocator);
+
+            var g_prefill = autodiff.Graph.initDefault(allocator);
+            defer g_prefill.deinit();
+
+            const prompt = [_]usize{ 2, 10, 25 };
+            const next_1 = try mmap_model.prefill(&g_prefill, &prompt, &cache, mock_mmap, 1.0);
+            try std.testing.expectEqual(@as(usize, 3), cache.layers[0].curr_len);
+            try std.testing.expect(next_1 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
+
+            var g_decode = autodiff.Graph.initDefault(allocator);
+            defer g_decode.deinit();
+
+            const next_2 = try mmap_model.decodeStep(&g_decode, next_1, &cache, mock_mmap, &prompt, 1.0);
+            try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
+            try std.testing.expect(next_2 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
+
+            cache.reset();
+            try std.testing.expectEqual(@as(usize, 0), cache.layers[0].curr_len);
+        }
+    }
+

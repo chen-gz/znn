@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `GraphOptions` 支持硬件设备配置：`device: backend.mlx.DeviceType = .cpu` 与 `mlx_stream: ?backend.mlx.Stream = null`。无求导执行时，`graph.matmul`、`graph.batchMatMul`、`graph.rmsNorm` 以及 `graph.scaledDotProductAttention` 自动下沉至 Apple Silicon GPU 流上并发执行。
   - `ScaledDotProductAttention.forwardCore` 与 `CausalSelfAttention` 模块在 GPU 模式下直通融合 FlashAttention 硬件内核。
   - 新增完整的 Apple Silicon CPU (AMX CBLAS) vs MLX GPU 性能基准测试与精度验证套件 (`src/bench/mlx_suite.zig`, `examples/benchmark.zig`)：包含 GEMM `[1024x1024]`、因果 SDPA `[1, 8, 512, 64]`、长上下文 SDPA `[1, 8, 1024, 64]`、RMSNorm `[1024x2048]` 与端到端因果自注意力模块 `CausalSelfAttention` `[B=4, T=128, D=256, H=4]`。实测因果 SDPA 取得 **12.77x** 延迟加速，长上下文 SDPA 取得 **22.62x** 延迟加速（GPU 1188.4 GFLOPS vs CPU 52.5 GFLOPS），RMSNorm 达到 **12.6 GB/s** (1.64x 加速)，所有算子与模块精度误差控制在 $\le 4 \times 10^{-6}$ 并通过数值校验。
+- **Gemma 4 专用异构键值缓存 (Key-Value Cache, KVCache) 与增量解码 (`src/models/gemma4.zig`, `src/models/gemma4_q4.zig`, `src/models/tests.zig`, `examples/gemma4.zig`)**:
+  - 新增 `Gemma4KVCache` 结构体：支持为 Gemma 4 的 40 层滑动窗口注意力 (`sliding_attention`, $d_{\text{head}}=256, n_{\text{kv}}=8$) 与 8 层全局注意力 (`full_attention`, $d_{\text{head}}=512, n_{\text{kv}}=1$) 分配紧凑连续的独立键值缓冲区，内存按 `[n_kv_heads, max_seq_len, head_dim]` 连续布局，在 1024 上下文下仅占 ~700 MB 内存。
+  - 在 `Gemma4Q4Attention` 与 `Gemma4Q4DecoderLayer` 中实现 `forwardPrefill` 与 `forwardDecode`：预填充阶段一次性处理 Prompt 并将各层 $K, V$ 写入缓存；增量解码阶段每步仅处理 1 个增量词元，通过单查询点积注意力（Single Query Attention）完成 $O(1)$ 键值更新与 $O(T)$ 注意力打分，在滑动窗口层自动执行窗口截断。
+  - 在 `Gemma4Q4ForCausalLM` 中暴露高效的 `prefill` 与 `decodeStep` 接口，并在 `examples/gemma4.zig` 中接入完整的端到端自回归流式生成循环。
+  - 在 `src/models/tests.zig` 中新增端到端 `TinyQ4Gemma4` 键值缓存生命周期、预填充与增量解码单测验证。
 - **Gemma 4 混合注意力与旋转位置编码硬件加速卸载 (`src/models/gemma4.zig`, `src/models/gemma4_q4.zig`, `src/autodiff/graph_nn.zig`, `src/models/tests.zig`)**:
   - `graph.rope` 算子接入 Apple MLX `fastRoPE` GPU 快速内核：在硬件设备为 GPU 且无梯度模式下，针对全旋转因子的滑动窗口层及标准 Transformer 自动下沉至 Metal GPU 执行，非全旋转因子安全回退至精确 CPU 算子，保证数学等价。
   - `Gemma4Attention` 与 `Gemma4Q4Attention` 混合注意力机制重构：在全局注意力层（`full_attention`）或序列长度不超过滑动窗口跨度（$T \le \text{sliding\_window}$，如 Prompt 预填充阶段）时，证明其与标准因果注意力具有严格数学等价性，直接分发至 `graph.scaledDotProductAttention`（GPU 模式下直通融合 FlashAttention Metal Steel 内核，实现最高 22.6x 的计算加速）；超出滑动窗口时自动降级分解计算图。

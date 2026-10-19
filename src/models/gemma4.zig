@@ -111,6 +111,120 @@ pub const Gemma4Config = struct {
     };
 };
 
+/// Gemma 4 专用键值缓存 (Key-Value Cache, KVCache)
+/// 针对滑动窗口注意力 (Sliding Window Attention) 与全局全注意力 (Full Attention) 混合异构架构设计。
+/// 每个解码层维护各自独立的键 (Key, K) 与值 (Value, V) 连续缓冲区。
+pub const Gemma4KVCache = struct {
+    pub const LayerCache = struct {
+        k: []f32,
+        v: []f32,
+        num_kv_heads: usize,
+        head_dim: usize,
+        sliding_window: usize,
+        attn_type: Gemma4AttentionType,
+        curr_len: usize = 0,
+        max_seq_len: usize,
+
+        pub fn init(
+            allocator: std.mem.Allocator,
+            attn_type: Gemma4AttentionType,
+            num_kv_heads: usize,
+            head_dim: usize,
+            sliding_window: usize,
+            max_seq_len: usize,
+        ) !LayerCache {
+            const numel = num_kv_heads * max_seq_len * head_dim;
+            const k = try allocator.alloc(f32, numel);
+            errdefer allocator.free(k);
+            const v = try allocator.alloc(f32, numel);
+            @memset(k, 0.0);
+            @memset(v, 0.0);
+            return LayerCache{
+                .k = k,
+                .v = v,
+                .num_kv_heads = num_kv_heads,
+                .head_dim = head_dim,
+                .sliding_window = sliding_window,
+                .attn_type = attn_type,
+                .curr_len = 0,
+                .max_seq_len = max_seq_len,
+            };
+        }
+
+        pub fn deinit(self: *LayerCache, allocator: std.mem.Allocator) void {
+            allocator.free(self.k);
+            allocator.free(self.v);
+        }
+
+        pub fn reset(self: *LayerCache) void {
+            self.curr_len = 0;
+        }
+    };
+
+    layers: []LayerCache,
+    max_seq_len: usize,
+
+    pub const Options = struct {
+        max_seq_len: usize = 2048,
+
+        pub const default: Options = .{};
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    pub fn init(allocator: std.mem.Allocator, config: Gemma4Config, options: Options) !Gemma4KVCache {
+        const layers = try allocator.alloc(LayerCache, config.num_hidden_layers);
+        errdefer allocator.free(layers);
+
+        var initialized_count: usize = 0;
+        errdefer {
+            for (layers[0..initialized_count]) |*l| {
+                l.deinit(allocator);
+            }
+        }
+
+        for (0..config.num_hidden_layers) |i| {
+            const is_full = ((i + 1) % 6 == 0);
+            const attn_type: Gemma4AttentionType = if (is_full) .full_attention else .sliding_attention;
+            const head_dim = if (is_full) config.global_head_dim else config.head_dim;
+            const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
+
+            layers[i] = try LayerCache.init(
+                allocator,
+                attn_type,
+                num_kv,
+                head_dim,
+                config.sliding_window,
+                options.max_seq_len,
+            );
+            initialized_count += 1;
+        }
+
+        return Gemma4KVCache{
+            .layers = layers,
+            .max_seq_len = options.max_seq_len,
+        };
+    }
+
+    pub fn initDefault(allocator: std.mem.Allocator, config: Gemma4Config) !Gemma4KVCache {
+        return init(allocator, config, Options.default);
+    }
+
+    pub fn deinit(self: *Gemma4KVCache, allocator: std.mem.Allocator) void {
+        for (self.layers) |*l| {
+            l.deinit(allocator);
+        }
+        allocator.free(self.layers);
+    }
+
+    pub fn reset(self: *Gemma4KVCache) void {
+        for (self.layers) |*l| {
+            l.reset();
+        }
+    }
+};
+
 /// Gemma RMSNorm (with learnable scale)
 pub const GemmaRMSNorm = struct {
     weight: *Tensor, // [dim]

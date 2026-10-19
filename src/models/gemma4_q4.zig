@@ -4,6 +4,7 @@
 //! 采用 split-half Q4Block，并通过 Executor 进行多核并行，热路径不派生临时 OS 线程。
 
 const std = @import("std");
+const backend = @import("../backend.zig");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const nn = @import("../nn.zig");
@@ -11,6 +12,7 @@ const gemma4 = @import("gemma4.zig");
 
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
+const Executor = backend.Executor;
 const Q4Block = tensor.quant.Q4Block;
 const Linear = nn.core.Linear;
 const Embedding = nn.transformer.Embedding;
@@ -18,6 +20,7 @@ const GemmaRMSNorm = gemma4.GemmaRMSNorm;
 const GemmaUnscaledRMSNorm = gemma4.GemmaUnscaledRMSNorm;
 const Gemma4Config = gemma4.Gemma4Config;
 const Gemma4AttentionType = gemma4.Gemma4AttentionType;
+const Gemma4KVCache = gemma4.Gemma4KVCache;
 const ropeSplitHalf = gemma4.ropeSplitHalf;
 
 const createPersistentTensor = nn.core.createPersistentTensor;
@@ -236,6 +239,26 @@ pub const Gemma4Q4Attention = struct {
     }
 
     pub fn forward(self: *const Gemma4Q4Attention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        return self.forwardPrefillOptional(graph, x, null);
+    }
+
+    /// 预填充阶段 (Prefill Phase)：处理初始输入的提示词元 (Prompt Tokens) 序列，
+    /// 计算注意力并将该层所有的键值特征存入键值缓存 (Key-Value Cache, KVCache)
+    pub fn forwardPrefill(
+        self: *const Gemma4Q4Attention,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: *Gemma4KVCache.LayerCache,
+    ) !*Tensor {
+        return self.forwardPrefillOptional(graph, x, layer_cache);
+    }
+
+    fn forwardPrefillOptional(
+        self: *const Gemma4Q4Attention,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: ?*Gemma4KVCache.LayerCache,
+    ) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
@@ -275,7 +298,25 @@ pub const Gemma4Q4Attention = struct {
         const q_rot = try ropeSplitHalf(graph, q, 0, self.partial_rotary_factor, self.rope_theta);
         const k_rot = try ropeSplitHalf(graph, k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
 
-        // 5. GQA 广播
+        // 5. 写入键值缓存 (Key-Value Cache, KVCache)
+        if (layer_cache) |cache| {
+            std.debug.assert(B == 1);
+            std.debug.assert(T <= cache.max_seq_len);
+            const max_len = cache.max_seq_len;
+            for (0..n_kv) |kv_h| {
+                for (0..T) |t| {
+                    const dest_k = cache.k[(kv_h * max_len + t) * hd .. (kv_h * max_len + t + 1) * hd];
+                    const dest_v = cache.v[(kv_h * max_len + t) * hd .. (kv_h * max_len + t + 1) * hd];
+                    const src_k = k_rot.data[(kv_h * T + t) * hd .. (kv_h * T + t + 1) * hd];
+                    const src_v = v.data[(kv_h * T + t) * hd .. (kv_h * T + t + 1) * hd];
+                    @memcpy(dest_k, src_k);
+                    @memcpy(dest_v, src_v);
+                }
+            }
+            cache.curr_len = T;
+        }
+
+        // 6. GQA 广播
         var k = k_rot;
         var v_final = v;
         if (groups > 1) {
@@ -283,7 +324,7 @@ pub const Gemma4Q4Attention = struct {
             v_final = try graph.repeatKV(v, groups);
         }
 
-        // 6. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0)
+        // 7. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0)
         // 当为全局注意力层 (full_attention) 或时间步不超过滑动窗口跨度时，等价于标准因果注意力，
         // 直接分发至 scaledDotProductAttention（无求导 GPU 模式直通融合 FlashAttention Metal 内核）；
         // 否则回退至带滑动窗口截断的分解计算图。
@@ -313,12 +354,116 @@ pub const Gemma4Q4Attention = struct {
             break :blk try graph.batchMatMul(att_sm, v_final);
         };
 
-        // 7. 转置并输出投影
+        // 8. 转置并输出投影
         const y_trans = try graph.transposeND(y_4d, 1, 2);
         const y_2d = try graph.reshape(y_trans, &.{ B * T, nh * hd });
         const out_2d = try self.o_proj.forward(graph, y_2d);
 
         return try graph.reshape(out_2d, &.{ B, T, C });
+    }
+
+    /// 增量解码阶段 (Decode Phase)：基于键值缓存 (Key-Value Cache, KVCache) 处理单个增量词元 (Token)，
+    /// 计算复杂度从 O(T^2) 降至 O(T)，单步矩阵乘变为单行矩阵向量乘 (GEMV)
+    pub fn forwardDecode(
+        self: *const Gemma4Q4Attention,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: *Gemma4KVCache.LayerCache,
+    ) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+
+        const C = self.hidden_size;
+        const nh = self.num_heads;
+        const n_kv = self.num_kv_heads;
+        const hd = self.head_dim;
+        const groups = nh / n_kv;
+        const pos = layer_cache.curr_len;
+        const max_len = layer_cache.max_seq_len;
+        if (pos >= max_len) return error.ContextWindowExceeded;
+
+        const x_2d = if (x.shape.len == 2) x else try graph.reshape(x, &.{ 1, C });
+
+        // 1. Q4 投影单行向量 (GEMV)
+        const q_raw = try self.q_proj.forward(graph, x_2d);
+        const k_raw = try self.k_proj.forward(graph, x_2d);
+        const v_raw = if (self.v_proj) |*vp| try vp.forward(graph, x_2d) else k_raw;
+
+        // 2. Q-Norm 与 K-Norm，以及无参数 v_norm
+        const q_heads = try graph.reshape(q_raw, &.{ nh, hd });
+        const q_normed = try self.q_norm.forward(graph, q_heads);
+        const k_heads = try graph.reshape(k_raw, &.{ n_kv, hd });
+        const k_normed = try self.k_norm.forward(graph, k_heads);
+        const v_heads = try graph.reshape(v_raw, &.{ n_kv, hd });
+        const v_normed = try self.v_norm.forward(graph, v_heads);
+
+        // 3. 施加半切分旋转位置编码 (Split-Half RoPE, 当前时间步为 pos)
+        const q_4d = try graph.reshape(q_normed, &.{ 1, nh, 1, hd });
+        const k_4d = try graph.reshape(k_normed, &.{ 1, n_kv, 1, hd });
+        const q_rot = try ropeSplitHalf(graph, q_4d, pos, self.partial_rotary_factor, self.rope_theta);
+        const k_rot = try ropeSplitHalf(graph, k_4d, pos, self.partial_rotary_factor, self.rope_theta);
+
+        // 4. 写入键值缓存 (Key-Value Cache, KVCache)
+        for (0..n_kv) |kv_h| {
+            const dest_k = layer_cache.k[(kv_h * max_len + pos) * hd .. (kv_h * max_len + pos + 1) * hd];
+            const dest_v = layer_cache.v[(kv_h * max_len + pos) * hd .. (kv_h * max_len + pos + 1) * hd];
+            const src_k = k_rot.data[kv_h * hd .. (kv_h + 1) * hd];
+            const src_v = v_normed.data[kv_h * hd .. (kv_h + 1) * hd];
+            @memcpy(dest_k, src_k);
+            @memcpy(dest_v, src_v);
+        }
+        layer_cache.curr_len = pos + 1;
+        const curr_len = layer_cache.curr_len;
+
+        // 5. 单查询点积注意力 (Single Query Attention against Cached Keys & Values)
+        const y_2d = try graph.zeros(&.{ 1, nh * hd }, false);
+        const start_idx: usize = if (self.attn_type == .sliding_attention and curr_len > self.sliding_window)
+            curr_len - self.sliding_window
+        else
+            0;
+        const valid_len = curr_len - start_idx;
+        const scores = try graph.arenaAllocator().alloc(f32, valid_len);
+
+        for (0..nh) |h| {
+            const kv_h = h / groups;
+            const q_head = q_rot.data[h * hd .. (h + 1) * hd];
+            var max_score: f32 = -1e30;
+
+            for (start_idx..curr_len) |j| {
+                const k_cached = layer_cache.k[(kv_h * max_len + j) * hd .. (kv_h * max_len + j + 1) * hd];
+                var dot: f32 = 0.0;
+                for (q_head, k_cached) |qv, kv| {
+                    dot += qv * kv;
+                }
+                scores[j - start_idx] = dot;
+                if (dot > max_score) max_score = dot;
+            }
+
+            var exp_sum: f32 = 0.0;
+            for (scores) |*s| {
+                const e = @exp(s.* - max_score);
+                s.* = e;
+                exp_sum += e;
+            }
+            const inv_sum = 1.0 / exp_sum;
+            for (scores) |*s| {
+                s.* *= inv_sum;
+            }
+
+            const y_head = y_2d.data[h * hd .. (h + 1) * hd];
+            @memset(y_head, 0.0);
+            for (start_idx..curr_len) |j| {
+                const v_cached = layer_cache.v[(kv_h * max_len + j) * hd .. (kv_h * max_len + j + 1) * hd];
+                const weight = scores[j - start_idx];
+                for (y_head, v_cached) |*yv, vv| {
+                    yv.* += weight * vv;
+                }
+            }
+        }
+
+        // 6. 输出投影
+        const out_2d = try self.o_proj.forward(graph, y_2d);
+        return try graph.reshape(out_2d, &.{ 1, 1, C });
     }
 };
 
@@ -394,6 +539,48 @@ pub const Gemma4Q4DecoderLayer = struct {
 
         const in_norm = try self.input_layernorm.forward(graph, x);
         const attn_out = try self.self_attn.forward(graph, in_norm);
+        const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
+        const x1 = try graph.add(x, post_attn);
+
+        const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
+        const mlp_out = try self.mlp.forward(graph, pre_mlp);
+        const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
+        const x2 = try graph.add(x1, post_mlp);
+        return try graph.mulScalar(x2, self.layer_scalar.data[0]);
+    }
+
+    pub fn forwardPrefill(
+        self: *const Gemma4Q4DecoderLayer,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: *Gemma4KVCache.LayerCache,
+    ) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+
+        const in_norm = try self.input_layernorm.forward(graph, x);
+        const attn_out = try self.self_attn.forwardPrefill(graph, in_norm, layer_cache);
+        const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
+        const x1 = try graph.add(x, post_attn);
+
+        const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
+        const mlp_out = try self.mlp.forward(graph, pre_mlp);
+        const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
+        const x2 = try graph.add(x1, post_mlp);
+        return try graph.mulScalar(x2, self.layer_scalar.data[0]);
+    }
+
+    pub fn forwardDecode(
+        self: *const Gemma4Q4DecoderLayer,
+        graph: *autodiff.Graph,
+        x: *Tensor,
+        layer_cache: *Gemma4KVCache.LayerCache,
+    ) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+
+        const in_norm = try self.input_layernorm.forward(graph, x);
+        const attn_out = try self.self_attn.forwardDecode(graph, in_norm, layer_cache);
         const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
         const x1 = try graph.add(x, post_attn);
 
@@ -727,6 +914,36 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             }
         };
 
+        fn sampleNextToken(
+            h_last: []const f32,
+            embed_u16: []const u16,
+            recent_tokens: []const usize,
+            repetition_penalty: f32,
+            exec: Executor,
+        ) !usize {
+            const recent_window = if (recent_tokens.len > 64) recent_tokens[recent_tokens.len - 64 ..] else recent_tokens;
+            const ctx = ArgmaxContext{
+                .embed_u16 = embed_u16,
+                .h_last = h_last,
+                .hidden_size = config.hidden_size,
+                .recent_tokens = recent_window,
+                .repetition_penalty = repetition_penalty,
+            };
+
+            const grain: usize = 4096;
+            const best = try exec.parallelReduce(
+                BestToken,
+                config.vocab_size,
+                grain,
+                ctx,
+                ArgmaxContext.mapFn,
+                ArgmaxContext.reduceFn,
+                BestToken{ .id = 0, .val = -1e30 },
+            );
+
+            return best.id;
+        }
+
         /// 自回归前向推理单步：输入历史 token_ids 序列与 mmap 字节，直接前向传播并返回下一个预测 token_id
         pub fn generateNextToken(
             self: *const Self,
@@ -779,29 +996,87 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const last_row = h_norm.data[(T - 1) * config.hidden_size .. T * config.hidden_size];
 
             // 5. 使用执行器执行确定性多核点积投影与贪婪采样 (零临时 OS 线程派生)
-            const recent_window = if (token_ids.len > 64) token_ids[token_ids.len - 64 ..] else token_ids;
-            const ctx = ArgmaxContext{
-                .embed_u16 = embed_u16,
-                .h_last = last_row,
-                .hidden_size = config.hidden_size,
-                .recent_tokens = recent_window,
-                .repetition_penalty = repetition_penalty,
-            };
+            return sampleNextToken(last_row, embed_u16, token_ids, repetition_penalty, graph.executor());
+        }
 
-            const exec = graph.executor();
-            // 固定粒度切块（与线程数无关，结果可复现）：262144 词表约切为 64 块，可用满多核
-            const grain: usize = 4096;
-            const best = try exec.parallelReduce(
-                BestToken,
-                config.vocab_size,
-                grain,
-                ctx,
-                ArgmaxContext.mapFn,
-                ArgmaxContext.reduceFn,
-                BestToken{ .id = 0, .val = -1e30 },
-            );
+        /// 预填充阶段 (Prefill)：处理 Prompt 词元序列，写入键值缓存 (Key-Value Cache, KVCache)，并返回首个预测词元
+        pub fn prefill(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            prompt_tokens: []const usize,
+            cache: *Gemma4KVCache,
+            mmap_bytes: []const u8,
+            repetition_penalty: f32,
+        ) !usize {
+            const T = prompt_tokens.len;
+            if (T == 0) return 0;
+            cache.reset();
 
-            return best.id;
+            const embed_u16: []const u16 = @alignCast(std.mem.bytesAsSlice(
+                u16,
+                mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
+            ));
+
+            // 1. 词表嵌入查表
+            const tok_emb = try graph.tensorND(&.{ 1, T, config.hidden_size }, false);
+            const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
+            for (prompt_tokens, 0..) |tok, t_idx| {
+                const emb_row = embed_u16[tok * config.hidden_size .. (tok + 1) * config.hidden_size];
+                const dest = tok_emb.data[t_idx * config.hidden_size .. (t_idx + 1) * config.hidden_size];
+                for (0..config.hidden_size) |d| {
+                    const b: tensor.bf16 = .{ .bits = emb_row[d] };
+                    dest[d] = b.toF32() * sqrt_d;
+                }
+            }
+
+            // 2. 逐层预填充前向传播并写入键值缓存
+            var h = tok_emb;
+            for (self.layers, 0..) |*layer, l_idx| {
+                h = try layer.forwardPrefill(graph, h, &cache.layers[l_idx]);
+            }
+
+            // 3. 最终层 RMSNorm
+            const h_norm = try self.norm.forward(graph, h);
+            const last_row = h_norm.data[(T - 1) * config.hidden_size .. T * config.hidden_size];
+
+            return sampleNextToken(last_row, embed_u16, prompt_tokens, repetition_penalty, graph.executor());
+        }
+
+        /// 增量解码阶段 (Decode Step)：输入最新生成的单个词元 ID，基于键值缓存 (Key-Value Cache, KVCache) 高效自回归生成下一个词元
+        pub fn decodeStep(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            token: usize,
+            cache: *Gemma4KVCache,
+            mmap_bytes: []const u8,
+            recent_tokens: []const usize,
+            repetition_penalty: f32,
+        ) !usize {
+            const embed_u16: []const u16 = @alignCast(std.mem.bytesAsSlice(
+                u16,
+                mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
+            ));
+
+            // 1. 单个词元嵌入查表 [1, 1, hidden_size]
+            const tok_emb = try graph.tensorND(&.{ 1, 1, config.hidden_size }, false);
+            const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
+            const emb_row = embed_u16[token * config.hidden_size .. (token + 1) * config.hidden_size];
+            for (0..config.hidden_size) |d| {
+                const b: tensor.bf16 = .{ .bits = emb_row[d] };
+                tok_emb.data[d] = b.toF32() * sqrt_d;
+            }
+
+            // 2. 逐层增量解码传播
+            var h = tok_emb;
+            for (self.layers, 0..) |*layer, l_idx| {
+                h = try layer.forwardDecode(graph, h, &cache.layers[l_idx]);
+            }
+
+            // 3. 最终层 RMSNorm
+            const h_norm = try self.norm.forward(graph, h);
+            const last_row = h_norm.data[0..config.hidden_size];
+
+            return sampleNextToken(last_row, embed_u16, recent_tokens, repetition_penalty, graph.executor());
         }
     };
 }
