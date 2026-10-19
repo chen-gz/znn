@@ -120,6 +120,29 @@ pub const Array = struct {
         return .{ .handle = arr };
     }
 
+    /// 从切片数据复制创建脑浮点 16 (Brain Floating Point 16, BF16) MLX 数组
+    pub fn fromSliceBf16(slice: []const u16, shape_dims: []const usize) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (shape_dims.len == 0 or shape_dims.len > 8) return error.InvalidShape;
+
+        var c_shape: [8]c_int = undefined;
+        var total_numel: usize = 1;
+        for (shape_dims, 0..) |dim, i| {
+            c_shape[i] = @intCast(dim);
+            total_numel *= dim;
+        }
+        if (total_numel != slice.len) return error.InvalidShape;
+
+        const arr = c.mlx_array_new_data(
+            slice.ptr,
+            &c_shape,
+            @intCast(shape_dims.len),
+            c.MLX_BFLOAT16,
+        );
+        if (arr.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = arr };
+    }
+
     fn noopDtor(_: ?*anyopaque) callconv(.c) void {}
 
     /// 从外部已分配内存零拷贝 (Zero-Copy) 创建单精度浮点 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
@@ -305,6 +328,18 @@ pub const Array = struct {
         if (custom == null) {
             _ = c.mlx_stream_free(s);
         }
+    }
+
+    /// 矩阵或多维数组转置 (Transpose)
+    pub fn transpose(self: Array, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_transpose(&res.handle, self.handle, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
     }
 
     /// 矩阵乘法：`res = a @ b`

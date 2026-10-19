@@ -474,19 +474,11 @@ pub const Graph = struct {
     // 矩阵乘法算子前向传播：C = A * B
     pub fn matmul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad) {
-            var a_mlx = try A.toMlxArrayZeroCopy();
-            defer a_mlx.deinit();
-            var b_mlx = try B.toMlxArrayZeroCopy();
-            defer b_mlx.deinit();
-
-            var c_mlx = try backend.mlx.Array.matmul(a_mlx, b_mlx, self.options.mlx_stream);
-            defer c_mlx.deinit();
-
+        if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
             const M = A.shape.dims[0];
             const N = B.shape.dims[1];
             const C = try self.tensorND(&.{ M, N }, false);
-            try c_mlx.copyToSlice(C.data);
+            try backend.offload.matmul(A, B, C, self.options.mlx_stream);
             return C;
         }
 

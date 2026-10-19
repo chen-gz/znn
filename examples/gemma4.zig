@@ -73,10 +73,7 @@ const Gemma4ChatTokenizer = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
-    var threaded = std.Io.Threaded.init(allocator);
-    defer threaded.deinit();
-    const io = threaded.io();
-    _ = init;
+    const io = init.io;
     const q4_model_path = "gemma-4-12B-q4.bin";
 
     std.debug.print("================================================================================\n", .{});
@@ -188,9 +185,20 @@ pub fn main(init: std.process.Init) !void {
     var first_token_ns: u64 = 0;
     var decode_start_ns: u64 = 0;
 
+    const use_gpu = zig_ml.backend.offload.isAvailable();
+    if (use_gpu) {
+        std.debug.print("   - 硬件加速: Apple Silicon MLX GPU 统一卸载已启用\n", .{});
+    } else {
+        std.debug.print("   - 硬件加速: CPU 多核并行\n", .{});
+    }
+
     // 1. 预填充阶段 (Prefill)：一次性处理全部 Prompt 词元并写入 KVCache，获取首个词元
     {
-        var prefill_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false, .io = io });
+        var prefill_graph = autodiff.Graph.init(allocator, .{
+            .enable_grad = false,
+            .io = io,
+            .device = if (use_gpu) .gpu else .cpu,
+        });
         defer prefill_graph.deinit();
 
         _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
@@ -220,7 +228,11 @@ pub fn main(init: std.process.Init) !void {
             break;
         }
 
-        var step_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false, .io = io });
+        var step_graph = autodiff.Graph.init(allocator, .{
+            .enable_grad = false,
+            .io = io,
+            .device = if (use_gpu) .gpu else .cpu,
+        });
         defer step_graph.deinit();
 
         const next_tok = try model.decodeStep(&step_graph, current_tok, &cache, mmap_ptr, current_tokens.items, 1.25);

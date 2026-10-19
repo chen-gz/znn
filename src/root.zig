@@ -15,6 +15,7 @@ pub const models = @import("models.zig");
 pub const backend = @import("backend.zig");
 pub const Executor = backend.Executor;
 pub const mlx = backend.mlx;
+pub const offload = backend.offload;
 
 pub const gemma4 = models.gemma4;
 pub const gemma4_q4 = models.gemma4_q4;

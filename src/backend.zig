@@ -10,9 +10,12 @@ pub const cblas = @import("backend/cblas.zig");
 
 pub const mlx = @import("backend/mlx.zig");
 
+pub const offload = @import("backend/offload.zig");
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("backend/executor.zig");
     _ = @import("backend/cblas.zig");
     _ = @import("backend/mlx.zig");
+    _ = @import("backend/offload.zig");
 }

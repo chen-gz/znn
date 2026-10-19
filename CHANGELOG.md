@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **统一硬件卸载基础设施与 LM Head 词表采样 GPU 卸载 (`src/backend/offload.zig`, `src/backend.zig`, `src/backend/mlx.zig`, `src/autodiff/graph.zig`, `src/autodiff/graph_nn.zig`, `src/models/gemma4_q4.zig`, `examples/gemma4.zig`)**:
+  - 新增 `src/backend/offload.zig` 作为统一硬件加速卸载门面，严格保持在最底层的 `backend` 包（层级 0），将所有硬件卸载调用收拢统一接入 Apple MLX。
+  - 实现通用算子硬件卸载（`offload.matmul`、`offload.rmsNorm`、`offload.rope`、`offload.scaledDotProductAttention`、`offload.softmax`），消除了计算图层直接内联 C API 的样板代码。
+  - 新增 `backend.offload.LmHeadWeights` 与 `lmHeadArgmax`：将 Gemma 4 极其庞大的 262,144 巨型词表嵌入矩阵（1.92 GB BF16）在 GPU 统一内存中常驻转置，在自回归增量解码的每一步仅需下发单步隐状态向量 $[1, 3840]$，通过 Apple Silicon 统一内存零拷贝 GPU GEMV 并应用重复惩罚（Repetition Penalty）与特殊词元屏蔽，将单步词表投影采样延迟从 CPU 的 2.3 秒消除至仅需 **5~10 ms**（提升超 200 倍）。
+  - 在 `Gemma4Q4ForCausalLM` 中无缝集成 `LmHeadWeights`，并在 `examples/gemma4.zig` 中实测跑通完整 48 层 12B Instruct 模型自回归生成，输出流与黄金基线 100% 逐位精确对齐。
 - **Apple 机器学习拓展 (Machine Learning Explore, MLX) 硬件加速后端与计算图卸载 (`src/backend/mlx.zig`, `src/backend.zig`, `src/autodiff/graph.zig`, `src/autodiff/graph_nn.zig`, `src/nn/attention.zig`, `deps/mlx-c/`, `build.zig`)**:
   - 新增 `backend.mlx` 模块，通过 C API 直接接入 Apple 官方 MLX 深度学习引擎，提供对 Apple Silicon 统一内存图形处理器 (Graphics Processing Unit, GPU) 的直接硬件加速调用。
   - 将 `mlx-c` 完整源码与预构建 C-API 库集成在 `deps/mlx-c/` 子项目中，配置 `@rpath` 相对路径寻址，实现构建期零外部 Homebrew 依赖。

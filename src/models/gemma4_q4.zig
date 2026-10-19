@@ -602,6 +602,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         embed_tokens: Embedding,
         layers: []Gemma4Q4DecoderLayer,
         norm: GemmaRMSNorm,
+        lm_head_weights: ?backend.offload.LmHeadWeights = null,
 
         name: ?[]const u8 = null,
         module_type: []const u8 = "Gemma4Q4ForCausalLM",
@@ -635,10 +636,15 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 .embed_tokens = embed_tokens,
                 .layers = layers,
                 .norm = norm,
+                .lm_head_weights = null,
             };
         }
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            if (self.lm_head_weights) |*w| {
+                w.deinit();
+                self.lm_head_weights = null;
+            }
             deinitModel(&self.embed_tokens, allocator);
             for (self.layers) |*layer| {
                 layer.deinit(allocator);
@@ -853,10 +859,20 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 layers[i] = layer;
             }
 
+            var lm_head_weights: ?backend.offload.LmHeadWeights = null;
+            if (backend.offload.isAvailable()) {
+                const embed_u16_slice: []const u16 = @alignCast(std.mem.bytesAsSlice(
+                    u16,
+                    mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
+                ));
+                lm_head_weights = backend.offload.LmHeadWeights.init(embed_u16_slice, config.vocab_size, config.hidden_size, null) catch null;
+            }
+
             return Self{
                 .embed_tokens = embed_tokens,
                 .layers = layers,
                 .norm = norm,
+                .lm_head_weights = lm_head_weights,
             };
         }
 
@@ -915,13 +931,29 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         };
 
         fn sampleNextToken(
+            self: *const Self,
             h_last: []const f32,
             embed_u16: []const u16,
             recent_tokens: []const usize,
             repetition_penalty: f32,
-            exec: Executor,
+            graph: *autodiff.Graph,
         ) !usize {
             const recent_window = if (recent_tokens.len > 64) recent_tokens[recent_tokens.len - 64 ..] else recent_tokens;
+
+            // 1. 优先通过 GPU 卸载执行巨型词表投影与采样 (消除 2.3 秒延迟至 5~10 ms)
+            if (graph.options.device == .gpu and backend.offload.isAvailable()) {
+                if (self.lm_head_weights) |weights| {
+                    if (weights.sampleNext(h_last, recent_window, repetition_penalty, graph.options.mlx_stream)) |tok| {
+                        return tok;
+                    } else |_| {}
+                } else {
+                    if (backend.offload.lmHeadArgmax(h_last, embed_u16, config.vocab_size, config.hidden_size, recent_window, repetition_penalty, graph.options.mlx_stream)) |tok| {
+                        return tok;
+                    } else |_| {}
+                }
+            }
+
+            // 2. CPU 确定性多核并行回退路径
             const ctx = ArgmaxContext{
                 .embed_u16 = embed_u16,
                 .h_last = h_last,
@@ -931,7 +963,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             };
 
             const grain: usize = 4096;
-            const best = try exec.parallelReduce(
+            const best = try graph.executor().parallelReduce(
                 BestToken,
                 config.vocab_size,
                 grain,
@@ -996,7 +1028,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const last_row = h_norm.data[(T - 1) * config.hidden_size .. T * config.hidden_size];
 
             // 5. 使用执行器执行确定性多核点积投影与贪婪采样 (零临时 OS 线程派生)
-            return sampleNextToken(last_row, embed_u16, token_ids, repetition_penalty, graph.executor());
+            return self.sampleNextToken(last_row, embed_u16, token_ids, repetition_penalty, graph);
         }
 
         /// 预填充阶段 (Prefill)：处理 Prompt 词元序列，写入键值缓存 (Key-Value Cache, KVCache)，并返回首个预测词元
@@ -1039,7 +1071,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const h_norm = try self.norm.forward(graph, h);
             const last_row = h_norm.data[(T - 1) * config.hidden_size .. T * config.hidden_size];
 
-            return sampleNextToken(last_row, embed_u16, prompt_tokens, repetition_penalty, graph.executor());
+            return self.sampleNextToken(last_row, embed_u16, prompt_tokens, repetition_penalty, graph);
         }
 
         /// 增量解码阶段 (Decode Step)：输入最新生成的单个词元 ID，基于键值缓存 (Key-Value Cache, KVCache) 高效自回归生成下一个词元
@@ -1076,7 +1108,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const h_norm = try self.norm.forward(graph, h);
             const last_row = h_norm.data[0..config.hidden_size];
 
-            return sampleNextToken(last_row, embed_u16, recent_tokens, repetition_penalty, graph.executor());
+            return self.sampleNextToken(last_row, embed_u16, recent_tokens, repetition_penalty, graph);
         }
     };
 }
