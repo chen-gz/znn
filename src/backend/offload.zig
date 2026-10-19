@@ -200,7 +200,16 @@ pub const LmHeadWeights = struct {
         const logits_slice = logits.dataFloat32();
         if (logits_slice.len != self.vocab_size) return error.ShapeMismatch;
 
-        // 3. 在统一内存中读取未受惩罚的最大分值与索引，并应用重复惩罚 (Repetition Penalty)
+        // 3. 构建最近词元快速位图 (Bitset)，消除 O(V * R) 1600 万次嵌套循环
+        var recent_bitset = [_]u64{0} ** (262144 / 64);
+        if (repetition_penalty > 1.0) {
+            for (recent_tokens) |rec| {
+                if (rec < self.vocab_size) {
+                    recent_bitset[rec / 64] |= (@as(u64, 1) << @intCast(rec % 64));
+                }
+            }
+        }
+
         var max_val: f32 = -1e30;
         var max_id: usize = 0;
 
@@ -209,16 +218,11 @@ pub const LmHeadWeights = struct {
             if (v == 0 or (v >= 258880 and v <= 258884)) continue;
 
             var dot = logits_slice[v];
-            if (repetition_penalty > 1.0) {
-                for (recent_tokens) |rec| {
-                    if (rec == v) {
-                        if (dot > 0.0) {
-                            dot /= repetition_penalty;
-                        } else {
-                            dot *= repetition_penalty;
-                        }
-                        break;
-                    }
+            if (repetition_penalty > 1.0 and (recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
+                if (dot > 0.0) {
+                    dot /= repetition_penalty;
+                } else {
+                    dot *= repetition_penalty;
                 }
             }
 

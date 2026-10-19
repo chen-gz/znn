@@ -866,8 +866,9 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             }
             cursor += config.hidden_size * 2;
 
-            // 2. 词表嵌入矩阵 (262,144 x 3840 个 BF16)
-            const embed_tokens = try Embedding.init(allocator, config.vocab_size, config.hidden_size);
+            // 2. 词表嵌入矩阵 (262,144 x 3840 个 BF16 保持在 mmap 与 GPU 统一显存中)
+            // 避免在 CPU 堆内存上分配 4.03 GB 的冗余 F32 Tensor，自回归直接利用零拷贝映射
+            const embed_tokens = try Embedding.init(allocator, 1, 1);
             cursor += config.vocab_size * config.hidden_size * 2;
 
             // 3. 逐层加载 48 层 Transformer
@@ -1022,6 +1023,16 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     layer.mlp.down_proj.enableOffload(allocator, null) catch { failed_count += 1; };
                     if (layer.mlp.down_proj.q4_weights != null) offloaded_count += 1;
                 }
+
+                // 通知操作系统内核丢弃已卸载至 GPU 显存的 4-bit 权重文件页缓存，防止 7.59 GB 物理内存重复驻留造成 macOS Swap 严重换页
+                const q4_weights_start = 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2;
+                const page_size: usize = 16384;
+                const aligned_start = (q4_weights_start / page_size) * page_size;
+                const aligned_len = ((mmap_bytes.len - aligned_start) / page_size) * page_size;
+                if (aligned_len > 0) {
+                    const ptr: *align(16384) anyopaque = @ptrCast(@alignCast(@constCast(mmap_bytes.ptr + aligned_start)));
+                    _ = std.posix.system.madvise(ptr, aligned_len, std.posix.MADV.DONTNEED);
+                }
             }
 
             return Self{
@@ -1055,7 +1066,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             embed_u16: []const u16,
             h_last: []const f32,
             hidden_size: usize,
-            recent_tokens: []const usize,
+            recent_bitset: *const [4096]u64,
             repetition_penalty: f32,
 
             fn mapFn(ctx: @This(), start_v: usize, end_v: usize) BestToken {
@@ -1073,16 +1084,11 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                         dot += ctx.h_last[d] * b.toF32();
                     }
 
-                    if (ctx.repetition_penalty > 1.0) {
-                        for (ctx.recent_tokens) |rec| {
-                            if (rec == v) {
-                                if (dot > 0.0) {
-                                    dot /= ctx.repetition_penalty;
-                                } else {
-                                    dot *= ctx.repetition_penalty;
-                                }
-                                break;
-                            }
+                    if (ctx.repetition_penalty > 1.0 and (ctx.recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
+                        if (dot > 0.0) {
+                            dot /= ctx.repetition_penalty;
+                        } else {
+                            dot *= ctx.repetition_penalty;
                         }
                     }
 
@@ -1115,20 +1121,34 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 if (self.lm_head_weights) |weights| {
                     if (weights.sampleNext(h_last, recent_window, repetition_penalty, graph.options.mlx_stream)) |tok| {
                         return tok;
-                    } else |_| {}
+                    } else |err| {
+                        std.debug.print(" [LM_HEAD_WEIGHTS_ERROR: {}] ", .{err});
+                    }
                 } else {
+                    std.debug.print(" [LM_HEAD_WEIGHTS_IS_NULL!] ", .{});
                     if (backend.offload.lmHeadArgmax(h_last, embed_u16, config.vocab_size, config.hidden_size, recent_window, repetition_penalty, graph.options.mlx_stream)) |tok| {
                         return tok;
-                    } else |_| {}
+                    } else |err| {
+                        std.debug.print(" [LM_HEAD_ARGMAX_ERROR: {}] ", .{err});
+                    }
                 }
             }
 
             // 2. CPU 确定性多核并行回退路径
+            var recent_bitset = [_]u64{0} ** (262144 / 64);
+            if (repetition_penalty > 1.0) {
+                for (recent_window) |rec| {
+                    if (rec < config.vocab_size) {
+                        recent_bitset[rec / 64] |= (@as(u64, 1) << @intCast(rec % 64));
+                    }
+                }
+            }
+
             const ctx = ArgmaxContext{
                 .embed_u16 = embed_u16,
                 .h_last = h_last,
                 .hidden_size = config.hidden_size,
-                .recent_tokens = recent_window,
+                .recent_bitset = &recent_bitset,
                 .repetition_penalty = repetition_penalty,
             };
 

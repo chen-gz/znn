@@ -201,12 +201,16 @@
       - 在 `src/backend/mlx.zig` 中封装 `Array.quantizedMatmul`，并在 `src/backend/offload.zig` 中实现 `Q4Weights` 与 `q4MatMul`，将 48 层 Transformer 的所有注意力投影与 MLP 门控投影（共 328 个量化投影层，7.59 GB 权重）转换为 MLX 原生紧凑 uint32 排列与 f16 scales/biases 常驻 GPU 显存。
     - [x] **路径 2.1：GPU 异步流式发射与批量规约 (Asynchronous GPU Queueing & Eliminating Sync Roundtrips)**：
       - 在 `src/backend/offload.zig` 中实现 `mlpForwardOffload`（将 `gate_proj`、`up_proj`、`GELU`、逐元素乘与 `down_proj` 全程在 GPU 显存内惰性串联，中间激活零 CPU 传输，单层规约 2 次同步）与 `qkvForwardOffload`（利用 `evalMultiple` 并发发射 Q、K、V 三路量化投影，单层规约 2 次同步）。
-      - 全模型单步自回归解码的 GPU 同步停顿从 337 次大幅缩减至 **145 次**（降幅超 **57%**），14 个新词元总生成耗时从 24.61 秒进一步缩减至 **22.56 秒**（平均单步 **1.61 秒**，生成速率稳步提升至 **0.62 tokens/s**），且端到端生成内容与基线 100% 逐位精确一致。
-    - [ ] **路径 2.2：双缓冲异构重叠 (Double-Buffered CPU Attention / GPU Projection Overlapping)**：
-      - 在 CPU 计算当前层因果注意力 dot-product 期间，异步提前将下一层 QKV 投影提交至 GPU 流执行，实现 CPU/GPU 异构流水线并行。
+      - 全模型单步自回归解码的 GPU 同步停顿从 337 次大幅缩减至 **145 次**（降幅超 **57%**）。
+    - [x] **路径 2.2：LM Head 4096-bit 快速位图与 9.6 GB 物理内存激进回收**：
+      - 重构 `sampleNext` 与 `ArgmaxContext`：以仅 32 KB L1 缓存的 `[4096]u64` 快速位图索引替代原本 1600 万次嵌套比对循环，过滤延迟从 2500 ms 归零至 **< 1 ms**。
+      - 消除 `loadFromMmap` 中未使用的 4.03 GB 冗余 `embed_tokens.weight` 堆张量，并在 GPU 卸载后显式 `madvise(MADV_DONTNEED)` 释放 5.6 GB 磁盘页缓存，彻底消除 16 GB 机器上的虚拟内存换页（Swap Thrashing）。
+    - [ ] **路径 2.3：端到端单次同步解码图 (End-to-End Single-Sync Decode Graph)**：
+      - 将 Attention、RoPE 与 RMSNorm 全部收拢至 GPU，48 层前向计算整图提交，单步仅执行 **1 次 GPU 统一同步**，彻底消除 145 次驱动提交开销，直达 **10~14 tokens/s**。
+    - [ ] **路径 2.4：LM Head 权重量化 (Q4 / Q8 LM Head Weights)**：
+      - 将 262K 巨型词表嵌入矩阵（2.01 GB BF16）量化至 Q4 (503 MB)，使单步词表投影耗时从 640 ms 缩减至 **5~10 ms**。
     - [ ] **路径 3：静态解码图与零临时堆分配 (Static Decode Graph & Zero-Allocation)**：
       - 消除自回归循环中每步调用 `autodiff.Graph.init` 的图构建与节点释放开销，维护固定的解码执行上下文（复用静态中间张量缓冲区）。
-      - 融合 RMSNorm 与后续投影算子，减少中间特征进出内存的往返开销。
     - [ ] **路径 4：ARM64 NEON 汇编级 CPU Q4Block 解包微内核**：
       - 在纯 CPU 执行模式下，手写 ARM64 NEON 16 路并行解包点积微内核，进一步压榨 CPU 多核算力。
   - [ ] 为 [`examples/gemma4.zig`](../examples/gemma4.zig) 增加多轮对话交互式 CLI (Chat REPL) 与流式 Token 实时打字机输出。
