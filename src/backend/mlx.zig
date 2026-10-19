@@ -483,6 +483,44 @@ pub const Array = struct {
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
         return res;
     }
+
+    /// 量化矩阵乘法硬件加速 (Quantized Matrix Multiplication, QMM)
+    /// 借助图形处理器 (Graphics Processing Unit, GPU) 硬件流水线执行量化矩阵点积运算
+    pub fn quantizedMatmul(
+        x: Array,
+        w: Array,
+        scales: Array,
+        biases: ?Array,
+        do_transpose: bool,
+        group_size: i32,
+        bits: i32,
+        mode: [*:0]const u8,
+        stream: ?Stream,
+    ) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res: c.mlx_array = .{ .ctx = null };
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const gs: c.mlx_optional_int = .{ .value = group_size, .has_value = true };
+        const b: c.mlx_optional_int = .{ .value = bits, .has_value = true };
+        const bias_handle: c.mlx_array = if (biases) |bi| bi.handle else .{ .ctx = null };
+
+        const status = c.mlx_quantized_matmul(
+            &res,
+            x.handle,
+            w.handle,
+            scales.handle,
+            bias_handle,
+            do_transpose,
+            gs,
+            b,
+            mode,
+            s,
+        );
+        if (status != 0 or res.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = res };
+    }
 };
 
 test "MLX GPU backend matmul and fast kernels" {
@@ -542,4 +580,113 @@ test "MLX GPU backend matmul and fast kernels" {
     var copy_dest = [_]f32{0.0} ** 6;
     try zc_arr.copyToSlice(&copy_dest);
     try std.testing.expectEqualSlices(f32, &host_buf, &copy_dest);
+
+    // 6. 验证由 Q4Block 转换为 MLX 格式后调用 mlx_quantized_matmul
+    var q4_weights: [32]f32 = undefined;
+    for (&q4_weights, 0..) |*val, i| {
+        val.* = @as(f32, @floatFromInt(i)) - 16.0;
+    }
+    // 量化为 Q4Block
+    var q4_block: [1]extern struct {
+        scale: f16,
+        qs: [16]u8,
+    } = undefined;
+
+    // 使用标准 Q4Block 算法量化
+    var amax: f32 = 0.0;
+    for (q4_weights) |v| {
+        const av = @abs(v);
+        if (av > amax) amax = av;
+    }
+    const scale_f32 = amax / 7.0;
+    const inv_scale = if (scale_f32 > 0.0) 1.0 / scale_f32 else 0.0;
+    q4_block[0].scale = @floatCast(scale_f32);
+    for (0..16) |j| {
+        const v0 = q4_weights[j];
+        const v1 = q4_weights[j + 16];
+        const q0_f = std.math.clamp(std.math.round(v0 * inv_scale) + 8.0, 0.0, 15.0);
+        const q1_f = std.math.clamp(std.math.round(v1 * inv_scale) + 8.0, 0.0, 15.0);
+        const q0: u8 = @intFromFloat(q0_f);
+        const q1: u8 = @intFromFloat(q1_f);
+        q4_block[0].qs[j] = (q0 & 0x0F) | ((q1 & 0x0F) << 4);
+    }
+
+    // 计算 CPU 基准点积 (x = [1, 1, ..., 1])
+    var x_ones: [32]f32 = undefined;
+    for (&x_ones) |*v| v.* = 1.0;
+    var expected_dot: f32 = 0.0;
+    const d: f32 = @floatCast(q4_block[0].scale);
+    for (0..16) |j| {
+        const byte = q4_block[0].qs[j];
+        const q0: f32 = @as(f32, @floatFromInt(byte & 0x0F)) - 8.0;
+        const q1: f32 = @as(f32, @floatFromInt(byte >> 4)) - 8.0;
+        expected_dot += (q0 * d) * x_ones[j];
+        expected_dot += (q1 * d) * x_ones[j + 16];
+    }
+
+    // 打包为 MLX uint32 格式
+    var mlx_u32: [4]u32 = undefined;
+    const qs = q4_block[0].qs;
+    var w0: u32 = 0;
+    var w1: u32 = 0;
+    var w2: u32 = 0;
+    var w3: u32 = 0;
+    for (0..8) |j| {
+        const shift: u5 = @intCast(j * 4);
+        w0 |= @as(u32, qs[j] & 0x0F) << shift;
+        w1 |= @as(u32, qs[j + 8] & 0x0F) << shift;
+        w2 |= @as(u32, qs[j] >> 4) << shift;
+        w3 |= @as(u32, qs[j + 8] >> 4) << shift;
+    }
+    mlx_u32[0] = w0;
+    mlx_u32[1] = w1;
+    mlx_u32[2] = w2;
+    mlx_u32[3] = w3;
+
+    const w_shape = [_]c_int{ 1, 4 }; // [out_features=1, in_features/8 = 4]
+    const mlx_w_arr = c.mlx_array_new_data(@ptrCast(&mlx_u32), &w_shape, 2, @intFromEnum(DType.uint32));
+    var mlx_w = Array{ .handle = mlx_w_arr };
+    defer mlx_w.deinit();
+
+    var mlx_scale_val = [1]f16{q4_block[0].scale};
+    var mlx_bias_val = [1]f16{@floatCast(-8.0 * d)};
+    const sb_shape = [_]c_int{ 1, 1 };
+
+    const mlx_s_arr = c.mlx_array_new_data(@ptrCast(&mlx_scale_val), &sb_shape, 2, @intFromEnum(DType.float16));
+    var mlx_s = Array{ .handle = mlx_s_arr };
+    defer mlx_s.deinit();
+
+    const mlx_b_arr = c.mlx_array_new_data(@ptrCast(&mlx_bias_val), &sb_shape, 2, @intFromEnum(DType.float16));
+    var mlx_b = Array{ .handle = mlx_b_arr };
+    defer mlx_b.deinit();
+
+    var mlx_x = try Array.fromSlice(&x_ones, &.{ 1, 32 });
+    defer mlx_x.deinit();
+
+    const group_size: c.mlx_optional_int = .{ .value = 32, .has_value = true };
+    const bits: c.mlx_optional_int = .{ .value = 4, .has_value = true };
+
+    var qmm_res: c.mlx_array = .{ .ctx = null };
+    const qmm_st = c.mlx_quantized_matmul(
+        &qmm_res,
+        mlx_x.handle,
+        mlx_w.handle,
+        mlx_s.handle,
+        mlx_b.handle,
+        true, // transpose
+        group_size,
+        bits,
+        "affine",
+        stream.handle,
+    );
+    try std.testing.expectEqual(@as(c_int, 0), qmm_st);
+    var qmm_arr = Array{ .handle = qmm_res };
+    defer qmm_arr.deinit();
+    qmm_arr.eval();
+    stream.synchronize();
+
+    const qmm_out = qmm_arr.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 1), qmm_out.len);
+    try std.testing.expectApproxEqAbs(expected_dot, qmm_out[0], 1e-2);
 }
+
