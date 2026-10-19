@@ -424,10 +424,10 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const layers = try allocator.alloc(Gemma4Q4DecoderLayer, config.num_hidden_layers);
 
             for (0..config.num_hidden_layers) |i| {
-                const attn_type: Gemma4AttentionType = if ((i + 1) % 6 == 0)
-                    .full_attention
-                else
-                    .sliding_attention;
+                const is_full = ((i + 1) % 6 == 0);
+                const attn_type: Gemma4AttentionType = if (is_full) .full_attention else .sliding_attention;
+                const head_dim = if (is_full) config.global_head_dim else config.head_dim;
+                const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
 
                 layers[i] = try Gemma4Q4DecoderLayer.init(
                     allocator,
@@ -435,8 +435,8 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     config.hidden_size,
                     config.intermediate_size,
                     config.num_attention_heads,
-                    config.num_key_value_heads,
-                    config.head_dim,
+                    num_kv,
+                    head_dim,
                     config.sliding_window,
                     config.rms_norm_eps,
                 );
@@ -501,12 +501,12 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const embed_tokens_bytes: usize = config.vocab_size * config.hidden_size * 2; // BF16
 
             var layers_total: usize = 0;
-            const head_dim = config.head_dim;
-            const num_kv = config.num_key_value_heads;
 
             for (0..config.num_hidden_layers) |layer_idx| {
                 const is_full = ((layer_idx + 1) % 6 == 0);
-                const norms_bytes = (config.hidden_size * 4 + head_dim * 3 + 1) * 2; // BF16
+                const head_dim = if (is_full) config.global_head_dim else config.head_dim;
+                const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
+                const norms_bytes = (config.hidden_size * 4 + head_dim * 2 + 1) * 2; // BF16
 
                 const q_blocks = (config.hidden_size * config.num_attention_heads * head_dim) / Q4Block.QK;
                 const k_blocks = (config.hidden_size * num_kv * head_dim) / Q4Block.QK;
@@ -554,6 +554,8 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             for (0..config.num_hidden_layers) |i| {
                 const is_full = ((i + 1) % 6 == 0);
                 const attn_type: Gemma4AttentionType = if (is_full) .full_attention else .sliding_attention;
+                const head_dim = if (is_full) config.global_head_dim else config.head_dim;
+                const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
 
                 var layer = try Gemma4Q4DecoderLayer.init(
                     allocator,
@@ -561,13 +563,13 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     config.hidden_size,
                     config.intermediate_size,
                     config.num_attention_heads,
-                    config.num_key_value_heads,
-                    config.head_dim,
+                    num_kv,
+                    head_dim,
                     config.sliding_window,
                     config.rms_norm_eps,
                 );
 
-                // 加载当前层 5 个 Layernorm 参数 (BF16)
+                // 加载当前层 4 个 Layernorm 参数 (BF16)
                 inline for ([_]*GemmaRMSNorm{
                     &layer.input_layernorm,
                     &layer.post_attention_layernorm,
@@ -584,23 +586,16 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
                 // 加载 Q-Norm 与 K-Norm
                 inline for ([_]*GemmaRMSNorm{ &layer.self_attn.q_norm, &layer.self_attn.k_norm }) |ln| {
-                    const u16_s: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, mmap_bytes[cursor .. cursor + config.head_dim * 2]));
+                    const u16_s: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, mmap_bytes[cursor .. cursor + head_dim * 2]));
                     for (u16_s, 0..) |bits, idx| {
                         const b: tensor.bf16 = .{ .bits = bits };
                         ln.weight.data[idx] = b.toF32();
                     }
-                    cursor += config.head_dim * 2;
+                    cursor += head_dim * 2;
                 }
 
-                // 加载 v_norm.weight (BF16) 与 layer_scalar (BF16)
+                // 加载 layer_scalar (BF16)
                 {
-                    const u16_s: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, mmap_bytes[cursor .. cursor + config.head_dim * 2]));
-                    for (u16_s, 0..) |bits, idx| {
-                        const b: tensor.bf16 = .{ .bits = bits };
-                        layer.self_attn.v_norm.weight.data[idx] = b.toF32();
-                    }
-                    cursor += config.head_dim * 2;
-
                     const sc_bits = std.mem.readInt(u16, mmap_bytes[cursor .. cursor + 2][0..2], .little);
                     const b_sc: tensor.bf16 = .{ .bits = sc_bits };
                     layer.layer_scalar.data[0] = b_sc.toF32();
@@ -609,9 +604,9 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
                 // 零拷贝绑定 Q4Block 分块数组
                 const q_in = config.hidden_size;
-                const q_out = config.num_attention_heads * config.head_dim;
+                const q_out = config.num_attention_heads * head_dim;
                 const k_in = config.hidden_size;
-                const k_out = config.num_key_value_heads * config.head_dim;
+                const k_out = num_kv * head_dim;
                 const o_in = q_out;
                 const o_out = config.hidden_size;
                 const ffn_in = config.hidden_size;
