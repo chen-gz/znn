@@ -6,72 +6,6 @@ const autodiff = zig_ml.autodiff;
 const gemma4 = zig_ml.models.gemma4;
 const gemma4_q4 = zig_ml.models.gemma4_q4;
 
-/// Gemma 4 官方 Tokenizer 规范与词表映射
-const Gemma4ChatTokenizer = struct {
-    pub const BOS: usize = 2; // <bos> (Beginning of Sequence)
-    pub const EOS: usize = 1; // <eos> (End of Sequence)
-    pub const SOT: usize = 105; // <|turn> (Start of Turn)
-    pub const EOT: usize = 106; // <turn|> (End of Turn)
-    pub const USER: usize = 2364; // user
-    pub const MODEL: usize = 4368; // model
-    pub const NL: usize = 107; // \n
-
-    pub const TokenItem = struct {
-        id: usize,
-        text: []const u8,
-    };
-
-    pub const vocab_table = [_]TokenItem{
-        .{ .id = 1, .text = "<eos>" },
-        .{ .id = 2, .text = "<bos>" },
-        .{ .id = 105, .text = "<|turn>" },
-        .{ .id = 106, .text = "<turn|>" },
-        .{ .id = 107, .text = "\n" },
-        .{ .id = 138, .text = "  " },
-        .{ .id = 564, .text = " I" },
-        .{ .id = 607, .text = " with" },
-        .{ .id = 611, .text = " you" },
-        .{ .id = 659, .text = " are" },
-        .{ .id = 733, .text = "are" },
-        .{ .id = 740, .text = " can" },
-        .{ .id = 993, .text = " there" },
-        .{ .id = 1015, .text = " who" },
-        .{ .id = 1601, .text = " help" },
-        .{ .id = 1717, .text = " !" },
-        .{ .id = 1902, .text = " world" },
-        .{ .id = 2088, .text = " How" },
-        .{ .id = 2360, .text = " ?" },
-        .{ .id = 2364, .text = "user" },
-        .{ .id = 3124, .text = " today" },
-        .{ .id = 3910, .text = "How" },
-        .{ .id = 4060, .text = "with" },
-        .{ .id = 4368, .text = "model" },
-        .{ .id = 4658, .text = " anything" },
-        .{ .id = 4881, .text = "can" },
-        .{ .id = 7624, .text = "you" },
-        .{ .id = 9259, .text = "Hello" },
-        .{ .id = 12392, .text = "world" },
-        .{ .id = 13534, .text = "there" },
-        .{ .id = 17002, .text = "help" },
-        .{ .id = 23391, .text = "hello" },
-        .{ .id = 26352, .text = " Hello" },
-        .{ .id = 29104, .text = " hello" },
-        .{ .id = 31524, .text = "today" },
-        .{ .id = 112318, .text = "anything" },
-        .{ .id = 236743, .text = " " },
-        .{ .id = 236777, .text = "I" },
-        .{ .id = 236881, .text = "?" },
-        .{ .id = 236888, .text = "!" },
-    };
-
-    pub fn decode(id: usize) []const u8 {
-        for (vocab_table) |item| {
-            if (item.id == id) return item.text;
-        }
-        return "";
-    }
-};
-
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
     const io = init.io;
@@ -124,37 +58,40 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("   - 格式签名: {s} (有效)\n", .{magic});
     std.debug.print("   - 包含模块: 最终层 RMSNorm + 262K 词表嵌入矩阵 (1.92 GB) + 48 层 Transformer 4-bit Q4Block 权重\n\n", .{});
 
-    // 3. 构建 Gemma 4 Instruct 官方标准对话上下文:
+    // 3. 直接加载 262,144 完整官方词表，支持 O(1) 零拷贝解码与正反向查表
+    var vocab = try gemma4.Gemma4Vocabulary.openFile(io, "gemma4_vocab.bin");
+    defer vocab.deinit();
+    std.debug.print("3. [加载 262K 官方词表解码器 (零拷贝映射)]:\n", .{});
+    std.debug.print("   - 词表解码器已就绪: 262,144 个完整官方 Token 文本，无硬编码词表映射表。\n\n", .{});
+
+    // 4. 构建 Gemma 4 Instruct 官方标准对话上下文:
     // <bos><|turn>user\nwho are you<turn|>\n<|turn>model\n
-    std.debug.print("3. [Gemma 4 Instruct 对话模板 (Chat Template)]:\n", .{});
+    std.debug.print("4. [Gemma 4 Instruct 对话模板 (Chat Template)]:\n", .{});
     const prompt_tokens = [_]usize{
-        Gemma4ChatTokenizer.BOS, // <bos>
-        Gemma4ChatTokenizer.SOT, // <|turn>
-        Gemma4ChatTokenizer.USER, // user
-        Gemma4ChatTokenizer.NL, // \n
-        1015, //  who
-        659, //  are
-        611, //  you
-        Gemma4ChatTokenizer.EOT, // <turn|>
-        Gemma4ChatTokenizer.NL, // \n
-        Gemma4ChatTokenizer.SOT, // <|turn>
-        Gemma4ChatTokenizer.MODEL, // model
-        Gemma4ChatTokenizer.NL, // \n
+        gemma4.Gemma4Vocabulary.BOS, // <bos>
+        gemma4.Gemma4Vocabulary.SOT, // <|turn>
+        gemma4.Gemma4Vocabulary.USER, // user
+        gemma4.Gemma4Vocabulary.NL, // \n
+        vocab.findToken(" who") orelse 1015,
+        vocab.findToken(" are") orelse 659,
+        vocab.findToken(" you") orelse 611,
+        gemma4.Gemma4Vocabulary.EOT, // <turn|>
+        gemma4.Gemma4Vocabulary.NL, // \n
+        gemma4.Gemma4Vocabulary.SOT, // <|turn>
+        gemma4.Gemma4Vocabulary.MODEL, // model
+        gemma4.Gemma4Vocabulary.NL, // \n
     };
 
     std.debug.print("   - 输入 Prompt 文本: \"<bos><|turn>user\\nwho are you<turn|>\\n<|turn>model\\n\"\n", .{});
     std.debug.print("   - Prompt Tokens ({} 个词元): [", .{prompt_tokens.len});
     for (prompt_tokens, 0..) |tid, i| {
         if (i > 0) std.debug.print(", ", .{});
-        std.debug.print("{}:'{s}'", .{ tid, Gemma4ChatTokenizer.decode(tid) });
+        std.debug.print("{}:'{s}'", .{ tid, vocab.decode(tid) });
     }
     std.debug.print("]\n\n", .{});
 
-    // 4. 加载完整 262K 词表解码器与 48 层 Gemma 4 Q4 量化模型
-    std.debug.print("4. [加载 262K 官方词表与 48 层 Gemma 4 12B 模型并执行自回归生成]:\n", .{});
-    var vocab = try gemma4.Gemma4Vocabulary.openFile(io, "gemma4_vocab.bin");
-    defer vocab.deinit();
-
+    // 5. 加载 48 层 Gemma 4 Q4 量化模型并执行自回归生成
+    std.debug.print("5. [加载 48 层 Gemma 4 12B 模型并执行自回归生成]:\n", .{});
     var model = try gemma4_q4.DefaultGemma4Q4.loadFromMmap(allocator, mmap_ptr);
     defer model.deinit(allocator);
     std.debug.print("   - 模型已成功零拷贝加载: 48 层 Transformer (40 层滑动窗口 + 8 层全局注意力)\n", .{});
@@ -222,7 +159,7 @@ pub fn main(init: std.process.Init) !void {
     // 2. 增量解码阶段 (Decode Loop)：每步仅处理 1 个增量词元，复用 KVCache
     var current_tok = current_tokens.items[current_tokens.items.len - 1];
     while (gen_count < max_new_tokens) : (gen_count += 1) {
-        if (current_tok == Gemma4ChatTokenizer.EOS or current_tok == Gemma4ChatTokenizer.EOT) {
+        if (current_tok == gemma4.Gemma4Vocabulary.EOS or current_tok == gemma4.Gemma4Vocabulary.EOT) {
             break;
         }
 

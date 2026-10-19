@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **消除硬编码静态词表映射并全面接入 262K 官方动态词表解码器 (`src/models/gemma4.zig`, `examples/gemma4.zig`)**:
+  - 彻底移除 `examples/gemma4.zig` 中的 `Gemma4ChatTokenizer` 冗余包装与 40 行硬编码静态映射表（`pub const vocab_table = [_]TokenItem{...}`），改由全模型共享的 `gemma4_vocab.bin` 二进制词表文件直接以零拷贝（Zero-Copy mmap）加载。
+  - 在 `Gemma4Vocabulary` 中新增完整官方特殊控制词元常量（`BOS`、`EOS`、`PAD`、`UNK`、`THINK`、`SOC`、`EOC`、`SOT`、`EOT`、`NL`、`USER`、`MODEL`、`SYSTEM`）与 `findToken(text)` 反向查表接口，实现 Prompt 词元解析与生成文本解码统一由词表实例动态支持。
+
 - **端到端单次求值 GPU 解码计算图与 bfloat16 精度对齐实现 10.3 倍自回归解码加速 (`src/backend/offload.zig`, `src/backend/mlx.zig`, `src/models/gemma4_q4.zig`, `examples/gemma4.zig`)**:
   - 在 `src/backend/mlx.zig` 中新增 `Array.reshape`、`Array.transposeAxes`、`Array.concatenateAxis`、`Array.sliceAxis`、`Array.mulScalar` 与 `Array.astype` 等全套多维张量惰性图算子。
   - 在 `src/backend/offload.zig` 中实现 `GpuModelContext` 端到端整网自回归增量解码上下文：将全部 48 层 Transformer 解码层（QKV 投影、Q/K/V 归一化、RoPE、沿时间轴拼接的 GPU KVCache、SDPA/GQA 注意力与门控 MLP）、最终层 RMSNorm 以及语言模型输出头（LM Head）全部常驻在 GPU 统一内存中，将单步解码的 CPU-GPU 驱动同步往返彻底规约至 **单次求值（Single Evaluation）**（消除原本每步 145 次往返开销）。
