@@ -143,6 +143,14 @@ pub const Array = struct {
         return .{ .handle = arr };
     }
 
+    /// 从单精度浮点标量创建 MLX 标量数组
+    pub fn fromScalarF32(val: f32) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        const arr = c.mlx_array_new_float32(val);
+        if (arr.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = arr };
+    }
+
     fn noopDtor(_: ?*anyopaque) callconv(.c) void {}
 
     /// 从外部已分配内存零拷贝 (Zero-Copy) 创建单精度浮点 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
@@ -390,6 +398,56 @@ pub const Array = struct {
         return res;
     }
 
+    /// 高斯误差函数 (Error Function, ERF)
+    pub fn erf(self: Array, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_erf(&res.handle, self.handle, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 高斯误差线性单元激活函数 (Gaussian Error Linear Unit, GELU)
+    /// 数学公式：GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+    pub fn gelu(self: Array, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var s_scale = try fromScalarF32(0.7071067811865475);
+        defer s_scale.deinit();
+        var x_scaled = try multiply(self, s_scale, stream);
+        defer x_scaled.deinit();
+
+        var erf_val = try x_scaled.erf(stream);
+        defer erf_val.deinit();
+
+        var s_one = try fromScalarF32(1.0);
+        defer s_one.deinit();
+        var one_plus_erf = try add(s_one, erf_val, stream);
+        defer one_plus_erf.deinit();
+
+        var s_half = try fromScalarF32(0.5);
+        defer s_half.deinit();
+        var half_x = try multiply(self, s_half, stream);
+        defer half_x.deinit();
+
+        return multiply(half_x, one_plus_erf, stream);
+    }
+
+    /// 批量评估多个 MLX 数组 (多算子并行批处理调度，消除重复的主机-设备同步开销)
+    pub fn evalMultiple(arrays: []const Array) void {
+        if (!has_mlx or arrays.len == 0) return;
+        var buf: [32]c.mlx_array = undefined;
+        const count = @min(arrays.len, buf.len);
+        for (0..count) |i| {
+            buf[i] = arrays[i].handle;
+        }
+        const vec = c.mlx_vector_array_new_data(&buf, count);
+        defer _ = c.mlx_vector_array_free(vec);
+        _ = c.mlx_eval(vec);
+    }
+
     /// Softmax 归一化算子
     pub fn softmax(a: Array, axis: c_int, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
@@ -548,11 +606,15 @@ test "MLX GPU backend matmul and fast kernels" {
     // 2. 验证快速均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)
     var x_norm = try Array.fromSlice(&[_]f32{ 1.0, 2.0, 3.0, 4.0 }, &.{ 1, 4 });
     defer x_norm.deinit();
-    var norm_res = try Array.fastRmsNorm(x_norm, null, 1e-5, stream);
+    var w_norm = try Array.fromSlice(&[_]f32{ 2.0, 2.0, 2.0, 2.0 }, &.{ 4 });
+    defer w_norm.deinit();
+    var norm_res = try Array.fastRmsNorm(x_norm, w_norm, 1e-5, stream);
     defer norm_res.deinit();
     norm_res.eval();
     const norm_out = norm_res.dataFloat32();
     try std.testing.expectEqual(@as(usize, 4), norm_out.len);
+    // mean(x^2) = (1+4+9+16)/4 = 7.5. rsqrt(7.5) = 0.36514837. With weight 2.0: x * 0.7302967
+    try std.testing.expectApproxEqAbs(@as(f32, 0.7302967), norm_out[0], 1e-4);
 
     // 3. 验证快速缩放点积注意力 (Scaled Dot-Product Attention, SDPA)
     const q_data = [_]f32{0.1} ** 64;
@@ -688,5 +750,23 @@ test "MLX GPU backend matmul and fast kernels" {
     const qmm_out = qmm_arr.dataFloat32();
     try std.testing.expectEqual(@as(usize, 1), qmm_out.len);
     try std.testing.expectApproxEqAbs(expected_dot, qmm_out[0], 1e-2);
+
+    // 4. 验证高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 与批量评估
+    const gelu_inputs = [_]f32{ 0.0, 1.0, -1.0, 2.0 };
+    var x_gelu = try Array.fromSlice(&gelu_inputs, &.{ 1, 4 });
+    defer x_gelu.deinit();
+
+    var y_gelu = try x_gelu.gelu(stream);
+    defer y_gelu.deinit();
+
+    Array.evalMultiple(&.{y_gelu});
+    const gelu_out = y_gelu.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 4), gelu_out.len);
+    // GELU(0) = 0.0
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), gelu_out[0], 1e-4);
+    // GELU(1) = 0.5 * 1 * (1 + erf(1/sqrt(2))) = 0.8413447
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8413447), gelu_out[1], 1e-4);
+    // GELU(-1) = 0.5 * (-1) * (1 + erf(-1/sqrt(2))) = -0.158655
+    try std.testing.expectApproxEqAbs(@as(f32, -0.158655), gelu_out[2], 1e-4);
 }
 

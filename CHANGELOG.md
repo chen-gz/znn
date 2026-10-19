@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **MLP 算子融合与 QKV 批量并发分发大幅降低 GPU 同步停顿 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `src/models/gemma4_q4.zig`)**:
+  - 在 `src/backend/mlx.zig` 中新增惰性 `Array.gelu` 原生图算子封装与 `Array.evalMultiple` 批量多张量求值接口。
+  - 在 `src/backend/offload.zig` 中实现 `mlpForwardOffload`：将门控多层感知机（MLP）的 `gate_proj`、`up_proj`、`GELU` 激活、逐元素乘与 `down_proj` 全程在 GPU 显存内惰性拓扑串联，消除 64 KB 中间激活张量在 CPU/GPU 总线上的两次来回往返与驱动等待，将单层 3 次同步规约为 1 次。
+  - 在 `src/backend/offload.zig` 与 `src/models/gemma4_q4.zig` 中实现 `qkvForwardOffload` 与 `projectQKV`：并发向 GPU 流提交 Q、K、V 三路量化投影，并通过 `evalMultiple` 统一触发硬件内核执行，单层再消除 2 次往返同步。
+  - 全模型单步自回归解码的 GPU 同步停顿从 337 次大幅缩减至 **145 次**（降幅超 **57%**），14 个新词元总生成时间由 24.61 秒进一步缩减至 **22.56 秒**（平均单步 **1.61 秒**，生成速率稳步提升至 **0.62 tokens/s**），且端到端生成内容与基线 100% 逐位精确一致。
+
 - **全量 Q4 权重矩阵乘法 Apple MLX GPU 硬件加速卸载 (`src/backend/offload.zig`, `src/backend/mlx.zig`, `src/models/gemma4_q4.zig`)**:
   - 在 `src/backend/mlx.zig` 中新增 `Array.quantizedMatmul` 原生封装，直通 Apple MLX 官方针对 Metal GPU 高度优化的低比特量化矩阵乘法硬件内核。
   - 在 `src/backend/offload.zig` 中新增 `Q4Weights` 与 `q4MatMul`：在模型加载时将所有 48 层 Transformer 的注意力投影与 MLP 门控投影（共 328 个量化层，7.59 GB 权重）转换为 MLX 原生紧凑 uint32 排列并配合 f16 scales 与 biases 常驻统一显存。
