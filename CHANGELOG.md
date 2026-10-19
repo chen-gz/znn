@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **封装 `mlx.Array.fromRawData` 消除底层 C 结构体穿透依赖并保证无 MLX 平台编译兼容 (`src/backend/mlx.zig`, `src/backend/offload.zig`)**:
+  - 在 `src/backend/mlx.zig` 中新增统一封装的 `Array.fromRawData(data, shape_dims, dtype)` 接口，严格守卫 `if (!has_mlx) return error.MlxNotSupported;`。
+  - 在 `src/backend/offload.zig` 的 `initFromBlockSlices` 中重构量化权重初始化，改调 `Array.fromRawData` 替代原本直接穿透访问私有 C 绑定 `mlx.c.mlx_array_new_data`，彻底消除在非 MLX 目标或无 C 头文件支持时因 `mlx.c` 为空结构体引发的编译失败。
+
 - **QKV 与 MLP 融合分发、切片极速算子与 GPU 自回归流水线提速 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `src/models/gemma4_q4.zig`)**:
   - 在 `src/backend/mlx.zig` 中新增 `Array.slice2dAxis1` 专有 2D 列切片算子，直接构造固定维度向量，每步消除原本 48 层共 240 次动态 `c.mlx_array_ndim` 与 `c.mlx_array_shape` 运行时描述符查询与系统调用开销。
   - 在 `src/backend/offload.zig` 的 `GpuLayerWeights` 中预计算全部 48 层的 `rot_dim` 与 `attn_dim`，消除解码内循环中每步 48 次重复浮点截断转换与维度乘法。

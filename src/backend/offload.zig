@@ -422,15 +422,12 @@ pub const Q4Weights = struct {
             }
         }
 
-        const w_shape = [_]c_int{ @intCast(total_out_features), @intCast(in_features / 8) };
-        const sb_shape = [_]c_int{ @intCast(total_out_features), @intCast(in_features / 32) };
+        const w_dims = [_]usize{ total_out_features, in_features / 8 };
+        const sb_dims = [_]usize{ total_out_features, in_features / 32 };
 
-        const w_arr = mlx.c.mlx_array_new_data(@ptrCast(w_q_buf.ptr), &w_shape, 2, @intFromEnum(mlx.DType.uint32));
-        var w_q = mlx.Array{ .handle = w_arr };
-        const s_arr = mlx.c.mlx_array_new_data(@ptrCast(scales_buf.ptr), &sb_shape, 2, @intFromEnum(mlx.DType.float16));
-        var scales = mlx.Array{ .handle = s_arr };
-        const b_arr = mlx.c.mlx_array_new_data(@ptrCast(biases_buf.ptr), &sb_shape, 2, @intFromEnum(mlx.DType.float16));
-        var biases = mlx.Array{ .handle = b_arr };
+        var w_q = try mlx.Array.fromRawData(@ptrCast(w_q_buf.ptr), &w_dims, .uint32);
+        var scales = try mlx.Array.fromRawData(@ptrCast(scales_buf.ptr), &sb_dims, .float16);
+        var biases = try mlx.Array.fromRawData(@ptrCast(biases_buf.ptr), &sb_dims, .float16);
 
         w_q.eval();
         scales.eval();
