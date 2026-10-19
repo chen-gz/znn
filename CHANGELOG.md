@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **修复 GPU 卸载上下文生命周期、长序列滑动窗口 Prefill 与零拷贝 `forward` 兼容性 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `src/models/gemma4_q4.zig`, `src/models/tests.zig`, `AGENTS.md`, `doc/architecture.md`, `plan/`)**:
+  - 移除单文件 `< 60 KB` 的硬性字节限制，改为以模块职责单一与边界清晰作为模块化准则（同步更新 `AGENTS.md`、`doc/architecture.md` 与 `plan/`）。
+  - 在 `Gemma4Q4ForCausalLM.initGpuContext` 中增加已有 `gpu_context` 的先释放保护，并为 `Q4Weights.initFromBlockSlices`、`GpuLayerWeights.initFromBlocks` 与 `GpuModelContext.init` 补齐 `errdefer` 错误回滚释放链，消除重复初始化或半途失败时的 GPU 显存泄漏。
+  - 修复 `GpuModelContext.prefill` 在序列长度超过滑动窗口（`T > sliding_window`）时未施加局部滑动窗口掩码的问题，并在 `Gemma4Q4ForCausalLM.prefill` 的 GPU 分支中同步更新 `cache.layers[i].curr_len = T`。
+  - 在 `Gemma4Q4ForCausalLM` 中保存 `embed_u16_mmap` 零拷贝切片引用，使 `loadFromMmap` 加载的模型在跳过 4.03 GB F32 嵌入张量分配的同时，仍可正常执行全序列 `forward()` 而不触发越界。
+  - 提取公共的 `LmHeadWeights.argmaxWithPenalty` 并根据 `vocab_size` 动态计算位图大小，消除三处重复采样代码与 `262144` 硬编码越界风险；修复 `Array.evalMultiple` 超过 32 个张量时的静默截断问题；使用 `std.heap.page_size_min` 与 `alignForward`/`alignBackward` 保证 `madvise` 地址安全对齐。
+
 - **封装 `mlx.Array.fromRawData` 消除底层 C 结构体穿透依赖并保证无 MLX 平台编译兼容 (`src/backend/mlx.zig`, `src/backend/offload.zig`)**:
   - 在 `src/backend/mlx.zig` 中新增统一封装的 `Array.fromRawData(data, shape_dims, dtype)` 接口，严格守卫 `if (!has_mlx) return error.MlxNotSupported;`。
   - 在 `src/backend/offload.zig` 的 `initFromBlockSlices` 中重构量化权重初始化，改调 `Array.fromRawData` 替代原本直接穿透访问私有 C 绑定 `mlx.c.mlx_array_new_data`，彻底消除在非 MLX 目标或无 C 头文件支持时因 `mlx.c` 为空结构体引发的编译失败。

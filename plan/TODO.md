@@ -6,7 +6,7 @@
 
 ## 🔍 第一部分：代码库现状诊断与演进空间 (Current Architecture Review)
 
-经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.3.0`）已完成核心架构解耦与全模块精简（除 `src/models/gemma4.zig`（64,336 B，拆分任务见 2.5）外，所有非测试源码文件均 `< 60 KB`；涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
+经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.3.0`）已完成核心架构解耦与模块化清晰划分（涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Apple Silicon MLX GPU 端到端硬件卸载、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
 
 ### 1. 核心计算与张量系统 (Tensor Engine & Core Math)
 * **自动微分多精度与量化张量扩展 (Mixed-Precision Autograd & Quantization)**：
@@ -59,7 +59,7 @@
 
 | 阶段 / 优先级 | 核心目标 | 涉及模块 | 预估复杂度 |
 | :--- | :--- | :--- | :--- |
-| **Phase 1 (P0)** | 健壮性增强、类型化错误、自动化测试覆盖、模块化重构 (`< 60 KB`) | `tensor/`, `autodiff/`, `nn/`, `bench/` | 🟡 中等 |
+| **Phase 1 (P0)** | 健壮性增强、类型化错误、自动化测试覆盖、模块化清晰重构 | `tensor/`, `autodiff/`, `nn/`, `bench/` | 🟡 中等 |
 | **Phase 2 (P1)** | 泛型/静态形状张量、`io: std.Io` 多核执行器与 Apple Silicon Metal 异步卸载 | `tensor/`, `backend/`, `autodiff/`, `build.zig` | 🔴 较高 |
 | **Phase 3 (P2)** | 现代 LLM 架构、FlashAttention、KV-Cache 解码与视觉算子 | `nn/`, `autodiff/`, `optim.zig` | 🔴 较高 |
 | **Phase 4 (P3)** | 分词器升级、格式互操作与非 Apple GPU 后端 | `dataset.zig`, `tools/`, `build.zig` | 🟣 复杂 |
@@ -132,9 +132,9 @@
   - [x] **`cblas_sgemm_fallback` `TransB` SIMD 加速**：为 [`cblas_sgemm_fallback`](../src/cblas.zig) 的 `NoTrans × Trans` 分支实现 8 路 `@Vector(8, f32)` 向量化内积。
   - [x] **`Conv2D` 步长/填充扩展与 `im2col + sgemm` 加速**：为 [`Conv2D`](../src/nn/core.zig) 与 [`Tensor.conv2dWithConfig`](../src/tensor/nn_kernels.zig) 增加可配置 `stride` 与 `padding` 支持，并用 `im2col` / `col2im` + `cblas_sgemm` 加速前向与反向计算。
 
-- [x] **1.6 全库架构评审与超长模块解耦重构 (`< 60 KB` per File)**
+- [x] **1.6 全库架构评审与模块化清晰解耦重构 (Modular Architecture Refactoring)**
   - [x] 完成目录组织、核心抽象解耦、训练/推理/优化流水线与文档/测试/基准四大维度的全库审查与文档同步（详见 [`doc/architecture.md`](../doc/architecture.md)）。
-  - [x] 将所有超 60 KB 的实现文件拆分为高内聚子模块：`src/tensor/{core,conv_pool,nn_kernels,reductions,linalg,static}.zig`、`src/autodiff/{op,backward_core,backward_nn,backward_math,graph,graph_nn,graph_init}.zig`、`src/nn/{attention,transformer,llm,visualization,graph_ir}.zig`、`src/models/{gemma4.zig}` 与 `src/bench/{suites.zig}`。
+  - [x] 将复合实现文件按职责拆分为高内聚子模块：`src/tensor/{core,conv_pool,nn_kernels,reductions,linalg,static}.zig`、`src/autodiff/{op,backward_core,backward_nn,backward_math,graph,graph_nn,graph_init}.zig`、`src/nn/{attention,transformer,llm,visualization,graph_ir}.zig`、`src/models/{gemma4,gemma4_q4}.zig` 与 `src/bench/{suites.zig}`。
   - [x] 在 [`src/nn/core.zig`](../src/nn/core.zig) 中新增全模型训练/评估状态切换函数 `setTrainingModel`、`trainModel` 与 `evalModel`；在 [`src/nn/recurrent.zig`](../src/nn/recurrent.zig) 中定义具名返回结构体 `RNNResult`、`LSTMResult`、`StackedLSTMResult`、`GRUResult`；补齐全部配置结构体的默认值与 `defaultOptions()` / `initDefault()`。
 
 - [x] **1.7 包级单向依赖与分层检查 (Layered Package Dependencies)**
@@ -171,7 +171,7 @@
   - [ ] Linux GEMM 寄存器/缓存分块微内核与多线程（Phase 5）。
 
 - [x] **2.5 Apple Silicon Metal / MLX 硬件加速与端到端 GPU 增量解码（详见 [`ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)）**
-  - [x] **Phase 0 执行器与基线**：`GraphOptions` 与 `Graph.init(backing, options)` / `Graph.initDefault`（删除 `initNoGrad` 并完成全库迁移）；拆分 `src/models/gemma4.zig` 为 `src/tensor/quant.zig` 与 `src/models/gemma4_q4.zig`（所有非测试源码文件均 `< 60 KB`）；`Q4Block` 与内核下沉为 `src/tensor/quant.zig` 并新增 `Q4MatMul` 算子；Q4 块内 split-half 排布与文件魔数 `ZNNQ4G02`（128 核 Linux 虚拟机、3840×15360：单线程 19.7 ms → 约 11.6 ms，经 `Graph.q4MatMul` 用满全部核心约 0.9 ms）；Q4 矩阵乘按（8 行 × 128 列）二维分块并复用已解包的权重块；`src/cblas.zig` 迁入 `src/backend/` 并更新分层检查；新增 `executor` / `q4` / `decode` 基准。
+  - [x] **Phase 0 执行器与基线**：`GraphOptions` 与 `Graph.init(backing, options)` / `Graph.initDefault`（删除 `initNoGrad` 并完成全库迁移）；拆分 `src/models/gemma4.zig` 为 `src/tensor/quant.zig` 与 `src/models/gemma4_q4.zig`（保持模块边界清晰）；`Q4Block` 与内核下沉为 `src/tensor/quant.zig` 并新增 `Q4MatMul` 算子；Q4 块内 split-half 排布与文件魔数 `ZNNQ4G02`（128 核 Linux 虚拟机、3840×15360：单线程 19.7 ms → 约 11.6 ms，经 `Graph.q4MatMul` 用满全部核心约 0.9 ms）；Q4 矩阵乘按（8 行 × 128 列）二维分块并复用已解包的权重块；`src/cblas.zig` 迁入 `src/backend/` 并更新分层检查；新增 `executor` / `q4` / `decode` 基准。
   - [x] **Phase 1-2 MLX GPU 硬件加速后端与统一卸载基础设施**：
     - [x] 在 `src/backend/mlx.zig` 中接入 Apple 官方 MLX 引擎，提供 `MlxStream`、`MlxArray`、`fastRmsNorm`、`fastRoPE` 与 `fastScaledDotProductAttention`（FlashAttention）。
     - [x] 在 `src/backend/offload.zig` 中新增统一硬件卸载门面，实现 `Q4Weights` 与 `q4MatMul`，模型加载时将全部 48 层共 328 个量化层常驻统一内存，并在推理时自动下沉至 MLX GPU 执行。

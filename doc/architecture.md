@@ -6,15 +6,17 @@
 
 ## 1. 系统分层全景与数据流向 (System Overview & Architecture)
 
-`znn` 采用高度解耦的分层架构设计，各子系统职责单一且边界清晰；全库所有非测试实现文件均严格控制在 `< 60 KB` 以内：
+`znn` 采用高度解耦的分层架构设计，各子系统职责单一且模块边界清晰：
 
 ```text
 src/
 ├── root.zig                      # 顶层公共门面 (Facade)，聚合导出所有核心子模块
-├── backend.zig                   # 硬件后端与执行器门面 (导出 Executor, cblas)
+├── backend.zig                   # 硬件后端与执行器门面 (导出 Executor, cblas, mlx, offload)
 ├── backend/
 │   ├── cblas.zig                 # macOS Accelerate (AMX) 构建期链接与跨平台 8 路 SIMD GEMM 后备内核
-│   └── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
+│   ├── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
+│   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定与 GPU 数组算子
+│   └── offload.zig               # 硬件加速统一卸载基础设施 (GEMM, RMSNorm, RoPE, SDPA, Q4Weights, GpuModelContext)
 ├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, Q4Block, ops)
 ├── tensor/
 │   ├── shape.zig                 # 8D Shape 维度系统、跨步推导与 NumPy 广播规则
@@ -194,7 +196,7 @@ flowchart TD
 
 | 层级 | 包 |
 | :--- | :--- |
-| 0 | `cblas` |
+| 0 | `backend` |
 | 1 | `tensor`、`dataset` |
 | 2 | `autodiff`、`regression`、`manifold` |
 | 3 | `nn`、`cross_validation` |
