@@ -197,10 +197,12 @@
     - [x] **路径 1：LM Head 262K 词表采样 GPU 卸载（消除 2.3 秒单步延迟）**：
       - 在 `src/backend/offload.zig` 中实现 `LmHeadWeights` 与 `lmHeadArgmax`，将 262,144 个 3840 维 BF16 权重 (1.92 GB) 转置常驻 GPU 显存，自回归每步仅需将 `[1, 3840]` 隐状态向量下发至 MLX GPU 流。
       - 在 Apple Silicon 统一内存架构下 GEMV 耗时仅需 **5~10 ms**（直接取得 200x 加速，完全消除 2.3 秒 CPU 软件扫描延迟），并在 `Gemma4Q4ForCausalLM` 中完成集成与端到端实测验证。
-    - [ ] **路径 2：Q4 矩阵向量乘 (GEMV) 的 Apple Silicon Metal / MLX 硬件加速（消除 5.5 秒单步延迟）**：
-      - 当前 48 层 Transformer 增量解码耗时 ~5.5 秒，瓶颈在于 CPU 单核/多核访问 7.59 GB 权重的有效内存带宽仅约 1.38 GB/s。
-      - 编写原生 Metal Compute Shader（或通过 MLX 算子内核）执行专用 Q4 GEMV：每个线程组负责若干输出特征通道，利用 Apple Silicon 硬件专属的 100~400 GB/s 统一显存带宽并行读取 Q4Block 并快速解包点积。
-      - 在 200 GB/s 显存带宽下，单步读取并计算全模 48 层 7.59 GB 权重仅需 **~38 ms**，理论解码速度可直接从 0.14 tokens/s 跃升至 **15 ~ 25 tokens/s**（提升 100x 以上！）。
+    - [x] **路径 2：Q4 矩阵向量乘 (GEMV) 的 Apple Silicon MLX GPU 硬件加速卸载（实测提速 3.1 倍）**：
+      - 在 `src/backend/mlx.zig` 中封装 `Array.quantizedMatmul`，并在 `src/backend/offload.zig` 中实现 `Q4Weights` 与 `q4MatMul`，将 48 层 Transformer 的所有注意力投影与 MLP 门控投影（共 328 个量化投影层，7.59 GB 权重）转换为 MLX 原生紧凑 uint32 排列与 f16 scales/biases 常驻 GPU 显存。
+      - 在 `Gemma4Q4ForCausalLM` 中全面接入硬件卸载，实测单步自回归解码耗时从 ~5.4 秒骤降至 **1.75 秒**，增量解码速度从 0.18 tokens/s 跃升至 **0.57 tokens/s**（提升超 3.1 倍，14 个新词元总生成耗时从 75.6 秒缩减至 **24.61 秒**），且输出词元与黄金基线 100% 逐位精确一致。
+    - [ ] **路径 2.1：GPU 异步流式发射与批量规约 (Asynchronous GPU Queueing & Eliminating Sync Roundtrips)**：
+      - 当前单步包含 328 次 Q4 GEMV，每次调用均执行同步 `eval()` 产生多次 GPU 命令调度与主机同步往返（每次 ~2-3 ms，累积约 0.8-1.0 秒调度开销）。
+      - 改为在 GPU 流上按依赖关系异步录制并仅在每步结束时统一同步，消除单步中百次往返开销，预计将单步耗时进一步压缩至 **0.1~0.2 秒** (5~10 tokens/s)。
     - [ ] **路径 3：静态解码图与零临时堆分配 (Static Decode Graph & Zero-Allocation)**：
       - 消除自回归循环中每步调用 `autodiff.Graph.init` 的图构建与节点释放开销，维护固定的解码执行上下文（复用静态中间张量缓冲区）。
       - 融合 RMSNorm 与后续投影算子，减少中间特征进出内存的往返开销。

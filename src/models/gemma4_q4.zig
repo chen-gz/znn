@@ -35,6 +35,7 @@ pub const Q4Linear = struct {
     out_features: usize,
     blocks: []Q4Block, // 权重分块数据，总长度 = (in_features * out_features) / 32
     owns_blocks: bool = true,
+    q4_weights: ?backend.offload.Q4Weights = null,
     name: ?[]const u8 = null,
     module_type: []const u8 = "Q4Linear",
 
@@ -49,6 +50,7 @@ pub const Q4Linear = struct {
             .out_features = out_features,
             .blocks = blocks,
             .owns_blocks = true,
+            .q4_weights = null,
         };
     }
 
@@ -58,13 +60,32 @@ pub const Q4Linear = struct {
             .out_features = out_features,
             .blocks = @constCast(blocks),
             .owns_blocks = false,
+            .q4_weights = null,
         };
     }
 
     pub fn deinit(self: *Q4Linear, allocator: std.mem.Allocator) void {
+        if (self.q4_weights) |*qw| {
+            qw.deinit();
+            self.q4_weights = null;
+        }
         if (self.owns_blocks) {
             allocator.free(self.blocks);
         }
+    }
+
+    /// 启用图形处理器 (Graphics Processing Unit, GPU) 硬件加速卸载
+    pub fn enableOffload(self: *Q4Linear, allocator: std.mem.Allocator, stream: ?backend.mlx.Stream) !void {
+        if (!backend.offload.isAvailable()) return;
+        if (self.q4_weights != null) return;
+        const raw_bytes = std.mem.sliceAsBytes(self.blocks);
+        self.q4_weights = try backend.offload.Q4Weights.initFromBlocks(
+            allocator,
+            raw_bytes,
+            self.in_features,
+            self.out_features,
+            stream,
+        );
     }
 
     /// 从原始 F32 权重矩阵原地量化填充当前层
@@ -88,10 +109,30 @@ pub const Q4Linear = struct {
         }
     }
 
-    /// 前向传播：高效按块点积计算 x * W，通过 Graph.q4MatMul 注册算子
+    /// 前向传播：高效按块点积计算 x * W，在 GPU 硬件加速模式下直通 MLX 量化内核
     pub fn forward(self: *const Q4Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
+
+        if (graph.options.device == .gpu and backend.offload.isAvailable() and !graph.enable_grad) {
+            if (self.q4_weights) |*qw| {
+                var total_elem: usize = 1;
+                for (0..x.shape.len) |d| {
+                    total_elem *= x.shape.dims[d];
+                }
+                const in_f = self.in_features;
+                const out_f = self.out_features;
+                const rows = total_elem / in_f;
+                const out = if (x.shape.len == 2)
+                    try graph.tensorND(&.{ rows, out_f }, false)
+                else if (x.shape.len == 3)
+                    try graph.tensorND(&.{ x.shape.dims[0], x.shape.dims[1], out_f }, false)
+                else
+                    try graph.tensorND(&.{ rows, out_f }, false);
+                try qw.forward(x, out, graph.options.mlx_stream);
+                return out;
+            }
+        }
 
         return graph.q4MatMul(x, self.blocks, self.in_features, self.out_features);
     }
@@ -866,6 +907,16 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
                 ));
                 lm_head_weights = backend.offload.LmHeadWeights.init(embed_u16_slice, config.vocab_size, config.hidden_size, null) catch null;
+
+                for (layers) |*layer| {
+                    layer.self_attn.q_proj.enableOffload(allocator, null) catch {};
+                    layer.self_attn.k_proj.enableOffload(allocator, null) catch {};
+                    if (layer.self_attn.v_proj) |*vp| vp.enableOffload(allocator, null) catch {};
+                    layer.self_attn.o_proj.enableOffload(allocator, null) catch {};
+                    layer.mlp.gate_proj.enableOffload(allocator, null) catch {};
+                    layer.mlp.up_proj.enableOffload(allocator, null) catch {};
+                    layer.mlp.down_proj.enableOffload(allocator, null) catch {};
+                }
             }
 
             return Self{
@@ -874,6 +925,20 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 .norm = norm,
                 .lm_head_weights = lm_head_weights,
             };
+        }
+
+        /// 为全模型所有 4-bit 量化层启用图形处理器 (Graphics Processing Unit, GPU) 硬件加速卸载
+        pub fn enableHardwareOffload(self: *Self, allocator: std.mem.Allocator) !void {
+            if (!backend.offload.isAvailable()) return;
+            for (self.layers) |*layer| {
+                try layer.self_attn.q_proj.enableOffload(allocator, null);
+                try layer.self_attn.k_proj.enableOffload(allocator, null);
+                if (layer.self_attn.v_proj) |*vp| try vp.enableOffload(allocator, null);
+                try layer.self_attn.o_proj.enableOffload(allocator, null);
+                try layer.mlp.gate_proj.enableOffload(allocator, null);
+                try layer.mlp.up_proj.enableOffload(allocator, null);
+                try layer.mlp.down_proj.enableOffload(allocator, null);
+            }
         }
 
         const BestToken = struct {

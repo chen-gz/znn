@@ -247,6 +247,144 @@ pub fn lmHeadArgmax(
     return weights.sampleNext(h_last, recent_tokens, repetition_penalty, stream);
 }
 
+/// 4-bit 分块量化矩阵乘法硬件加速权重 (Quantized Matrix Multiply Weights, Q4Weights)
+/// 将 Q4Block (18 字节/32 权重，含 16 字节数据与 1 个 f16 scale) 打包转置为
+/// Apple 机器学习拓展 (Machine Learning Explore, MLX) 原生 uint32 紧凑排列并在图形处理器 (Graphics Processing Unit, GPU) 显存中常驻。
+/// 在自回归单步解码时，通过统一内存零拷贝直接分发至硬件量化内核，消除 CPU 解包与带宽瓶颈。
+pub const Q4Weights = struct {
+    w_q: mlx.Array,
+    scales: mlx.Array,
+    biases: mlx.Array,
+    in_features: usize,
+    out_features: usize,
+
+    /// 从原始 Q4Block 切片 (18 字节/块) 构建 GPU 硬件加速量化权重矩阵
+    pub fn initFromBlocks(
+        allocator: std.mem.Allocator,
+        blocks_bytes: []const u8,
+        in_features: usize,
+        out_features: usize,
+        stream: ?Stream,
+    ) OffloadError!Q4Weights {
+        if (!isAvailable()) return error.OffloadNotSupported;
+        const blocks_per_row = in_features / 32;
+        const total_blocks = out_features * blocks_per_row;
+        if (blocks_bytes.len < total_blocks * 18) return error.ShapeMismatch;
+
+        const w_q_buf = try allocator.alloc(u32, total_blocks * 4);
+        defer allocator.free(w_q_buf);
+        const scales_buf = try allocator.alloc(f16, total_blocks);
+        defer allocator.free(scales_buf);
+        const biases_buf = try allocator.alloc(f16, total_blocks);
+        defer allocator.free(biases_buf);
+
+        for (0..total_blocks) |blk_idx| {
+            const raw = blocks_bytes[blk_idx * 18 .. (blk_idx + 1) * 18];
+            const scale_bits = std.mem.readInt(u16, raw[0..2][0..2], .little);
+            const scale_f16: f16 = @bitCast(scale_bits);
+            const scale_f32: f32 = @floatCast(scale_f16);
+            const bias_f16: f16 = @floatCast(-8.0 * scale_f32);
+
+            scales_buf[blk_idx] = scale_f16;
+            biases_buf[blk_idx] = bias_f16;
+
+            const qs = raw[2..18];
+            var w0: u32 = 0;
+            var w1: u32 = 0;
+            var w2: u32 = 0;
+            var w3: u32 = 0;
+            for (0..8) |j| {
+                const shift: u5 = @intCast(j * 4);
+                w0 |= @as(u32, qs[j] & 0x0F) << shift;
+                w1 |= @as(u32, qs[j + 8] & 0x0F) << shift;
+                w2 |= @as(u32, qs[j] >> 4) << shift;
+                w3 |= @as(u32, qs[j + 8] >> 4) << shift;
+            }
+            w_q_buf[blk_idx * 4 + 0] = w0;
+            w_q_buf[blk_idx * 4 + 1] = w1;
+            w_q_buf[blk_idx * 4 + 2] = w2;
+            w_q_buf[blk_idx * 4 + 3] = w3;
+        }
+
+        const w_shape = [_]c_int{ @intCast(out_features), @intCast(in_features / 8) };
+        const sb_shape = [_]c_int{ @intCast(out_features), @intCast(in_features / 32) };
+
+        const w_arr = mlx.c.mlx_array_new_data(@ptrCast(w_q_buf.ptr), &w_shape, 2, @intFromEnum(mlx.DType.uint32));
+        var w_q = mlx.Array{ .handle = w_arr };
+        const s_arr = mlx.c.mlx_array_new_data(@ptrCast(scales_buf.ptr), &sb_shape, 2, @intFromEnum(mlx.DType.float16));
+        var scales = mlx.Array{ .handle = s_arr };
+        const b_arr = mlx.c.mlx_array_new_data(@ptrCast(biases_buf.ptr), &sb_shape, 2, @intFromEnum(mlx.DType.float16));
+        var biases = mlx.Array{ .handle = b_arr };
+
+        w_q.eval();
+        scales.eval();
+        biases.eval();
+        if (stream) |s| s.synchronize();
+
+        return .{
+            .w_q = w_q,
+            .scales = scales,
+            .biases = biases,
+            .in_features = in_features,
+            .out_features = out_features,
+        };
+    }
+
+    /// 释放图形处理器 (Graphics Processing Unit, GPU) 权重资源
+    pub fn deinit(self: *Q4Weights) void {
+        self.w_q.deinit();
+        self.scales.deinit();
+        self.biases.deinit();
+    }
+
+    /// 前向量化矩阵乘法 (Quantized Matrix Multiplication, QMM)：out = X * W^T
+    pub fn forward(
+        self: Q4Weights,
+        X: anytype,
+        out: anytype,
+        stream: ?Stream,
+    ) OffloadError!void {
+        if (!isAvailable()) return error.OffloadNotSupported;
+        var total_elements: usize = 1;
+        for (0..X.shape.len) |d| {
+            total_elements *= X.shape.dims[d];
+        }
+        const in_f = self.in_features;
+        const out_f = self.out_features;
+        const rows = total_elements / in_f;
+
+        var x_mlx = try mlx.Array.fromSliceZeroCopy(X.data[0..total_elements], &.{ rows, in_f });
+        defer x_mlx.deinit();
+
+        var res_mlx = try x_mlx.quantizedMatmul(
+            self.w_q,
+            self.scales,
+            self.biases,
+            true, // transpose
+            32,
+            4,
+            "affine",
+            stream,
+        );
+        defer res_mlx.deinit();
+        res_mlx.eval();
+
+        const res_data = res_mlx.dataFloat32();
+        if (res_data.len != rows * out_f) return error.ShapeMismatch;
+        @memcpy(out.data[0..rows * out_f], res_data);
+    }
+};
+
+/// 4-bit 量化矩阵乘法硬件加速便捷入口 (Quantized Matrix Multiplication, QMM)
+pub fn q4MatMul(
+    X: anytype,
+    out: anytype,
+    weights: *const Q4Weights,
+    stream: ?Stream,
+) OffloadError!void {
+    return weights.forward(X, out, stream);
+}
+
 test "backend offload infrastructure" {
     if (!isAvailable()) return;
 
@@ -278,5 +416,33 @@ test "backend offload infrastructure" {
     const penalized_tok = try lm_head.sampleNext(&h_last, &.{2}, 10.0, stream);
     try std.testing.expectEqual(@as(usize, 1), penalized_tok);
 
+    // 2. 验证 Q4Weights 硬件量化矩阵乘法卸载
+    var raw_block: [18]u8 = undefined;
+    const scale_bits: u16 = 0x3c00; // f16 = 1.0
+    std.mem.writeInt(u16, raw_block[0..2], scale_bits, .little);
+    // 所有权重置为 (10 - 8) = 2.0 (低 4 位为 10 即 0xA，高 4 位为 10 即 0xA)
+    @memset(raw_block[2..18], 0xAA);
+
+    var q4_w = try Q4Weights.initFromBlocks(std.testing.allocator, &raw_block, 32, 1, stream);
+    defer q4_w.deinit();
+
+    var x_vec: [32]f32 = undefined;
+    for (&x_vec) |*v| v.* = 1.0;
+    var out_res: [1]f32 = undefined;
+
+    const DummyTensor = struct {
+        data: []f32,
+        shape: struct {
+            dims: [2]usize,
+            len: usize = 2,
+        },
+    };
+    var x_t = DummyTensor{ .data = &x_vec, .shape = .{ .dims = .{ 1, 32 }, .len = 2 } };
+    var out_t = DummyTensor{ .data = &out_res, .shape = .{ .dims = .{ 1, 1 }, .len = 2 } };
+
+    try q4MatMul(&x_t, &out_t, &q4_w, stream);
     stream.synchronize();
+
+    // 32 个 1.0 与 2.0 的点积 = 64.0
+    try std.testing.expectApproxEqAbs(@as(f32, 64.0), out_res[0], 1e-2);
 }

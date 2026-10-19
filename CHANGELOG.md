@@ -9,7 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+- **全量 Q4 权重矩阵乘法 Apple MLX GPU 硬件加速卸载 (`src/backend/offload.zig`, `src/backend/mlx.zig`, `src/models/gemma4_q4.zig`)**:
+  - 在 `src/backend/mlx.zig` 中新增 `Array.quantizedMatmul` 原生封装，直通 Apple MLX 官方针对 Metal GPU 高度优化的低比特量化矩阵乘法硬件内核。
+  - 在 `src/backend/offload.zig` 中新增 `Q4Weights` 与 `q4MatMul`：在模型加载时将所有 48 层 Transformer 的注意力投影与 MLP 门控投影（共 328 个量化层，7.59 GB 权重）转换为 MLX 原生紧凑 uint32 排列并配合 f16 scales 与 biases 常驻统一显存。
+  - 在 `Q4Linear` 中无缝集成 `Q4Weights`，自回归解码（与预填充）前向时自动下沉至 MLX GPU 流执行硬件量化计算，单步解码总耗时从 ~5.4 秒骤降至 **1.75 秒**，增量解码速度从 0.18 tokens/s 跃升至 **0.57 tokens/s**（提升超 **3.1 倍**，14 个新词元总生成耗时从 75.6 秒缩减至 **24.61 秒**），且输出词元与基线 100% 逐位精确一致。
 - **统一硬件卸载基础设施与 LM Head 词表采样 GPU 卸载 (`src/backend/offload.zig`, `src/backend.zig`, `src/backend/mlx.zig`, `src/autodiff/graph.zig`, `src/autodiff/graph_nn.zig`, `src/models/gemma4_q4.zig`, `examples/gemma4.zig`)**:
   - 新增 `src/backend/offload.zig` 作为统一硬件加速卸载门面，严格保持在最底层的 `backend` 包（层级 0），将所有硬件卸载调用收拢统一接入 Apple MLX。
   - 实现通用算子硬件卸载（`offload.matmul`、`offload.rmsNorm`、`offload.rope`、`offload.scaledDotProductAttention`、`offload.softmax`），消除了计算图层直接内联 C API 的样板代码。
