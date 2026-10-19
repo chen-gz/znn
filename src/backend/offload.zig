@@ -147,44 +147,133 @@ pub fn softmax(
 /// 预先将巨型词表嵌入矩阵 (如 Gemma 4 的 262,144 维词表) 在 GPU 显存中转置常驻，
 /// 自回归解码每一步仅需下发单步输入向量 [1, hidden_size]，利用统一内存实现 5~10 ms 极速词表打分与采样。
 pub const LmHeadWeights = struct {
-    w_t: mlx.Array,
+    pub const QuantMode = enum {
+        bf16,
+        q8,
+        q4,
+    };
+
+    w_t: ?mlx.Array = null,
+    w_q: ?mlx.Array = null,
+    scales: ?mlx.Array = null,
+    biases: ?mlx.Array = null,
+    is_quantized: bool = false,
+    group_size: i32 = 32,
+    bits: i32 = 4,
     vocab_size: usize,
     hidden_size: usize,
 
-    /// 从脑浮点 16 (Brain Floating Point 16, BF16) 词表权重构建常驻 GPU 词表矩阵
-    pub fn init(
+    /// 指定量化模式构建常驻 GPU 词表矩阵 (支持 BF16、Q8 与 Q4)
+    pub fn initWithMode(
         embed_u16: []const u16,
         vocab_size: usize,
         hidden_size: usize,
+        mode: QuantMode,
         stream: ?Stream,
     ) OffloadError!LmHeadWeights {
         if (!isAvailable()) return error.OffloadNotSupported;
         var w = try mlx.Array.fromSliceBf16(embed_u16, &.{ vocab_size, hidden_size });
         defer w.deinit();
 
+        switch (mode) {
+            .q4 => {
+                if (hidden_size >= 32 and hidden_size % 32 == 0) {
+                    var q4_pkg = try mlx.Array.quantize(w, 32, 4, "affine", stream);
+                    q4_pkg.weights.eval();
+                    q4_pkg.scales.eval();
+                    if (q4_pkg.biases) |*b| b.eval();
+                    if (stream) |st| st.synchronize();
+
+                    return .{
+                        .w_q = q4_pkg.weights,
+                        .scales = q4_pkg.scales,
+                        .biases = q4_pkg.biases,
+                        .is_quantized = true,
+                        .group_size = 32,
+                        .bits = 4,
+                        .vocab_size = vocab_size,
+                        .hidden_size = hidden_size,
+                    };
+                }
+            },
+            .q8 => {
+                if (hidden_size >= 64 and hidden_size % 64 == 0) {
+                    var q8_pkg = try mlx.Array.quantize(w, 64, 8, "affine", stream);
+                    q8_pkg.weights.eval();
+                    q8_pkg.scales.eval();
+                    if (q8_pkg.biases) |*b| b.eval();
+                    if (stream) |st| st.synchronize();
+
+                    return .{
+                        .w_q = q8_pkg.weights,
+                        .scales = q8_pkg.scales,
+                        .biases = q8_pkg.biases,
+                        .is_quantized = true,
+                        .group_size = 64,
+                        .bits = 8,
+                        .vocab_size = vocab_size,
+                        .hidden_size = hidden_size,
+                    };
+                }
+            },
+            .bf16 => {},
+        }
+
         const w_t = try w.transpose(stream);
         w_t.eval();
+        if (stream) |st| st.synchronize();
 
         return .{
             .w_t = w_t,
+            .is_quantized = false,
             .vocab_size = vocab_size,
             .hidden_size = hidden_size,
         };
     }
 
+    /// 从脑浮点 16 (Brain Floating Point 16, BF16) 词表权重构建常驻 GPU 词表矩阵 (默认标准 BF16 硬件直推，保证 100% 原始输出一致性)
+    pub fn init(
+        embed_u16: []const u16,
+        vocab_size: usize,
+        hidden_size: usize,
+        stream: ?Stream,
+    ) OffloadError!LmHeadWeights {
+        return initWithMode(embed_u16, vocab_size, hidden_size, .bf16, stream);
+    }
+
     /// 释放 GPU 常驻权重资源
     pub fn deinit(self: *LmHeadWeights) void {
-        self.w_t.deinit();
+        if (self.w_t) |*wt| wt.deinit();
+        if (self.w_q) |*wq| wq.deinit();
+        if (self.scales) |*sc| sc.deinit();
+        if (self.biases) |*b| b.deinit();
     }
 
     /// 执行 GPU 词表打分投影计算图调度：[..., hidden_size] -> [..., vocab_size]
     pub fn forwardArray(self: LmHeadWeights, x: mlx.Array, stream: ?Stream) OffloadError!mlx.Array {
         if (!isAvailable()) return error.OffloadNotSupported;
-        var x_bf16 = try x.astype(.bfloat16, stream);
-        defer x_bf16.deinit();
-        var logits_bf16 = try mlx.Array.matmul(x_bf16, self.w_t, stream);
-        defer logits_bf16.deinit();
-        return logits_bf16.astype(.float32, stream);
+        if (self.is_quantized) {
+            var x_bf16 = try x.astype(.bfloat16, stream);
+            defer x_bf16.deinit();
+            var logits_bf16 = try x_bf16.quantizedMatmul(
+                self.w_q.?,
+                self.scales.?,
+                self.biases,
+                true, // transpose = true -> x @ W^T
+                self.group_size,
+                self.bits,
+                "affine",
+                stream,
+            );
+            defer logits_bf16.deinit();
+            return logits_bf16.astype(.float32, stream);
+        } else {
+            var x_bf16 = try x.astype(.bfloat16, stream);
+            defer x_bf16.deinit();
+            var logits_bf16 = try mlx.Array.matmul(x_bf16, self.w_t.?, stream);
+            defer logits_bf16.deinit();
+            return logits_bf16.astype(.float32, stream);
+        }
     }
 
     /// 执行单步词表投影并贪婪采样最佳词元 ID
@@ -714,6 +803,7 @@ pub const GpuModelContext = struct {
     hidden_size: usize,
     vocab_size: usize,
     max_seq_len: usize,
+    alloc_seq_len: usize,
     stream: Stream,
 
     gpu_k: []?mlx.Array,
@@ -751,6 +841,7 @@ pub const GpuModelContext = struct {
             .hidden_size = hidden_size,
             .vocab_size = vocab_size,
             .max_seq_len = max_seq_len,
+            .alloc_seq_len = max_seq_len,
             .stream = stream,
             .gpu_k = gpu_k,
             .gpu_v = gpu_v,
@@ -834,18 +925,12 @@ pub const GpuModelContext = struct {
     ) !usize {
         const T = prompt_tokens.len;
         if (T == 0) return 0;
-        if (T >= self.max_seq_len) return error.ContextWindowExceeded;
+        if (T >= self.alloc_seq_len) return error.ContextWindowExceeded;
 
         const s = if (stream) |st| st else self.stream;
 
         // 重置 GPU 键值缓存 (Reset GPU KVCache)
-        for (self.gpu_k, 0..) |_, idx| {
-            if (self.gpu_k[idx]) |*arr| arr.deinit();
-            if (self.gpu_v[idx]) |*arr| arr.deinit();
-            self.gpu_k[idx] = null;
-            self.gpu_v[idx] = null;
-        }
-        self.curr_len = 0;
+        self.resetCache();
 
         // 1. 构建 Prompt 词元嵌入 [1, T, hidden_size]
         const tok_emb_buf = try self.allocator.alloc(f32, T * self.hidden_size);
@@ -1042,7 +1127,7 @@ pub const GpuModelContext = struct {
         stream: ?Stream,
     ) !usize {
         const pos = self.curr_len;
-        if (pos >= self.max_seq_len) return error.ContextWindowExceeded;
+        if (pos >= self.alloc_seq_len) return error.ContextWindowExceeded;
 
         const s = if (stream) |st| st else self.stream;
 

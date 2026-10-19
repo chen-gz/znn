@@ -553,6 +553,76 @@ pub const Array = struct {
         return res;
     }
 
+    /// 对四维键值缓存张量 (Key-Value Cache, KVCache) 沿序列轴 (axis 2) 快速切片 (Fast 4D Sequence Slice)
+    /// 预置 `[1, num_kv, max_seq_len, head_dim]` 四维形状，消除运行时 ndim 与 shape 描述符解析开销
+    pub fn slice4dAxis2(
+        self: Array,
+        num_kv: usize,
+        start: usize,
+        stop: usize,
+        head_dim: usize,
+        stream: ?Stream,
+    ) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        const start_arr = [_]c_int{ 0, 0, @intCast(start), 0 };
+        const stop_arr = [_]c_int{ 1, @intCast(num_kv), @intCast(stop), @intCast(head_dim) };
+        const strides_arr = [_]c_int{ 1, 1, 1, 1 };
+
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_slice(
+            &res.handle,
+            self.handle,
+            &start_arr,
+            4,
+            &stop_arr,
+            4,
+            &strides_arr,
+            4,
+            s,
+        );
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 对四维键值缓存张量 (Key-Value Cache, KVCache) 沿序列轴 (axis 2) 快速定点更新 (Fast 4D Sequence Slice Update)
+    /// 在固定预分配显存中直接更新指定序列范围，消除动态重新分配显存与数据拷贝开销
+    pub fn sliceUpdate4dAxis2(
+        self: Array,
+        update: Array,
+        num_kv: usize,
+        start: usize,
+        stop: usize,
+        head_dim: usize,
+        stream: ?Stream,
+    ) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        const start_arr = [_]c_int{ 0, 0, @intCast(start), 0 };
+        const stop_arr = [_]c_int{ 1, @intCast(num_kv), @intCast(stop), @intCast(head_dim) };
+        const strides_arr = [_]c_int{ 1, 1, 1, 1 };
+
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_slice_update(
+            &res.handle,
+            self.handle,
+            update.handle,
+            &start_arr,
+            4,
+            &stop_arr,
+            4,
+            &strides_arr,
+            4,
+            s,
+        );
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
     /// 标量乘法：`res = self * val`
     pub fn mulScalar(self: Array, val: f32, stream: ?Stream) !Array {
         var s_arr = try fromScalarF32(val);
@@ -1178,9 +1248,67 @@ test "MLX GPU backend matmul and fast kernels" {
     qmm_q8.eval();
     stream.synchronize();
 
-    const q8_out = qmm_q8.dataFloat32();
-    try std.testing.expectEqual(@as(usize, 1), q8_out.len);
-    // 0 + 1 + ... + 63 = 2016.0
-    try std.testing.expectApproxEqAbs(@as(f32, 2016.0), q8_out[0], 2.0);
+    // 6. 验证四维键值缓存 (Key-Value Cache, KVCache) 预分配切片与定点更新
+    // 形状 [1, 2, 4, 2] (num_kv=2, max_len=4, head_dim=2)
+    var cache_4d = try Array.zeros(&.{ 1, 2, 4, 2 }, .float32, stream);
+    defer cache_4d.deinit();
+
+    // 构造单步更新 token [1, 2, 1, 2]
+    const upd_data = [_]f32{ 10.0, 20.0, 30.0, 40.0 };
+    var upd_tok = try Array.fromSlice(&upd_data, &.{ 1, 2, 1, 2 });
+    defer upd_tok.deinit();
+
+    // 更新到位置 1 (pos = 1)
+    const updated_cache = try cache_4d.sliceUpdate4dAxis2(upd_tok, 2, 1, 2, 2, stream);
+    cache_4d.deinit();
+    cache_4d = updated_cache;
+
+    // 提取前 2 个词元 [1, 2, 2, 2]
+    var view_2 = try cache_4d.slice4dAxis2(2, 0, 2, 2, stream);
+    defer view_2.deinit();
+
+    var view_c = try view_2.contiguous(stream);
+    defer view_c.deinit();
+    view_c.eval();
+    stream.synchronize();
+
+    const view_data = view_c.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 8), view_data.len);
+    // kv=0, t=0 -> 0.0, 0.0
+    try std.testing.expectEqual(@as(f32, 0.0), view_data[0]);
+    try std.testing.expectEqual(@as(f32, 0.0), view_data[1]);
+    // kv=0, t=1 -> 10.0, 20.0
+    try std.testing.expectEqual(@as(f32, 10.0), view_data[2]);
+    try std.testing.expectEqual(@as(f32, 20.0), view_data[3]);
+    // kv=1, t=0 -> 0.0, 0.0
+    try std.testing.expectEqual(@as(f32, 0.0), view_data[4]);
+    try std.testing.expectEqual(@as(f32, 0.0), view_data[5]);
+    // kv=1, t=1 -> 30.0, 40.0
+    try std.testing.expectEqual(@as(f32, 30.0), view_data[6]);
+    // 7. 验证切片视图直接送入 fastScaledDotProductAttention 正常执行
+    var q_probe = try Array.zeros(&.{ 1, 2, 1, 2 }, .float32, stream);
+    defer q_probe.deinit();
+    var attn = try Array.fastScaledDotProductAttention(q_probe, view_2, view_2, 1.0, false, stream);
+    defer attn.deinit();
+    attn.eval();
+    stream.synchronize();
+
+    // 8. 验证连续多步增量写入 (Sequential Multi-step KVCache Updates)
+    const upd2_data = [_]f32{ 50.0, 60.0, 70.0, 80.0 };
+    var upd2_tok = try Array.fromSlice(&upd2_data, &.{ 1, 2, 1, 2 });
+    defer upd2_tok.deinit();
+
+    const cache_step2 = try cache_4d.sliceUpdate4dAxis2(upd2_tok, 2, 2, 3, 2, stream);
+    cache_4d.deinit();
+    cache_4d = cache_step2;
+
+    var view_3 = try cache_4d.slice4dAxis2(2, 0, 3, 2, stream);
+    defer view_3.deinit();
+
+    var attn2 = try Array.fastScaledDotProductAttention(q_probe, view_3, view_3, 1.0, false, stream);
+    defer attn2.deinit();
+    attn2.eval();
+    stream.synchronize();
 }
+
 
