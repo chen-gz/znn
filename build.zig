@@ -134,6 +134,7 @@ const examples = [_]ExampleTarget{
         .run_desc = "Run the Gemma 4 architecture and 4-bit (Q4) quantized inference example",
         .alias_step = "gemma4",
         .alias_desc = "Run the Gemma 4 architecture and 4-bit (Q4) quantized inference example (alias for run-gemma4)",
+        .forward_args = true,
     },
 };
 

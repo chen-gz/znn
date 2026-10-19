@@ -905,9 +905,27 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             return header_magic_bytes + final_norm_bytes + embed_tokens_bytes + layers_total;
         }
 
+        /// 从 4-bit 量化二进制映射切片加载时的配置选项结构体
+        pub const LoadMmapOptions = struct {
+            lm_head_mode: backend.offload.QuantMode = .bf16,
+
+            pub fn defaultOptions() LoadMmapOptions {
+                return .{};
+            }
+        };
+
         /// 从 4-bit 量化二进制映射切片 (mmap_bytes) 零拷贝加载全部 48 层权重与层归一化参数
         /// 遵循魔数规范 ZNNQ4G02（无向后兼容旧格式分支）
         pub fn loadFromMmap(allocator: std.mem.Allocator, mmap_bytes: []const u8) !Self {
+            return loadFromMmapWithOptions(allocator, mmap_bytes, .{});
+        }
+
+        /// 支持自定义选项从 4-bit 量化二进制映射切片 (mmap_bytes) 零拷贝加载全部 48 层权重与层归一化参数
+        pub fn loadFromMmapWithOptions(
+            allocator: std.mem.Allocator,
+            mmap_bytes: []const u8,
+            options: LoadMmapOptions,
+        ) !Self {
             if (mmap_bytes.len < 8 or !std.mem.eql(u8, mmap_bytes[0..8], "ZNNQ4G02")) {
                 return error.InvalidModelSignature;
             }
@@ -1007,7 +1025,13 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             ));
             var lm_head_weights: ?backend.offload.LmHeadWeights = null;
             if (backend.offload.isAvailable()) {
-                lm_head_weights = backend.offload.LmHeadWeights.init(embed_u16_slice, config.vocab_size, config.hidden_size, null) catch null;
+                lm_head_weights = backend.offload.LmHeadWeights.initWithMode(
+                    embed_u16_slice,
+                    config.vocab_size,
+                    config.hidden_size,
+                    options.lm_head_mode,
+                    null,
+                ) catch null;
             }
 
             var res = Self{

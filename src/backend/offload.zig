@@ -143,15 +143,16 @@ pub fn softmax(
     try res_mlx.copyToTensor(out);
 }
 
+pub const QuantMode = enum {
+    bf16,
+    q8,
+    q4,
+};
+
 /// 语言模型输出头权重与采样加速器 (Language Model Head Accelerator, LM Head Accelerator)
 /// 预先将巨型词表嵌入矩阵 (如 Gemma 4 的 262,144 维词表) 在 GPU 显存中转置常驻，
 /// 自回归解码每一步仅需下发单步输入向量 [1, hidden_size]，利用统一内存实现 5~10 ms 极速词表打分与采样。
 pub const LmHeadWeights = struct {
-    pub const QuantMode = enum {
-        bf16,
-        q8,
-        q4,
-    };
 
     w_t: ?mlx.Array = null,
     w_q: ?mlx.Array = null,
