@@ -225,6 +225,22 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
             try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
             try std.testing.expect(next_2 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
 
+            // 验证在 Apple MLX GPU 硬件加速模式下的预填充与增量解码等价性
+            if (backend.offload.isAvailable()) {
+                cache.reset();
+                var g_gpu_prefill = autodiff.Graph.init(allocator, .{ .device = .gpu });
+                defer g_gpu_prefill.deinit();
+
+                const next_gpu_1 = try mmap_model.prefill(&g_gpu_prefill, &prompt, &cache, mock_mmap, 1.0);
+                try std.testing.expectEqual(next_1, next_gpu_1);
+
+                var g_gpu_decode = autodiff.Graph.init(allocator, .{ .device = .gpu });
+                defer g_gpu_decode.deinit();
+
+                const next_gpu_2 = try mmap_model.decodeStep(&g_gpu_decode, next_gpu_1, &cache, mock_mmap, &prompt, 1.0);
+                try std.testing.expectEqual(next_2, next_gpu_2);
+            }
+
             cache.reset();
             try std.testing.expectEqual(@as(usize, 0), cache.layers[0].curr_len);
         }

@@ -455,24 +455,9 @@ pub fn softmax(self: *Graph, A: *Tensor) !*Tensor {
 
 pub fn rmsNorm(self: *Graph, X: *Tensor, G: *Tensor, eps: f32) !*Tensor {
     const allocator = self.arena.allocator();
-    if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad) {
-        var x_mlx = try X.toMlxArrayZeroCopy();
-        defer x_mlx.deinit();
-        const D = X.shape.dims[X.shape.len - 1];
-        var g_shape = [_]usize{D};
-        var g_mlx = try backend.mlx.Array.fromSliceZeroCopy(G.data[0..D], &g_shape);
-        defer g_mlx.deinit();
-
-        var out_mlx = try backend.mlx.Array.fastRmsNorm(
-            x_mlx,
-            g_mlx,
-            eps,
-            self.options.mlx_stream,
-        );
-        defer out_mlx.deinit();
-
+    if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
         const Y = try self.tensorND(X.shape.dims[0..X.shape.len], false);
-        try out_mlx.copyToSlice(Y.data);
+        try backend.offload.rmsNorm(X, G, Y, eps, self.options.mlx_stream);
         return Y;
     }
 
@@ -664,26 +649,12 @@ pub fn dropout(self: *Graph, X: *Tensor, p: f32, random: std.Random) !*Tensor {
 }
 
 pub fn rope(self: *Graph, X: *Tensor, start_pos: usize, options: tensor_mod.RopeOptions) !*Tensor {
-    if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad and options.rotary_offset == 0 and options.partial_rotary_factor == 1.0) {
+    if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad and options.rotary_offset == 0 and options.partial_rotary_factor == 1.0) {
         const D = X.shape.dims[X.shape.len - 1];
         if (D % 2 == 0) {
-            var x_mlx = try X.toMlxArrayZeroCopy();
-            defer x_mlx.deinit();
-
             const traditional = (options.mode == .interleaved);
-            var y_mlx = try backend.mlx.Array.fastRoPE(
-                x_mlx,
-                D,
-                traditional,
-                options.base,
-                1.0,
-                start_pos,
-                self.options.mlx_stream,
-            );
-            defer y_mlx.deinit();
-
             const Y = try self.tensorND(X.shape.dims[0..X.shape.len], false);
-            try y_mlx.copyToSlice(Y.data);
+            try backend.offload.rope(X, Y, D, traditional, options.base, 1.0, start_pos, self.options.mlx_stream);
             return Y;
         }
     }
@@ -707,15 +678,7 @@ pub fn rope(self: *Graph, X: *Tensor, start_pos: usize, options: tensor_mod.Rope
 
 pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
     const allocator = self.arena.allocator();
-    if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad) {
-        var a_mlx = try A.toMlxArrayZeroCopy();
-        defer a_mlx.deinit();
-        var b_mlx = try B.toMlxArrayZeroCopy();
-        defer b_mlx.deinit();
-
-        var c_mlx = try backend.mlx.Array.matmul(a_mlx, b_mlx, self.options.mlx_stream);
-        defer c_mlx.deinit();
-
+    if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
         const ndim = A.shape.len;
         var out_shape: [8]usize = undefined;
         for (0..ndim - 2) |i| {
@@ -725,7 +688,7 @@ pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         out_shape[ndim - 1] = B.shape.dims[B.shape.len - 1];
 
         const C = try self.tensorND(out_shape[0..ndim], false);
-        try c_mlx.copyToSlice(C.data);
+        try backend.offload.matmul(A, B, C, self.options.mlx_stream);
         return C;
     }
 
@@ -750,30 +713,13 @@ pub fn scaledDotProductAttention(
     scale: f32,
     is_causal: bool,
 ) !*Tensor {
-    if (self.options.device == .gpu and backend.mlx.has_mlx and !self.enable_grad) {
-        var q_mlx = try q.toMlxArray();
-        defer q_mlx.deinit();
-        var k_mlx = try k.toMlxArray();
-        defer k_mlx.deinit();
-        var v_mlx = try v.toMlxArray();
-        defer v_mlx.deinit();
-
-        var out_mlx = try backend.mlx.Array.fastScaledDotProductAttention(
-            q_mlx,
-            k_mlx,
-            v_mlx,
-            scale,
-            is_causal,
-            self.options.mlx_stream,
-        );
-        defer out_mlx.deinit();
-
+    if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
         const B = q.shape.dims[0];
         const H = q.shape.dims[1];
         const T = q.shape.dims[2];
         const d_v = v.shape.dims[3];
         const out_tensor = try self.tensorND(&.{ B, H, T, d_v }, false);
-        try out_mlx.copyToSlice(out_tensor.data);
+        try backend.offload.scaledDotProductAttention(q, k, v, out_tensor, scale, is_causal, self.options.mlx_stream);
         return out_tensor;
     }
 
