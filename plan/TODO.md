@@ -26,10 +26,14 @@
 > 📐 **专项设计**：详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)（Apple Silicon Metal 优先；并发经 `io: std.Io` 注入；`eager` / `deferred` 双模式；按流有序命令队列；Phase 0–5 路线图），对应任务见第二部分 2.4 与 2.5。
 * **缺少 GPU 加速后端**：
   所有前向计算与反向梯度求解均在 CPU 上执行。首要目标为 Apple Silicon Metal（统一内存零拷贝），CUDA / Vulkan / WebGPU 不在近期范围内。
-* **跨平台系统级 BLAS 链接选项**：
-  macOS 上通过 `@extern` 与构建期 `linkFramework("Accelerate")` 调用 Accelerate，由其调度 AMX 协处理器 ([`cblas.zig`](../src/cblas.zig))；Linux/Windows 上使用单线程纯 Zig 8 路 `@Vector(8, f32)` SIMD 后备内核，既没有寄存器/缓存分块微内核，也未在 `build.zig` 中提供链接系统 OpenBLAS、BLIS 或 Intel MKL 的配置选项。
-* **多核并行度不足**：
-  逐元素算子、Softmax、Conv2D、RMSNorm、LayerNorm 与 Linux 上的 GEMM 后备内核均为单线程；Gemma 4 的 [`Q4Linear.forward`](../src/models/gemma4.zig) 与 LM head argmax 每次调用都临时 spawn 8 个 OS 线程（128 核 Linux 虚拟机实测约 1.9 ms/次，常驻线程池派发约 32 µs/次），且线程数写死为 8。Zig 0.16 已移除 `std.Thread.Pool`，并发原语迁移至 `std.Io`，需经 `io: std.Io` 注入执行器。
+* **跨平台系统级 BLAS 链接选项与 Linux Fallback GEMM 瓶颈**：
+  macOS 上通过 `@extern` 与构建期 `linkFramework("Accelerate")` 调用 Accelerate，由其调度 AMX 协处理器 ([`src/backend/cblas.zig`](../src/backend/cblas.zig))；Linux/Windows 上使用单线程纯 Zig 8 路 `@Vector(8, f32)` SIMD 后备内核（`cblas_sgemm_fallback`，实测约 32~34 GFLOPS），既没有 L1/L2/L3 寄存器与缓存分块微内核（Register/Cache Blocking），也未接入 `Executor` 多线程并行或提供 `build.zig` 链接系统 OpenBLAS / BLIS / Intel MKL 的配置选项。
+* **多核并行度与超越激活函数标量瓶颈**：
+  逐元素算子、Softmax、Conv2D、RMSNorm、LayerNorm 与 Linux 上的 GEMM 后备内核均为单线程；特别是超越激活函数 [`GELU`](../src/tensor/nn_kernels.zig)（逐元素调用 `erff(x)`，实测仅 `0.62 GB/s`）与 [`SiLU`](../src/tensor/nn_kernels.zig) / [`Sigmoid`](../src/tensor/nn_kernels.zig)（逐元素调用 `@exp(-x)`，实测仅 `0.47 GB/s`）因标量 `libm` 调用阻碍了编译器 AVX2/NEON 向量化，吞吐比向量化 `Add`/`ReLU`（`8.4 ~ 11.6 GB/s`）慢近 20 倍，成为 Gemma 4 GeGLU MLP 层的显著 CPU 算力瓶颈。
+* **小模型 L3 Cache 容量效应与 Q4 单步 Decode 反量化开销**：
+  在 `Prefill` 多行批处理阶段（如 `T=16`），[`q4MatMulInto`](../src/tensor/quant.zig) 借助 `row_tile = 8` 将每个 `Q4Block` 解包一次复用于 8 行输入（实测 `66.44 GFLOPS`，`Gemma4Q4-6L Prefill` 达 `1648.8 tokens/s`，比 F32 的 `1097.1 tokens/s` 快 50%）；但在单步自回归 `DecodeStep`（`T=1` GEMV）且模型体积可完全放入 CPU L3 Cache（如 `Gemma4-6L` 约 24 MB）时，内存带宽不再是瓶颈，每 32 个权重执行一次半字节掩码/移位/`u8->f32` 解包且仅使用 1 次即丢弃的指令开销，使得小模型 Q4 单步 Decode（`390.9 tokens/s`）略低于直接做 FMA 的 F32（`484.0 tokens/s`）。需引入 AVX2/NEON 专用 `int8`/`int4` 整数点积（如 `_mm256_maddubs_epi16` / `vdotq_s32`）与激活量化（`Q8_0`）以消除逐块浮点转换开销。
+* **CPU 增量解码中间张量分配与拷贝开销**：
+  CPU 路径下的 [`Gemma4Q4ForCausalLM.decodeStep`](../src/models/gemma4_q4.zig) 与 [`Gemma4ForCausalLM.decodeStep`](../src/models/gemma4.zig) 在每步生成时仍为各层动态创建临时 `Tensor` 视图并执行 `contiguous()` 转置与拼接拷贝，尚待引入预分配固定形状的层间推理工作区（Scratchpad Buffer）与原位算子以消除中间缓冲分配和内存搬运。
 
 ### 4. 网络架构与现代 LLM 特性完备度 (Model Architectures & Operators)
 * **注意力机制 FlashAttention 与端到端 GPT / Gemma 4 KV-Cache 推理**：
@@ -164,11 +168,13 @@
   - [ ] 引入 Cholesky 分解 ($A = LL^T$) 与前代/回代求解器，替代线性回归/岭回归中现有的高斯-若尔当消元法 [`solveLinearSystem`](../src/tensor/ops.zig)。
   - [x] 增加 QR 分解 (`Tensor.qr`)、奇异值分解 (`Tensor.svd`) 与实对称特征值分解 (`Tensor.symeig`) 支持，提升病态矩阵求解稳定性。
 
-- [ ] **2.4 多核 CPU 并行化 (Multi-Threading，详见设计 Phase 0 / 1 / 5)**
+- [ ] **2.4 多核 CPU 并行化与 SIMD 算子优化 (Multi-Threading & SIMD Kernel Optimization，详见设计 Phase 0 / 1 / 5)**
   - [x] 基于 `std.Io`（应用创建 `std.Io.Threaded`，库内使用 `Io.Group`）实现固定粒度分块的确定性执行器 `parallelFor` / `parallelReduce`，经 `GraphOptions.io` 注入（Phase 0）。
   - [x] 用执行器替换 [`Q4Linear.forward`](../src/models/gemma4_q4.zig) 与 Gemma 4 LM head argmax 中每次调用临时 spawn 线程的实现（Phase 0）。
+  - [ ] **超越激活函数 `@Vector(8, f32)` 向量化 (`tensor/nn_kernels.zig`)**：使用高精度多项式/有理函数近似（Pade / `tanh` 近似与快速向量化 `exp`）重写 [`GELU`](../src/tensor/nn_kernels.zig)（当前标量 `erff` 仅 `0.62 GB/s`）、[`SiLU`](../src/tensor/nn_kernels.zig)（当前 `0.47 GB/s`）与 [`Sigmoid`](../src/tensor/nn_kernels.zig)（当前 `0.48 GB/s`），消除逐元素标量 `libm` 调用瓶颈。
+  - [ ] **Q4 单步 GEMV 激活量化 (`Q4_0 x Q8_0`) 与整数 SIMD 点积 (`tensor/quant.zig`)**：针对 `T=1` 单步自回归解码（`DecodeStep`）引入输入激活的在线 `int8` 块量化（`Q8_0`），配合 x86 AVX2 / ARM NEON 整数乘加内积指令消除逐块 `u8 -> f32` 解包转换开销。
   - [ ] 将 `Softmax`、`LayerNorm`、`RMSNorm`、`RoPE`、`Conv2D` 及大张量逐元素算子改写为按行/按块并行（Phase 1，随 DPS 内核改造）。
-  - [ ] Linux GEMM 寄存器/缓存分块微内核与多线程（Phase 5）。
+  - [ ] **Linux Fallback GEMM 寄存器/缓存分块微内核与多线程 (`backend/cblas.zig`)**：为 [`cblas_sgemm_fallback`](../src/backend/cblas.zig) 引入 L1/L2 Cache 二维分块（Tiling）、8×8 寄存器微内核与 `Executor.parallelFor` 多核并行（Phase 5）。
 
 - [x] **2.5 Apple Silicon Metal / MLX 硬件加速与端到端 GPU 增量解码（详见 [`ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)）**
   - [x] **Phase 0 执行器与基线**：`GraphOptions` 与 `Graph.init(backing, options)` / `Graph.initDefault`（删除 `initNoGrad` 并完成全库迁移）；拆分 `src/models/gemma4.zig` 为 `src/tensor/quant.zig` 与 `src/models/gemma4_q4.zig`（保持模块边界清晰）；`Q4Block` 与内核下沉为 `src/tensor/quant.zig` 并新增 `Q4MatMul` 算子；Q4 块内 split-half 排布与文件魔数 `ZNNQ4G02`（128 核 Linux 虚拟机、3840×15360：单线程 19.7 ms → 约 11.6 ms，经 `Graph.q4MatMul` 用满全部核心约 0.9 ms）；Q4 矩阵乘按（8 行 × 128 列）二维分块并复用已解包的权重块；`src/cblas.zig` 迁入 `src/backend/` 并更新分层检查；新增 `executor` / `q4` / `decode` 基准。
@@ -258,6 +264,7 @@
   - [ ] 激活重计算（Activation / Gradient Checkpointing）：前向释放中间激活，反向时重算，以计算换显存。
   - [x] 无梯度模式 (`Graph.initNoGrad`) 下不为中间张量分配 `grad` 缓冲（`tensorND`、`registerSingleOutputOp` 与张量层构造函数仅在需要梯度时分配）。
   - [ ] 消除 `op.forward` 与 `runAndRecordPreallocatedOp` 中 `copyFromEager` 的临时堆分配与输出预清零（并入设计 Phase 1 的 DPS 内核改造）。
+  - [ ] **CPU 增量解码预分配工作区（Decode Scratchpad Buffer）**：在 [`Gemma4Q4ForCausalLM`](../src/models/gemma4_q4.zig) 与 [`Gemma4ForCausalLM`](../src/models/gemma4.zig) 的 CPU `decodeStep` 中复用固定形状的层间激活缓冲（`q/k/v`、注意力分数、GeGLU MLP 中间态），消除每步逐层的临时 `Tensor` 分配与 `contiguous()` 拷贝。
   - [ ] 基于计算图生命周期分析的激活缓冲区复用（deferred 模式静态内存规划，设计 Phase 1）。
   - [ ] 将 [`StaticTensor`](../src/tensor/static.zig) 融入动态计算图，得到零分配、编译期校验形状的子图。
 
