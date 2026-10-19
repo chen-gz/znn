@@ -975,11 +975,17 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
                 ));
                 lm_head_weights = backend.offload.LmHeadWeights.init(embed_u16_slice, config.vocab_size, config.hidden_size, null) catch null;
+            }
 
-                for (layers) |*layer| {
-                    layer.enableHardwareOffload(allocator) catch {};
-                }
+            var res = Self{
+                .embed_tokens = embed_tokens,
+                .layers = layers,
+                .norm = norm,
+                .lm_head_weights = lm_head_weights,
+            };
+            res.initGpuContext(allocator) catch {};
 
+            if (backend.offload.isAvailable() and res.gpu_context != null) {
                 // 通知操作系统内核丢弃已卸载至 GPU 显存的 4-bit 权重文件页缓存，防止 7.59 GB 物理内存重复驻留造成 macOS Swap 严重换页
                 const q4_weights_start = 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2;
                 const page_size: usize = 16384;
@@ -991,13 +997,6 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 }
             }
 
-            var res = Self{
-                .embed_tokens = embed_tokens,
-                .layers = layers,
-                .norm = norm,
-                .lm_head_weights = lm_head_weights,
-            };
-            res.initGpuContext(allocator) catch {};
             return res;
         }
 
@@ -1006,26 +1005,41 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             if (!backend.offload.isAvailable() or self.lm_head_weights == null) return;
 
             const gpu_layers = try allocator.alloc(backend.offload.GpuLayerWeights, self.layers.len);
-            defer allocator.free(gpu_layers);
+            var init_idx: usize = 0;
+            errdefer {
+                for (0..init_idx) |idx| {
+                    gpu_layers[idx].deinit();
+                }
+                allocator.free(gpu_layers);
+            }
 
             for (self.layers, 0..) |*layer, i| {
-                const q_qw = &(layer.self_attn.q_proj.q4_weights orelse return);
-                const k_qw = &(layer.self_attn.k_proj.q4_weights orelse return);
-                const v_qw = if (layer.self_attn.v_proj) |*vp| (if (vp.q4_weights) |*w| w else null) else null;
-                const o_qw = &(layer.self_attn.o_proj.q4_weights orelse return);
-                const gate_qw = &(layer.mlp.gate_proj.q4_weights orelse return);
-                const up_qw = &(layer.mlp.up_proj.q4_weights orelse return);
-                const down_qw = &(layer.mlp.down_proj.q4_weights orelse return);
-                const hd = layer.self_attn.head_dim;
+                const is_full = (layer.self_attn.attn_type == .full_attention);
+                const q_bytes = std.mem.sliceAsBytes(layer.self_attn.q_proj.blocks);
+                const k_bytes = std.mem.sliceAsBytes(layer.self_attn.k_proj.blocks);
+                const v_bytes = if (!is_full) std.mem.sliceAsBytes(layer.self_attn.v_proj.?.blocks) else null;
+                const o_bytes = std.mem.sliceAsBytes(layer.self_attn.o_proj.blocks);
+                const gate_bytes = std.mem.sliceAsBytes(layer.mlp.gate_proj.blocks);
+                const up_bytes = std.mem.sliceAsBytes(layer.mlp.up_proj.blocks);
+                const down_bytes = std.mem.sliceAsBytes(layer.mlp.down_proj.blocks);
 
-                gpu_layers[i] = try backend.offload.GpuLayerWeights.init(
-                    q_qw,
-                    k_qw,
-                    v_qw,
-                    o_qw,
-                    gate_qw,
-                    up_qw,
-                    down_qw,
+                const hd = layer.self_attn.head_dim;
+                const q_dim = layer.self_attn.num_heads * hd;
+                const kv_dim = layer.self_attn.num_kv_heads * hd;
+
+                gpu_layers[i] = try backend.offload.GpuLayerWeights.initFromBlocks(
+                    allocator,
+                    q_bytes,
+                    k_bytes,
+                    v_bytes,
+                    o_bytes,
+                    gate_bytes,
+                    up_bytes,
+                    down_bytes,
+                    config.hidden_size,
+                    config.intermediate_size,
+                    q_dim,
+                    kv_dim,
                     layer.input_layernorm.weight.data,
                     layer.self_attn.q_norm.weight.data[0..hd],
                     layer.self_attn.k_norm.weight.data[0..hd],
@@ -1033,7 +1047,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     layer.pre_feedforward_layernorm.weight.data,
                     layer.post_feedforward_layernorm.weight.data,
                     layer.layer_scalar.data[0],
-                    if (layer.self_attn.attn_type == .full_attention) 1 else 0,
+                    if (is_full) 1 else 0,
                     layer.self_attn.sliding_window,
                     layer.self_attn.num_heads,
                     layer.self_attn.num_kv_heads,
@@ -1041,7 +1055,9 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     layer.self_attn.rope_theta,
                     layer.self_attn.partial_rotary_factor,
                     config.rms_norm_eps,
+                    null,
                 );
+                init_idx += 1;
             }
 
             self.gpu_context = try backend.offload.GpuModelContext.init(
@@ -1060,15 +1076,6 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         /// 为全模型所有 4-bit 量化层启用图形处理器 (Graphics Processing Unit, GPU) 硬件加速卸载
         pub fn enableHardwareOffload(self: *Self, allocator: std.mem.Allocator) !void {
             if (!backend.offload.isAvailable()) return;
-            for (self.layers) |*layer| {
-                try layer.self_attn.q_proj.enableOffload(allocator, null);
-                try layer.self_attn.k_proj.enableOffload(allocator, null);
-                if (layer.self_attn.v_proj) |*vp| try vp.enableOffload(allocator, null);
-                try layer.self_attn.o_proj.enableOffload(allocator, null);
-                try layer.mlp.gate_proj.enableOffload(allocator, null);
-                try layer.mlp.up_proj.enableOffload(allocator, null);
-                try layer.mlp.down_proj.enableOffload(allocator, null);
-            }
             try self.initGpuContext(allocator);
         }
 

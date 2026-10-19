@@ -177,6 +177,16 @@ pub const LmHeadWeights = struct {
         self.w_t.deinit();
     }
 
+    /// 执行 GPU 词表打分投影计算图调度：[..., hidden_size] -> [..., vocab_size]
+    pub fn forwardArray(self: LmHeadWeights, x: mlx.Array, stream: ?Stream) OffloadError!mlx.Array {
+        if (!isAvailable()) return error.OffloadNotSupported;
+        var x_bf16 = try x.astype(.bfloat16, stream);
+        defer x_bf16.deinit();
+        var logits_bf16 = try mlx.Array.matmul(x_bf16, self.w_t, stream);
+        defer logits_bf16.deinit();
+        return logits_bf16.astype(.float32, stream);
+    }
+
     /// 执行单步词表投影并贪婪采样最佳词元 ID
     pub fn sampleNext(
         self: LmHeadWeights,
@@ -188,18 +198,10 @@ pub const LmHeadWeights = struct {
         if (!isAvailable()) return error.OffloadNotSupported;
         if (h_last.len != self.hidden_size) return error.ShapeMismatch;
 
-        // 1. 创建单行隐状态向量 [1, hidden_size] 并快速转为 bfloat16，避免 MLX 在 Metal GEMV 内部将 2 GB 的词表矩阵全量上采样至 float32！
-        var x_vec_f32 = try mlx.Array.fromSlice(h_last, &.{ 1, self.hidden_size });
-        defer x_vec_f32.deinit();
-        var x_vec = try x_vec_f32.astype(.bfloat16, stream);
+        var x_vec = try mlx.Array.fromSlice(h_last, &.{ 1, self.hidden_size });
         defer x_vec.deinit();
 
-        // 2. GPU 矩阵乘法：[1, hidden_size] (bf16) @ [hidden_size, vocab_size] (bf16) -> [1, vocab_size] (bf16)
-        var logits_bf16 = try mlx.Array.matmul(x_vec, self.w_t, stream);
-        defer logits_bf16.deinit();
-
-        // 快速转回 float32 供 CPU 快速去重与贪婪采样 (仅 262K 数值，512 KB，< 0.05 ms)
-        var logits = try logits_bf16.astype(.float32, stream);
+        var logits = try self.forwardArray(x_vec, stream);
         defer logits.deinit();
         logits.eval();
 
@@ -268,18 +270,27 @@ pub const Q4Weights = struct {
     in_features: usize,
     out_features: usize,
 
-    /// 从原始 Q4Block 切片 (18 字节/块) 构建 GPU 硬件加速量化权重矩阵
-    pub fn initFromBlocks(
+    /// 从多个 Q4Block 权重切片直接沿输出维度 (axis 0) 串联构建融合 GPU 硬件加速量化权重矩阵 (Fused Q4Weights)
+    /// 例如：同时传入 gate_proj 与 up_proj 的切片，直接构建单一大矩阵 [gate_out + up_out, in_features]
+    pub fn initFromBlockSlices(
         allocator: std.mem.Allocator,
-        blocks_bytes: []const u8,
+        block_slices: []const []const u8,
         in_features: usize,
-        out_features: usize,
+        out_features_list: []const usize,
         stream: ?Stream,
     ) OffloadError!Q4Weights {
         if (!isAvailable()) return error.OffloadNotSupported;
+        if (block_slices.len != out_features_list.len or block_slices.len == 0) return error.ShapeMismatch;
+
         const blocks_per_row = in_features / 32;
-        const total_blocks = out_features * blocks_per_row;
-        if (blocks_bytes.len < total_blocks * 18) return error.ShapeMismatch;
+        var total_out_features: usize = 0;
+        var total_blocks: usize = 0;
+        for (out_features_list, 0..) |out_f, i| {
+            const expected_bytes = out_f * blocks_per_row * 18;
+            if (block_slices[i].len < expected_bytes) return error.ShapeMismatch;
+            total_out_features += out_f;
+            total_blocks += out_f * blocks_per_row;
+        }
 
         const w_q_buf = try allocator.alloc(u32, total_blocks * 4);
         defer allocator.free(w_q_buf);
@@ -288,36 +299,42 @@ pub const Q4Weights = struct {
         const biases_buf = try allocator.alloc(f16, total_blocks);
         defer allocator.free(biases_buf);
 
-        for (0..total_blocks) |blk_idx| {
-            const raw = blocks_bytes[blk_idx * 18 .. (blk_idx + 1) * 18];
-            const scale_bits = std.mem.readInt(u16, raw[0..2][0..2], .little);
-            const scale_f16: f16 = @bitCast(scale_bits);
-            const scale_f32: f32 = @floatCast(scale_f16);
-            const bias_f16: f16 = @floatCast(-8.0 * scale_f32);
+        var global_blk_idx: usize = 0;
+        for (block_slices, 0..) |slice, s_idx| {
+            const slice_blocks = out_features_list[s_idx] * blocks_per_row;
+            for (0..slice_blocks) |b_idx| {
+                const raw = slice[b_idx * 18 .. (b_idx + 1) * 18];
+                const scale_bits = std.mem.readInt(u16, raw[0..2][0..2], .little);
+                const scale_f16: f16 = @bitCast(scale_bits);
+                const scale_f32: f32 = @floatCast(scale_f16);
+                const bias_f16: f16 = @floatCast(-8.0 * scale_f32);
 
-            scales_buf[blk_idx] = scale_f16;
-            biases_buf[blk_idx] = bias_f16;
+                scales_buf[global_blk_idx] = scale_f16;
+                biases_buf[global_blk_idx] = bias_f16;
 
-            const qs = raw[2..18];
-            var w0: u32 = 0;
-            var w1: u32 = 0;
-            var w2: u32 = 0;
-            var w3: u32 = 0;
-            for (0..8) |j| {
-                const shift: u5 = @intCast(j * 4);
-                w0 |= @as(u32, qs[j] & 0x0F) << shift;
-                w1 |= @as(u32, qs[j + 8] & 0x0F) << shift;
-                w2 |= @as(u32, qs[j] >> 4) << shift;
-                w3 |= @as(u32, qs[j + 8] >> 4) << shift;
+                const qs = raw[2..18];
+                var w0: u32 = 0;
+                var w1: u32 = 0;
+                var w2: u32 = 0;
+                var w3: u32 = 0;
+                for (0..8) |j| {
+                    const shift: u5 = @intCast(j * 4);
+                    w0 |= @as(u32, qs[j] & 0x0F) << shift;
+                    w1 |= @as(u32, qs[j + 8] & 0x0F) << shift;
+                    w2 |= @as(u32, qs[j] >> 4) << shift;
+                    w3 |= @as(u32, qs[j + 8] >> 4) << shift;
+                }
+                w_q_buf[global_blk_idx * 4 + 0] = w0;
+                w_q_buf[global_blk_idx * 4 + 1] = w1;
+                w_q_buf[global_blk_idx * 4 + 2] = w2;
+                w_q_buf[global_blk_idx * 4 + 3] = w3;
+
+                global_blk_idx += 1;
             }
-            w_q_buf[blk_idx * 4 + 0] = w0;
-            w_q_buf[blk_idx * 4 + 1] = w1;
-            w_q_buf[blk_idx * 4 + 2] = w2;
-            w_q_buf[blk_idx * 4 + 3] = w3;
         }
 
-        const w_shape = [_]c_int{ @intCast(out_features), @intCast(in_features / 8) };
-        const sb_shape = [_]c_int{ @intCast(out_features), @intCast(in_features / 32) };
+        const w_shape = [_]c_int{ @intCast(total_out_features), @intCast(in_features / 8) };
+        const sb_shape = [_]c_int{ @intCast(total_out_features), @intCast(in_features / 32) };
 
         const w_arr = mlx.c.mlx_array_new_data(@ptrCast(w_q_buf.ptr), &w_shape, 2, @intFromEnum(mlx.DType.uint32));
         var w_q = mlx.Array{ .handle = w_arr };
@@ -336,8 +353,25 @@ pub const Q4Weights = struct {
             .scales = scales,
             .biases = biases,
             .in_features = in_features,
-            .out_features = out_features,
+            .out_features = total_out_features,
         };
+    }
+
+    /// 从单个原始 Q4Block 切片 (18 字节/块) 构建 GPU 硬件加速量化权重矩阵
+    pub fn initFromBlocks(
+        allocator: std.mem.Allocator,
+        blocks_bytes: []const u8,
+        in_features: usize,
+        out_features: usize,
+        stream: ?Stream,
+    ) OffloadError!Q4Weights {
+        return initFromBlockSlices(
+            allocator,
+            &.{blocks_bytes},
+            in_features,
+            &.{out_features},
+            stream,
+        );
     }
 
     /// 释放图形处理器 (Graphics Processing Unit, GPU) 权重资源
@@ -506,13 +540,17 @@ pub fn q4MatMul(
 
 /// 图形处理器 (Graphics Processing Unit, GPU) 加速解码单个 Transformer 层的常驻权重与超参数
 pub const GpuLayerWeights = struct {
-    q_proj: *const Q4Weights,
-    k_proj: *const Q4Weights,
-    v_proj: ?*const Q4Weights,
-    o_proj: *const Q4Weights,
-    gate_proj: *const Q4Weights,
-    up_proj: *const Q4Weights,
-    down_proj: *const Q4Weights,
+    fused_qkv: Q4Weights,
+    o_proj: Q4Weights,
+    fused_gate_up: Q4Weights,
+    down_proj: Q4Weights,
+
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+    intermediate_size: usize,
+    rot_dim: usize,
+    attn_dim: usize,
 
     input_norm_w: mlx.Array,
     q_norm_w: mlx.Array,
@@ -531,14 +569,19 @@ pub const GpuLayerWeights = struct {
     partial_rotary_factor: f32,
     rms_norm_eps: f32,
 
-    pub fn init(
-        q_proj: *const Q4Weights,
-        k_proj: *const Q4Weights,
-        v_proj: ?*const Q4Weights,
-        o_proj: *const Q4Weights,
-        gate_proj: *const Q4Weights,
-        up_proj: *const Q4Weights,
-        down_proj: *const Q4Weights,
+    pub fn initFromBlocks(
+        allocator: std.mem.Allocator,
+        q_bytes: []const u8,
+        k_bytes: []const u8,
+        v_bytes: ?[]const u8,
+        o_bytes: []const u8,
+        gate_bytes: []const u8,
+        up_bytes: []const u8,
+        down_bytes: []const u8,
+        hidden_size: usize,
+        intermediate_size: usize,
+        q_dim: usize,
+        kv_dim: usize,
         in_w_data: []const f32,
         qn_w_data: []const f32,
         kn_w_data: []const f32,
@@ -554,6 +597,7 @@ pub const GpuLayerWeights = struct {
         rope_theta: f32,
         partial_rotary_factor: f32,
         rms_norm_eps: f32,
+        stream: ?Stream,
     ) !GpuLayerWeights {
         var in_w = try mlx.Array.fromSlice(in_w_data, &.{in_w_data.len});
         in_w.eval();
@@ -568,14 +612,62 @@ pub const GpuLayerWeights = struct {
         var pom_w = try mlx.Array.fromSlice(pom_w_data, &.{pom_w_data.len});
         pom_w.eval();
 
+        const v_dim = if (v_bytes != null) kv_dim else 0;
+        const fused_qkv = if (v_bytes) |vb|
+            try Q4Weights.initFromBlockSlices(
+                allocator,
+                &.{ q_bytes, k_bytes, vb },
+                hidden_size,
+                &.{ q_dim, kv_dim, kv_dim },
+                stream,
+            )
+        else
+            try Q4Weights.initFromBlockSlices(
+                allocator,
+                &.{ q_bytes, k_bytes },
+                hidden_size,
+                &.{ q_dim, kv_dim },
+                stream,
+            );
+
+        const o_proj = try Q4Weights.initFromBlocks(
+            allocator,
+            o_bytes,
+            q_dim,
+            hidden_size,
+            stream,
+        );
+
+        const fused_gate_up = try Q4Weights.initFromBlockSlices(
+            allocator,
+            &.{ gate_bytes, up_bytes },
+            hidden_size,
+            &.{ intermediate_size, intermediate_size },
+            stream,
+        );
+
+        const down_proj = try Q4Weights.initFromBlocks(
+            allocator,
+            down_bytes,
+            intermediate_size,
+            hidden_size,
+            stream,
+        );
+
+        const rot_dim = @as(usize, @intFromFloat(@as(f32, @floatFromInt(head_dim)) * partial_rotary_factor));
+        const attn_dim = num_heads * head_dim;
+
         return .{
-            .q_proj = q_proj,
-            .k_proj = k_proj,
-            .v_proj = v_proj,
+            .fused_qkv = fused_qkv,
             .o_proj = o_proj,
-            .gate_proj = gate_proj,
-            .up_proj = up_proj,
+            .fused_gate_up = fused_gate_up,
             .down_proj = down_proj,
+            .q_dim = q_dim,
+            .k_dim = kv_dim,
+            .v_dim = v_dim,
+            .intermediate_size = intermediate_size,
+            .rot_dim = rot_dim,
+            .attn_dim = attn_dim,
             .input_norm_w = in_w,
             .q_norm_w = qn_w,
             .k_norm_w = kn_w,
@@ -595,6 +687,10 @@ pub const GpuLayerWeights = struct {
     }
 
     pub fn deinit(self: *GpuLayerWeights) void {
+        self.fused_qkv.deinit();
+        self.o_proj.deinit();
+        self.fused_gate_up.deinit();
+        self.down_proj.deinit();
         self.input_norm_w.deinit();
         self.q_norm_w.deinit();
         self.k_norm_w.deinit();
@@ -626,7 +722,7 @@ pub const GpuModelContext = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        layers: []const GpuLayerWeights,
+        layers: []GpuLayerWeights,
         final_norm_data: []const f32,
         final_eps: f32,
         lm_head: LmHeadWeights,
@@ -635,9 +731,6 @@ pub const GpuModelContext = struct {
         max_seq_len: usize,
     ) !GpuModelContext {
         if (!isAvailable()) return error.OffloadNotSupported;
-
-        const stored_layers = try allocator.alloc(GpuLayerWeights, layers.len);
-        @memcpy(stored_layers, layers);
 
         var final_norm_w = try mlx.Array.fromSlice(final_norm_data, &.{hidden_size});
         final_norm_w.eval();
@@ -651,7 +744,7 @@ pub const GpuModelContext = struct {
 
         return GpuModelContext{
             .allocator = allocator,
-            .layers = stored_layers,
+            .layers = layers,
             .final_norm_w = final_norm_w,
             .lm_head = lm_head,
             .final_eps = final_eps,
@@ -775,15 +868,18 @@ pub const GpuModelContext = struct {
             var in_norm = try mlx.Array.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
             defer in_norm.deinit();
 
-            // (2) QKV 量化投影 [1, T, total_dim] (GEMM 并行加速)
-            var q_raw = try lw.q_proj.forwardArray(in_norm, s);
+            // (2) QKV 融合量化投影 [1, T, total_dim] (Fused GEMM: 1 个内核完成全部 Q, K, V 投影)
+            var qkv_raw = try lw.fused_qkv.forwardArray(in_norm, s);
+            defer qkv_raw.deinit();
+
+            var q_raw = try qkv_raw.sliceAxis(2, 0, lw.q_dim, s);
             defer q_raw.deinit();
-            var k_raw = try lw.k_proj.forwardArray(in_norm, s);
+            var k_raw = try qkv_raw.sliceAxis(2, lw.q_dim, lw.q_dim + lw.k_dim, s);
             defer k_raw.deinit();
-            var v_raw = if (lw.v_proj) |vp|
-                try vp.forwardArray(in_norm, s)
+            var v_raw = if (lw.v_dim > 0)
+                try qkv_raw.sliceAxis(2, lw.q_dim + lw.k_dim, lw.q_dim + lw.k_dim + lw.v_dim, s)
             else
-                try lw.k_proj.forwardArray(in_norm, s);
+                try k_raw.sliceAxis(2, 0, lw.k_dim, s);
             defer v_raw.deinit();
 
             // (3) 重构形状与转置至 [1, heads, T, head_dim]
@@ -811,10 +907,9 @@ pub const GpuModelContext = struct {
             defer v_normed.deinit();
 
             // (5) 旋转位置编码 (Rotary Position Embedding, RoPE)
-            const rot_dim = @as(usize, @intFromFloat(@as(f32, @floatFromInt(lw.head_dim)) * lw.partial_rotary_factor));
-            var q_rot = try mlx.Array.fastRoPE(q_normed, rot_dim, false, lw.rope_theta, 1.0, 0, s);
+            var q_rot = try mlx.Array.fastRoPE(q_normed, lw.rot_dim, false, lw.rope_theta, 1.0, 0, s);
             defer q_rot.deinit();
-            var k_rot = try mlx.Array.fastRoPE(k_normed, rot_dim, false, lw.rope_theta, 1.0, 0, s);
+            var k_rot = try mlx.Array.fastRoPE(k_normed, lw.rot_dim, false, lw.rope_theta, 1.0, 0, s);
             defer k_rot.deinit();
 
             // (6) 写入 GPU 键值缓存 (Initial KVCache on GPU)
@@ -840,7 +935,7 @@ pub const GpuModelContext = struct {
             // (8) 输出投影 (O-projection)
             var attn_t = try attn_out.transposeAxes(&.{ 0, 2, 1, 3 }, s);
             defer attn_t.deinit();
-            var attn_2d = try attn_t.reshape(&.{ 1, T, lw.num_heads * lw.head_dim }, s);
+            var attn_2d = try attn_t.reshape(&.{ 1, T, lw.attn_dim }, s);
             defer attn_2d.deinit();
             var o_out = try lw.o_proj.forwardArray(attn_2d, s);
             defer o_out.deinit();
@@ -851,13 +946,18 @@ pub const GpuModelContext = struct {
             var x1 = try mlx.Array.add(x_cur, post_attn, s);
             defer x1.deinit();
 
-            // (10) 门控多层感知机 (MLP) (GEMM 并行加速)
+            // (10) 门控多层感知机 (Fused Gate-Up GEMV: 1 个内核完成 Gate 与 Up 投影)
             var pre_mlp = try mlx.Array.fastRmsNorm(x1, lw.pre_mlp_w, lw.rms_norm_eps, s);
             defer pre_mlp.deinit();
-            var gate = try lw.gate_proj.forwardArray(pre_mlp, s);
+
+            var gate_up = try lw.fused_gate_up.forwardArray(pre_mlp, s);
+            defer gate_up.deinit();
+
+            var gate = try gate_up.sliceAxis(2, 0, lw.intermediate_size, s);
             defer gate.deinit();
-            var up = try lw.up_proj.forwardArray(pre_mlp, s);
+            var up = try gate_up.sliceAxis(2, lw.intermediate_size, lw.intermediate_size * 2, s);
             defer up.deinit();
+
             var act = try gate.gelu(s);
             defer act.deinit();
             var fused = try mlx.Array.multiply(act, up, s);
@@ -869,17 +969,14 @@ pub const GpuModelContext = struct {
             var post_mlp = try mlx.Array.fastRmsNorm(down, lw.post_mlp_w, lw.rms_norm_eps, s);
             defer post_mlp.deinit();
             var x2 = try mlx.Array.add(x1, post_mlp, s);
-            defer x2.deinit();
-
-            var next_x: mlx.Array = undefined;
-            if (lw.layer_scalar != 1.0) {
-                next_x = try x2.mulScalar(lw.layer_scalar, s);
-            } else {
-                next_x = try x2.mulScalar(1.0, s);
-            }
 
             var old_x = x_cur;
-            x_cur = next_x;
+            if (lw.layer_scalar != 1.0) {
+                x_cur = try x2.mulScalar(lw.layer_scalar, s);
+                x2.deinit();
+            } else {
+                x_cur = x2;
+            }
             old_x.deinit();
         }
 
@@ -893,13 +990,7 @@ pub const GpuModelContext = struct {
         var h_norm = try mlx.Array.fastRmsNorm(last_row_2d, self.final_norm_w, self.final_eps, s);
         defer h_norm.deinit();
 
-        var h_bf16 = try h_norm.astype(.bfloat16, s);
-        defer h_bf16.deinit();
-
-        var logits_bf16 = try mlx.Array.matmul(h_bf16, self.lm_head.w_t, s);
-        defer logits_bf16.deinit();
-
-        var logits = try logits_bf16.astype(.float32, s);
+        var logits = try self.lm_head.forwardArray(h_norm, s);
         defer logits.deinit();
 
         logits.eval();
@@ -962,15 +1053,18 @@ pub const GpuModelContext = struct {
             var in_norm = try mlx.Array.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
             defer in_norm.deinit();
 
-            // 2. QKV 量化投影 (QKV Quantized MatMul)
-            var q_raw = try lw.q_proj.forwardArray(in_norm, s);
+            // 2. QKV 融合量化投影 (Fused QKV GEMV: 1 个内核完成全部 Q, K, V 投影)
+            var qkv_raw = try lw.fused_qkv.forwardArray(in_norm, s);
+            defer qkv_raw.deinit();
+
+            var q_raw = try qkv_raw.slice2dAxis1(0, lw.q_dim, s);
             defer q_raw.deinit();
-            var k_raw = try lw.k_proj.forwardArray(in_norm, s);
+            var k_raw = try qkv_raw.slice2dAxis1(lw.q_dim, lw.q_dim + lw.k_dim, s);
             defer k_raw.deinit();
-            var v_raw = if (lw.v_proj) |vp|
-                try vp.forwardArray(in_norm, s)
+            var v_raw = if (lw.v_dim > 0)
+                try qkv_raw.slice2dAxis1(lw.q_dim + lw.k_dim, lw.q_dim + lw.k_dim + lw.v_dim, s)
             else
-                try lw.k_proj.forwardArray(in_norm, s);
+                try k_raw.slice2dAxis1(0, lw.k_dim, s);
             defer v_raw.deinit();
 
             // 3. 重构形状至 [1, heads, 1, head_dim]
@@ -990,10 +1084,9 @@ pub const GpuModelContext = struct {
             defer v_normed.deinit();
 
             // 5. 旋转位置编码 (Rotary Position Embedding, RoPE)
-            const rot_dim = @as(usize, @intFromFloat(@as(f32, @floatFromInt(lw.head_dim)) * lw.partial_rotary_factor));
-            var q_rot = try mlx.Array.fastRoPE(q_normed, rot_dim, false, lw.rope_theta, 1.0, pos, s);
+            var q_rot = try mlx.Array.fastRoPE(q_normed, lw.rot_dim, false, lw.rope_theta, 1.0, pos, s);
             defer q_rot.deinit();
-            var k_rot = try mlx.Array.fastRoPE(k_normed, rot_dim, false, lw.rope_theta, 1.0, pos, s);
+            var k_rot = try mlx.Array.fastRoPE(k_normed, lw.rot_dim, false, lw.rope_theta, 1.0, pos, s);
             defer k_rot.deinit();
 
             // 6. 增量写入 GPU 键值缓存 (KVCache Along Axis 2)
@@ -1003,10 +1096,7 @@ pub const GpuModelContext = struct {
                 var k_to_free = old_k;
                 var v_to_free = self.gpu_v[l].?;
 
-                var shape_k: [4]usize = undefined;
-                _ = try new_k.shape(&shape_k);
-                const k_len = shape_k[2];
-
+                const k_len = pos + 1;
                 if (lw.attn_type == 0 and k_len > lw.sliding_window) {
                     const sliced_k = try new_k.sliceAxis(2, k_len - lw.sliding_window, k_len, s);
                     const sliced_v = try new_v.sliceAxis(2, k_len - lw.sliding_window, k_len, s);
@@ -1038,7 +1128,7 @@ pub const GpuModelContext = struct {
             defer attn_out.deinit();
 
             // 8. 输出投影 (O-projection)
-            var attn_2d = try attn_out.reshape(&.{ 1, lw.num_heads * lw.head_dim }, s);
+            var attn_2d = try attn_out.reshape(&.{ 1, lw.attn_dim }, s);
             defer attn_2d.deinit();
             var o_out = try lw.o_proj.forwardArray(attn_2d, s);
             defer o_out.deinit();
@@ -1049,17 +1139,23 @@ pub const GpuModelContext = struct {
             var x1 = try mlx.Array.add(x_cur, post_attn, s);
             defer x1.deinit();
 
-            // 10. 门控多层感知机 (Multilayer Perceptron, MLP)
+            // 10. 门控多层感知机 (Fused Gate-Up GEMV: 1 个内核完成 Gate 与 Up 投影)
             var pre_mlp = try mlx.Array.fastRmsNorm(x1, lw.pre_mlp_w, lw.rms_norm_eps, s);
             defer pre_mlp.deinit();
-            var gate = try lw.gate_proj.forwardArray(pre_mlp, s);
+
+            var gate_up = try lw.fused_gate_up.forwardArray(pre_mlp, s);
+            defer gate_up.deinit();
+
+            var gate = try gate_up.slice2dAxis1(0, lw.intermediate_size, s);
             defer gate.deinit();
-            var up = try lw.up_proj.forwardArray(pre_mlp, s);
+            var up = try gate_up.slice2dAxis1(lw.intermediate_size, lw.intermediate_size * 2, s);
             defer up.deinit();
+
             var act = try gate.gelu(s);
             defer act.deinit();
             var fused = try mlx.Array.multiply(act, up, s);
             defer fused.deinit();
+
             var down = try lw.down_proj.forwardArray(fused, s);
             defer down.deinit();
 
@@ -1067,17 +1163,14 @@ pub const GpuModelContext = struct {
             var post_mlp = try mlx.Array.fastRmsNorm(down, lw.post_mlp_w, lw.rms_norm_eps, s);
             defer post_mlp.deinit();
             var x2 = try mlx.Array.add(x1, post_mlp, s);
-            defer x2.deinit();
-
-            var next_x: mlx.Array = undefined;
-            if (lw.layer_scalar != 1.0) {
-                next_x = try x2.mulScalar(lw.layer_scalar, s);
-            } else {
-                next_x = try x2.mulScalar(1.0, s);
-            }
 
             var old_x = x_cur;
-            x_cur = next_x;
+            if (lw.layer_scalar != 1.0) {
+                x_cur = try x2.mulScalar(lw.layer_scalar, s);
+                x2.deinit();
+            } else {
+                x_cur = x2;
+            }
             old_x.deinit();
         }
 
@@ -1086,16 +1179,8 @@ pub const GpuModelContext = struct {
         defer h_norm.deinit();
         x_cur.deinit();
 
-        // 最终词表投影 (LM Head MatMul)
-        // 将 [1, hidden_size] 快速转为 bfloat16 (仅 3840 个数，7.6 KB，< 0.001 ms)，
-        // 与常驻显存的 262K 巨型 bfloat16 词表嵌入矩阵对齐，避免 MLX 在 Metal GEMV 内部将 2 GB 的词表矩阵全量上采样至 float32！
-        var h_bf16 = try h_norm.astype(.bfloat16, s);
-        defer h_bf16.deinit();
-
-        var logits_bf16 = try mlx.Array.matmul(h_bf16, self.lm_head.w_t, s);
-        defer logits_bf16.deinit();
-
-        var logits = try logits_bf16.astype(.float32, s);
+        // 最终词表投影 (LM Head MatMul: 自动走 Q8 量化加速或密集矩阵乘)
+        var logits = try self.lm_head.forwardArray(h_norm, s);
         defer logits.deinit();
 
         // 单一终点强制求值 (Single Evaluation): 全网 48 层 + RMSNorm + LM Head 一次性在 Metal GPU 流水线中完成
@@ -1200,4 +1285,65 @@ test "backend offload infrastructure" {
 
     // 32 个 1.0 与 2.0 的点积 = 64.0
     try std.testing.expectApproxEqAbs(@as(f32, 64.0), out_res[0], 1e-2);
+
+    // 3. 验证融合量化矩阵 (Fused Q4Weights: initFromBlockSlices)
+    var raw_block_a: [18]u8 = undefined;
+    std.mem.writeInt(u16, raw_block_a[0..2], scale_bits, .little);
+    @memset(raw_block_a[2..18], 0xAA); // weight = 2.0
+
+    var raw_block_b: [18]u8 = undefined;
+    std.mem.writeInt(u16, raw_block_b[0..2], scale_bits, .little);
+    @memset(raw_block_b[2..18], 0xBB); // weight = 11 - 8 = 3.0
+
+    var fused_q4 = try Q4Weights.initFromBlockSlices(
+        std.testing.allocator,
+        &.{ &raw_block_a, &raw_block_b },
+        32,
+        &.{ 1, 1 },
+        stream,
+    );
+    defer fused_q4.deinit();
+
+    var in_arr = try mlx.Array.fromSlice(&x_vec, &.{ 1, 32 });
+    defer in_arr.deinit();
+
+    var in_bf16 = try in_arr.astype(.bfloat16, stream);
+    defer in_bf16.deinit();
+
+    var norm_bf16 = try mlx.Array.fastRmsNorm(in_bf16, null, 1e-6, stream);
+    defer norm_bf16.deinit();
+    norm_bf16.eval();
+    stream.synchronize();
+
+    var fused_bf16_out = try fused_q4.forwardArray(in_bf16, stream);
+    defer fused_bf16_out.deinit();
+    fused_bf16_out.eval();
+    stream.synchronize();
+
+    var fused_out = try fused_q4.forwardArray(in_arr, stream);
+    defer fused_out.deinit();
+
+    var shape_buf: [8]usize = undefined;
+    const fused_nd = try fused_out.shape(&shape_buf);
+    try std.testing.expectEqual(@as(usize, 2), fused_nd);
+    try std.testing.expectEqual(@as(usize, 1), shape_buf[0]);
+    try std.testing.expectEqual(@as(usize, 2), shape_buf[1]);
+
+    // 切片验证: sliceAxis 产生子张量并支持后续算子
+    var slice_a = try fused_out.sliceAxis(1, 0, 1, stream);
+    defer slice_a.deinit();
+    var slice_b = try fused_out.sliceAxis(1, 1, 2, stream);
+    defer slice_b.deinit();
+
+    // 验证 gelu 与 multiply
+    var act = try slice_a.gelu(stream);
+    defer act.deinit();
+    var mul = try mlx.Array.multiply(act, slice_b, stream);
+    defer mul.deinit();
+
+    fused_out.eval();
+    const f_data = fused_out.dataFloat32();
+    try std.testing.expectApproxEqAbs(@as(f32, 64.0), f_data[0], 1e-2);
+    try std.testing.expectApproxEqAbs(@as(f32, 96.0), f_data[1], 1e-2);
+
 }

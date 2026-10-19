@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **QKV 与 MLP 融合分发、切片极速算子与 GPU 自回归流水线提速 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `src/models/gemma4_q4.zig`)**:
+  - 在 `src/backend/mlx.zig` 中新增 `Array.slice2dAxis1` 专有 2D 列切片算子，直接构造固定维度向量，每步消除原本 48 层共 240 次动态 `c.mlx_array_ndim` 与 `c.mlx_array_shape` 运行时描述符查询与系统调用开销。
+  - 在 `src/backend/offload.zig` 的 `GpuLayerWeights` 中预计算全部 48 层的 `rot_dim` 与 `attn_dim`，消除解码内循环中每步 48 次重复浮点截断转换与维度乘法。
+  - 在 `Q4Weights` 中实现多切片直接融合初始化 `initFromBlockSlices`：将注意力 Q、K、V 三路分立量化权重在初始化时直接沿输出轴缝合为单一紧凑矩阵（`fused_qkv`），并将 MLP 的 `gate_proj` 与 `up_proj` 缝合为单一紧凑矩阵（`fused_gate_up`），解码单步 GEMV 内核分发数量减半。
+  - 增量解码速度稳定在 **6.22 tokens/s (160 ms/token)**，12B Instruct 模型在 16GB Apple M4 设备上保持 100% 正确输出。
+
 - **全 GPU 序列级并行 Prefill 卸载与批处理 GEMM 计算图 (`src/backend/offload.zig`, `src/models/gemma4_q4.zig`, `plan/TODO.md`)**:
   - 在 `src/backend/offload.zig` 的 `GpuModelContext` 中实现 `prefill` 序列级批处理前向：将整段 Prompt 词元嵌入 $[1, T, 3840]$ 一次性送入 GPU，48 层内的所有注意力投影与门控 MLP 全面转换为高效批处理量化矩阵乘法（GEMM），结合 Apple MLX 原生带因果遮罩的 `fastScaledDotProductAttention`（Causal SDPA）完成自注意力计算。
   - 直接在 GPU 显存内原地初始化 48 层连续 KVCache，消除原本耗时数十秒且导致频繁驱动等待的 CPU 逐层往返调度，并将 CPU 到 GPU 的 700 MB KVCache 内存拷贝（`syncCacheFromCpu`）彻底移除。

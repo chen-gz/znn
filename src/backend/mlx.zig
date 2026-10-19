@@ -143,6 +143,31 @@ pub const Array = struct {
         return .{ .handle = arr };
     }
 
+    /// 创建全零数组 (Zeros)
+    pub fn zeros(shape_dims: []const usize, dtype: DType, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (shape_dims.len == 0 or shape_dims.len > 8) return error.InvalidShape;
+
+        var c_shape: [8]c_int = undefined;
+        for (shape_dims, 0..) |dim, i| {
+            c_shape[i] = @intCast(dim);
+        }
+
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_zeros(
+            &res.handle,
+            &c_shape,
+            shape_dims.len,
+            @intFromEnum(dtype),
+            s,
+        );
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
     /// 从单精度浮点标量创建 MLX 标量数组
     pub fn fromScalarF32(val: f32) !Array {
         if (!has_mlx) return error.MlxNotSupported;
@@ -453,6 +478,81 @@ pub const Array = struct {
         return res;
     }
 
+    /// 对二维张量沿列维度 (axis 1) 快速切片 (Fast 2D Column Slice)
+    /// 预置 `[1, total_cols]` 形状，消除动态 ndim 与 shape 描述符解析开销
+    pub fn slice2dAxis1(self: Array, start: usize, stop: usize, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        const start_arr = [_]c_int{ 0, @intCast(start) };
+        const stop_arr = [_]c_int{ 1, @intCast(stop) };
+        const strides_arr = [_]c_int{ 1, 1 };
+
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_slice(
+            &res.handle,
+            self.handle,
+            &start_arr,
+            2,
+            &stop_arr,
+            2,
+            &strides_arr,
+            2,
+            s,
+        );
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 沿指定轴以子数组切片更新 (Slice Update Axis)
+    pub fn sliceUpdateAxis(
+        self: Array,
+        update: Array,
+        axis: usize,
+        start: usize,
+        stop: usize,
+        stream: ?Stream,
+    ) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var shape_buf: [8]usize = undefined;
+        const nd = try self.shape(&shape_buf);
+        if (axis >= nd) return error.InvalidShape;
+
+        var start_arr: [8]c_int = undefined;
+        var stop_arr: [8]c_int = undefined;
+        var strides_arr: [8]c_int = undefined;
+        for (0..nd) |i| {
+            if (i == axis) {
+                start_arr[i] = @intCast(start);
+                stop_arr[i] = @intCast(stop);
+            } else {
+                start_arr[i] = 0;
+                stop_arr[i] = @intCast(shape_buf[i]);
+            }
+            strides_arr[i] = 1;
+        }
+
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_slice_update(
+            &res.handle,
+            self.handle,
+            update.handle,
+            &start_arr,
+            nd,
+            &stop_arr,
+            nd,
+            &strides_arr,
+            nd,
+            s,
+        );
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
     /// 标量乘法：`res = self * val`
     pub fn mulScalar(self: Array, val: f32, stream: ?Stream) !Array {
         var s_arr = try fromScalarF32(val);
@@ -701,6 +801,66 @@ pub const Array = struct {
         if (status != 0 or res.ctx == null) return error.MlxOperationFailed;
         return .{ .handle = res };
     }
+
+    /// 低比特量化权重元组 (Quantized Weights Output)
+    pub const QuantizedOutput = struct {
+        weights: Array,
+        scales: Array,
+        biases: ?Array,
+
+        pub fn deinit(self: *QuantizedOutput) void {
+            self.weights.deinit();
+            self.scales.deinit();
+            if (self.biases) |*b| b.deinit();
+        }
+    };
+
+    /// 借助图形处理器 (Graphics Processing Unit, GPU) 硬件流水线执行量化矩阵转换 (GPU-accelerated Quantize)
+    pub fn quantize(
+        w: Array,
+        group_size: i32,
+        bits: i32,
+        mode: [*:0]const u8,
+        stream: ?Stream,
+    ) !QuantizedOutput {
+        if (!has_mlx) return error.MlxNotSupported;
+        var vec = c.mlx_vector_array_new();
+        defer _ = c.mlx_vector_array_free(vec);
+
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const gs = c.mlx_optional_int{ .value = group_size, .has_value = true };
+        const b = c.mlx_optional_int{ .value = bits, .has_value = true };
+        const null_arr = c.mlx_array{ .ctx = null };
+
+        const status = c.mlx_quantize(&vec, w.handle, gs, b, mode, null_arr, s);
+        if (status != 0 or vec.ctx == null) return error.MlxOperationFailed;
+
+        const sz = c.mlx_vector_array_size(vec);
+        if (sz < 2) return error.MlxOperationFailed;
+
+        var w_arr = c.mlx_array{ .ctx = null };
+        _ = c.mlx_vector_array_get(&w_arr, vec, 0);
+
+        var s_arr = c.mlx_array{ .ctx = null };
+        _ = c.mlx_vector_array_get(&s_arr, vec, 1);
+
+        var b_arr_opt: ?Array = null;
+        if (sz >= 3) {
+            var b_arr = c.mlx_array{ .ctx = null };
+            _ = c.mlx_vector_array_get(&b_arr, vec, 2);
+            if (b_arr.ctx != null) {
+                b_arr_opt = Array{ .handle = b_arr };
+            }
+        }
+
+        return .{
+            .weights = .{ .handle = w_arr },
+            .scales = .{ .handle = s_arr },
+            .biases = b_arr_opt,
+        };
+    }
 };
 
 test "MLX GPU backend matmul and fast kernels" {
@@ -818,6 +978,39 @@ test "MLX GPU backend matmul and fast kernels" {
     const mul_out = mul_scalar_res.dataFloat32();
     try std.testing.expectEqual(@as(f32, 6.0), mul_out[0]);
     try std.testing.expectEqual(@as(f32, 12.0), mul_out[3]);
+
+    // 3.4 验证全零数组 (Zeros) 与切片原地更新 (Slice Update)
+    var zero_base = try Array.zeros(&.{ 1, 1, 4, 2 }, .float32, stream);
+    defer zero_base.deinit();
+
+    var update_piece = try Array.fromSlice(&[_]f32{ 7.0, 8.0 }, &.{ 1, 1, 1, 2 });
+    defer update_piece.deinit();
+
+    var updated_arr = try zero_base.sliceUpdateAxis(update_piece, 2, 2, 3, stream);
+    defer updated_arr.deinit();
+    updated_arr.eval();
+    const up_data = updated_arr.dataFloat32();
+    try std.testing.expectEqual(@as(f32, 0.0), up_data[0]); // [0, 0]
+    try std.testing.expectEqual(@as(f32, 0.0), up_data[1]); // [0, 1]
+    try std.testing.expectEqual(@as(f32, 0.0), up_data[2]); // [1, 0]
+    try std.testing.expectEqual(@as(f32, 0.0), up_data[3]); // [1, 1]
+    try std.testing.expectEqual(@as(f32, 7.0), up_data[4]); // [2, 0]
+    try std.testing.expectEqual(@as(f32, 8.0), up_data[5]); // [2, 1]
+    try std.testing.expectEqual(@as(f32, 0.0), up_data[6]); // [3, 0]
+    try std.testing.expectEqual(@as(f32, 0.0), up_data[7]); // [3, 1]
+
+    // 验证 SDPA 接收从 sliceAxis 产生的非全长缓存切片
+    var q_single = try Array.fromSlice(&[_]f32{ 1.0, 1.0 }, &.{ 1, 1, 1, 2 });
+    defer q_single.deinit();
+    var k_sub = try updated_arr.sliceAxis(2, 0, 3, stream);
+    defer k_sub.deinit();
+    var v_sub = try updated_arr.sliceAxis(2, 0, 3, stream);
+    defer v_sub.deinit();
+    var sdpa_sub = try Array.fastScaledDotProductAttention(q_single, k_sub, v_sub, 1.0, false, stream);
+    defer sdpa_sub.deinit();
+    sdpa_sub.eval();
+    const sdpa_sub_out = sdpa_sub.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 2), sdpa_sub_out.len);
 
     // 4. 验证零拷贝创建与形状查询 (Zero-Copy & Shape Query)
     var host_buf = [_]f32{ 10.0, 20.0, 30.0, 40.0, 50.0, 60.0 };
@@ -960,5 +1153,34 @@ test "MLX GPU backend matmul and fast kernels" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.8413447), gelu_out[1], 1e-4);
     // GELU(-1) = 0.5 * (-1) * (1 + erf(-1/sqrt(2))) = -0.158655
     try std.testing.expectApproxEqAbs(@as(f32, -0.158655), gelu_out[2], 1e-4);
+
+    // 5. 验证原生 GPU quantize 与 quantizedMatmul 端到端协同
+    var test_w_data: [64]f32 = undefined;
+    for (0..64) |i| {
+        test_w_data[i] = @floatFromInt(i);
+    }
+    var test_w = try Array.fromSlice(&test_w_data, &.{ 1, 64 });
+    defer test_w.deinit();
+
+    var test_w_bf16 = try test_w.astype(.bfloat16, stream);
+    defer test_w_bf16.deinit();
+
+    var q8_pkg = try Array.quantize(test_w_bf16, 32, 8, "affine", stream);
+    defer q8_pkg.deinit();
+
+    var test_x_data: [64]f32 = undefined;
+    @memset(&test_x_data, 1.0);
+    var test_x = try Array.fromSlice(&test_x_data, &.{ 1, 64 });
+    defer test_x.deinit();
+
+    var qmm_q8 = try test_x.quantizedMatmul(q8_pkg.weights, q8_pkg.scales, q8_pkg.biases, true, 32, 8, "affine", stream);
+    defer qmm_q8.deinit();
+    qmm_q8.eval();
+    stream.synchronize();
+
+    const q8_out = qmm_q8.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 1), q8_out.len);
+    // 0 + 1 + ... + 63 = 2016.0
+    try std.testing.expectApproxEqAbs(@as(f32, 2016.0), q8_out[0], 2.0);
 }
 
