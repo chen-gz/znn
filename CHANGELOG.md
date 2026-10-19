@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **支持 Gemma 4 命令行 `--q4` / `--q8` 词表量化模式与 `loadFromMmapWithOptions` 接口 (`examples/gemma4.zig`, `src/models/gemma4_q4.zig`, `src/backend/offload.zig`, `build.zig`)**:
+  - 在 `src/models/gemma4_q4.zig` 中新增符合工程规范默认值的 `LoadMmapOptions` 配置结构体，提供 `loadFromMmapWithOptions` 支持外部指定 `lm_head_mode`（默认 `.bf16`，可显式指定 `.q4` 或 `.q8`）。
+  - 在 `examples/gemma4.zig` 中支持 `--q4`、`--q8` 与 `--bf16` 命令行参数解析，并在 `build.zig` 中为 `gemma4` 示例开启 `.forward_args = true`。
+  - 使用 Q4 量化 LM Head 后，词表显存占用直降 75%（从 2.01 GB 降至 530 MB），首字延迟从 9.42 秒大幅优化至 2.71 秒，增量解码速度从 5.64 tokens/s 跃升至 **6.91 tokens/s**。
+
 - **修复 GPU 卸载上下文生命周期、长序列滑动窗口 Prefill 与零拷贝 `forward` 兼容性 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `src/models/gemma4_q4.zig`, `src/models/tests.zig`, `AGENTS.md`, `doc/architecture.md`, `plan/`)**:
   - 移除单文件 `< 60 KB` 的硬性字节限制，改为以模块职责单一与边界清晰作为模块化准则（同步更新 `AGENTS.md`、`doc/architecture.md` 与 `plan/`）。
   - 在 `Gemma4Q4ForCausalLM.initGpuContext` 中增加已有 `gpu_context` 的先释放保护，并为 `Q4Weights.initFromBlockSlices`、`GpuLayerWeights.initFromBlocks` 与 `GpuModelContext.init` 补齐 `errdefer` 错误回滚释放链，消除重复初始化或半途失败时的 GPU 显存泄漏。

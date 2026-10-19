@@ -11,6 +11,22 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const q4_model_path = "gemma-4-12B-q4.bin";
 
+    var lm_head_mode: zig_ml.backend.offload.QuantMode = .bf16;
+    if (init.minimal.args.iterateAllocator(allocator)) |*iter| {
+        var it = iter.*;
+        defer it.deinit();
+        _ = it.next(); // Skip executable path
+        while (it.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--q4") or std.mem.eql(u8, arg, "-q4") or std.mem.eql(u8, arg, "--lm-head=q4")) {
+                lm_head_mode = .q4;
+            } else if (std.mem.eql(u8, arg, "--q8") or std.mem.eql(u8, arg, "-q8") or std.mem.eql(u8, arg, "--lm-head=q8")) {
+                lm_head_mode = .q8;
+            } else if (std.mem.eql(u8, arg, "--bf16") or std.mem.eql(u8, arg, "-bf16") or std.mem.eql(u8, arg, "--lm-head=bf16")) {
+                lm_head_mode = .bf16;
+            }
+        }
+    } else |_| {}
+
     std.debug.print("================================================================================\n", .{});
     std.debug.print("🤖 Gemma 4 12B Instruct 模型加载与真实推理演示 (Q4 量化)\n", .{});
     std.debug.print("================================================================================\n\n", .{});
@@ -92,10 +108,15 @@ pub fn main(init: std.process.Init) !void {
 
     // 5. 加载 48 层 Gemma 4 Q4 量化模型并执行自回归生成
     std.debug.print("5. [加载 48 层 Gemma 4 12B 模型并执行自回归生成]:\n", .{});
-    var model = try gemma4_q4.DefaultGemma4Q4.loadFromMmap(allocator, mmap_ptr);
+    var model = try gemma4_q4.DefaultGemma4Q4.loadFromMmapWithOptions(allocator, mmap_ptr, .{ .lm_head_mode = lm_head_mode });
     defer model.deinit(allocator);
     std.debug.print("   - 模型已成功零拷贝加载: 48 层 Transformer (40 层滑动窗口 + 8 层全局注意力)\n", .{});
     std.debug.print("   - 词表解码器已就绪: 262,144 个完整官方 Token 文本，支持任意词元实时直接还原！\n", .{});
+    std.debug.print("   - LM Head 词表投影加速: {s}\n", .{switch (lm_head_mode) {
+        .bf16 => "BF16 硬件直推 (2.01 GB，100% 原始位一致性)",
+        .q8 => "Q8 仿射量化 (1.07 GB，显存节省 50%)",
+        .q4 => "Q4 仿射量化 (530 MB，显存节省 75%，极速)",
+    }});
 
     // 初始化 Gemma 4 专用混合键值缓存 (Key-Value Cache, KVCache)
     var cache = try gemma4.Gemma4KVCache.init(allocator, gemma4_q4.DefaultGemma4Q4.config, .{ .max_seq_len = 1024 });
