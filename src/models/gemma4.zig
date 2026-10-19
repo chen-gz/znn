@@ -762,6 +762,21 @@ pub const Gemma4Vocabulary = struct {
         std.posix.munmap(@alignCast(self.mmap_ptr));
     }
 
+    // 官方保留特殊控制词元 (Special Control Tokens)
+    pub const PAD: usize = 0; // <pad>
+    pub const EOS: usize = 1; // <eos> (End of Sequence)
+    pub const BOS: usize = 2; // <bos> (Beginning of Sequence)
+    pub const UNK: usize = 3; // <unk>
+    pub const THINK: usize = 98; // <|think|>
+    pub const SOC: usize = 100; // <|channel> (Start of Channel)
+    pub const EOC: usize = 101; // <channel|> (End of Channel)
+    pub const SOT: usize = 105; // <|turn> (Start of Turn)
+    pub const EOT: usize = 106; // <turn|> (End of Turn)
+    pub const NL: usize = 107; // \n
+    pub const USER: usize = 2364; // user
+    pub const MODEL: usize = 4368; // model
+    pub const SYSTEM: usize = 9731; // system
+
     /// O(1) 根据 token_id 获取对应解码文本切片
     pub fn decode(self: *const Gemma4Vocabulary, token_id: usize) []const u8 {
         if (token_id >= self.count) return "";
@@ -769,5 +784,13 @@ pub const Gemma4Vocabulary = struct {
         const end: usize = if (token_id + 1 < self.count) self.offsets[token_id + 1] else self.str_data.len;
         if (start > end or end > self.str_data.len) return "";
         return self.str_data[start..end];
+    }
+
+    /// 在词表中根据确切文本反查对应的 Token ID (若不存在返回 null)
+    pub fn findToken(self: *const Gemma4Vocabulary, text: []const u8) ?usize {
+        for (0..self.count) |i| {
+            if (std.mem.eql(u8, self.decode(i), text)) return i;
+        }
+        return null;
     }
 };
