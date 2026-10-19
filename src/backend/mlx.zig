@@ -350,6 +350,128 @@ pub const Array = struct {
         return res;
     }
 
+    /// 重构张量维度形状 (Reshape)
+    pub fn reshape(self: Array, shape_dims: []const usize, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (shape_dims.len > 8) return error.InvalidShape;
+        var shape_ints: [8]c_int = undefined;
+        for (shape_dims, 0..) |dim, i| {
+            shape_ints[i] = @intCast(dim);
+        }
+
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_reshape(&res.handle, self.handle, &shape_ints, shape_dims.len, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 指定轴转置 (Transpose Axes)
+    pub fn transposeAxes(self: Array, axes: []const usize, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (axes.len > 8) return error.InvalidShape;
+        var axes_ints: [8]c_int = undefined;
+        for (axes, 0..) |ax, i| {
+            axes_ints[i] = @intCast(ax);
+        }
+
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_transpose_axes(&res.handle, self.handle, &axes_ints, axes.len, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 沿指定轴拼接多个数组 (Concatenate Along Axis)
+    pub fn concatenateAxis(arrays: []const Array, axis: c_int, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (arrays.len == 0) return error.InvalidShape;
+
+        var handles_buf: [16]c.mlx_array = undefined;
+        const raw_handles = if (arrays.len <= 16)
+            handles_buf[0..arrays.len]
+        else
+            try std.heap.c_allocator.alloc(c.mlx_array, arrays.len);
+        defer if (arrays.len > 16) std.heap.c_allocator.free(raw_handles);
+
+        for (arrays, 0..) |arr, i| {
+            raw_handles[i] = arr.handle;
+        }
+        const vec = c.mlx_vector_array_new_data(raw_handles.ptr, raw_handles.len);
+        defer _ = c.mlx_vector_array_free(vec);
+
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_concatenate_axis(&res.handle, vec, axis, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 沿指定轴切片 (Slice Axis)
+    pub fn sliceAxis(self: Array, axis: usize, start: usize, stop: usize, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var shape_buf: [8]usize = undefined;
+        const nd = try self.shape(&shape_buf);
+        if (axis >= nd) return error.InvalidShape;
+
+        var start_arr: [8]c_int = undefined;
+        var stop_arr: [8]c_int = undefined;
+        var strides_arr: [8]c_int = undefined;
+        for (0..nd) |i| {
+            if (i == axis) {
+                start_arr[i] = @intCast(start);
+                stop_arr[i] = @intCast(stop);
+            } else {
+                start_arr[i] = 0;
+                stop_arr[i] = @intCast(shape_buf[i]);
+            }
+            strides_arr[i] = 1;
+        }
+
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_slice(
+            &res.handle,
+            self.handle,
+            &start_arr,
+            nd,
+            &stop_arr,
+            nd,
+            &strides_arr,
+            nd,
+            s,
+        );
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 标量乘法：`res = self * val`
+    pub fn mulScalar(self: Array, val: f32, stream: ?Stream) !Array {
+        var s_arr = try fromScalarF32(val);
+        defer s_arr.deinit();
+        return multiply(self, s_arr, stream);
+    }
+
+    /// 数据类型转换 (Data Type Conversion / Astype)
+    pub fn astype(self: Array, dtype: DType, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_astype(&res.handle, self.handle, @intFromEnum(dtype), s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
     /// 矩阵乘法：`res = a @ b`
     pub fn matmul(a: Array, b: Array, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
@@ -616,6 +738,16 @@ test "MLX GPU backend matmul and fast kernels" {
     // mean(x^2) = (1+4+9+16)/4 = 7.5. rsqrt(7.5) = 0.36514837. With weight 2.0: x * 0.7302967
     try std.testing.expectApproxEqAbs(@as(f32, 0.7302967), norm_out[0], 1e-4);
 
+    // 2.1 验证多维高阶张量快速均方根层归一化 (4D RMSNorm)
+    var x_4d_norm = try Array.fromSlice(&[_]f32{ 1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 6.0, 8.0 }, &.{ 1, 2, 1, 4 });
+    defer x_4d_norm.deinit();
+    var norm_4d_res = try Array.fastRmsNorm(x_4d_norm, w_norm, 1e-5, stream);
+    defer norm_4d_res.deinit();
+    norm_4d_res.eval();
+    const norm_4d_out = norm_4d_res.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 8), norm_4d_out.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.7302967), norm_4d_out[0], 1e-4);
+
     // 3. 验证快速缩放点积注意力 (Scaled Dot-Product Attention, SDPA)
     const q_data = [_]f32{0.1} ** 64;
     var q = try Array.fromSlice(&q_data, &.{ 1, 2, 4, 8 });
@@ -625,7 +757,67 @@ test "MLX GPU backend matmul and fast kernels" {
     sdpa_res.eval();
     const sdpa_out = sdpa_res.dataFloat32();
     try std.testing.expectEqual(@as(usize, 64), sdpa_out.len);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.1), sdpa_out[0], 1e-4);
+    // 3.1 验证单步增量解码 (Decode Step) 与分组查询注意力 (Grouped-Query Attention, GQA)
+    const q_step = [_]f32{0.2} ** 16; // [1, 2 heads, 1, 8 dim]
+    var q_dec = try Array.fromSlice(&q_step, &.{ 1, 2, 1, 8 });
+    defer q_dec.deinit();
+
+    const kv_cached = [_]f32{0.1} ** 32; // [1, 1 kv head, 4 seq_len, 8 dim]
+    var k_dec = try Array.fromSlice(&kv_cached, &.{ 1, 1, 4, 8 });
+    defer k_dec.deinit();
+    var v_dec = try Array.fromSlice(&kv_cached, &.{ 1, 1, 4, 8 });
+    defer v_dec.deinit();
+
+    var gqa_sdpa = try Array.fastScaledDotProductAttention(q_dec, k_dec, v_dec, 1.0 / @sqrt(8.0), false, stream);
+    defer gqa_sdpa.deinit();
+    gqa_sdpa.eval();
+    const gqa_out = gqa_sdpa.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 16), gqa_out.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), gqa_out[0], 1e-4);
+
+    // 3.2 验证旋转位置编码 (Rotary Position Embedding, RoPE)
+    const rope_in = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+    var rope_arr = try Array.fromSlice(&rope_in, &.{ 1, 1, 1, 4 });
+    defer rope_arr.deinit();
+    var rope_res = try Array.fastRoPE(rope_arr, 4, false, 10000.0, 1.0, 1, stream);
+    defer rope_res.deinit();
+    rope_res.eval();
+    const rope_out = rope_res.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 4), rope_out.len);
+    try std.testing.expectApproxEqAbs(@as(f32, -1.9841107), rope_out[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.9599), rope_out[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.4623779), rope_out[2], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0198), rope_out[3], 1e-4);
+
+    // 3.3 验证数组重构 (Reshape)、轴拼接 (Concatenate) 与轴切片 (Slice)
+    var arr_a = try Array.fromSlice(&[_]f32{ 1.0, 2.0, 3.0, 4.0 }, &.{ 1, 1, 2, 2 });
+    defer arr_a.deinit();
+    var arr_b = try Array.fromSlice(&[_]f32{ 5.0, 6.0 }, &.{ 1, 1, 1, 2 });
+    defer arr_b.deinit();
+
+    var concat_res = try Array.concatenateAxis(&.{ arr_a, arr_b }, 2, stream);
+    defer concat_res.deinit();
+    concat_res.eval();
+    var concat_dims: [4]usize = undefined;
+    _ = try concat_res.shape(&concat_dims);
+    try std.testing.expectEqual(@as(usize, 3), concat_dims[2]);
+
+    var slice_res = try concat_res.sliceAxis(2, 1, 3, stream);
+    defer slice_res.deinit();
+    slice_res.eval();
+    const slice_out = slice_res.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 4), slice_out.len);
+    try std.testing.expectEqual(@as(f32, 3.0), slice_out[0]);
+    try std.testing.expectEqual(@as(f32, 4.0), slice_out[1]);
+    try std.testing.expectEqual(@as(f32, 5.0), slice_out[2]);
+    try std.testing.expectEqual(@as(f32, 6.0), slice_out[3]);
+
+    var mul_scalar_res = try slice_res.mulScalar(2.0, stream);
+    defer mul_scalar_res.deinit();
+    mul_scalar_res.eval();
+    const mul_out = mul_scalar_res.dataFloat32();
+    try std.testing.expectEqual(@as(f32, 6.0), mul_out[0]);
+    try std.testing.expectEqual(@as(f32, 12.0), mul_out[3]);
 
     // 4. 验证零拷贝创建与形状查询 (Zero-Copy & Shape Query)
     var host_buf = [_]f32{ 10.0, 20.0, 30.0, 40.0, 50.0, 60.0 };

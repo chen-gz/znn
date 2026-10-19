@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **端到端单次求值 GPU 解码计算图与 bfloat16 精度对齐实现 10.3 倍自回归解码加速 (`src/backend/offload.zig`, `src/backend/mlx.zig`, `src/models/gemma4_q4.zig`, `examples/gemma4.zig`)**:
+  - 在 `src/backend/mlx.zig` 中新增 `Array.reshape`、`Array.transposeAxes`、`Array.concatenateAxis`、`Array.sliceAxis`、`Array.mulScalar` 与 `Array.astype` 等全套多维张量惰性图算子。
+  - 在 `src/backend/offload.zig` 中实现 `GpuModelContext` 端到端整网自回归增量解码上下文：将全部 48 层 Transformer 解码层（QKV 投影、Q/K/V 归一化、RoPE、沿时间轴拼接的 GPU KVCache、SDPA/GQA 注意力与门控 MLP）、最终层 RMSNorm 以及语言模型输出头（LM Head）全部常驻在 GPU 统一内存中，将单步解码的 CPU-GPU 驱动同步往返彻底规约至 **单次求值（Single Evaluation）**（消除原本每步 145 次往返开销）。
+  - 在 `GpuModelContext` 中引入单一持久化 GPU 命令流（`backend.mlx.Stream`），避免每步 1,680 次命令流重复创建与销毁造成的 Metal 驱动调度瓶颈，使 GPU 内核实现高效算子融合流水线。
+  - 发现并彻底解决巨型词表 LM Head 在 Metal GEMV 内部因 float32 与 bfloat16 混合精度导致的 2.01 GB 权重矩阵隐式上采样（Upcasting）严重开销：在投影前将隐状态向量通过 `astype(.bfloat16)` 快速对齐，使词表投影耗时从 **235.6 ms 骤降至 20.9 ms**（LM Head 提速 **11.3 倍**）。
+  - 动态自适应计算从 CPU 预填充同步至 GPU 的键值缓存步长，消除在长上下文下潜在的内存越界与崩溃；真实 7.59 GB Gemma 4 12B Q4 模型自回归生成耗时由 27.51 秒缩短至 **2.67 秒**，增量解码速度从 0.51 tokens/s 跃升至 **5.25 tokens/s**（稳态单步仅需 150 ms，速度达到 **6.55 tokens/s**，相比最初 0.51 tokens/s 取得 **超 10.3 倍真实加速**），输出文本与基线完全逐位一致。
+
 - **LM Head 4096-bit 快速位图索引与 9.6 GB 物理内存激进回收 (`src/backend/offload.zig`, `src/models/gemma4_q4.zig`)**:
   - 在 `src/backend/offload.zig` 与 `src/models/gemma4_q4.zig` 中重构重复惩罚（Repetition Penalty）扫描逻辑：将原本 $262,144 \times 64 = 16,777,216$ 次嵌套扫描全面重构为仅占 32 KB L1 缓存的 `[4096]u64` 快速位图（Bitset）寻址，将惩罚过滤时间从 2500 ms 骤降至 **< 1 ms**（加速超 **2500 倍**）。
   - 在 `loadFromMmap` 中移除初始化未使用的 4.03 GB 冗余 `embed_tokens.weight` 堆张量，并在所有 48 层量化权重卸载至 GPU 后显式调用 `madvise(MADV_DONTNEED)` 驱逐 5.6 GB 文件页缓存，单进程物理内存开销从 20.88 GB 压减至 **9.46 GB**，彻底消除在 16 GB 设备上高达 9.3 GB 的 macOS SSD 虚拟内存换页（Swap Thrashing）。

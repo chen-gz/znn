@@ -153,11 +153,8 @@ pub fn main(init: std.process.Init) !void {
     var vocab = try gemma4.Gemma4Vocabulary.openFile(io, "gemma4_vocab.bin");
     defer vocab.deinit();
 
-    const model = try gemma4_q4.DefaultGemma4Q4.loadFromMmap(allocator, mmap_ptr);
-    defer {
-        var m_mut = model;
-        m_mut.deinit(allocator);
-    }
+    var model = try gemma4_q4.DefaultGemma4Q4.loadFromMmap(allocator, mmap_ptr);
+    defer model.deinit(allocator);
     std.debug.print("   - 模型已成功零拷贝加载: 48 层 Transformer (40 层滑动窗口 + 8 层全局注意力)\n", .{});
     std.debug.print("   - 词表解码器已就绪: 262,144 个完整官方 Token 文本，支持任意词元实时直接还原！\n", .{});
 
@@ -165,9 +162,15 @@ pub fn main(init: std.process.Init) !void {
     var cache = try gemma4.Gemma4KVCache.init(allocator, gemma4_q4.DefaultGemma4Q4.config, .{ .max_seq_len = 1024 });
     defer cache.deinit(allocator);
     std.debug.print("   - 键值缓存已初始化: 48 层异构连续 KVCache (最大序列长度: 1024)\n", .{});
+    const use_gpu = zig_ml.backend.offload.isAvailable();
+    if (use_gpu) {
+        std.debug.print("   - 硬件加速: Apple Silicon MLX GPU 统一卸载已启用\n", .{});
+    } else {
+        std.debug.print("   - 硬件加速: CPU 多核并行\n", .{});
+    }
     std.debug.print("   -------------------------------------------------------------\n", .{});
     std.debug.print("   User  : hello world\n", .{});
-    std.debug.print("   Model :", .{});
+    std.debug.print("   Model : ", .{});
 
     var current_tokens: std.ArrayList(usize) = .empty;
     defer current_tokens.deinit(allocator);
@@ -184,13 +187,6 @@ pub fn main(init: std.process.Init) !void {
     const start_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
     var first_token_ns: u64 = 0;
     var decode_start_ns: u64 = 0;
-
-    const use_gpu = zig_ml.backend.offload.isAvailable();
-    if (use_gpu) {
-        std.debug.print("   - 硬件加速: Apple Silicon MLX GPU 统一卸载已启用\n", .{});
-    } else {
-        std.debug.print("   - 硬件加速: CPU 多核并行\n", .{});
-    }
 
     // 1. 预填充阶段 (Prefill)：一次性处理全部 Prompt 词元并写入 KVCache，获取首个词元
     {
