@@ -11,7 +11,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const q4_model_path = "gemma-4-12B-q4.bin";
 
-    var lm_head_mode: zig_ml.backend.offload.QuantMode = .bf16;
+    var lm_head_mode: zig_ml.backend.offload.QuantMode = .q8;
     if (init.minimal.args.iterateAllocator(allocator)) |*iter| {
         var it = iter.*;
         defer it.deinit();

@@ -907,7 +907,10 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
         /// 从 4-bit 量化二进制映射切片加载时的配置选项结构体
         pub const LoadMmapOptions = struct {
-            lm_head_mode: backend.offload.QuantMode = .bf16,
+            /// 最终层 LM Head (分类头) 量化模式：
+            /// 骨干 48 层始终为 Q4 (7.59 GB)，LM Head 默认采用 .q8 (1.07 GB) 保障 100% 精度一致性并降低 50% 显存；
+            /// 也可指定为 .bf16 (2.01 GB) 或 .q4 (530 MB)。
+            lm_head_mode: backend.offload.QuantMode = .q8,
 
             pub fn defaultOptions() LoadMmapOptions {
                 return .{};
