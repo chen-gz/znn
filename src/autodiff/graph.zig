@@ -176,6 +176,16 @@ pub const Graph = struct {
         self.arena.deinit();
     }
 
+    /// 重置计算图状态与 Arena 内存（保留已分配容量以供高效复用）
+    pub fn reset(self: *Graph) void {
+        self.module_formulas.clearRetainingCapacity();
+        self.module_types.clearRetainingCapacity();
+        self.scope_stack.clearRetainingCapacity();
+        self.tensors.clearRetainingCapacity();
+        self.ops.clearRetainingCapacity();
+        _ = self.arena.reset(.retain_capacity);
+    }
+
     // 在计算图中注册外部持久化参数张量节点 (如 Linear / Conv2D 的权重与偏置)
     pub fn registerParameter(self: *Graph, t: *Tensor) !void {
         try self.tensors.append(self.backing_allocator, t);

@@ -183,17 +183,20 @@ pub fn main(init: std.process.Init) !void {
     // 2. 增量解码阶段 (Decode Loop)：结合 Prompt N-gram 投机采样与 KVCache
     var current_tok = current_tokens.items[current_tokens.items.len - 1];
     var speculative_hits: usize = 0;
+
+    var step_graph = autodiff.Graph.init(allocator, .{
+        .enable_grad = false,
+        .io = io,
+        .device = if (use_gpu) .gpu else .cpu,
+    });
+    defer step_graph.deinit();
+
     while (gen_count < max_new_tokens) {
         if (current_tok == gemma4.Gemma4Vocabulary.EOS or current_tok == gemma4.Gemma4Vocabulary.EOT) {
             break;
         }
 
-        var step_graph = autodiff.Graph.init(allocator, .{
-            .enable_grad = false,
-            .io = io,
-            .device = if (use_gpu) .gpu else .cpu,
-        });
-        defer step_graph.deinit();
+        step_graph.reset();
 
         const draft = if (enable_speculative and use_gpu)
             gemma4.promptLookup(current_tokens.items, 2, 4, 3)

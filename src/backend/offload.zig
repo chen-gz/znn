@@ -313,26 +313,50 @@ pub const LmHeadWeights = struct {
             const end_v = @min(base_v + 64, vocab_size);
 
             if (word == 0) {
-                // 快车道 (Fast Path): 该 64 词块内无任何重复词元，直接执行纯向量化极速最大值查找
-                for (base_v..end_v) |v| {
-                    if (v == 0 or (v >= 258880 and v <= 258884)) continue;
-                    const dot = logits_slice[v];
-                    if (dot > max_val) {
-                        max_val = dot;
-                        max_id = v;
+                // 快车道 (Fast Path): 该 64 词块内无任何重复词元
+                if (w != 0 and w != 4045) {
+                    // 无特殊排除词元，直接进行纯向量化极速最大值查找（零条件分支）
+                    for (base_v..end_v) |v| {
+                        const dot = logits_slice[v];
+                        if (dot > max_val) {
+                            max_val = dot;
+                            max_id = v;
+                        }
+                    }
+                } else {
+                    for (base_v..end_v) |v| {
+                        if (v == 0 or (v >= 258880 and v <= 258884)) continue;
+                        const dot = logits_slice[v];
+                        if (dot > max_val) {
+                            max_val = dot;
+                            max_id = v;
+                        }
                     }
                 }
             } else {
                 // 精准道: 仅对包含最近词元的少数几个词块执行位掩码测试与重复惩罚
-                for (base_v..end_v) |v| {
-                    if (v == 0 or (v >= 258880 and v <= 258884)) continue;
-                    var dot = logits_slice[v];
-                    if ((word & (@as(u64, 1) << @intCast(v % 64))) != 0) {
-                        dot = if (dot > 0.0) dot / repetition_penalty else dot * repetition_penalty;
+                if (w != 0 and w != 4045) {
+                    for (base_v..end_v) |v| {
+                        var dot = logits_slice[v];
+                        if ((word & (@as(u64, 1) << @intCast(v % 64))) != 0) {
+                            dot = if (dot > 0.0) dot / repetition_penalty else dot * repetition_penalty;
+                        }
+                        if (dot > max_val) {
+                            max_val = dot;
+                            max_id = v;
+                        }
                     }
-                    if (dot > max_val) {
-                        max_val = dot;
-                        max_id = v;
+                } else {
+                    for (base_v..end_v) |v| {
+                        if (v == 0 or (v >= 258880 and v <= 258884)) continue;
+                        var dot = logits_slice[v];
+                        if ((word & (@as(u64, 1) << @intCast(v % 64))) != 0) {
+                            dot = if (dot > 0.0) dot / repetition_penalty else dot * repetition_penalty;
+                        }
+                        if (dot > max_val) {
+                            max_val = dot;
+                            max_id = v;
+                        }
                     }
                 }
             }
@@ -852,6 +876,7 @@ pub const GpuModelContext = struct {
     gpu_k: []?mlx.Array,
     gpu_v: []?mlx.Array,
     curr_len: usize = 0,
+    sqrt_d: f32 = 0.0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -892,6 +917,7 @@ pub const GpuModelContext = struct {
             .gpu_k = gpu_k,
             .gpu_v = gpu_v,
             .curr_len = 0,
+            .sqrt_d = @sqrt(@as(f32, @floatFromInt(hidden_size))),
         };
     }
 
@@ -987,16 +1013,14 @@ pub const GpuModelContext = struct {
         const tok_emb_buf = try self.allocator.alloc(f32, T * self.hidden_size);
         defer self.allocator.free(tok_emb_buf);
 
-        const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(self.hidden_size)));
         for (prompt_tokens, 0..) |tok, t_idx| {
             const emb_row = embed_u16[tok * self.hidden_size .. (tok + 1) * self.hidden_size];
             const dest = tok_emb_buf[t_idx * self.hidden_size .. (t_idx + 1) * self.hidden_size];
             for (0..self.hidden_size) |d| {
                 const u: u32 = @as(u32, emb_row[d]) << 16;
-                dest[d] = @as(f32, @bitCast(u)) * sqrt_d;
+                dest[d] = @as(f32, @bitCast(u)) * self.sqrt_d;
             }
         }
-
         var x_cur = try mlx.Array.fromSlice(tok_emb_buf, &.{ 1, T, self.hidden_size });
 
         for (self.layers, 0..) |lw, l| {
@@ -1138,14 +1162,7 @@ pub const GpuModelContext = struct {
             var gate_up = try lw.fused_gate_up.forwardArray(pre_mlp, s);
             defer gate_up.deinit();
 
-            var gate = try gate_up.sliceAxis(2, 0, lw.intermediate_size, s);
-            defer gate.deinit();
-            var up = try gate_up.sliceAxis(2, lw.intermediate_size, lw.intermediate_size * 2, s);
-            defer up.deinit();
-
-            var act = try gate.gelu(s);
-            defer act.deinit();
-            var fused = try mlx.Array.multiply(act, up, s);
+            var fused = try gate_up.geglu(lw.intermediate_size, s);
             defer fused.deinit();
             var down = try lw.down_proj.forwardArray(fused, s);
             defer down.deinit();
@@ -1196,12 +1213,29 @@ pub const GpuModelContext = struct {
         repetition_penalty: f32,
         stream: ?Stream,
     ) !usize {
+        const x_cur = try mlx.Array.fromSlice(emb_row, &.{ 1, self.hidden_size });
+        return self.decodeStepWithArray(x_cur, recent_tokens, repetition_penalty, stream);
+    }
+
+    /// 基于已初始化的词元嵌入数组执行单步端到端整网自回归增量解码 (Array-based Decode Step)
+    pub fn decodeStepWithArray(
+        self: *GpuModelContext,
+        x_in: mlx.Array,
+        recent_tokens: []const usize,
+        repetition_penalty: f32,
+        stream: ?Stream,
+    ) !usize {
         const pos = self.curr_len;
-        if (pos >= self.alloc_seq_len) return error.ContextWindowExceeded;
+        if (pos >= self.alloc_seq_len) {
+            var to_free = x_in;
+            to_free.deinit();
+            return error.ContextWindowExceeded;
+        }
 
         const s = if (stream) |st| st else self.stream;
 
-        var x_cur = try mlx.Array.fromSlice(emb_row, &.{ 1, self.hidden_size });
+        var x_cur = x_in;
+        errdefer x_cur.deinit();
 
         for (self.layers, 0..) |lw, l| {
             // 1. 输入均方根层归一化 (Input RMSNorm)
@@ -1294,21 +1328,14 @@ pub const GpuModelContext = struct {
             var x1 = try mlx.Array.add(x_cur, post_attn, s);
             defer x1.deinit();
 
-            // 10. 门控多层感知机 (Fused Gate-Up GEMV: 1 个内核完成 Gate 与 Up 投影)
+            // 10. 门控多层感知机 (Fused Gate-Up GEMV + GeGLU 融合激活)
             var pre_mlp = try mlx.Array.fastRmsNorm(x1, lw.pre_mlp_w, lw.rms_norm_eps, s);
             defer pre_mlp.deinit();
 
             var gate_up = try lw.fused_gate_up.forwardArray(pre_mlp, s);
             defer gate_up.deinit();
 
-            var gate = try gate_up.slice2dAxis1(0, lw.intermediate_size, s);
-            defer gate.deinit();
-            var up = try gate_up.slice2dAxis1(lw.intermediate_size, lw.intermediate_size * 2, s);
-            defer up.deinit();
-
-            var act = try gate.gelu(s);
-            defer act.deinit();
-            var fused = try mlx.Array.multiply(act, up, s);
+            var fused = try gate_up.geglu(lw.intermediate_size, s);
             defer fused.deinit();
 
             var down = try lw.down_proj.forwardArray(fused, s);
@@ -1374,14 +1401,13 @@ pub const GpuModelContext = struct {
         const tok_emb_buf = try self.allocator.alloc(f32, M * self.hidden_size);
         defer self.allocator.free(tok_emb_buf);
 
-        const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(self.hidden_size)));
         for (input_tokens, 0..) |tok, i| {
             if (tok >= self.vocab_size) return error.TokenOutOfBounds;
             const emb_row = embed_u16[tok * self.hidden_size .. (tok + 1) * self.hidden_size];
             const dest = tok_emb_buf[i * self.hidden_size .. (i + 1) * self.hidden_size];
             for (0..self.hidden_size) |d| {
                 const u: u32 = @as(u32, emb_row[d]) << 16;
-                dest[d] = @as(f32, @bitCast(u)) * sqrt_d;
+                dest[d] = @as(f32, @bitCast(u)) * self.sqrt_d;
             }
         }
 
@@ -1483,14 +1509,7 @@ pub const GpuModelContext = struct {
             var gate_up = try lw.fused_gate_up.forwardArray(pre_mlp, s);
             defer gate_up.deinit();
 
-            var gate = try gate_up.sliceAxis(2, 0, lw.intermediate_size, s);
-            defer gate.deinit();
-            var up = try gate_up.sliceAxis(2, lw.intermediate_size, lw.intermediate_size * 2, s);
-            defer up.deinit();
-
-            var act = try gate.gelu(s);
-            defer act.deinit();
-            var fused = try mlx.Array.multiply(act, up, s);
+            var fused = try gate_up.geglu(lw.intermediate_size, s);
             defer fused.deinit();
             var down = try lw.down_proj.forwardArray(fused, s);
             defer down.deinit();
