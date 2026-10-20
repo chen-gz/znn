@@ -431,31 +431,6 @@ pub const Array = struct {
         return .{ .handle = arr };
     }
 
-    /// 从原始数据指针与形状维度零拷贝 (Zero-Copy) 创建 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
-    pub fn fromRawDataZeroCopy(
-        data: *const anyopaque,
-        shape_dims: []const usize,
-        dt: DType,
-    ) !Array {
-        if (!has_mlx) return error.MlxNotSupported;
-        if (shape_dims.len == 0 or shape_dims.len > 8) return error.InvalidShape;
-
-        var c_shape: [8]c_int = undefined;
-        for (shape_dims, 0..) |dim, i| {
-            c_shape[i] = @intCast(dim);
-        }
-
-        const arr = c.mlx_array_new_data_managed(
-            @constCast(data),
-            &c_shape,
-            @intCast(shape_dims.len),
-            @intFromEnum(dt),
-            &noopDtor,
-        );
-        if (arr.ctx == null) return error.MlxOperationFailed;
-        return .{ .handle = arr };
-    }
-
     /// 获取数组元素数据类型 (Element Data Type)
     pub fn dtype(self: Array) DType {
         if (!has_mlx or self.handle.ctx == null) return .float32;
