@@ -1436,13 +1436,15 @@ pub const GpuModelContext = struct {
         var h_norm = try mlx.Array.fastRmsNorm(last_row_2d, self.final_norm_w, self.final_eps, s);
         defer h_norm.deinit();
 
-        const max_id: usize = if (repetition_penalty == 1.0) blk: {
+        const max_id: usize = if (repetition_penalty == 1.0 and self.vocab_size > 1) blk: {
             var logits_bf16 = try self.lm_head.forwardArrayBf16(h_norm, s);
             defer logits_bf16.deinit();
-            var best_tok_arr = try logits_bf16.argmax(1, false, s);
+            var sliced = try logits_bf16.sliceAxis(1, 1, self.vocab_size, s);
+            defer sliced.deinit();
+            var best_tok_arr = try sliced.argmax(1, false, s);
             defer best_tok_arr.deinit();
             best_tok_arr.eval();
-            break :blk @intCast(best_tok_arr.itemUint32());
+            break :blk @intCast(best_tok_arr.itemUint32() + 1);
         } else blk: {
             var logits = try self.lm_head.forwardArray(h_norm, s);
             defer logits.deinit();
@@ -1623,13 +1625,15 @@ pub const GpuModelContext = struct {
         x_cur.deinit();
 
         // 最终词表投影 (LM Head MatMul: 自动走 Q8 量化加速或密集矩阵乘，当无重复惩罚时直接在 GPU 上执行 BF16 argmax)
-        const max_id: usize = if (repetition_penalty == 1.0) blk: {
+        const max_id: usize = if (repetition_penalty == 1.0 and self.vocab_size > 1) blk: {
             var logits_bf16 = try self.lm_head.forwardArrayBf16(h_norm, s);
             defer logits_bf16.deinit();
-            var best_tok_arr = try logits_bf16.argmax(1, false, s);
+            var sliced = try logits_bf16.sliceAxis(1, 1, self.vocab_size, s);
+            defer sliced.deinit();
+            var best_tok_arr = try sliced.argmax(1, false, s);
             defer best_tok_arr.deinit();
             best_tok_arr.eval();
-            break :blk @intCast(best_tok_arr.itemUint32());
+            break :blk @intCast(best_tok_arr.itemUint32() + 1);
         } else blk: {
             var logits = try self.lm_head.forwardArray(h_norm, s);
             defer logits.deinit();
