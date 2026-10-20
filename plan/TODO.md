@@ -63,10 +63,53 @@
 
 | 阶段 / 优先级 | 核心目标 | 涉及模块 | 预估复杂度 |
 | :--- | :--- | :--- | :--- |
-| **Phase 1 (P0)** | 健壮性增强、类型化错误、自动化测试覆盖、模块化清晰重构 | `tensor/`, `autodiff/`, `nn/`, `bench/` | 🟡 中等 |
+| **Phase 0 (当前最高优先级 P0)** | Gemma 4 E4B 性能极限对齐与追平 Python MLX 官方基准 (15.5 → 32+ tokens/s) | `examples/gemma4_e4b.zig`, `backend/mlx.zig`, `backend/offload.zig` | 🔴 较高 |
+| **Phase 1 (P0 已完成)** | 健壮性增强、类型化错误、自动化测试覆盖、模块化清晰重构 | `tensor/`, `autodiff/`, `nn/`, `bench/` | 🟡 中等 |
 | **Phase 2 (P1)** | 泛型/静态形状张量、`io: std.Io` 多核执行器与 Apple Silicon Metal 异步卸载 | `tensor/`, `backend/`, `autodiff/`, `build.zig` | 🔴 较高 |
 | **Phase 3 (P2)** | 现代 LLM 架构、FlashAttention、KV-Cache 解码与视觉算子 | `nn/`, `autodiff/`, `optim.zig` | 🔴 较高 |
 | **Phase 4 (P3)** | 分词器升级、格式互操作与非 Apple GPU 后端 | `dataset.zig`, `tools/`, `build.zig` | 🟣 复杂 |
+
+---
+
+### 🔥 Phase 0 (当前最高优先级 P0): Gemma 4 E4B 性能极限对齐与追平 Python MLX 官方基准 (15.5 → 32+ tokens/s)
+
+> 📌 **核心目标**：在 100% 官方词表数学精度与位输出完全一致的前提下，将 Zig 原生 Gemma 4 E4B 自回归解码速率由 **15.5 token/s 提升至 32+ token/s**，全面追平甚至反超 Apple 官方 Python MLX 基准。
+
+#### 1. 现状实测对比基准 (Benchmark Snapshot)
+| 评测指标 | 官方 Python MLX | Zig (`znn`) 当前版本 | 差异对比 |
+| :--- | :--- | :--- | :--- |
+| **自回归解码速率 (Decode)** | **~32.8 token/s** (单步 ~30.4 ms) | **~15.5 ~ 15.75 token/s** (单步 ~63.5 ms) | Python MLX 目前快约 **2.1 倍** |
+| **首字延迟 (TTFT / Prefill)** | **~350 毫秒** | **~716 毫秒** | Python MLX 快约 2 倍 |
+| **冷启动加载耗时** | **~2.5 ~ 3.0 秒** | **~7.1 ~ 8.2 秒** | Python MLX 略快 (C++ 内部直接构建) |
+| **显存峰值占用** | **~3.8 GB** | **~3.9 GB** | 基本持平 (均为零拷贝 mmap 直通) |
+| **输出精度与内容** | 100% 基准 | 100% 对齐 | **完全位一致 (Bit-exact)** |
+
+#### 2. 四大核心性能瓶颈深度剖析 (33 ms/token 差异来源)
+1. **键值缓存：256 步长预分配（In-Place） vs 逐步动态拼接（Concatenate）——【最核心差异】**
+   - **Python MLX (`KVCache`)**：采用**块式预分配（Chunked Pre-allocation, `step = 256`）**。在开始时直接预分配 256 步的连续显存，每生成一个新词元，直接通过原地切片写入新键值：$\text{cache}[\dots, \text{pos}:\text{pos}+1, :] = K_{\text{new}}$。只有在跨过 256 步阈值时才扩容一次，单步解码**零显存分配、零历史数据重拷**。
+   - **当前 Zig 实现**：在 `forwardLayer` 中每解码一个 Token，都会对 24 个独立 KV 层的 Key 和 Value 调用 `mlx.Array.concatenateAxis`。每一步都会触发 **48 次 Metal 显存重新分配**，并将前面所有已生成 Token 的 KV 重新完整拷贝一次，随着上下文变长，这部分显存分配器和拷贝开销会持续消耗 GPU 带宽。
+2. **GPU 异步流水线重叠（`async_eval`） vs 同步阻塞等待（`synchronize`）**
+   - **Python MLX**：采用双缓冲流水线设计。当 GPU 在计算第 $N$ 步时，CPU 已经提前向 Metal 命令队列提交第 $N+1$ 步的计算图，GPU 与 CPU 几乎完全并行，Metal GPU 执行管线没有任何气泡（Pipeline Bubbles）。
+   - **当前 Zig 实现**：在每一步解码末尾显式执行了 `logits.eval(); s.synchronize();`，强行等待 GPU 完全停机并排空指令流，导致每生成一个 Token，CPU 和 GPU 之间都存在一次强同步空转等待。
+3. **GPU 原生 Argmax vs 26 万 Logits 拷贝回 CPU**
+   - **Python MLX**：直接在 GPU 上执行 `mx.argmax(logits)`，每步仅需将 **1 个 4-byte 整数（Token ID）**从 GPU 回传到 CPU。
+   - **当前 Zig 实现**：通过 `dataFloat32()` 将全词表 $262,144$ 个 float32（整整 **1 MB 显存**）每一步都从 GPU 传回 CPU，随后 CPU 运行循环扫描 26.2 万次寻找最大值。单是这次 1MB 显存同步回读就会额外消耗 3 ~ 5 ms。
+4. **逐层嵌入增强 (PLE) 切片开销**
+   - **Python MLX**：在每步前向开始前，把 `[1, 1, 42, 256]` 一次性预切分为 42 个子张量数组传入各层；
+   - **当前 Zig 实现**：在 42 层的循环体内每层单独执行 `sliceAxis` 与 `reshape`，每步多了 84 次 C API 数组封装调度。
+
+#### 3. 落地实施任务清单 (Actionable P0 Tasks)
+- [ ] **P0.1 块式预分配与切片原地更新 KVCache (`step = 256`)**：
+  - 在 `Gemma4E4BModel` 中实现类似 MLX 的块式容量增长：初始分配 256 步容量 $[1, \text{num\_kv}, 256, \text{head\_dim}]$。
+  - 单步解码时，通过原地切片写入新词元 KV，只有当 `curr_len % 256 == 0` 时才按需扩容 256 步，彻底消除单步 48 次 `concatenateAxis` 显存反复重分配。
+- [ ] **P0.2 GPU 原生 Argmax 采样算子与轻量回读**：
+  - 在 `src/backend/mlx.zig` 中暴露 `mlx.Array.argmax(axis, keepdims, stream)` 算子。
+  - 在自回归解码主循环中，直接在 Metal GPU 上完成 `argmax` 规约，将 CPU 拷贝数据量从 1 MB (262,144 floats) 骤降至 4 字节 (1 个 uint32 ID)。
+- [ ] **P0.3 双缓冲异步执行管线 (`async_eval`) 消除 GPU 同步停顿**：
+  - 改造解码循环，移除单步内的 `s.synchronize()` 强同步。
+  - 实现第 $N$ 步异步回读与第 $N+1$ 步计算图提前发射的管线重叠，保持 Metal GPU 计算核心 100% 满载，消除驱动气泡。
+- [ ] **P0.4 逐层嵌入输入 (PLE) 步首预切分**：
+  - 将 `getPleTokens` 与投影输出在进入 42 层循环前一次性切分出 42 个层级张量引用，消除循环体内部高频触发的 `sliceAxis` 与 `reshape` C API 往返。
 
 ---
 
