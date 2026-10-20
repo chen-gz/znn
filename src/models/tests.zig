@@ -247,10 +247,46 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
                 const next_gpu_2 = try mmap_model.decodeStep(&g_gpu_decode, next_gpu_1, &cache, mock_mmap, &prompt, 1.0);
                 try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
                 try std.testing.expectEqual(next_2, next_gpu_2);
+
+                // 验证在 GPU 模式下的投机采样多词元校验
+                var accepted_buf: [3]usize = undefined;
+                var g_gpu_spec = autodiff.Graph.init(allocator, .{ .device = .gpu });
+                defer g_gpu_spec.deinit();
+
+                const input_spec = [_]usize{ next_gpu_2, 10, 25 };
+                const num_acc = try mmap_model.decodeSpeculative(&g_gpu_spec, &input_spec, &cache, mock_mmap, &prompt, 1.0, &accepted_buf);
+                try std.testing.expect(num_acc >= 1);
             }
 
             cache.reset();
             try std.testing.expectEqual(@as(usize, 0), cache.layers[0].curr_len);
         }
     }
+
+test "Gemma 4 promptLookup N-gram speculative sampling" {
+    // 1. 短序列测试：无法构成 N-gram 返回 null
+    const short_seq = [_]usize{ 1, 2 };
+    try std.testing.expectEqual(@as(?[]const usize, null), gemma4.promptLookup(&short_seq, 2, 4, 3));
+
+    // 2. 匹配测试：重复 2-gram 提取后续候选
+    const seq1 = [_]usize{ 10, 20, 30, 40, 50, 10, 20 };
+    const draft1 = gemma4.promptLookup(&seq1, 2, 4, 3);
+    try std.testing.expect(draft1 != null);
+    try std.testing.expectEqualSlices(usize, &[_]usize{ 30, 40, 50 }, draft1.?);
+
+    // 3. 最大推测长度限制测试
+    const draft1_max2 = gemma4.promptLookup(&seq1, 2, 4, 2);
+    try std.testing.expect(draft1_max2 != null);
+    try std.testing.expectEqualSlices(usize, &[_]usize{ 30, 40 }, draft1_max2.?);
+
+    // 4. 无重复序列测试
+    const seq2 = [_]usize{ 1, 2, 3, 4, 5, 6, 7 };
+    try std.testing.expectEqual(@as(?[]const usize, null), gemma4.promptLookup(&seq2, 2, 4, 3));
+
+    // 5. 优先最长 3-gram 测试
+    const seq3 = [_]usize{ 99, 10, 20, 30, 88, 10, 20, 77, 10, 20, 30 };
+    const draft3 = gemma4.promptLookup(&seq3, 2, 4, 2);
+    try std.testing.expect(draft3 != null);
+    try std.testing.expectEqualSlices(usize, &[_]usize{ 88, 10 }, draft3.?);
+}
 

@@ -1349,6 +1349,219 @@ pub const GpuModelContext = struct {
         return max_id;
     }
 
+    /// 执行投机采样批量验证前向传播 (Speculative Draft Verification Step)
+    /// 一次性将基础词元 (input_tokens[0]) 与投机候选词元 (input_tokens[1..M])
+    /// 在图形处理器 (GPU) 上完成因果注意力与全网前向传播（仅单次遍历读取 7.59 GB 权重），
+    /// 并逐位贪婪校验接受候选词元。
+    /// 返回值：实际被接受并写入 KVCache 的词元数量 (1 <= num_accepted <= input_tokens.len)
+    pub fn decodeSpeculative(
+        self: *GpuModelContext,
+        input_tokens: []const usize,
+        embed_u16: []const u16,
+        recent_tokens: []const usize,
+        repetition_penalty: f32,
+        stream: ?Stream,
+        accepted_tokens: []usize,
+    ) !usize {
+        const M = input_tokens.len;
+        if (M == 0) return 0;
+        const pos = self.curr_len;
+        if (pos + M >= self.alloc_seq_len) return error.ContextWindowExceeded;
+
+        const s = if (stream) |st| st else self.stream;
+
+        // 1. 构建 M 个词元的嵌入向量 [1, M, hidden_size]
+        const tok_emb_buf = try self.allocator.alloc(f32, M * self.hidden_size);
+        defer self.allocator.free(tok_emb_buf);
+
+        const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(self.hidden_size)));
+        for (input_tokens, 0..) |tok, i| {
+            if (tok >= self.vocab_size) return error.TokenOutOfBounds;
+            const emb_row = embed_u16[tok * self.hidden_size .. (tok + 1) * self.hidden_size];
+            const dest = tok_emb_buf[i * self.hidden_size .. (i + 1) * self.hidden_size];
+            for (0..self.hidden_size) |d| {
+                const u: u32 = @as(u32, emb_row[d]) << 16;
+                dest[d] = @as(f32, @bitCast(u)) * sqrt_d;
+            }
+        }
+
+        var x_cur = try mlx.Array.fromSlice(tok_emb_buf, &.{ 1, M, self.hidden_size });
+
+        for (self.layers, 0..) |lw, l| {
+            // (1) 输入均方根层归一化 [1, M, hidden_size]
+            var in_norm = try mlx.Array.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
+            defer in_norm.deinit();
+
+            // (2) QKV 融合量化投影 [1, M, total_dim]
+            var qkv_raw = try lw.fused_qkv.forwardArray(in_norm, s);
+            defer qkv_raw.deinit();
+
+            var q_raw = try qkv_raw.sliceAxis(2, 0, lw.q_dim, s);
+            defer q_raw.deinit();
+            var k_raw = try qkv_raw.sliceAxis(2, lw.q_dim, lw.q_dim + lw.k_dim, s);
+            defer k_raw.deinit();
+            var v_raw = if (lw.v_dim > 0)
+                try qkv_raw.sliceAxis(2, lw.q_dim + lw.k_dim, lw.q_dim + lw.k_dim + lw.v_dim, s)
+            else
+                try k_raw.sliceAxis(2, 0, lw.k_dim, s);
+            defer v_raw.deinit();
+
+            // (3) 重构形状与转置至 [1, heads, M, head_dim]
+            var q_4d_raw = try q_raw.reshape(&.{ 1, M, lw.num_heads, lw.head_dim }, s);
+            defer q_4d_raw.deinit();
+            var q_4d = try q_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer q_4d.deinit();
+
+            var k_4d_raw = try k_raw.reshape(&.{ 1, M, lw.num_kv_heads, lw.head_dim }, s);
+            defer k_4d_raw.deinit();
+            var k_4d = try k_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer k_4d.deinit();
+
+            var v_4d_raw = try v_raw.reshape(&.{ 1, M, lw.num_kv_heads, lw.head_dim }, s);
+            defer v_4d_raw.deinit();
+            var v_4d = try v_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer v_4d.deinit();
+
+            // (4) Q-Norm, K-Norm 与无参数 V-Norm
+            var q_normed = try mlx.Array.fastRmsNorm(q_4d, lw.q_norm_w, lw.rms_norm_eps, s);
+            defer q_normed.deinit();
+            var k_normed = try mlx.Array.fastRmsNorm(k_4d, lw.k_norm_w, lw.rms_norm_eps, s);
+            defer k_normed.deinit();
+            var v_normed = try mlx.Array.fastRmsNorm(v_4d, null, lw.rms_norm_eps, s);
+            defer v_normed.deinit();
+
+            // (5) 旋转位置编码 (Rotary Position Embedding, RoPE)
+            var q_rot = try mlx.Array.fastRoPE(q_normed, lw.rot_dim, false, lw.rope_theta, 1.0, pos, s);
+            defer q_rot.deinit();
+            var k_rot = try mlx.Array.fastRoPE(k_normed, lw.rot_dim, false, lw.rope_theta, 1.0, pos, s);
+            defer k_rot.deinit();
+
+            // (6) 增量追加至 GPU 键值缓存 [1, num_kv_heads, pos + M, head_dim]
+            if (self.gpu_k[l]) |old_k| {
+                const new_k = try mlx.Array.concatenateAxis(&.{ old_k, k_rot }, 2, s);
+                const new_v = try mlx.Array.concatenateAxis(&.{ self.gpu_v[l].?, v_normed }, 2, s);
+                var k_to_free = old_k;
+                var v_to_free = self.gpu_v[l].?;
+                self.gpu_k[l] = new_k;
+                self.gpu_v[l] = new_v;
+                k_to_free.deinit();
+                v_to_free.deinit();
+            } else {
+                self.gpu_k[l] = try k_rot.mulScalar(1.0, s);
+                self.gpu_v[l] = try v_normed.mulScalar(1.0, s);
+            }
+
+            // (7) 因果注意力机制 (Causal Scaled Dot-Product Attention)
+            var attn_out = try mlx.Array.fastScaledDotProductAttention(
+                q_rot,
+                self.gpu_k[l].?,
+                self.gpu_v[l].?,
+                1.0,
+                true,
+                s,
+            );
+            defer attn_out.deinit();
+
+            // (8) 输出投影 (O-projection)
+            var attn_t = try attn_out.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer attn_t.deinit();
+            var attn_2d = try attn_t.reshape(&.{ 1, M, lw.attn_dim }, s);
+            defer attn_2d.deinit();
+            var o_out = try lw.o_proj.forwardArray(attn_2d, s);
+            defer o_out.deinit();
+
+            // (9) 注意力后层归一化与残差相加
+            var post_attn = try mlx.Array.fastRmsNorm(o_out, lw.post_attn_w, lw.rms_norm_eps, s);
+            defer post_attn.deinit();
+            var x1 = try mlx.Array.add(x_cur, post_attn, s);
+            defer x1.deinit();
+
+            // (10) 门控多层感知机 (Fused Gate-Up GEMV)
+            var pre_mlp = try mlx.Array.fastRmsNorm(x1, lw.pre_mlp_w, lw.rms_norm_eps, s);
+            defer pre_mlp.deinit();
+
+            var gate_up = try lw.fused_gate_up.forwardArray(pre_mlp, s);
+            defer gate_up.deinit();
+
+            var gate = try gate_up.sliceAxis(2, 0, lw.intermediate_size, s);
+            defer gate.deinit();
+            var up = try gate_up.sliceAxis(2, lw.intermediate_size, lw.intermediate_size * 2, s);
+            defer up.deinit();
+
+            var act = try gate.gelu(s);
+            defer act.deinit();
+            var fused = try mlx.Array.multiply(act, up, s);
+            defer fused.deinit();
+            var down = try lw.down_proj.forwardArray(fused, s);
+            defer down.deinit();
+
+            // (11) 前馈后层归一化、残差相加与层缩放
+            var post_mlp = try mlx.Array.fastRmsNorm(down, lw.post_mlp_w, lw.rms_norm_eps, s);
+            defer post_mlp.deinit();
+            var x2 = try mlx.Array.add(x1, post_mlp, s);
+
+            var old_x = x_cur;
+            if (lw.layer_scalar != 1.0) {
+                x_cur = try x2.mulScalar(lw.layer_scalar, s);
+                x2.deinit();
+            } else {
+                x_cur = x2;
+            }
+            old_x.deinit();
+        }
+
+        // 2. 最终层 RMSNorm 与 LM Head 词表投影
+        var h_norm = try mlx.Array.fastRmsNorm(x_cur, self.final_norm_w, self.final_eps, s);
+        defer h_norm.deinit();
+        x_cur.deinit();
+
+        var logits = try self.lm_head.forwardArray(h_norm, s);
+        defer logits.deinit();
+
+        logits.eval();
+
+        const logits_slice = logits.dataFloat32();
+        if (logits_slice.len != M * self.vocab_size) return error.ShapeMismatch;
+
+        // 3. 逐位贪婪校验候选词元 (Greedy Verification with Penalty)
+        var verified_tokens = try std.ArrayList(usize).initCapacity(self.allocator, recent_tokens.len + M);
+        defer verified_tokens.deinit(self.allocator);
+        try verified_tokens.appendSlice(self.allocator, recent_tokens);
+
+        var num_accepted: usize = 0;
+        for (0..M) |step_i| {
+            const row = logits_slice[step_i * self.vocab_size .. (step_i + 1) * self.vocab_size];
+            const rec_window = if (verified_tokens.items.len > 64) verified_tokens.items[verified_tokens.items.len - 64 ..] else verified_tokens.items;
+            const pred = LmHeadWeights.argmaxWithPenalty(row, self.vocab_size, rec_window, repetition_penalty);
+            accepted_tokens[step_i] = pred;
+            num_accepted += 1;
+            try verified_tokens.append(self.allocator, pred);
+
+            if (step_i + 1 < M) {
+                // 投机命中校验：若预测词元与下一个投机候选词元不一致，则停止接受后续投机词元
+                if (pred != input_tokens[step_i + 1]) {
+                    break;
+                }
+            }
+        }
+
+        // 4. 回滚未被接受的投机词元 KVCache
+        if (num_accepted < M) {
+            const target_len = pos + num_accepted;
+            for (self.layers, 0..) |_, l| {
+                var old_k = self.gpu_k[l].?;
+                var old_v = self.gpu_v[l].?;
+                self.gpu_k[l] = try old_k.sliceAxis(2, 0, target_len, s);
+                self.gpu_v[l] = try old_v.sliceAxis(2, 0, target_len, s);
+                old_k.deinit();
+                old_v.deinit();
+            }
+        }
+
+        self.curr_len = pos + num_accepted;
+        return num_accepted;
+    }
+
     /// 执行 Metal 计算管线预热 (Pipeline Pre-warming)，通过微型前向传递触发 MSL JIT 编译并构建管线状态对象 (PSO)
     pub fn warmup(self: *GpuModelContext, embed_u16: []const u16, stream: ?Stream) !void {
         if (self.vocab_size < 3) return;
@@ -1361,6 +1574,10 @@ pub const GpuModelContext = struct {
             @memset(row_slice, 0.0);
             _ = try self.decodeStep(row_slice, &dummy_prompt, 1.0, stream);
         }
+
+        const dummy_spec = [_]usize{ 1, 2 };
+        var accepted_dummy: [2]usize = undefined;
+        _ = self.decodeSpeculative(&dummy_spec, embed_u16, &dummy_prompt, 1.0, stream, &accepted_dummy) catch {};
 
         self.resetCache();
         if (stream) |s| s.synchronize();

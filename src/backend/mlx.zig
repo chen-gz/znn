@@ -84,6 +84,35 @@ pub const Stream = struct {
     }
 };
 
+/// 机器学习拓展计算图编译模式 (Compilation Mode)
+pub const CompileMode = enum(c_uint) {
+    disabled = 0,
+    no_simplify = 1,
+    no_fuse = 2,
+    enabled = 3,
+};
+
+/// 启用机器学习拓展 (Machine Learning Explore, MLX) 计算图静态编译与算子融合
+pub fn enableCompile() void {
+    if (has_mlx) {
+        _ = c.mlx_enable_compile();
+    }
+}
+
+/// 禁用机器学习拓展 (Machine Learning Explore, MLX) 计算图静态编译
+pub fn disableCompile() void {
+    if (has_mlx) {
+        _ = c.mlx_disable_compile();
+    }
+}
+
+/// 设置机器学习拓展 (Machine Learning Explore, MLX) 计算图编译模式
+pub fn setCompileMode(mode: CompileMode) void {
+    if (has_mlx) {
+        _ = c.mlx_set_compile_mode(@intFromEnum(mode));
+    }
+}
+
 /// MLX 多维数组封装 (Array)
 pub const Array = struct {
     handle: if (has_mlx) c.mlx_array else ?*anyopaque,
