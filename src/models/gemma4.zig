@@ -1137,3 +1137,36 @@ pub const Gemma4Vocabulary = struct {
         return null;
     }
 };
+
+/// 基于上下文 N-gram 匹配的投机采样候选生成器 (Prompt Lookup Decoding / N-gram Speculative Sampling)
+/// 在历史序列（Prompt 上下文 + 已生成词元）中反向查找当前尾部匹配的 N-gram，
+/// 提取历史上紧随其后的后续词元作为推测候选序列 (Draft Candidates)。
+/// 该算法零额外参数模型负担，完全基于自然语言/代码的局部重复性，与大模型一次性并行验证形成吞吐放大。
+pub fn promptLookup(
+    tokens: []const usize,
+    min_n: usize,
+    max_n: usize,
+    max_speculate: usize,
+) ?[]const usize {
+    if (tokens.len < min_n + 1) return null;
+    const cur_len = tokens.len;
+
+    var n = @min(max_n, cur_len - 1);
+    while (n >= min_n) : (n -= 1) {
+        const pattern = tokens[cur_len - n .. cur_len];
+        var search_idx: usize = cur_len - n;
+        while (search_idx > 0) {
+            search_idx -= 1;
+            if (std.mem.eql(usize, tokens[search_idx .. search_idx + n], pattern)) {
+                const draft_start = search_idx + n;
+                if (draft_start < cur_len) {
+                    const draft_end = @min(draft_start + max_speculate, cur_len);
+                    if (draft_end > draft_start) {
+                        return tokens[draft_start..draft_end];
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}

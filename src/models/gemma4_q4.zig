@@ -1433,6 +1433,58 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             return self.sampleNextToken(last_row, embed_u16, recent_tokens, repetition_penalty, graph);
         }
+
+        /// 投机采样批量验证解码 (Speculative Draft Verification Step)
+        /// 在 GPU 统一卸载加速下，一次前向传播批量验证候选词元序列，突破单字显存带宽高墙
+        pub fn decodeSpeculative(
+            self: *Self,
+            graph: *autodiff.Graph,
+            input_tokens: []const usize,
+            cache: *Gemma4KVCache,
+            mmap_bytes: []const u8,
+            recent_tokens: []const usize,
+            repetition_penalty: f32,
+            accepted_buf: []usize,
+        ) !usize {
+            if (input_tokens.len == 0) return 0;
+            const embed_u16: []const u16 = @alignCast(std.mem.bytesAsSlice(
+                u16,
+                mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
+            ));
+
+            if (graph.options.device == .gpu and self.gpu_context != null) {
+                var gpu_ctx = &self.gpu_context.?;
+                if (self.gpu_needs_sync) {
+                    const k_slices = try graph.arenaAllocator().alloc([]const f32, self.layers.len);
+                    const v_slices = try graph.arenaAllocator().alloc([]const f32, self.layers.len);
+                    for (cache.layers, 0..) |*cl, idx| {
+                        k_slices[idx] = cl.k;
+                        v_slices[idx] = cl.v;
+                    }
+                    try gpu_ctx.syncCacheFromCpu(k_slices, v_slices, cache.layers[0].curr_len);
+                    self.gpu_needs_sync = false;
+                }
+
+                const recent_window = if (recent_tokens.len > 64) recent_tokens[recent_tokens.len - 64 ..] else recent_tokens;
+                const accepted_count = try gpu_ctx.decodeSpeculative(
+                    input_tokens,
+                    embed_u16,
+                    recent_window,
+                    repetition_penalty,
+                    graph.options.mlx_stream,
+                    accepted_buf,
+                );
+                for (cache.layers) |*cl| {
+                    cl.curr_len += accepted_count;
+                }
+                return accepted_count;
+            }
+
+            // CPU 单步回退保底：对第 1 个词元执行标准 decodeStep
+            const single_tok = try self.decodeStep(graph, input_tokens[0], cache, mmap_bytes, recent_tokens, repetition_penalty);
+            accepted_buf[0] = single_tok;
+            return 1;
+        }
     };
 }
 
