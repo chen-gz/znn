@@ -113,6 +113,85 @@ pub fn setCompileMode(mode: CompileMode) void {
     }
 }
 
+/// MLX 数组向量容器 (VectorArray)
+pub const VectorArray = struct {
+    handle: if (has_mlx) c.mlx_vector_array else ?*anyopaque,
+
+    pub fn init() VectorArray {
+        if (!has_mlx) return .{ .handle = null };
+        return .{ .handle = c.mlx_vector_array_new() };
+    }
+
+    pub fn fromArrays(arrays: []const Array) VectorArray {
+        if (!has_mlx) return .{ .handle = null };
+        var raw_handles: [64]c.mlx_array = undefined;
+        const count = @min(arrays.len, raw_handles.len);
+        for (0..count) |i| {
+            raw_handles[i] = arrays[i].handle;
+        }
+        return .{ .handle = c.mlx_vector_array_new_data(&raw_handles, count) };
+    }
+
+    pub fn deinit(self: *VectorArray) void {
+        if (has_mlx and self.handle.ctx != null) {
+            _ = c.mlx_vector_array_free(self.handle);
+            self.handle.ctx = null;
+        }
+    }
+
+    pub fn size(self: VectorArray) usize {
+        if (!has_mlx or self.handle.ctx == null) return 0;
+        return c.mlx_vector_array_size(self.handle);
+    }
+
+    pub fn get(self: VectorArray, idx: usize) ?Array {
+        if (!has_mlx or self.handle.ctx == null) return null;
+        var res = Array.init();
+        if (c.mlx_vector_array_get(&res.handle, self.handle, idx) != 0 or res.handle.ctx == null) {
+            return null;
+        }
+        return res;
+    }
+};
+
+/// MLX 计算图静态编译闭包 (Closure)
+pub const Closure = struct {
+    handle: if (has_mlx) c.mlx_closure else ?*anyopaque,
+
+    pub fn deinit(self: *Closure) void {
+        if (has_mlx and self.handle.ctx != null) {
+            _ = c.mlx_closure_free(self.handle);
+            self.handle.ctx = null;
+        }
+    }
+
+    /// 应用静态编译闭包并执行硬件加速前向推理 (Execute Compiled Closure)
+    pub fn apply(self: Closure, inputs: VectorArray) !VectorArray {
+        if (!has_mlx or self.handle.ctx == null) return error.MlxNotSupported;
+        var res = VectorArray.init();
+        if (c.mlx_closure_apply(&res.handle, self.handle, inputs.handle) != 0 or res.handle.ctx == null) {
+            return error.MlxOperationFailed;
+        }
+        return res;
+    }
+};
+
+/// 静态编译函数闭包 (Compile Closure)，通过 Metal 即时编译 (Just-In-Time Compilation, JIT) 融合计算图内核
+pub fn compile(
+    fun: *const fn ([*c]c.mlx_vector_array, c.mlx_vector_array, ?*anyopaque) callconv(.c) c_int,
+    payload: ?*anyopaque,
+    shapeless: bool,
+) !Closure {
+    if (!has_mlx) return error.MlxNotSupported;
+    const raw_cls = c.mlx_closure_new_func_payload(fun, payload, null);
+    defer _ = c.mlx_closure_free(raw_cls);
+
+    var compiled_cls = c.mlx_closure_new();
+    const rc = c.mlx_compile(&compiled_cls, raw_cls, shapeless);
+    if (rc != 0 or compiled_cls.ctx == null) return error.MlxOperationFailed;
+    return .{ .handle = compiled_cls };
+}
+
 /// MLX 多维数组封装 (Array)
 pub const Array = struct {
     handle: if (has_mlx) c.mlx_array else ?*anyopaque,
@@ -1451,6 +1530,55 @@ test "MLX GPU backend matmul and fast kernels" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), geglu_out[0], 1e-4);
     // GELU(1) * 3.0 = 0.8413447 * 3.0 = 2.524034
     try std.testing.expectApproxEqAbs(@as(f32, 2.524034), geglu_out[1], 1e-4);
+
+    // 11. 验证计算图函数闭包静态编译 (Closure & compile)
+    const Helper = struct {
+        fn compute(vres: [*c]c.mlx_vector_array, in: c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
+            _ = payload;
+            var x_handle: c.mlx_array = .{ .ctx = null };
+            if (c.mlx_vector_array_get(&x_handle, in, 0) != 0 or x_handle.ctx == null) return 1;
+            const x = Array{ .handle = x_handle };
+
+            var gelu_res = x.gelu(null) catch return 1;
+            defer gelu_res.deinit();
+
+            var one = Array.fromScalarF32(1.0) catch return 1;
+            defer one.deinit();
+
+            var res_arr = Array.add(gelu_res, one, null) catch return 1;
+            defer res_arr.deinit();
+
+            const res_vec = c.mlx_vector_array_new_data(&[_]c.mlx_array{res_arr.handle}, 1);
+            _ = c.mlx_vector_array_set(vres, res_vec);
+            _ = c.mlx_vector_array_free(res_vec);
+            return 0;
+        }
+    };
+
+    var compiled = try compile(Helper.compute, null, false);
+    defer compiled.deinit();
+
+    const in_comp_data = [_]f32{ 0.0, 1.0, 2.0, -1.0 };
+    var in_comp_arr = try Array.fromSlice(&in_comp_data, &.{ 1, 4 });
+    defer in_comp_arr.deinit();
+
+    var in_comp_vec = VectorArray.fromArrays(&.{in_comp_arr});
+    defer in_comp_vec.deinit();
+
+    var out_comp_vec = try compiled.apply(in_comp_vec);
+    defer out_comp_vec.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), out_comp_vec.size());
+    var out_comp_arr = out_comp_vec.get(0).?;
+    defer out_comp_arr.deinit();
+    out_comp_arr.eval();
+
+    const out_comp_slice = out_comp_arr.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 4), out_comp_slice.len);
+    // x=0: gelu(0) + 1.0 = 0.0 + 1.0 = 1.0
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), out_comp_slice[0], 1e-3);
+    // x=1: gelu(1) + 1.0 = 0.8413447 + 1.0 = 1.8413447
+    try std.testing.expectApproxEqAbs(@as(f32, 1.8413447), out_comp_slice[1], 1e-3);
 }
 
 
