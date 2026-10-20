@@ -903,6 +903,9 @@ pub const GpuModelContext = struct {
 
         const stream = try Stream.defaultGpu();
 
+        mlx.enableCompile();
+        mlx.setCompileMode(.enabled);
+
         return GpuModelContext{
             .allocator = allocator,
             .layers = layers,
@@ -1564,7 +1567,7 @@ pub const GpuModelContext = struct {
             }
         }
 
-        // 4. 回滚未被接受的投机词元 KVCache
+        // 4. 回滚未被接受的投机词元 KVCache (惰性图切片，零同步开销)
         if (num_accepted < M) {
             const target_len = pos + num_accepted;
             for (self.layers, 0..) |_, l| {

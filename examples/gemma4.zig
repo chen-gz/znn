@@ -13,6 +13,7 @@ pub fn main(init: std.process.Init) !void {
 
     var lm_head_mode: zig_ml.backend.offload.QuantMode = .q8;
     var enable_speculative: bool = true;
+    var custom_prompt: ?[]const u8 = null;
     if (init.minimal.args.iterateAllocator(allocator)) |*iter| {
         var it = iter.*;
         defer it.deinit();
@@ -26,6 +27,10 @@ pub fn main(init: std.process.Init) !void {
                 lm_head_mode = .bf16;
             } else if (std.mem.eql(u8, arg, "--no-spec") or std.mem.eql(u8, arg, "--no-speculative")) {
                 enable_speculative = false;
+            } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--prompt")) {
+                if (it.next()) |p| {
+                    custom_prompt = p;
+                }
             }
         }
     } else |_| {}
@@ -80,28 +85,36 @@ pub fn main(init: std.process.Init) !void {
     // 3. 直接加载 262,144 完整官方词表，支持 O(1) 零拷贝解码与正反向查表
     var vocab = try gemma4.Gemma4Vocabulary.openFile(io, "gemma4_vocab.bin");
     defer vocab.deinit();
+    try vocab.buildLookupTable(allocator);
     std.debug.print("3. [加载 262K 官方词表解码器 (零拷贝映射)]:\n", .{});
     std.debug.print("   - 词表解码器已就绪: 262,144 个完整官方 Token 文本，无硬编码词表映射表。\n\n", .{});
 
     // 4. 构建 Gemma 4 Instruct 官方标准对话上下文:
-    // <bos><|turn>user\nwho are you<turn|>\n<|turn>model\n
+    // <bos><|turn>user\n[prompt]<turn|>\n<|turn>model\n
     std.debug.print("4. [Gemma 4 Instruct 对话模板 (Chat Template)]:\n", .{});
-    const prompt_tokens = [_]usize{
-        gemma4.Gemma4Vocabulary.BOS, // <bos>
-        gemma4.Gemma4Vocabulary.SOT, // <|turn>
-        gemma4.Gemma4Vocabulary.USER, // user
-        gemma4.Gemma4Vocabulary.NL, // \n
-        vocab.findToken(" who") orelse 1015,
-        vocab.findToken(" are") orelse 659,
-        vocab.findToken(" you") orelse 611,
-        gemma4.Gemma4Vocabulary.EOT, // <turn|>
-        gemma4.Gemma4Vocabulary.NL, // \n
-        gemma4.Gemma4Vocabulary.SOT, // <|turn>
-        gemma4.Gemma4Vocabulary.MODEL, // model
-        gemma4.Gemma4Vocabulary.NL, // \n
-    };
+    const user_prompt_str = custom_prompt orelse "who are you";
 
-    std.debug.print("   - 输入 Prompt 文本: \"<bos><|turn>user\\nwho are you<turn|>\\n<|turn>model\\n\"\n", .{});
+    var prompt_list: std.ArrayList(usize) = .empty;
+    defer prompt_list.deinit(allocator);
+
+    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.BOS);
+    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.SOT);
+    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.USER);
+    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.NL);
+
+    const user_tokens = try vocab.encode(allocator, user_prompt_str);
+    defer allocator.free(user_tokens);
+    try prompt_list.appendSlice(allocator, user_tokens);
+
+    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.EOT);
+    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.NL);
+    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.SOT);
+    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.MODEL);
+    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.NL);
+
+    const prompt_tokens = prompt_list.items;
+
+    std.debug.print("   - 输入 Prompt 文本: \"<bos><|turn>user\\n{s}<turn|>\\n<|turn>model\\n\"\n", .{user_prompt_str});
     std.debug.print("   - Prompt Tokens ({} 个词元): [", .{prompt_tokens.len});
     for (prompt_tokens, 0..) |tid, i| {
         if (i > 0) std.debug.print(", ", .{});
@@ -132,7 +145,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("   - 硬件加速: CPU 多核并行\n", .{});
     }
     std.debug.print("   -------------------------------------------------------------\n", .{});
-    std.debug.print("   User  : who are you\n", .{});
+    std.debug.print("   User  : {s}\n", .{user_prompt_str});
     std.debug.print("   Model : ", .{});
 
     var current_tokens: std.ArrayList(usize) = .empty;
@@ -180,7 +193,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    // 2. 增量解码阶段 (Decode Loop)：结合 Prompt N-gram 投机采样与 KVCache
+    // 2. 增量解码阶段 (Decode Loop)：结合 Prompt N-gram 与马尔可夫转移投机采样与 KVCache
     var current_tok = current_tokens.items[current_tokens.items.len - 1];
     var speculative_hits: usize = 0;
 
@@ -191,6 +204,11 @@ pub fn main(init: std.process.Init) !void {
     });
     defer step_graph.deinit();
 
+    var draft_engine = gemma4.SpeculativeDraftEngine.init(allocator);
+    defer draft_engine.deinit();
+    try draft_engine.seedFromTokens(prompt_tokens);
+    try draft_engine.seedCommonCollocations(&vocab);
+
     while (gen_count < max_new_tokens) {
         if (current_tok == gemma4.Gemma4Vocabulary.EOS or current_tok == gemma4.Gemma4Vocabulary.EOT) {
             break;
@@ -198,36 +216,41 @@ pub fn main(init: std.process.Init) !void {
 
         step_graph.reset();
 
+        var cand_buf: [8]usize = undefined;
         const draft = if (enable_speculative and use_gpu)
-            gemma4.promptLookup(current_tokens.items, 2, 4, 3)
+            draft_engine.proposeDraft(current_tokens.items, cand_buf[0..3])
         else
             null;
 
         if (draft) |cands| {
-            var input_spec: [4]usize = undefined;
+            var input_spec: [16]usize = undefined;
             input_spec[0] = current_tok;
-            const spec_k = @min(cands.len, 3);
+            const spec_k: usize = if (cands.len > 3) @as(usize, 3) else cands.len;
             for (0..spec_k) |idx| {
                 input_spec[idx + 1] = cands[idx];
             }
-            var accepted_buf: [4]usize = undefined;
+            const spec_total: usize = 1 + spec_k;
+            var accepted_buf: [16]usize = undefined;
             const num_acc = try model.decodeSpeculative(
                 &step_graph,
-                input_spec[0 .. spec_k + 1],
+                input_spec[0..spec_total],
                 &cache,
                 mmap_ptr,
                 current_tokens.items,
                 1.25,
-                &accepted_buf,
+                accepted_buf[0..spec_total],
             );
 
             if (num_acc > 1) {
                 speculative_hits += (num_acc - 1);
             }
 
+            var prev_tok = current_tok;
             for (0..num_acc) |acc_i| {
                 const tok = accepted_buf[acc_i];
                 try current_tokens.append(allocator, tok);
+                draft_engine.recordTransition(prev_tok, tok) catch {};
+                prev_tok = tok;
                 gen_count += 1;
                 const piece = vocab.decode(tok);
                 if (piece.len > 0) {
@@ -242,6 +265,7 @@ pub fn main(init: std.process.Init) !void {
             current_tok = current_tokens.items[current_tokens.items.len - 1];
         } else {
             const next_tok = try model.decodeStep(&step_graph, current_tok, &cache, mmap_ptr, current_tokens.items, 1.25);
+            draft_engine.recordTransition(current_tok, next_tok) catch {};
             current_tok = next_tok;
             gen_count += 1;
             try current_tokens.append(allocator, next_tok);

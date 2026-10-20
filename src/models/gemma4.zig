@@ -1057,6 +1057,8 @@ pub const Gemma4Vocabulary = struct {
     offsets: []const u32,
     str_data: []const u8,
     count: usize,
+    lookup_table: ?std.StringHashMapUnmanaged(usize) = null,
+    lookup_allocator: ?std.mem.Allocator = null,
 
     pub const MAGIC: *const [8]u8 = "ZNNVOC01";
 
@@ -1101,7 +1103,31 @@ pub const Gemma4Vocabulary = struct {
         return loadFromMmap(mmap_ptr);
     }
 
+    /// 构建高速反向词表哈希索引，将 Token 查找从 O(N) 线性扫描降至 O(1)
+    pub fn buildLookupTable(self: *Gemma4Vocabulary, allocator: std.mem.Allocator) !void {
+        if (self.lookup_table != null) return;
+        var table = std.StringHashMapUnmanaged(usize){};
+        try table.ensureTotalCapacity(allocator, @intCast(self.count));
+        for (0..self.count) |i| {
+            const piece = self.decode(i);
+            if (piece.len > 0) {
+                const gop = try table.getOrPut(allocator, piece);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = i;
+                }
+            }
+        }
+        self.lookup_table = table;
+        self.lookup_allocator = allocator;
+    }
+
     pub fn deinit(self: *Gemma4Vocabulary) void {
+        if (self.lookup_table) |*table| {
+            if (self.lookup_allocator) |alloc| {
+                table.deinit(alloc);
+            }
+            self.lookup_table = null;
+        }
         std.posix.munmap(@alignCast(self.mmap_ptr));
     }
 
@@ -1131,10 +1157,73 @@ pub const Gemma4Vocabulary = struct {
 
     /// 在词表中根据确切文本反查对应的 Token ID (若不存在返回 null)
     pub fn findToken(self: *const Gemma4Vocabulary, text: []const u8) ?usize {
+        if (self.lookup_table) |table| {
+            return table.get(text);
+        }
         for (0..self.count) |i| {
             if (std.mem.eql(u8, self.decode(i), text)) return i;
         }
         return null;
+    }
+
+    /// 将任意 UTF-8 文本贪婪切分为 Gemma 4 词元序列 (Greedy Longest Matching Tokenization)
+    pub fn encode(self: *const Gemma4Vocabulary, allocator: std.mem.Allocator, text: []const u8) ![]usize {
+        var tokens: std.ArrayList(usize) = .empty;
+        errdefer tokens.deinit(allocator);
+
+        var idx: usize = 0;
+        var at_start = true;
+        while (idx < text.len) {
+            var best_len: usize = 0;
+            var best_token: ?usize = null;
+
+            // 1. 尝试匹配以   (0xe2, 0x96, 0x81) 开头的词元
+            var cand_buf: [256]u8 = undefined;
+            if (at_start or text[idx] == ' ') {
+                const effective_idx = if (text[idx] == ' ') idx + 1 else idx;
+                const max_check = @min(effective_idx + 48, text.len);
+                var sub_len = max_check - effective_idx;
+                while (sub_len > 0) : (sub_len -= 1) {
+                    const chunk = text[effective_idx .. effective_idx + sub_len];
+                    if (3 + chunk.len <= cand_buf.len) {
+                        cand_buf[0] = 0xe2;
+                        cand_buf[1] = 0x96;
+                        cand_buf[2] = 0x81;
+                        @memcpy(cand_buf[3 .. 3 + chunk.len], chunk);
+                        if (self.findToken(cand_buf[0 .. 3 + chunk.len])) |tok| {
+                            best_token = tok;
+                            best_len = (if (text[idx] == ' ') @as(usize, 1) else 0) + sub_len;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // 2. 若无前缀   匹配，则尝试纯文本贪婪最长匹配
+            if (best_token == null) {
+                const max_check = @min(idx + 48, text.len);
+                var sub_len = max_check - idx;
+                while (sub_len > 0) : (sub_len -= 1) {
+                    const chunk = text[idx .. idx + sub_len];
+                    if (self.findToken(chunk)) |tok| {
+                        best_token = tok;
+                        best_len = sub_len;
+                        break;
+                    }
+                }
+            }
+
+            if (best_token) |tok| {
+                try tokens.append(allocator, tok);
+                idx += best_len;
+            } else {
+                // 单字节跳过保底
+                idx += 1;
+            }
+            at_start = false;
+        }
+
+        return tokens.toOwnedSlice(allocator);
     }
 };
 
@@ -1170,3 +1259,103 @@ pub fn promptLookup(
     }
     return null;
 }
+
+/// 投机采样推测草稿引擎 (Speculative Draft Engine)
+/// 结合自适应多尺度 N-gram 历史回溯匹配与高频词元马尔可夫转移缓存 (Markov Transition Cache)
+pub const SpeculativeDraftEngine = struct {
+    allocator: std.mem.Allocator,
+    transitions: std.AutoHashMapUnmanaged(usize, usize),
+
+    pub fn init(allocator: std.mem.Allocator) SpeculativeDraftEngine {
+        return .{
+            .allocator = allocator,
+            .transitions = .{},
+        };
+    }
+
+    pub fn deinit(self: *SpeculativeDraftEngine) void {
+        self.transitions.deinit(self.allocator);
+    }
+
+    /// 根据 Prompt 与已知词元预填充转移图
+    pub fn seedFromTokens(self: *SpeculativeDraftEngine, tokens: []const usize) !void {
+        if (tokens.len < 2) return;
+        for (0..tokens.len - 1) |i| {
+            try self.transitions.put(self.allocator, tokens[i], tokens[i + 1]);
+        }
+    }
+
+    /// 记录新生成的词元转移
+    pub fn recordTransition(self: *SpeculativeDraftEngine, from: usize, to: usize) !void {
+        try self.transitions.put(self.allocator, from, to);
+    }
+
+    /// 预注入通用语言与编程高频共现搭配 (Collocations)
+    pub fn seedCommonCollocations(self: *SpeculativeDraftEngine, vocab: *const Gemma4Vocabulary) !void {
+        const pairs = [_][2][]const u8{
+            .{ " language", " model" },
+            .{ " developed", " by" },
+            .{ " artificial", " intelligence" },
+            .{ " machine", " learning" },
+            .{ " neural", " network" },
+            .{ " deep", " learning" },
+            .{ " large", " language" },
+            .{ " in", " order" },
+            .{ " order", " to" },
+            .{ " as", " well" },
+            .{ " well", " as" },
+            .{ " for", " example" },
+            .{ " such", " as" },
+            .{ " based", " on" },
+            .{ " according", " to" },
+            .{ " thank", " you" },
+            .{ " help", " answer" },
+            .{ " answer", " your" },
+            .{ " your", " questions" },
+            .{ " Open", "AI" },
+            .{ "def", " __init__" },
+            .{ "pub", " fn" },
+            .{ "return", " error" },
+        };
+        for (pairs) |pair| {
+            if (vocab.findToken(pair[0])) |t1| {
+                if (vocab.findToken(pair[1])) |t2| {
+                    try self.transitions.put(self.allocator, t1, t2);
+                }
+            }
+        }
+    }
+
+    /// 提出推测草稿候选词元 (Propose Draft Candidates)
+    pub fn proposeDraft(
+        self: *const SpeculativeDraftEngine,
+        current_tokens: []const usize,
+        out_buf: []usize,
+    ) ?[]const usize {
+        if (current_tokens.len == 0 or out_buf.len == 0) return null;
+
+        // 1. 优先使用 N-gram 历史回溯匹配 (N=4, 3, 2)
+        if (promptLookup(current_tokens, 2, 4, out_buf.len)) |draft| {
+            return draft;
+        }
+
+        // 2. 马尔可夫多阶转移预测 (Token-to-Token Markov Chain)
+        const cur_tok = current_tokens[current_tokens.len - 1];
+        var count: usize = 0;
+        var probe = cur_tok;
+        while (count < out_buf.len) {
+            if (self.transitions.get(probe)) |nxt| {
+                if (nxt == probe or nxt == Gemma4Vocabulary.EOS or nxt == Gemma4Vocabulary.EOT) break;
+                out_buf[count] = nxt;
+                count += 1;
+                probe = nxt;
+            } else {
+                break;
+            }
+        }
+        if (count > 0) {
+            return out_buf[0..count];
+        }
+        return null;
+    }
+};

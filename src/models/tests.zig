@@ -290,3 +290,27 @@ test "Gemma 4 promptLookup N-gram speculative sampling" {
     try std.testing.expectEqualSlices(usize, &[_]usize{ 88, 10 }, draft3.?);
 }
 
+test "Gemma 4 SpeculativeDraftEngine Markov and N-gram proposal" {
+    const allocator = std.testing.allocator;
+    var engine = gemma4.SpeculativeDraftEngine.init(allocator);
+    defer engine.deinit();
+
+    // 1. 种子注入转移
+    const prompt_seq = [_]usize{ 100, 200, 300, 400 };
+    try engine.seedFromTokens(&prompt_seq);
+
+    // 2. 预测转移：100 -> 200 -> 300 -> 400
+    var buf: [3]usize = undefined;
+    const cur_seq1 = [_]usize{ 999, 100 };
+    const draft1 = engine.proposeDraft(&cur_seq1, &buf);
+    try std.testing.expect(draft1 != null);
+    try std.testing.expectEqualSlices(usize, &[_]usize{ 200, 300, 400 }, draft1.?);
+
+    // 3. 动态记录新转移
+    try engine.recordTransition(500, 600);
+    const cur_seq2 = [_]usize{ 888, 500 };
+    const draft2 = engine.proposeDraft(&cur_seq2, &buf);
+    try std.testing.expect(draft2 != null);
+    try std.testing.expectEqualSlices(usize, &[_]usize{600}, draft2.?);
+}
+
