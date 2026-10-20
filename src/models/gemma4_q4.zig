@@ -911,6 +911,8 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             /// 骨干 48 层始终为 Q4 (7.59 GB)，LM Head 默认采用 .q8 (1.07 GB) 保障 100% 精度一致性并降低 50% 显存；
             /// 也可指定为 .bf16 (2.01 GB) 或 .q4 (530 MB)。
             lm_head_mode: backend.offload.QuantMode = .q8,
+            /// 是否在加载阶段自动执行 Metal 计算管线预热，消除推理首字着色器编译延迟 (TTFT)
+            warmup: bool = true,
 
             pub fn defaultOptions() LoadMmapOptions {
                 return .{};
@@ -1045,6 +1047,10 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 .lm_head_weights = lm_head_weights,
             };
             res.initGpuContext(allocator) catch {};
+
+            if (options.warmup and res.gpu_context != null and res.embed_u16_mmap != null) {
+                res.gpu_context.?.warmup(res.embed_u16_mmap.?, null) catch {};
+            }
 
             if (backend.offload.isAvailable() and res.gpu_context != null) {
                 // 通知操作系统内核丢弃已卸载至 GPU 显存的 4-bit 权重文件页缓存，防止 7.59 GB 物理内存重复驻留造成 macOS Swap 严重换页
