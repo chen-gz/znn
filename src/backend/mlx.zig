@@ -1043,6 +1043,54 @@ pub const Array = struct {
         return .{ .handle = res };
     }
 
+    /// 反量化低比特数组 (Dequantize Quantized Weights via GPU Metal Kernel)
+    pub fn dequantize(
+        w: Array,
+        scales: Array,
+        biases: ?Array,
+        group_size: i32,
+        bits: i32,
+        mode: [*:0]const u8,
+        stream: ?Stream,
+    ) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res: c.mlx_array = .{ .ctx = null };
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const gs: c.mlx_optional_int = .{ .value = group_size, .has_value = true };
+        const b: c.mlx_optional_int = .{ .value = bits, .has_value = true };
+        const bias_handle: c.mlx_array = if (biases) |bi| bi.handle else .{ .ctx = null };
+        const opt_none: c.mlx_optional_dtype = .{ .value = 0, .has_value = false };
+
+        const status = c.mlx_dequantize(
+            &res,
+            w.handle,
+            scales.handle,
+            bias_handle,
+            gs,
+            b,
+            mode,
+            .{ .ctx = null },
+            opt_none,
+            s,
+        );
+        if (status != 0 or res.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = res };
+    }
+
+    /// 双曲正切算子 (Hyperbolic Tangent, Tanh)
+    pub fn tanh(a: Array, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res: c.mlx_array = .{ .ctx = null };
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const status = c.mlx_tanh(&res, a.handle, s);
+        if (status != 0 or res.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = res };
+    }
+
     /// 低比特量化权重元组 (Quantized Weights Output)
     pub const QuantizedOutput = struct {
         weights: Array,

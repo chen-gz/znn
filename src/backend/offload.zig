@@ -413,6 +413,8 @@ pub const Q4Weights = struct {
     biases: mlx.Array,
     in_features: usize,
     out_features: usize,
+    group_size: i32 = 32,
+    bits: i32 = 4,
 
     /// 将 18 字节/块的原始量化切片解包并重排写入直接内存缓冲区 (w_q, scales, biases)
     pub fn packBlocksToDirectBuffers(
@@ -469,17 +471,42 @@ pub const Q4Weights = struct {
         out_features: usize,
         stream: ?Stream,
     ) OffloadError!Q4Weights {
+        return initFromDirectBuffersCustom(
+            w_q_bytes,
+            scales_bytes,
+            biases_bytes,
+            in_features,
+            out_features,
+            32,
+            4,
+            .float16,
+            stream,
+        );
+    }
+
+    /// 从任意量化配置（支持 4-bit / 8-bit 及 float16 / bfloat16 缩放偏移）直接构建 GPU 量化权重
+    pub fn initFromDirectBuffersCustom(
+        w_q_bytes: []const u8,
+        scales_bytes: []const u8,
+        biases_bytes: []const u8,
+        in_features: usize,
+        out_features: usize,
+        group_size: i32,
+        bits: i32,
+        sb_dtype: mlx.DType,
+        stream: ?Stream,
+    ) OffloadError!Q4Weights {
         _ = stream;
         if (!isAvailable()) return error.OffloadNotSupported;
 
-        const w_dims = [_]usize{ out_features, in_features / 8 };
-        const sb_dims = [_]usize{ out_features, in_features / 32 };
+        const w_dims = [_]usize{ out_features, in_features / @as(usize, @intCast(@divExact(32, bits))) };
+        const sb_dims = [_]usize{ out_features, in_features / @as(usize, @intCast(group_size)) };
 
         var w_q = try mlx.Array.fromRawData(@ptrCast(w_q_bytes.ptr), &w_dims, .uint32);
         errdefer w_q.deinit();
-        var scales = try mlx.Array.fromRawData(@ptrCast(scales_bytes.ptr), &sb_dims, .float16);
+        var scales = try mlx.Array.fromRawData(@ptrCast(scales_bytes.ptr), &sb_dims, sb_dtype);
         errdefer scales.deinit();
-        var biases = try mlx.Array.fromRawData(@ptrCast(biases_bytes.ptr), &sb_dims, .float16);
+        var biases = try mlx.Array.fromRawData(@ptrCast(biases_bytes.ptr), &sb_dims, sb_dtype);
         errdefer biases.deinit();
 
         return .{
@@ -488,6 +515,8 @@ pub const Q4Weights = struct {
             .biases = biases,
             .in_features = in_features,
             .out_features = out_features,
+            .group_size = group_size,
+            .bits = bits,
         };
     }
 
@@ -569,8 +598,8 @@ pub const Q4Weights = struct {
             self.scales,
             self.biases,
             true, // transpose
-            32,
-            4,
+            self.group_size,
+            self.bits,
             "affine",
             stream,
         );
