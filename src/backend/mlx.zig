@@ -1097,6 +1097,21 @@ test "MLX GPU backend matmul and fast kernels" {
     try std.testing.expectEqual(@as(usize, 16), gqa_out.len);
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), gqa_out[0], 1e-4);
 
+    // 3.1.1 验证带前缀因果注意力 (Causal SDPA with M > 1 and K > M)
+    const q_prefix = [_]f32{0.2} ** 16; // [1, 1 head, 2 seq, 8 dim]
+    var q_pref_arr = try Array.fromSlice(&q_prefix, &.{ 1, 1, 2, 8 });
+    defer q_pref_arr.deinit();
+    const kv_prefix = [_]f32{0.1} ** 40; // [1, 1 head, 5 seq, 8 dim]
+    var k_pref_arr = try Array.fromSlice(&kv_prefix, &.{ 1, 1, 5, 8 });
+    defer k_pref_arr.deinit();
+    var v_pref_arr = try Array.fromSlice(&kv_prefix, &.{ 1, 1, 5, 8 });
+    defer v_pref_arr.deinit();
+    var pref_sdpa = try Array.fastScaledDotProductAttention(q_pref_arr, k_pref_arr, v_pref_arr, 1.0 / @sqrt(8.0), true, stream);
+    defer pref_sdpa.deinit();
+    pref_sdpa.eval();
+    const pref_out = pref_sdpa.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 16), pref_out.len);
+
     // 3.2 验证旋转位置编码 (Rotary Position Embedding, RoPE)
     const rope_in = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
     var rope_arr = try Array.fromSlice(&rope_in, &.{ 1, 1, 1, 4 });

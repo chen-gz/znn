@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **自适应投机推测草稿引擎、马尔可夫转移缓存与自定义 Prompt 词元编码 (`src/models/gemma4.zig`, `src/models/tests.zig`, `examples/gemma4.zig`, `src/backend/offload.zig`)**:
+  - 在 `src/models/gemma4.zig` 中实现 `SpeculativeDraftEngine`，融合多尺度 Prompt N-gram 历史回溯匹配 (`promptLookup`)、在线单步马尔可夫词元转移学习 (`transitions`) 与通用语言高频共现搭配词组缓存 (`seedCommonCollocations`)，在无需引入额外小模型辅助的前提下大幅提升草稿命中率。
+  - 在 `src/models/gemma4.zig` 中新增 `Gemma4Vocabulary.buildLookupTable` 与 `encode` 方法，为 262K 官方词表构建高频逆向索引表，支持命令行 `-p` / `--prompt` 输入任意用户 Prompt 文本并动态分词编码。
+  - 在 `src/backend/offload.zig` 的 `GpuModelContext.init` 中全面开启 Apple MLX 静态编译模式 (`enableCompile` 与 `setCompileMode(.enabled)`)，并将投机采样回滚阶段优化为惰性计算图切片，消除 96 次同步 Metal 内核等待。
+  - 修复 ReleaseFast 优化下切片长度被错误收缩截断为 2-bit 导致投机批量验证触发空切片 SIGSEGV 的编译器范围推断缺陷，实现 100% 数学无损、位一致的自回归投机采样加速。
+
 - **GeGLU 门控激活融合、计算图单例复用与零分支向量化 Argmax 性能优化 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `src/autodiff/graph.zig`, `examples/gemma4.zig`)**:
   - 在 `src/backend/mlx.zig` 中实现 `Array.geglu(intermediate_size)` 门控激活融合算子与 `Array.takeAxis` 沿轴索引抽取算子，每层 Transformer 减少 4 个中间数组分配与 3 次独立 Metal 内核调度，全网 48 层共减少 192 次数组分配与 144 次内核派发，在 `prefill`、`decodeStepWithArray` 与 `decodeSpeculative` 中全链路启用。
   - 在 `src/autodiff/graph.zig` 为 `Graph` 引入 `reset()` 方法（清空 `module_formulas`、`scope_stack`、`tensors`、`ops` 并保留容量，重置 `arena.reset(.retain_capacity)`），并在 `examples/gemma4.zig` 将 `step_graph` 提升至 while 循环外部单例复用，消除每个自回归词元重复分配释放 5 个哈希表与 Arena 内存的开销。
