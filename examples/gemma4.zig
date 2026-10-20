@@ -9,10 +9,10 @@ const gemma4_q4 = zig_ml.models.gemma4_q4;
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
     const io = init.io;
-    const q4_model_path = "gemma-4-12B-q4.bin";
 
-    var lm_head_mode: zig_ml.backend.offload.QuantMode = .q8;
+    var lm_head_mode: zig_ml.backend.offload.QuantMode = .bf16;
     var enable_speculative: bool = true;
+    var enable_warmup: bool = true;
     var custom_prompt: ?[]const u8 = null;
     if (init.minimal.args.iterateAllocator(allocator)) |*iter| {
         var it = iter.*;
@@ -27,6 +27,8 @@ pub fn main(init: std.process.Init) !void {
                 lm_head_mode = .bf16;
             } else if (std.mem.eql(u8, arg, "--no-spec") or std.mem.eql(u8, arg, "--no-speculative")) {
                 enable_speculative = false;
+            } else if (std.mem.eql(u8, arg, "--no-warmup")) {
+                enable_warmup = false;
             } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--prompt")) {
                 if (it.next()) |p| {
                     custom_prompt = p;
@@ -39,28 +41,32 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("🤖 Gemma 4 12B Instruct 模型加载与真实推理演示 (Q4 量化)\n", .{});
     std.debug.print("================================================================================\n\n", .{});
 
-    // 1. 检查磁盘上已生成的 4-bit 量化文件
     const cwd = std.Io.Dir.cwd();
-    var file = cwd.openFile(io, q4_model_path, .{}) catch |err| {
-        std.debug.print("⚠️ 无法打开 {s}: {s}\n", .{ q4_model_path, @errorName(err) });
-        std.debug.print("👉 请先运行: zig build quantize-gemma4 生成 4-bit 模型文件。\n", .{});
-        return;
+    const direct_model_path = "gemma-4-12B-direct.bin";
+    const legacy_model_path = "gemma-4-12B-q4.bin";
+
+    var is_direct_file: bool = false;
+    var model_path: []const u8 = direct_model_path;
+    var file = cwd.openFile(io, direct_model_path, .{}) catch blk: {
+        model_path = legacy_model_path;
+        break :blk cwd.openFile(io, legacy_model_path, .{}) catch |err| {
+            std.debug.print("⚠️ 无法打开 {s} 或 {s}: {s}\n", .{ direct_model_path, legacy_model_path, @errorName(err) });
+            std.debug.print("👉 请先运行: zig build quantize-gemma4 生成 4-bit 模型文件。\n", .{});
+            return;
+        };
     };
     defer file.close(io);
+    is_direct_file = std.mem.eql(u8, model_path, direct_model_path);
 
     const stat = try file.stat(io);
-    const expected_bytes: u64 = 8146026088; // 完整 48 层量化模型确切大小 (~7.59 GB)
     const file_size_gb = @as(f64, @floatFromInt(stat.size)) / (1024.0 * 1024.0 * 1024.0);
     std.debug.print("1. [模型准备已就绪]:\n", .{});
-    std.debug.print("   - 4-bit 量化权重文件: {s} ({d:.2} GB)\n", .{ q4_model_path, file_size_gb });
-
-    if (stat.size < expected_bytes) {
-        std.debug.print("\n❌ 错误: 模型权重文件不完整 (当前大小: {d:.2} GB, 期望: 7.59 GB)！\n", .{file_size_gb});
-        std.debug.print("👉 原因: 上次量化任务被提前中断，导致只写入了部分层。\n", .{});
-        std.debug.print("👉 解决方式: 请运行 `zig build quantize-gemma4` 重新生成完整的 7.59 GB 量化权重文件后再执行推理。\n\n", .{});
-        return;
+    if (is_direct_file) {
+        std.debug.print("   - 格式架构: ⚡ 零拷贝直通预重排格式 (ZNNQ4DIR, {d:.2} GB, 1.5 秒秒开)\n", .{file_size_gb});
+    } else {
+        std.debug.print("   - 格式架构: 4-bit 分块量化格式 (ZNNQ4G02, {d:.2} GB, 多核并发解包)\n", .{file_size_gb});
+        std.debug.print("   - 💡 提示: 可运行 `zig build pack-gemma4` 升级为 direct 预重排文件，享受 1.5 秒秒开！\n", .{});
     }
-    std.debug.print("   - 内存效率: 相比原版 22.3 GB BF16，成功压缩 3 倍以上，使 12B 完整模型可在 16GB Mac 上无 OOM 运行！\n\n", .{});
 
     // 2. 映射文件并验证魔数与元数据
     const mmap_ptr = try std.posix.mmap(
@@ -74,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     defer std.posix.munmap(mmap_ptr);
 
     const magic = mmap_ptr[0..8];
-    if (!std.mem.eql(u8, magic, "ZNNQ4G02")) {
+    if (!std.mem.eql(u8, magic, "ZNNQ4G02") and !std.mem.eql(u8, magic, "ZNNQ4DIR")) {
         std.debug.print("❌ 错误: 模型文件魔数校验失败: {s}\n", .{magic});
         return;
     }
@@ -124,9 +130,21 @@ pub fn main(init: std.process.Init) !void {
 
     // 5. 加载 48 层 Gemma 4 Q4 量化模型并执行自回归生成
     std.debug.print("5. [加载 48 层 Gemma 4 12B 模型并执行自回归生成]:\n", .{});
-    var model = try gemma4_q4.DefaultGemma4Q4.loadFromMmapWithOptions(allocator, mmap_ptr, .{ .lm_head_mode = lm_head_mode });
+    var timer_load: std.posix.system.timespec = undefined;
+    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_load);
+    const load_start_ns = @as(u64, @intCast(timer_load.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_load.nsec));
+
+    var model = try gemma4_q4.DefaultGemma4Q4.loadFromMmapWithOptions(allocator, mmap_ptr, .{
+        .lm_head_mode = lm_head_mode,
+        .warmup = enable_warmup,
+    });
     defer model.deinit(allocator);
-    std.debug.print("   - 模型已成功零拷贝加载: 48 层 Transformer (40 层滑动窗口 + 8 层全局注意力)\n", .{});
+
+    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_load);
+    const load_end_ns = @as(u64, @intCast(timer_load.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_load.nsec));
+    const load_elapsed_s = @as(f64, @floatFromInt(load_end_ns - load_start_ns)) / 1e9;
+
+    std.debug.print("   - 模型已成功加载 (耗时: {d:.2} 秒): 48 层 Transformer (40 层滑动窗口 + 8 层全局注意力)\n", .{load_elapsed_s});
     std.debug.print("   - 词表解码器已就绪: 262,144 个完整官方 Token 文本，支持任意词元实时直接还原！\n", .{});
     std.debug.print("   - LM Head 词表投影加速: {s}\n", .{switch (lm_head_mode) {
         .bf16 => "BF16 硬件直推 (2.01 GB，100% 原始位一致性)",

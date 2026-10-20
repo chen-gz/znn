@@ -221,8 +221,6 @@ pub const LmHeadWeights = struct {
         }
 
         const w_t = try w.transpose(stream);
-        w_t.eval();
-        if (stream) |st| st.synchronize();
 
         return .{
             .w_t = w_t,
@@ -416,6 +414,83 @@ pub const Q4Weights = struct {
     in_features: usize,
     out_features: usize,
 
+    /// 将 18 字节/块的原始量化切片解包并重排写入直接内存缓冲区 (w_q, scales, biases)
+    pub fn packBlocksToDirectBuffers(
+        block_slices: []const []const u8,
+        out_features_list: []const usize,
+        in_features: usize,
+        w_q_out: []u32,
+        scales_out: []f16,
+        biases_out: []f16,
+    ) void {
+        const blocks_per_row = in_features / 32;
+        var global_blk_idx: usize = 0;
+        for (block_slices, 0..) |slice, s_idx| {
+            const slice_blocks = out_features_list[s_idx] * blocks_per_row;
+            for (0..slice_blocks) |b_idx| {
+                const raw = slice[b_idx * 18 .. (b_idx + 1) * 18];
+                const scale_bits = std.mem.readInt(u16, raw[0..2][0..2], .little);
+                const scale_f16: f16 = @bitCast(scale_bits);
+                const scale_f32: f32 = @floatCast(scale_f16);
+                const bias_f16: f16 = @floatCast(-8.0 * scale_f32);
+
+                scales_out[global_blk_idx] = scale_f16;
+                biases_out[global_blk_idx] = bias_f16;
+
+                const qs = raw[2..18];
+                var w0: u32 = 0;
+                var w1: u32 = 0;
+                var w2: u32 = 0;
+                var w3: u32 = 0;
+                for (0..8) |j| {
+                    const shift: u5 = @intCast(j * 4);
+                    w0 |= @as(u32, qs[j] & 0x0F) << shift;
+                    w1 |= @as(u32, qs[j + 8] & 0x0F) << shift;
+                    w2 |= @as(u32, qs[j] >> 4) << shift;
+                    w3 |= @as(u32, qs[j + 8] >> 4) << shift;
+                }
+                w_q_out[global_blk_idx * 4 + 0] = w0;
+                w_q_out[global_blk_idx * 4 + 1] = w1;
+                w_q_out[global_blk_idx * 4 + 2] = w2;
+                w_q_out[global_blk_idx * 4 + 3] = w3;
+
+                global_blk_idx += 1;
+            }
+        }
+    }
+
+    /// 从预重排直接内存缓冲区构建 GPU 量化权重 (Direct Layout Fast Path)
+    /// 无需任何运行时 CPU 解包与动态内存分配，直接将预重排内存映射至 MLX 显存，实现毫秒级加载
+    pub fn initFromDirectBuffers(
+        w_q_bytes: []const u8,
+        scales_bytes: []const u8,
+        biases_bytes: []const u8,
+        in_features: usize,
+        out_features: usize,
+        stream: ?Stream,
+    ) OffloadError!Q4Weights {
+        _ = stream;
+        if (!isAvailable()) return error.OffloadNotSupported;
+
+        const w_dims = [_]usize{ out_features, in_features / 8 };
+        const sb_dims = [_]usize{ out_features, in_features / 32 };
+
+        var w_q = try mlx.Array.fromRawData(@ptrCast(w_q_bytes.ptr), &w_dims, .uint32);
+        errdefer w_q.deinit();
+        var scales = try mlx.Array.fromRawData(@ptrCast(scales_bytes.ptr), &sb_dims, .float16);
+        errdefer scales.deinit();
+        var biases = try mlx.Array.fromRawData(@ptrCast(biases_bytes.ptr), &sb_dims, .float16);
+        errdefer biases.deinit();
+
+        return .{
+            .w_q = w_q,
+            .scales = scales,
+            .biases = biases,
+            .in_features = in_features,
+            .out_features = out_features,
+        };
+    }
+
     /// 从多个 Q4Block 权重切片直接沿输出维度 (axis 0) 串联构建融合 GPU 硬件加速量化权重矩阵 (Fused Q4Weights)
     /// 例如：同时传入 gate_proj 与 up_proj 的切片，直接构建单一大矩阵 [gate_out + up_out, in_features]
     pub fn initFromBlockSlices(
@@ -445,62 +520,16 @@ pub const Q4Weights = struct {
         const biases_buf = try allocator.alloc(f16, total_blocks);
         defer allocator.free(biases_buf);
 
-        var global_blk_idx: usize = 0;
-        for (block_slices, 0..) |slice, s_idx| {
-            const slice_blocks = out_features_list[s_idx] * blocks_per_row;
-            for (0..slice_blocks) |b_idx| {
-                const raw = slice[b_idx * 18 .. (b_idx + 1) * 18];
-                const scale_bits = std.mem.readInt(u16, raw[0..2][0..2], .little);
-                const scale_f16: f16 = @bitCast(scale_bits);
-                const scale_f32: f32 = @floatCast(scale_f16);
-                const bias_f16: f16 = @floatCast(-8.0 * scale_f32);
+        packBlocksToDirectBuffers(block_slices, out_features_list, in_features, w_q_buf, scales_buf, biases_buf);
 
-                scales_buf[global_blk_idx] = scale_f16;
-                biases_buf[global_blk_idx] = bias_f16;
-
-                const qs = raw[2..18];
-                var w0: u32 = 0;
-                var w1: u32 = 0;
-                var w2: u32 = 0;
-                var w3: u32 = 0;
-                for (0..8) |j| {
-                    const shift: u5 = @intCast(j * 4);
-                    w0 |= @as(u32, qs[j] & 0x0F) << shift;
-                    w1 |= @as(u32, qs[j + 8] & 0x0F) << shift;
-                    w2 |= @as(u32, qs[j] >> 4) << shift;
-                    w3 |= @as(u32, qs[j + 8] >> 4) << shift;
-                }
-                w_q_buf[global_blk_idx * 4 + 0] = w0;
-                w_q_buf[global_blk_idx * 4 + 1] = w1;
-                w_q_buf[global_blk_idx * 4 + 2] = w2;
-                w_q_buf[global_blk_idx * 4 + 3] = w3;
-
-                global_blk_idx += 1;
-            }
-        }
-
-        const w_dims = [_]usize{ total_out_features, in_features / 8 };
-        const sb_dims = [_]usize{ total_out_features, in_features / 32 };
-
-        var w_q = try mlx.Array.fromRawData(@ptrCast(w_q_buf.ptr), &w_dims, .uint32);
-        errdefer w_q.deinit();
-        var scales = try mlx.Array.fromRawData(@ptrCast(scales_buf.ptr), &sb_dims, .float16);
-        errdefer scales.deinit();
-        var biases = try mlx.Array.fromRawData(@ptrCast(biases_buf.ptr), &sb_dims, .float16);
-        errdefer biases.deinit();
-
-        w_q.eval();
-        scales.eval();
-        biases.eval();
-        if (stream) |s| s.synchronize();
-
-        return .{
-            .w_q = w_q,
-            .scales = scales,
-            .biases = biases,
-            .in_features = in_features,
-            .out_features = total_out_features,
-        };
+        return initFromDirectBuffers(
+            std.mem.sliceAsBytes(w_q_buf),
+            std.mem.sliceAsBytes(scales_buf),
+            std.mem.sliceAsBytes(biases_buf),
+            in_features,
+            total_out_features,
+            stream,
+        );
     }
 
     /// 从单个原始 Q4Block 切片 (18 字节/块) 构建 GPU 硬件加速量化权重矩阵
@@ -748,22 +777,16 @@ pub const GpuLayerWeights = struct {
     ) !GpuLayerWeights {
         var in_w = try mlx.Array.fromSlice(in_w_data, &.{in_w_data.len});
         errdefer in_w.deinit();
-        in_w.eval();
         var qn_w = try mlx.Array.fromSlice(qn_w_data, &.{qn_w_data.len});
         errdefer qn_w.deinit();
-        qn_w.eval();
         var kn_w = try mlx.Array.fromSlice(kn_w_data, &.{kn_w_data.len});
         errdefer kn_w.deinit();
-        kn_w.eval();
         var pa_w = try mlx.Array.fromSlice(pa_w_data, &.{pa_w_data.len});
         errdefer pa_w.deinit();
-        pa_w.eval();
         var pm_w = try mlx.Array.fromSlice(pm_w_data, &.{pm_w_data.len});
         errdefer pm_w.deinit();
-        pm_w.eval();
         var pom_w = try mlx.Array.fromSlice(pom_w_data, &.{pom_w_data.len});
         errdefer pom_w.deinit();
-        pom_w.eval();
 
         const v_dim = if (v_bytes != null) kv_dim else 0;
         var fused_qkv = if (v_bytes) |vb|
@@ -805,6 +828,131 @@ pub const GpuLayerWeights = struct {
         var down_proj = try Q4Weights.initFromBlocks(
             allocator,
             down_bytes,
+            intermediate_size,
+            hidden_size,
+            stream,
+        );
+        errdefer down_proj.deinit();
+
+        const rot_dim = @as(usize, @intFromFloat(@as(f32, @floatFromInt(head_dim)) * partial_rotary_factor));
+        const attn_dim = num_heads * head_dim;
+
+        return .{
+            .fused_qkv = fused_qkv,
+            .o_proj = o_proj,
+            .fused_gate_up = fused_gate_up,
+            .down_proj = down_proj,
+            .q_dim = q_dim,
+            .k_dim = kv_dim,
+            .v_dim = v_dim,
+            .intermediate_size = intermediate_size,
+            .rot_dim = rot_dim,
+            .attn_dim = attn_dim,
+            .input_norm_w = in_w,
+            .q_norm_w = qn_w,
+            .k_norm_w = kn_w,
+            .post_attn_w = pa_w,
+            .pre_mlp_w = pm_w,
+            .post_mlp_w = pom_w,
+            .layer_scalar = layer_scalar,
+            .attn_type = attn_type,
+            .sliding_window = sliding_window,
+            .num_heads = num_heads,
+            .num_kv_heads = num_kv_heads,
+            .head_dim = head_dim,
+            .rope_theta = rope_theta,
+            .partial_rotary_factor = partial_rotary_factor,
+            .rms_norm_eps = rms_norm_eps,
+            .compiled_mlp = null,
+        };
+    }
+
+    /// 从预重排直接内存缓冲区构建 GPU 硬件加速层权重 (Direct Layout Fast Path)
+    /// 无需 CPU 解包与动态内存分配，实现毫秒级快速初始化
+    pub fn initFromDirect(
+        fused_qkv_wq: []const u8,
+        fused_qkv_scales: []const u8,
+        fused_qkv_biases: []const u8,
+        o_proj_wq: []const u8,
+        o_proj_scales: []const u8,
+        o_proj_biases: []const u8,
+        fused_gate_up_wq: []const u8,
+        fused_gate_up_scales: []const u8,
+        fused_gate_up_biases: []const u8,
+        down_proj_wq: []const u8,
+        down_proj_scales: []const u8,
+        down_proj_biases: []const u8,
+        hidden_size: usize,
+        intermediate_size: usize,
+        q_dim: usize,
+        kv_dim: usize,
+        v_dim: usize,
+        in_w_data: []const f32,
+        qn_w_data: []const f32,
+        kn_w_data: []const f32,
+        pa_w_data: []const f32,
+        pm_w_data: []const f32,
+        pom_w_data: []const f32,
+        layer_scalar: f32,
+        attn_type: u8,
+        sliding_window: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        rope_theta: f32,
+        partial_rotary_factor: f32,
+        rms_norm_eps: f32,
+        stream: ?Stream,
+    ) OffloadError!GpuLayerWeights {
+        if (!isAvailable()) return error.OffloadNotSupported;
+
+        var in_w = try mlx.Array.fromSlice(in_w_data, &.{in_w_data.len});
+        errdefer in_w.deinit();
+        var qn_w = try mlx.Array.fromSlice(qn_w_data, &.{qn_w_data.len});
+        errdefer qn_w.deinit();
+        var kn_w = try mlx.Array.fromSlice(kn_w_data, &.{kn_w_data.len});
+        errdefer kn_w.deinit();
+        var pa_w = try mlx.Array.fromSlice(pa_w_data, &.{pa_w_data.len});
+        errdefer pa_w.deinit();
+        var pm_w = try mlx.Array.fromSlice(pm_w_data, &.{pm_w_data.len});
+        errdefer pm_w.deinit();
+        var pom_w = try mlx.Array.fromSlice(pom_w_data, &.{pom_w_data.len});
+        errdefer pom_w.deinit();
+
+        var fused_qkv = try Q4Weights.initFromDirectBuffers(
+            fused_qkv_wq,
+            fused_qkv_scales,
+            fused_qkv_biases,
+            hidden_size,
+            q_dim + kv_dim + v_dim,
+            stream,
+        );
+        errdefer fused_qkv.deinit();
+
+        var o_proj = try Q4Weights.initFromDirectBuffers(
+            o_proj_wq,
+            o_proj_scales,
+            o_proj_biases,
+            q_dim,
+            hidden_size,
+            stream,
+        );
+        errdefer o_proj.deinit();
+
+        var fused_gate_up = try Q4Weights.initFromDirectBuffers(
+            fused_gate_up_wq,
+            fused_gate_up_scales,
+            fused_gate_up_biases,
+            hidden_size,
+            intermediate_size * 2,
+            stream,
+        );
+        errdefer fused_gate_up.deinit();
+
+        var down_proj = try Q4Weights.initFromDirectBuffers(
+            down_proj_wq,
+            down_proj_scales,
+            down_proj_biases,
             intermediate_size,
             hidden_size,
             stream,
@@ -1877,6 +2025,45 @@ test "Q4Weights inside compiled closure" {
 
     try std.testing.expectEqual(@as(usize, 1), out_vec.size());
     var out_arr = out_vec.get(0).?;
+    defer out_arr.deinit();
+    out_arr.eval();
+    const data = out_arr.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 1), data.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), data[0], 1e-3);
+}
+
+test "Q4Weights initFromDirectBuffers fast path" {
+    if (!isAvailable()) return;
+    var stream = try Stream.defaultGpu();
+    defer stream.deinit();
+
+    var raw_block: [18]u8 = undefined;
+    const scale_bits: u16 = 0x3C00; // 1.0 in f16
+    std.mem.writeInt(u16, raw_block[0..2], scale_bits, .little);
+    @memset(raw_block[2..18], 0x88); // weight = 8 - 8 = 0
+
+    var w_q_buf: [4]u32 = undefined;
+    var scales_buf: [1]f16 = undefined;
+    var biases_buf: [1]f16 = undefined;
+
+    Q4Weights.packBlocksToDirectBuffers(&.{&raw_block}, &.{1}, 32, &w_q_buf, &scales_buf, &biases_buf);
+
+    var q4_direct = try Q4Weights.initFromDirectBuffers(
+        std.mem.sliceAsBytes(&w_q_buf),
+        std.mem.sliceAsBytes(&scales_buf),
+        std.mem.sliceAsBytes(&biases_buf),
+        32,
+        1,
+        stream,
+    );
+    defer q4_direct.deinit();
+
+    var x_vec: [32]f32 = undefined;
+    for (&x_vec) |*v| v.* = 1.0;
+    var in_arr = try mlx.Array.fromSlice(&x_vec, &.{ 1, 32 });
+    defer in_arr.deinit();
+
+    var out_arr = try q4_direct.forwardArray(in_arr, stream);
     defer out_arr.deinit();
     out_arr.eval();
     const data = out_arr.dataFloat32();

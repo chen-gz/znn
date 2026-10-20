@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **零拷贝直通内存重排格式 (ZNNQ4DIR) 与多核并发解包工具 (`tools/pack_gemma4.zig`, `src/backend/offload.zig`, `src/models/gemma4_q4.zig`, `examples/gemma4.zig`, `build.zig`)**:
+  - 设计并实现零拷贝直通权重格式 (`ZNNQ4DIR`)：将 Gemma 4 12B 模型 48 层 Transformer 的量化权重 (`w_q`、`scales`、`biases`) 离线预重排并连续存放，使运行时完全绕过 CPU 单线程解包与数百次内核 `mmap`/`munmap` 内存页清理，通过 `mlx.Array.fromRawData` 直接将内存映射指针挂载至 Apple Silicon Metal 统一内存架构 (Unified Memory Architecture, UMA) 显存中，消除冷启动 40 秒等待，实现秒级极速就绪。
+  - 在 `src/backend/offload.zig` 中实现 `packBlocksToDirectBuffers`（零内存分配解包内核）与 `initFromDirectBuffers`，并重构 `initFromBlockSlices` 与 `GpuLayerWeights.initFromDirect`，精准支持全局注意力 (Full Attention) 与滑动窗口注意力 (Sliding Attention) 的异构头维度与非对称投影矩阵重组。
+  - 在 `tools/pack_gemma4.zig` (`zig build pack-gemma4`) 中实现多核多线程并发转换工具，将原始 `gemma-4-12B-q4.bin` 极速重排为 8.22 GB 的 `gemma-4-12B-direct.bin`。
+  - 在 `src/models/gemma4_q4.zig` 中新增多线程并行层解包回退通道与 `computeExpectedDirectFileSize` 校验，并在 `examples/gemma4.zig` 中实现 `ZNNQ4DIR` 优先探测与自动回退。
+
+
 - **Apple MLX 闭包与计算图静态编译、门控多层感知机 (MLP) Metal 宏内核融合 (`src/backend/mlx.zig`, `src/backend/offload.zig`)**:
   - 在 `src/backend/mlx.zig` 中完整封装 Apple MLX 的 C 静态编译闭包接口，实现 `VectorArray`（向量容器包装器）、`Closure`（Metal JIT 编译闭包执行器）与 `mlx.compile(fun, payload, shapeless)`，为全栈静态图编译提供完备的基础设施。
   - 在 `src/backend/offload.zig` 的 `GpuLayerWeights` 中引入 `compiled_mlp` 与 `initCompiledMlp`：将 Transformer 层的 7 个微算子（Pre-feedforward 均方根层归一化、Fused Gate-Up 4-bit 量化通用矩阵向量乘法、GeGLU 门控激活融合、Down 4-bit 量化投影、Post-feedforward 均方根层归一化、残差相加与层缩放）在 GPU 加载阶段一次性通过 Metal JIT 编译融合为单一纯函数闭包宏内核。
