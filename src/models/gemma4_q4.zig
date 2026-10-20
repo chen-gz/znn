@@ -171,6 +171,15 @@ pub const Gemma4Q4MLP = struct {
         };
     }
 
+    /// 构建无 CPU 权重实体的空 MLP 结构 (用于 GPU 硬件加速直通路径，避免 4.5 GB 内存分配与零填充)
+    pub fn initEmpty(hidden_size: usize, intermediate_size: usize) Gemma4Q4MLP {
+        return Gemma4Q4MLP{
+            .gate_proj = Q4Linear.fromBlocks(hidden_size, intermediate_size, &.{}),
+            .up_proj = Q4Linear.fromBlocks(hidden_size, intermediate_size, &.{}),
+            .down_proj = Q4Linear.fromBlocks(intermediate_size, hidden_size, &.{}),
+        };
+    }
+
     pub fn deinit(self: *Gemma4Q4MLP, allocator: std.mem.Allocator) void {
         self.gate_proj.deinit(allocator);
         self.up_proj.deinit(allocator);
@@ -268,6 +277,57 @@ pub const Gemma4Q4Attention = struct {
         const k_proj = try Q4Linear.init(allocator, hidden_size, kv_dim);
         const v_proj = if (attn_type == .full_attention) null else try Q4Linear.init(allocator, hidden_size, kv_dim);
         const o_proj = try Q4Linear.init(allocator, q_dim, hidden_size);
+
+        const q_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
+        const k_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
+        const v_norm = try GemmaUnscaledRMSNorm.init(allocator, head_dim, rms_norm_eps);
+
+        const rope_theta: f32 = switch (attn_type) {
+            .sliding_attention => 10000.0,
+            .full_attention => 1000000.0,
+        };
+        const partial_rotary_factor: f32 = switch (attn_type) {
+            .sliding_attention => 1.0,
+            .full_attention => 0.25,
+        };
+
+        return Gemma4Q4Attention{
+            .q_proj = q_proj,
+            .k_proj = k_proj,
+            .v_proj = v_proj,
+            .o_proj = o_proj,
+            .q_norm = q_norm,
+            .k_norm = k_norm,
+            .v_norm = v_norm,
+            .attn_type = attn_type,
+            .hidden_size = hidden_size,
+            .num_heads = num_heads,
+            .num_kv_heads = num_kv_heads,
+            .head_dim = head_dim,
+            .sliding_window = sliding_window,
+            .rope_theta = rope_theta,
+            .partial_rotary_factor = partial_rotary_factor,
+        };
+    }
+
+    /// 构建无 CPU 权重实体的空注意力机制结构 (用于 GPU 硬件加速直通路径，避免数 GB 内存分配与零填充)
+    pub fn initEmpty(
+        allocator: std.mem.Allocator,
+        attn_type: Gemma4AttentionType,
+        hidden_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        sliding_window: usize,
+        rms_norm_eps: f32,
+    ) !Gemma4Q4Attention {
+        const q_dim = num_heads * head_dim;
+        const kv_dim = num_kv_heads * head_dim;
+
+        const q_proj = Q4Linear.fromBlocks(hidden_size, q_dim, &.{});
+        const k_proj = Q4Linear.fromBlocks(hidden_size, kv_dim, &.{});
+        const v_proj = if (attn_type == .full_attention) null else Q4Linear.fromBlocks(hidden_size, kv_dim, &.{});
+        const o_proj = Q4Linear.fromBlocks(q_dim, hidden_size, &.{});
 
         const q_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
         const k_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
@@ -662,6 +722,50 @@ pub const Gemma4Q4DecoderLayer = struct {
         };
     }
 
+    /// 构建无 CPU 权重实体的空解码层结构 (用于 GPU 硬件加速直通路径，彻底消除 4.5 GB 内存分配与零填充)
+    pub fn initEmpty(
+        allocator: std.mem.Allocator,
+        attn_type: Gemma4AttentionType,
+        hidden_size: usize,
+        intermediate_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        sliding_window: usize,
+        rms_norm_eps: f32,
+    ) !Gemma4Q4DecoderLayer {
+        const input_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const self_attn = try Gemma4Q4Attention.initEmpty(
+            allocator,
+            attn_type,
+            hidden_size,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            sliding_window,
+            rms_norm_eps,
+        );
+        const post_attention_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const pre_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const mlp = Gemma4Q4MLP.initEmpty(hidden_size, intermediate_size);
+        const post_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+
+        const layer_scalar = try createPersistentTensor(allocator, 1, 1, true);
+        layer_scalar.data[0] = 1.0;
+        layer_scalar.shape = Shape.init(&.{1});
+        layer_scalar.strides = tensor.computeContiguousStrides(layer_scalar.shape);
+
+        return Gemma4Q4DecoderLayer{
+            .input_layernorm = input_layernorm,
+            .self_attn = self_attn,
+            .post_attention_layernorm = post_attention_layernorm,
+            .pre_feedforward_layernorm = pre_feedforward_layernorm,
+            .mlp = mlp,
+            .post_feedforward_layernorm = post_feedforward_layernorm,
+            .layer_scalar = layer_scalar,
+        };
+    }
+
     pub fn deinit(self: *Gemma4Q4DecoderLayer, allocator: std.mem.Allocator) void {
         deinitModel(&self.input_layernorm, allocator);
         self.self_attn.deinit(allocator);
@@ -878,6 +982,202 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             return try graph.reshape(capped_logits_2d, &.{ B, T, config.vocab_size });
         }
 
+        /// 计算 Gemma 4 12B Direct 预重排二进制文件的理论字节大小
+        pub fn computeExpectedDirectFileSize() usize {
+            const header_magic_bytes: usize = 8; // "ZNNQ4DIR"
+            const final_norm_bytes: usize = config.hidden_size * 2; // BF16
+            const embed_tokens_bytes: usize = config.vocab_size * config.hidden_size * 2; // BF16
+
+            var layers_total: usize = 0;
+
+            for (0..config.num_hidden_layers) |layer_idx| {
+                const is_full = ((layer_idx + 1) % 6 == 0);
+                const head_dim = if (is_full) config.global_head_dim else config.head_dim;
+                const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
+                const norms_bytes = (config.hidden_size * 4 + head_dim * 2 + 1) * 2; // BF16
+
+                const q_dim = config.num_attention_heads * head_dim;
+                const kv_dim = num_kv * head_dim;
+                const v_dim = if (is_full) 0 else kv_dim;
+
+                const qkv_blocks = ((q_dim + kv_dim + v_dim) * config.hidden_size) / Q4Block.QK;
+                const o_blocks = (config.hidden_size * q_dim) / Q4Block.QK;
+                const fgu_blocks = (config.intermediate_size * 2 * config.hidden_size) / Q4Block.QK;
+                const down_blocks = (config.hidden_size * config.intermediate_size) / Q4Block.QK;
+
+                // 每个 Q4 block 在预重排布局中占: 16 (w_q: 4*u32) + 2 (scales: f16) + 2 (biases: f16) = 20 字节
+                const layer_matrices_bytes = (qkv_blocks + o_blocks + fgu_blocks + down_blocks) * 20;
+                layers_total += norms_bytes + layer_matrices_bytes;
+            }
+
+            return header_magic_bytes + final_norm_bytes + embed_tokens_bytes + layers_total;
+        }
+
+        pub const DirectLayerOffsets = struct {
+            offsets: [config.num_hidden_layers + 1]usize,
+        };
+
+        /// 计算 Gemma 4 12B Direct 预重排二进制文件中全部 48 层的绝对字节偏移量表
+        pub fn computeDirectLayerOffsets() DirectLayerOffsets {
+            var res: DirectLayerOffsets = undefined;
+            const base = 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2;
+            res.offsets[0] = base;
+
+            for (0..config.num_hidden_layers) |i| {
+                const is_full = ((i + 1) % 6 == 0);
+                const head_dim = if (is_full) config.global_head_dim else config.head_dim;
+                const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
+                const q_dim = config.num_attention_heads * head_dim;
+                const kv_dim = num_kv * head_dim;
+                const v_dim = if (is_full) 0 else kv_dim;
+
+                const norms_len = (config.hidden_size * 4 + head_dim * 2 + 1) * 2;
+                const qkv_blocks = ((q_dim + kv_dim + v_dim) * config.hidden_size) / Q4Block.QK;
+                const o_blocks = (config.hidden_size * q_dim) / Q4Block.QK;
+                const fgu_blocks = (config.intermediate_size * 2 * config.hidden_size) / Q4Block.QK;
+                const down_blocks = (config.hidden_size * config.intermediate_size) / Q4Block.QK;
+
+                const direct_layer_bytes = norms_len + (qkv_blocks + o_blocks + fgu_blocks + down_blocks) * 20;
+                res.offsets[i + 1] = res.offsets[i] + direct_layer_bytes;
+            }
+            return res;
+        }
+
+        fn loadDirectSingleLayer(
+            allocator: std.mem.Allocator,
+            mmap_bytes: []const u8,
+            cursor_start: usize,
+            i: usize,
+            out_layer: *Gemma4Q4DecoderLayer,
+            out_gpu: *backend.offload.GpuLayerWeights,
+        ) !void {
+            var cursor = cursor_start;
+            const is_full = ((i + 1) % 6 == 0);
+            const attn_type: Gemma4AttentionType = if (is_full) .full_attention else .sliding_attention;
+            const head_dim = if (is_full) config.global_head_dim else config.head_dim;
+            const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
+
+            var layer = try Gemma4Q4DecoderLayer.initEmpty(
+                allocator,
+                attn_type,
+                config.hidden_size,
+                config.intermediate_size,
+                config.num_attention_heads,
+                num_kv,
+                head_dim,
+                config.sliding_window,
+                config.rms_norm_eps,
+            );
+
+            // 加载 Layernorms
+            inline for ([_]*GemmaRMSNorm{
+                &layer.input_layernorm,
+                &layer.post_attention_layernorm,
+                &layer.pre_feedforward_layernorm,
+                &layer.post_feedforward_layernorm,
+            }) |ln| {
+                const u16_s: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, mmap_bytes[cursor .. cursor + config.hidden_size * 2]));
+                for (u16_s, 0..) |bits, idx| {
+                    const b: tensor.bf16 = .{ .bits = bits };
+                    ln.weight.data[idx] = b.toF32();
+                }
+                cursor += config.hidden_size * 2;
+            }
+
+            inline for ([_]*GemmaRMSNorm{ &layer.self_attn.q_norm, &layer.self_attn.k_norm }) |ln| {
+                const u16_s: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, mmap_bytes[cursor .. cursor + head_dim * 2]));
+                for (u16_s, 0..) |bits, idx| {
+                    const b: tensor.bf16 = .{ .bits = bits };
+                    ln.weight.data[idx] = b.toF32();
+                }
+                cursor += head_dim * 2;
+            }
+
+            {
+                const sc_bits = std.mem.readInt(u16, mmap_bytes[cursor .. cursor + 2][0..2], .little);
+                const b_sc: tensor.bf16 = .{ .bits = sc_bits };
+                layer.layer_scalar.data[0] = b_sc.toF32();
+                cursor += 2;
+            }
+
+            const q_dim = config.num_attention_heads * head_dim;
+            const kv_dim = num_kv * head_dim;
+            const v_dim = if (is_full) 0 else kv_dim;
+
+            // 直接切片 4 个已重排的矩阵
+            const qkv_blocks = ((q_dim + kv_dim + v_dim) * config.hidden_size) / Q4Block.QK;
+            const qkv_wq_len: usize = qkv_blocks * 16;
+            const qkv_sc_len: usize = qkv_blocks * 2;
+            const qkv_bi_len: usize = qkv_blocks * 2;
+            const fused_qkv_wq = mmap_bytes[cursor .. cursor + qkv_wq_len]; cursor += qkv_wq_len;
+            const fused_qkv_sc = mmap_bytes[cursor .. cursor + qkv_sc_len]; cursor += qkv_sc_len;
+            const fused_qkv_bi = mmap_bytes[cursor .. cursor + qkv_bi_len]; cursor += qkv_bi_len;
+
+            const o_blocks = (config.hidden_size * q_dim) / Q4Block.QK;
+            const o_wq_len: usize = o_blocks * 16;
+            const o_sc_len: usize = o_blocks * 2;
+            const o_bi_len: usize = o_blocks * 2;
+            const o_wq = mmap_bytes[cursor .. cursor + o_wq_len]; cursor += o_wq_len;
+            const o_sc = mmap_bytes[cursor .. cursor + o_sc_len]; cursor += o_sc_len;
+            const o_bi = mmap_bytes[cursor .. cursor + o_bi_len]; cursor += o_bi_len;
+
+            const fgu_blocks = (config.intermediate_size * 2 * config.hidden_size) / Q4Block.QK;
+            const fgu_wq_len: usize = fgu_blocks * 16;
+            const fgu_sc_len: usize = fgu_blocks * 2;
+            const fgu_bi_len: usize = fgu_blocks * 2;
+            const fgu_wq = mmap_bytes[cursor .. cursor + fgu_wq_len]; cursor += fgu_wq_len;
+            const fgu_sc = mmap_bytes[cursor .. cursor + fgu_sc_len]; cursor += fgu_sc_len;
+            const fgu_bi = mmap_bytes[cursor .. cursor + fgu_bi_len]; cursor += fgu_bi_len;
+
+            const down_blocks = (config.hidden_size * config.intermediate_size) / Q4Block.QK;
+            const down_wq_len: usize = down_blocks * 16;
+            const down_sc_len: usize = down_blocks * 2;
+            const down_bi_len: usize = down_blocks * 2;
+            const down_wq = mmap_bytes[cursor .. cursor + down_wq_len]; cursor += down_wq_len;
+            const down_sc = mmap_bytes[cursor .. cursor + down_sc_len]; cursor += down_sc_len;
+            const down_bi = mmap_bytes[cursor .. cursor + down_bi_len]; cursor += down_bi_len;
+
+            if (backend.offload.isAvailable()) {
+                out_gpu.* = try backend.offload.GpuLayerWeights.initFromDirect(
+                    fused_qkv_wq,
+                    fused_qkv_sc,
+                    fused_qkv_bi,
+                    o_wq,
+                    o_sc,
+                    o_bi,
+                    fgu_wq,
+                    fgu_sc,
+                    fgu_bi,
+                    down_wq,
+                    down_sc,
+                    down_bi,
+                    config.hidden_size,
+                    config.intermediate_size,
+                    q_dim,
+                    kv_dim,
+                    v_dim,
+                    layer.input_layernorm.weight.data,
+                    layer.self_attn.q_norm.weight.data[0..head_dim],
+                    layer.self_attn.k_norm.weight.data[0..head_dim],
+                    layer.post_attention_layernorm.weight.data,
+                    layer.pre_feedforward_layernorm.weight.data,
+                    layer.post_feedforward_layernorm.weight.data,
+                    layer.layer_scalar.data[0],
+                    if (is_full) 1 else 0,
+                    layer.self_attn.sliding_window,
+                    layer.self_attn.num_heads,
+                    layer.self_attn.num_kv_heads,
+                    head_dim,
+                    layer.self_attn.rope_theta,
+                    layer.self_attn.partial_rotary_factor,
+                    config.rms_norm_eps,
+                    null,
+                );
+            }
+
+            out_layer.* = layer;
+        }
+
         /// 计算 Gemma 4 12B Q4 模型二进制文件的理论字节大小
         pub fn computeExpectedFileSize() usize {
             const header_magic_bytes: usize = 8; // "ZNNQ4G02"
@@ -931,15 +1231,25 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             mmap_bytes: []const u8,
             options: LoadMmapOptions,
         ) !Self {
-            if (mmap_bytes.len < 8 or !std.mem.eql(u8, mmap_bytes[0..8], "ZNNQ4G02")) {
+            const is_direct = mmap_bytes.len >= 8 and std.mem.eql(u8, mmap_bytes[0..8], "ZNNQ4DIR");
+            if (mmap_bytes.len < 8 or (!is_direct and !std.mem.eql(u8, mmap_bytes[0..8], "ZNNQ4G02"))) {
                 return error.InvalidModelSignature;
             }
 
-            const expected_len = computeExpectedFileSize();
+            const expected_len = if (is_direct) computeExpectedDirectFileSize() else computeExpectedFileSize();
             if (mmap_bytes.len < expected_len) {
                 return error.IncompleteModelFile;
             }
 
+            const Helper = struct {
+                fn getNowNs() u64 {
+                    var ts: std.posix.system.timespec = undefined;
+                    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
+                    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+                }
+            };
+            const t_start = Helper.getNowNs();
+            _ = std.posix.system.madvise(@alignCast(@ptrCast(@constCast(mmap_bytes.ptr))), mmap_bytes.len, std.posix.MADV.WILLNEED);
             var cursor: usize = 8;
 
             // 1. 最终层 RMSNorm 权重 (3840 个 BF16)
@@ -955,6 +1265,81 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             // 避免在 CPU 堆内存上分配 4.03 GB 的冗余 F32 Tensor，自回归直接利用零拷贝映射
             const embed_tokens = try Embedding.init(allocator, 1, 1);
             cursor += config.vocab_size * config.hidden_size * 2;
+
+            const embed_u16_slice: []const u16 = @alignCast(std.mem.bytesAsSlice(
+                u16,
+                mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
+            ));
+
+            if (is_direct) {
+                // 直通零拷贝极速初始化 (Direct Layout Fast Path, 1.5s 秒开)
+                const gpu_layers = try allocator.alloc(backend.offload.GpuLayerWeights, config.num_hidden_layers);
+                errdefer allocator.free(gpu_layers);
+                const layers = try allocator.alloc(Gemma4Q4DecoderLayer, config.num_hidden_layers);
+
+                const offsets = computeDirectLayerOffsets();
+
+                for (0..config.num_hidden_layers) |i| {
+                    try loadDirectSingleLayer(
+                        allocator,
+                        mmap_bytes,
+                        offsets.offsets[i],
+                        i,
+                        &layers[i],
+                        &gpu_layers[i],
+                    );
+                }
+                const t_layers = Helper.getNowNs();
+
+                // 创建 LM Head
+                var lm_head_weights: ?backend.offload.LmHeadWeights = null;
+                if (backend.offload.isAvailable()) {
+                    lm_head_weights = backend.offload.LmHeadWeights.initWithMode(
+                        embed_u16_slice,
+                        config.vocab_size,
+                        config.hidden_size,
+                        options.lm_head_mode,
+                        null,
+                    ) catch null;
+                }
+                const t_lm_head = Helper.getNowNs();
+
+                var res = Self{
+                    .embed_tokens = embed_tokens,
+                    .embed_u16_mmap = embed_u16_slice,
+                    .layers = layers,
+                    .norm = norm,
+                    .lm_head_weights = lm_head_weights,
+                };
+
+                if (backend.offload.isAvailable() and lm_head_weights != null) {
+                    res.gpu_context = try backend.offload.GpuModelContext.init(
+                        allocator,
+                        gpu_layers,
+                        res.norm.weight.data,
+                        config.rms_norm_eps,
+                        res.lm_head_weights.?,
+                        config.hidden_size,
+                        config.vocab_size,
+                        config.max_position_embeddings,
+                    );
+                    res.gpu_needs_sync = true;
+                }
+                const t_gpu_ctx = Helper.getNowNs();
+
+                if (options.warmup and res.gpu_context != null and res.embed_u16_mmap != null) {
+                    res.gpu_context.?.warmup(res.embed_u16_mmap.?, null) catch {};
+                }
+                const t_warmup = Helper.getNowNs();
+
+                std.debug.print("   ⏱️ [Direct 加载各阶段耗时拆解]:\n", .{});
+                std.debug.print("      - 48 层结构与权重映射耗时: {d:.2} ms\n", .{@as(f64, @floatFromInt(t_layers - t_start)) / 1e6});
+                std.debug.print("      - LM Head 词表矩阵映射耗时: {d:.2} ms\n", .{@as(f64, @floatFromInt(t_lm_head - t_layers)) / 1e6});
+                std.debug.print("      - GPU 上下文与宏内核初始化耗时: {d:.2} ms\n", .{@as(f64, @floatFromInt(t_gpu_ctx - t_lm_head)) / 1e6});
+                std.debug.print("      - 预热阶段耗时: {d:.2} ms\n", .{@as(f64, @floatFromInt(t_warmup - t_gpu_ctx)) / 1e6});
+
+                return res;
+            }
 
             // 3. 逐层加载 48 层 Transformer
             const layers = try allocator.alloc(Gemma4Q4DecoderLayer, config.num_hidden_layers);
@@ -1024,10 +1409,6 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 layers[i] = layer;
             }
 
-            const embed_u16_slice: []const u16 = @alignCast(std.mem.bytesAsSlice(
-                u16,
-                mmap_bytes[8 + config.hidden_size * 2 .. 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2],
-            ));
             var lm_head_weights: ?backend.offload.LmHeadWeights = null;
             if (backend.offload.isAvailable()) {
                 lm_head_weights = backend.offload.LmHeadWeights.initWithMode(
@@ -1071,68 +1452,133 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             return res;
         }
 
-        /// 初始化图形处理器 (Graphics Processing Unit, GPU) 端到端整网自回归增量解码上下文
+        fn initSingleGpuLayer(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            layer: *Gemma4Q4DecoderLayer,
+            i: usize,
+        ) !backend.offload.GpuLayerWeights {
+            _ = self;
+            _ = i;
+            const is_full = (layer.self_attn.attn_type == .full_attention);
+            const q_bytes = std.mem.sliceAsBytes(layer.self_attn.q_proj.blocks);
+            const k_bytes = std.mem.sliceAsBytes(layer.self_attn.k_proj.blocks);
+            const v_bytes = if (!is_full) std.mem.sliceAsBytes(layer.self_attn.v_proj.?.blocks) else null;
+            const o_bytes = std.mem.sliceAsBytes(layer.self_attn.o_proj.blocks);
+            const gate_bytes = std.mem.sliceAsBytes(layer.mlp.gate_proj.blocks);
+            const up_bytes = std.mem.sliceAsBytes(layer.mlp.up_proj.blocks);
+            const down_bytes = std.mem.sliceAsBytes(layer.mlp.down_proj.blocks);
+
+            const hd = layer.self_attn.head_dim;
+            const q_dim = layer.self_attn.num_heads * hd;
+            const kv_dim = layer.self_attn.num_kv_heads * hd;
+
+            return backend.offload.GpuLayerWeights.initFromBlocks(
+                allocator,
+                q_bytes,
+                k_bytes,
+                v_bytes,
+                o_bytes,
+                gate_bytes,
+                up_bytes,
+                down_bytes,
+                config.hidden_size,
+                config.intermediate_size,
+                q_dim,
+                kv_dim,
+                layer.input_layernorm.weight.data,
+                layer.self_attn.q_norm.weight.data[0..hd],
+                layer.self_attn.k_norm.weight.data[0..hd],
+                layer.post_attention_layernorm.weight.data,
+                layer.pre_feedforward_layernorm.weight.data,
+                layer.post_feedforward_layernorm.weight.data,
+                layer.layer_scalar.data[0],
+                if (is_full) 1 else 0,
+                layer.self_attn.sliding_window,
+                layer.self_attn.num_heads,
+                layer.self_attn.num_kv_heads,
+                hd,
+                layer.self_attn.rope_theta,
+                layer.self_attn.partial_rotary_factor,
+                config.rms_norm_eps,
+                null,
+            );
+        }
+
+        /// 为全模型所有 4-bit 量化层构建常驻 GPU 显存解码上下文 (GPU Model Context)
         pub fn initGpuContext(self: *Self, allocator: std.mem.Allocator) !void {
-            if (!backend.offload.isAvailable() or self.lm_head_weights == null) return;
-            if (self.gpu_context) |*ctx| {
-                ctx.deinit();
+            if (self.gpu_context != null) {
+                self.gpu_context.?.deinit();
                 self.gpu_context = null;
             }
 
             const gpu_layers = try allocator.alloc(backend.offload.GpuLayerWeights, self.layers.len);
+            errdefer allocator.free(gpu_layers);
             var init_idx: usize = 0;
             errdefer {
-                for (0..init_idx) |idx| {
-                    gpu_layers[idx].deinit();
+                for (gpu_layers[0..init_idx]) |*gl| {
+                    gl.deinit();
                 }
-                allocator.free(gpu_layers);
             }
 
-            for (self.layers, 0..) |*layer, i| {
-                const is_full = (layer.self_attn.attn_type == .full_attention);
-                const q_bytes = std.mem.sliceAsBytes(layer.self_attn.q_proj.blocks);
-                const k_bytes = std.mem.sliceAsBytes(layer.self_attn.k_proj.blocks);
-                const v_bytes = if (!is_full) std.mem.sliceAsBytes(layer.self_attn.v_proj.?.blocks) else null;
-                const o_bytes = std.mem.sliceAsBytes(layer.self_attn.o_proj.blocks);
-                const gate_bytes = std.mem.sliceAsBytes(layer.mlp.gate_proj.blocks);
-                const up_bytes = std.mem.sliceAsBytes(layer.mlp.up_proj.blocks);
-                const down_bytes = std.mem.sliceAsBytes(layer.mlp.down_proj.blocks);
+            const cpu_count = @max(1, std.Thread.getCpuCount() catch 1);
+            const num_threads = @min(cpu_count, self.layers.len);
 
-                const hd = layer.self_attn.head_dim;
-                const q_dim = layer.self_attn.num_heads * hd;
-                const kv_dim = layer.self_attn.num_kv_heads * hd;
+            if (num_threads <= 1 or self.layers.len <= 2) {
+                for (self.layers, 0..) |*layer, i| {
+                    gpu_layers[i] = try self.initSingleGpuLayer(allocator, layer, i);
+                    init_idx += 1;
+                }
+            } else {
+                const Worker = struct {
+                    model: *Self,
+                    alloc: std.mem.Allocator,
+                    dest: []backend.offload.GpuLayerWeights,
+                    start: usize,
+                    end: usize,
+                    err: ?anyerror = null,
 
-                gpu_layers[i] = try backend.offload.GpuLayerWeights.initFromBlocks(
-                    allocator,
-                    q_bytes,
-                    k_bytes,
-                    v_bytes,
-                    o_bytes,
-                    gate_bytes,
-                    up_bytes,
-                    down_bytes,
-                    config.hidden_size,
-                    config.intermediate_size,
-                    q_dim,
-                    kv_dim,
-                    layer.input_layernorm.weight.data,
-                    layer.self_attn.q_norm.weight.data[0..hd],
-                    layer.self_attn.k_norm.weight.data[0..hd],
-                    layer.post_attention_layernorm.weight.data,
-                    layer.pre_feedforward_layernorm.weight.data,
-                    layer.post_feedforward_layernorm.weight.data,
-                    layer.layer_scalar.data[0],
-                    if (is_full) 1 else 0,
-                    layer.self_attn.sliding_window,
-                    layer.self_attn.num_heads,
-                    layer.self_attn.num_kv_heads,
-                    hd,
-                    layer.self_attn.rope_theta,
-                    layer.self_attn.partial_rotary_factor,
-                    config.rms_norm_eps,
-                    null,
-                );
-                init_idx += 1;
+                    fn run(ctx: *@This()) void {
+                        for (ctx.start..ctx.end) |i| {
+                            ctx.dest[i] = ctx.model.initSingleGpuLayer(ctx.alloc, &ctx.model.layers[i], i) catch |err| {
+                                ctx.err = err;
+                                return;
+                            };
+                        }
+                    }
+                };
+
+                var workers = try allocator.alloc(Worker, num_threads);
+                defer allocator.free(workers);
+                var threads = try allocator.alloc(std.Thread, num_threads);
+                defer allocator.free(threads);
+
+                const chunk = (self.layers.len + num_threads - 1) / num_threads;
+                var spawned: usize = 0;
+
+                for (0..num_threads) |t_idx| {
+                    const s = t_idx * chunk;
+                    const e = @min(s + chunk, self.layers.len);
+                    if (s >= e) {
+                        workers[t_idx] = .{ .model = self, .alloc = allocator, .dest = gpu_layers, .start = 0, .end = 0 };
+                        continue;
+                    }
+                    workers[t_idx] = .{ .model = self, .alloc = allocator, .dest = gpu_layers, .start = s, .end = e };
+                    threads[spawned] = std.Thread.spawn(.{}, Worker.run, .{&workers[t_idx]}) catch {
+                        workers[t_idx].run();
+                        continue;
+                    };
+                    spawned += 1;
+                }
+
+                for (threads[0..spawned]) |t| {
+                    t.join();
+                }
+
+                for (workers[0..num_threads]) |w| {
+                    if (w.err) |err| return err;
+                }
+                init_idx = self.layers.len;
             }
 
             self.gpu_context = try backend.offload.GpuModelContext.init(

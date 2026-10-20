@@ -301,4 +301,28 @@ pub fn build(b: *std.Build) void {
     }
     const quantize_step = b.step("quantize-gemma4", "Quantize Gemma 4 12B model.safetensors to 4-bit Q4 binary");
     quantize_step.dependOn(&quantize_cmd.step);
+
+    // Gemma 4 Direct Layout Reordering Tool Step (zig build pack-gemma4)
+    const exe_pack = b.addExecutable(.{
+        .name = "pack_gemma4",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/pack_gemma4.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "zig_ml", .module = mod },
+            },
+        }),
+    });
+    if (target.result.os.tag == .macos) {
+        exe_pack.root_module.linkFramework("Accelerate", .{});
+    }
+    b.installArtifact(exe_pack);
+    const pack_cmd = b.addRunArtifact(exe_pack);
+    if (b.args) |args| {
+        pack_cmd.addArgs(args);
+    }
+    const pack_step = b.step("pack-gemma4", "Reorder Gemma 4 12B Q4 weights into zero-copy direct layout (1.5s fast load)");
+    pack_step.dependOn(&pack_cmd.step);
 }
