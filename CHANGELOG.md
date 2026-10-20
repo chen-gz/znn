@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Gemma 4 E4B 预填充首字延迟 (Prefill / TTFT) 与冷启动加载极速优化 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `examples/gemma4_e4b.zig`, `plan/TODO.md`)**:
-  - **UMA 真零拷贝权重直通映射 (`fromRawDataZeroCopy` / `initFromDirectBuffersZeroCopyCustom`)**：修复此前 `loadFromDirectory` 使用 `mlx.Array.fromRawData` (`mlx_array_new_data`) 导致在 CPU 端分配并深拷贝全部 3.8 GB 权重的性能开销。通过在 `Gemma4E4BModel` 生命周期内驻留 `SafetensorsArchive` 只读 `mmap` 映射，并采用 `mlx_array_new_data_managed` (`noopDtor`) 直接包装 `mmap` 虚拟地址，实现 Apple Silicon 统一内存架构 (UMA) 下的真零拷贝直通，彻底消除 3.8 GB CPU `memcpy`。
-  - **Metal 管线与多维融合闭包离线预热 (`Gemma4E4BModel.warmup`)**：在模型加载收尾阶段自动执行微型预填充 (`T = 2`) 与单步解码 (`T = 1`) 预热传递，提前完成 GEMM 模式 `quantized_matmul`、因果掩码 `fast_scaled_dot_product_attention` 以及 3D/4D `compiled_gelu_mul` 闭包的 Metal Shading Language (MSL) JIT 编译与管线状态对象 (PSO) 缓存，并触发权重 `mmap` 页面预缺页与 `mlx.clearCache()` 临时缓冲回收（同时支持 `--no-warmup` 命令行开关）。
+- **Gemma 4 E4B 预填充首字延迟 (Prefill / TTFT) 优化、算子管线预热与生成稳定性修复 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `examples/gemma4_e4b.zig`, `plan/TODO.md`)**:
+  - **修复未对齐权重映射导致的 NaN 与 `<pad>` 词元退化**：定位并修复此前尝试对 `SafetensorsArchive` 非对齐文件偏移使用 `mlx_array_new_data_managed` 直通导致 Metal GPU 内核静默失败、Logits 全为 NaN 触发连续生成 `<pad>` (Token 0) 的缺陷。恢复可靠的 `mlx.Array.fromRawData` 统一内存直通加载，并在权重加载完成后立即调用 `archive.deinit()` 卸载文件映射，保持 100% 位一致输出。
+  - **Metal 管线与多维融合闭包离线预热 (`Gemma4E4BModel.warmup`)**：在模型加载收尾阶段自动执行微型预填充 (`T = 2`) 与单步解码 (`T = 1`) 预热传递，提前完成 GEMM 模式 `quantized_matmul`、因果掩码 `fast_scaled_dot_product_attention` 以及 3D/4D `compiled_gelu_mul` 闭包的 Metal Shading Language (MSL) JIT 编译与管线状态对象 (PSO) 缓存，使真实 Prompt 预填充首字延迟 (TTFT) 从 768ms **骤降至 94.23ms**（吞吐率达 127.4 token/s，支持 `--no-warmup` 命令行开关）。
   - **消除预填充阶段 (`T > 1`) 42 层非连续 PLE 张量重塑拷贝内核 (`examples/gemma4_e4b.zig`)**：诊断发现当 `T > 1` 时，`ple_inputs.split(42, 2)` 切分出的 `[1, T, 1, 256]` 视图在维度 1 上非连续，此前逐层调用 `ple_item.reshape(&.{1, T, 256})` 会迫使 MLX 在每层额外派发 1 次 GPU 连续化拷贝内核（全网共 **42 个额外 GPU Copy 内核**）。改为将连续的 `ple_gate_raw` (`[1, T, 256]`) 以 O(1) 零拷贝视图重塑为 `[1, T, 1, 256]`，由 `fusedGeluMul` 直接融合读取跨步视图并输出连续张量后再以 O(1) 视图还原为 `[1, T, 256]`，实现 `T > 1` 预填充阶段零额外拷贝内核。
   - **24 层 `GpuKvCache` 初始预分配与跨轮次零分配复用 (`resetCache`) + Metal Wired Memory 锁定 (`configureOptimalWiredMemory`)**：在模型初始化期一次性预分配 24 个 KV 拥有层的 256 步容量缓冲区，`resetCache()` 仅将 `curr_len` 归零并原位复用已分配显存，彻底消除每次 `prefill` 时动态触发 48 次 `mlx_zeros` 显存分配内核的开销；新增 `mlx.configureOptimalWiredMemory()` 自动锁定 Apple Silicon 推荐工作集上限 (`max_recommended_working_set_size`)。
 

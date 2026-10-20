@@ -309,7 +309,6 @@ pub const GpuKvCache = struct {
 /// Gemma 4 E4B 完整模型推理引擎
 pub const Gemma4E4BModel = struct {
     allocator: std.mem.Allocator,
-    archive: SafetensorsArchive,
     layers: []GpuLayerE4B,
     ple: PleWeights,
 
@@ -346,7 +345,7 @@ pub const Gemma4E4BModel = struct {
         options: LoadOptions,
     ) !Gemma4E4BModel {
         var archive = try SafetensorsArchive.open(allocator, io, dir_path);
-        errdefer archive.deinit();
+        defer archive.deinit();
 
         const cfg = Gemma4Config.e4b;
         const stream = try Stream.defaultGpu();
@@ -364,7 +363,7 @@ pub const Gemma4E4BModel = struct {
         const emb_sc = archive.getTensorBytes("language_model.model.embed_tokens.scales") orelse return error.TensorNotFound;
         const emb_bi = archive.getTensorBytes("language_model.model.embed_tokens.biases") orelse return error.TensorNotFound;
 
-        var embed_tokens = try Q4Weights.initFromDirectBuffersZeroCopyCustom(
+        var embed_tokens = try Q4Weights.initFromDirectBuffersCustom(
             emb_wq,
             emb_sc,
             emb_bi,
@@ -378,7 +377,7 @@ pub const Gemma4E4BModel = struct {
         errdefer embed_tokens.deinit();
 
         const norm_bytes = archive.getTensorBytes("language_model.model.norm.weight") orelse return error.TensorNotFound;
-        var norm_w = try mlx.Array.fromRawDataZeroCopy(@ptrCast(norm_bytes.ptr), &.{cfg.hidden_size}, .bfloat16);
+        var norm_w = try mlx.Array.fromRawData(@ptrCast(norm_bytes.ptr), &.{cfg.hidden_size}, .bfloat16);
         errdefer norm_w.deinit();
 
         // 2. 逐层嵌入输入结构 (Per-Layer Embeddings, PLE)
@@ -386,7 +385,7 @@ pub const Gemma4E4BModel = struct {
         const ple_tokens_sc = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.scales") orelse return error.TensorNotFound;
         const ple_tokens_bi = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.biases") orelse return error.TensorNotFound;
 
-        var ple_tokens = try Q4Weights.initFromDirectBuffersZeroCopyCustom(
+        var ple_tokens = try Q4Weights.initFromDirectBuffersCustom(
             ple_tokens_wq,
             ple_tokens_sc,
             ple_tokens_bi,
@@ -403,7 +402,7 @@ pub const Gemma4E4BModel = struct {
         const ple_proj_sc = archive.getTensorBytes("language_model.model.per_layer_model_projection.scales") orelse return error.TensorNotFound;
         const ple_proj_bi = archive.getTensorBytes("language_model.model.per_layer_model_projection.biases") orelse return error.TensorNotFound;
 
-        var ple_model_proj = try Q4Weights.initFromDirectBuffersZeroCopyCustom(
+        var ple_model_proj = try Q4Weights.initFromDirectBuffersCustom(
             ple_proj_wq,
             ple_proj_sc,
             ple_proj_bi,
@@ -417,7 +416,7 @@ pub const Gemma4E4BModel = struct {
         errdefer ple_model_proj.deinit();
 
         const ple_pnorm_bytes = archive.getTensorBytes("language_model.model.per_layer_projection_norm.weight") orelse return error.TensorNotFound;
-        var ple_pnorm_w = try mlx.Array.fromRawDataZeroCopy(@ptrCast(ple_pnorm_bytes.ptr), &.{cfg.hidden_size_per_layer_input}, .bfloat16);
+        var ple_pnorm_w = try mlx.Array.fromRawData(@ptrCast(ple_pnorm_bytes.ptr), &.{cfg.hidden_size_per_layer_input}, .bfloat16);
         errdefer ple_pnorm_w.deinit();
 
         const embed_scale_val: f32 = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size_per_layer_input)));
@@ -517,7 +516,7 @@ pub const Gemma4E4BModel = struct {
                     const f32_val: f32 = @bitCast(@as(u32, u16_val) << 16);
                     l_scalar = f32_val;
                     if (l_scalar != 1.0) {
-                        l_scalar_w = try mlx.Array.fromRawDataZeroCopy(@ptrCast(sb.ptr), &.{1}, .bfloat16);
+                        l_scalar_w = try mlx.Array.fromRawData(@ptrCast(sb.ptr), &.{1}, .bfloat16);
                     }
                 }
             }
@@ -570,7 +569,6 @@ pub const Gemma4E4BModel = struct {
 
         var model = Gemma4E4BModel{
             .allocator = allocator,
-            .archive = archive,
             .layers = layers,
             .ple = ple,
             .embed_tokens = embed_tokens,
@@ -614,7 +612,6 @@ pub const Gemma4E4BModel = struct {
         self.sqrt_hidden_arr.deinit();
         self.embed_tokens.deinit();
         self.stream.deinit();
-        self.archive.deinit();
     }
 
     /// 重置键值缓存游标（保留已分配的 256 步容量显存块直接覆写，消除重复分配释放开销）
@@ -657,7 +654,7 @@ pub const Gemma4E4BModel = struct {
         const b_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.biases", .{ l_idx, sub });
         const b_bytes = archive.getTensorBytes(b_name) orelse return error.TensorNotFound;
 
-        return Q4Weights.initFromDirectBuffersZeroCopyCustom(
+        return Q4Weights.initFromDirectBuffersCustom(
             w_bytes,
             s_bytes,
             b_bytes,
@@ -673,7 +670,7 @@ pub const Gemma4E4BModel = struct {
     fn loadNorm(archive: SafetensorsArchive, buf: *[128]u8, l_idx: usize, sub: []const u8, dim: usize) !mlx.Array {
         const name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}", .{ l_idx, sub });
         const bytes = archive.getTensorBytes(name) orelse return error.TensorNotFound;
-        return mlx.Array.fromRawDataZeroCopy(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
+        return mlx.Array.fromRawData(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
     }
 
     fn createTokenIndicesArray(self: *const Gemma4E4BModel, tokens: []const usize) !mlx.Array {
@@ -1237,7 +1234,7 @@ pub fn main(init: std.process.Init) !void {
     const load_end_ns = @as(u64, @intCast(timer_load.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_load.nsec));
     const load_elapsed_s = @as(f64, @floatFromInt(load_end_ns - load_start_ns)) / 1e9;
 
-    std.debug.print("   - 格式架构: ⚡ MLX 原生分块量化 Safetensors (UMA 零拷贝 mmap 直通加载)\n", .{});
+    std.debug.print("   - 格式架构: ⚡ MLX 原生分块量化 Safetensors (GPU 显存直通映射)\n", .{});
     std.debug.print("   - 模型规模: 42 层 Transformer (35 层局部滑动窗口 + 7 层全局全注意力)\n", .{});
     std.debug.print("   - 逐层增强: 逐层嵌入输入增强 (Per-Layer Embeddings, PLE) 已完全就绪\n", .{});
     std.debug.print("   - 算子预热: {s}\n", .{if (enable_warmup) "✅ 已完成 Metal 着色器与融合图预编译 (Warmup Enabled)" else "⏭️ 已跳过 (--no-warmup)"});

@@ -521,42 +521,6 @@ pub const Q4Weights = struct {
         };
     }
 
-    /// 从任意量化配置零拷贝 (Zero-Copy) 构建 GPU 量化权重（要求底层内存映射在模型生命周期内保持有效）
-    pub fn initFromDirectBuffersZeroCopyCustom(
-        w_q_bytes: []const u8,
-        scales_bytes: []const u8,
-        biases_bytes: []const u8,
-        in_features: usize,
-        out_features: usize,
-        group_size: i32,
-        bits: i32,
-        sb_dtype: mlx.DType,
-        stream: ?Stream,
-    ) OffloadError!Q4Weights {
-        _ = stream;
-        if (!isAvailable()) return error.OffloadNotSupported;
-
-        const w_dims = [_]usize{ out_features, in_features / @as(usize, @intCast(@divExact(32, bits))) };
-        const sb_dims = [_]usize{ out_features, in_features / @as(usize, @intCast(group_size)) };
-
-        var w_q = try mlx.Array.fromRawDataZeroCopy(@ptrCast(w_q_bytes.ptr), &w_dims, .uint32);
-        errdefer w_q.deinit();
-        var scales = try mlx.Array.fromRawDataZeroCopy(@ptrCast(scales_bytes.ptr), &sb_dims, sb_dtype);
-        errdefer scales.deinit();
-        var biases = try mlx.Array.fromRawDataZeroCopy(@ptrCast(biases_bytes.ptr), &sb_dims, sb_dtype);
-        errdefer biases.deinit();
-
-        return .{
-            .w_q = w_q,
-            .scales = scales,
-            .biases = biases,
-            .in_features = in_features,
-            .out_features = out_features,
-            .group_size = group_size,
-            .bits = bits,
-        };
-    }
-
     /// 从多个 Q4Block 权重切片直接沿输出维度 (axis 0) 串联构建融合 GPU 硬件加速量化权重矩阵 (Fused Q4Weights)
     /// 例如：同时传入 gate_proj 与 up_proj 的切片，直接构建单一大矩阵 [gate_out + up_out, in_features]
     pub fn initFromBlockSlices(
