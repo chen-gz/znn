@@ -318,6 +318,14 @@ pub const Array = struct {
         return .{ .handle = arr };
     }
 
+    /// 从 32 位整型标量创建 MLX 标量数组
+    pub fn fromScalarI32(val: i32) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        const arr = c.mlx_array_new_int(val);
+        if (arr.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = arr };
+    }
+
     fn noopDtor(_: ?*anyopaque) callconv(.c) void {}
 
     /// 从外部已分配内存零拷贝 (Zero-Copy) 创建单精度浮点 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
@@ -484,6 +492,15 @@ pub const Array = struct {
         }
     }
 
+    /// 异步触发惰性求值 (Asynchronous Evaluation)，将计算入队至 GPU 流水线但不阻塞当前线程
+    pub fn asyncEval(self: Array) void {
+        if (has_mlx and self.handle.ctx != null) {
+            const vec = c.mlx_vector_array_new_data(&self.handle, 1);
+            defer _ = c.mlx_vector_array_free(vec);
+            _ = c.mlx_async_eval(vec);
+        }
+    }
+
     /// 获取就绪后的单精度浮点切片指针
     pub fn dataFloat32(self: Array) []const f32 {
         if (!has_mlx or self.handle.ctx == null) return &.{};
@@ -491,6 +508,22 @@ pub const Array = struct {
         const ptr = c.mlx_array_data_float32(self.handle);
         const len = c.mlx_array_size(self.handle);
         return ptr[0..len];
+    }
+
+    /// 获取就绪后的 32 位无符号整型切片指针
+    pub fn dataUint32(self: Array) []const u32 {
+        if (!has_mlx or self.handle.ctx == null) return &.{};
+        self.eval();
+        const ptr = c.mlx_array_data_uint32(self.handle);
+        const len = c.mlx_array_size(self.handle);
+        return ptr[0..len];
+    }
+
+    /// 提取标量或单元素张量的 uint32 值
+    pub fn itemUint32(self: Array) u32 {
+        const d = self.dataUint32();
+        if (d.len == 0) return 0;
+        return d[0];
     }
 
     /// 获取张量维度数目
@@ -773,6 +806,30 @@ pub const Array = struct {
         defer maybeFreeStream(s, stream);
 
         const rc = c.mlx_take_axis(&res.handle, self.handle, indices.handle, axis, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 沿指定轴计算最大值索引 (Argmax along Axis)
+    pub fn argmax(self: Array, axis: i32, keepdims: bool, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_argmax_axis(&res.handle, self.handle, axis, keepdims, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 沿指定轴均等切分 (Split into equal sections)
+    pub fn split(self: Array, num_splits: i32, axis: i32, stream: ?Stream) !VectorArray {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = VectorArray.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_split(&res.handle, self.handle, num_splits, axis, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
         return res;
     }

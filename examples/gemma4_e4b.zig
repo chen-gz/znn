@@ -251,6 +251,52 @@ pub const GpuLayerE4B = struct {
     }
 };
 
+/// 块式预分配显存键值缓存 (Pre-allocated Chunked GPU Key-Value Cache, GPU KVCache)
+pub const GpuKvCache = struct {
+    k: mlx.Array,
+    v: mlx.Array,
+    capacity: usize,
+    num_kv: usize,
+    head_dim: usize,
+
+    pub fn init(capacity: usize, num_kv: usize, head_dim: usize, stream: Stream) !GpuKvCache {
+        var k = try mlx.Array.zeros(&.{ 1, num_kv, capacity, head_dim }, .bfloat16, stream);
+        errdefer k.deinit();
+        const v = try mlx.Array.zeros(&.{ 1, num_kv, capacity, head_dim }, .bfloat16, stream);
+        return .{
+            .k = k,
+            .v = v,
+            .capacity = capacity,
+            .num_kv = num_kv,
+            .head_dim = head_dim,
+        };
+    }
+
+    pub fn deinit(self: *GpuKvCache) void {
+        self.k.deinit();
+        self.v.deinit();
+    }
+
+    pub fn ensureCapacity(self: *GpuKvCache, required: usize, stream: Stream) !void {
+        if (required <= self.capacity) return;
+        const add_cap: usize = ((required - self.capacity + 255) / 256) * 256;
+        const new_cap = self.capacity + add_cap;
+        var pad_k = try mlx.Array.zeros(&.{ 1, self.num_kv, add_cap, self.head_dim }, .bfloat16, stream);
+        defer pad_k.deinit();
+        var pad_v = try mlx.Array.zeros(&.{ 1, self.num_kv, add_cap, self.head_dim }, .bfloat16, stream);
+        defer pad_v.deinit();
+
+        const exp_k = try mlx.Array.concatenateAxis(&.{ self.k, pad_k }, 2, stream);
+        const exp_v = try mlx.Array.concatenateAxis(&.{ self.v, pad_v }, 2, stream);
+
+        self.k.deinit();
+        self.v.deinit();
+        self.k = exp_k;
+        self.v = exp_v;
+        self.capacity = new_cap;
+    }
+};
+
 /// Gemma 4 E4B 完整模型推理引擎
 pub const Gemma4E4BModel = struct {
     allocator: std.mem.Allocator,
@@ -265,9 +311,8 @@ pub const Gemma4E4BModel = struct {
     config: Gemma4Config,
     stream: Stream,
 
-    // 图形处理器显存键值缓存 (Graphics Processing Unit Key-Value Cache, GPU KVCache)
-    gpu_k: []?mlx.Array,
-    gpu_v: []?mlx.Array,
+    // 24 个独立 KV 层的块式预分配显存键值缓存 (Pre-allocated Chunked GPU Key-Value Cache)
+    gpu_kv: [24]?GpuKvCache = [_]?GpuKvCache{null} ** 24,
     curr_len: usize = 0,
     sqrt_hidden: f32,
 
@@ -446,11 +491,6 @@ pub const Gemma4E4BModel = struct {
             };
         }
 
-        const gpu_k = try allocator.alloc(?mlx.Array, cfg.num_hidden_layers);
-        const gpu_v = try allocator.alloc(?mlx.Array, cfg.num_hidden_layers);
-        @memset(gpu_k, null);
-        @memset(gpu_v, null);
-
         return Gemma4E4BModel{
             .allocator = allocator,
             .archive = archive,
@@ -461,8 +501,7 @@ pub const Gemma4E4BModel = struct {
             .lm_head = embed_tokens,
             .config = cfg,
             .stream = stream,
-            .gpu_k = gpu_k,
-            .gpu_v = gpu_v,
+            .gpu_kv = [_]?GpuKvCache{null} ** 24,
             .curr_len = 0,
             .sqrt_hidden = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size))),
         };
@@ -478,17 +517,15 @@ pub const Gemma4E4BModel = struct {
         self.norm_w.deinit();
         self.embed_tokens.deinit();
         self.stream.deinit();
-        self.allocator.free(self.gpu_k);
-        self.allocator.free(self.gpu_v);
         self.archive.deinit();
     }
 
     pub fn resetCache(self: *Gemma4E4BModel) void {
-        for (self.gpu_k, self.gpu_v) |*k_opt, *v_opt| {
-            if (k_opt.*) |*k| k.deinit();
-            if (v_opt.*) |*v| v.deinit();
-            k_opt.* = null;
-            v_opt.* = null;
+        for (&self.gpu_kv) |*kv_opt| {
+            if (kv_opt.*) |*c| {
+                c.deinit();
+                kv_opt.* = null;
+            }
         }
         self.curr_len = 0;
     }
@@ -537,13 +574,17 @@ pub const Gemma4E4BModel = struct {
         s: Stream,
     ) !mlx.Array {
         const T = tokens.len;
-        const tokens_i32 = try self.allocator.alloc(i32, T);
-        defer self.allocator.free(tokens_i32);
-        for (tokens, 0..) |tok, i| {
-            tokens_i32[i] = @intCast(tok);
-        }
-
-        var indices_arr = try mlx.Array.fromSliceI32(tokens_i32, &.{T});
+        const single_tok = [_]i32{if (T > 0) @intCast(tokens[0]) else 0};
+        var indices_arr = if (T == 1)
+            try mlx.Array.fromSliceI32(&single_tok, &.{1})
+        else blk: {
+            const tokens_i32 = try self.allocator.alloc(i32, T);
+            defer self.allocator.free(tokens_i32);
+            for (tokens, 0..) |tok, i| {
+                tokens_i32[i] = @intCast(tok);
+            }
+            break :blk try mlx.Array.fromSliceI32(tokens_i32, &.{T});
+        };
         defer indices_arr.deinit();
 
         var w_sel = try self.embed_tokens.w_q.takeAxis(indices_arr, 0, s);
@@ -577,13 +618,17 @@ pub const Gemma4E4BModel = struct {
         s: Stream,
     ) !mlx.Array {
         const T = tokens.len;
-        const tokens_i32 = try self.allocator.alloc(i32, T);
-        defer self.allocator.free(tokens_i32);
-        for (tokens, 0..) |tok, i| {
-            tokens_i32[i] = @intCast(tok);
-        }
-
-        var indices_arr = try mlx.Array.fromSliceI32(tokens_i32, &.{T});
+        const single_tok = [_]i32{if (T > 0) @intCast(tokens[0]) else 0};
+        var indices_arr = if (T == 1)
+            try mlx.Array.fromSliceI32(&single_tok, &.{1})
+        else blk: {
+            const tokens_i32 = try self.allocator.alloc(i32, T);
+            defer self.allocator.free(tokens_i32);
+            for (tokens, 0..) |tok, i| {
+                tokens_i32[i] = @intCast(tok);
+            }
+            break :blk try mlx.Array.fromSliceI32(tokens_i32, &.{T});
+        };
         defer indices_arr.deinit();
 
         var w_sel = try self.ple.embed_tokens_per_layer.w_q.takeAxis(indices_arr, 0, s);
@@ -646,9 +691,17 @@ pub const Gemma4E4BModel = struct {
         var ple_inputs = try ple_sum.mulScalar(self.ple.input_scale, s);
         defer ple_inputs.deinit();
 
-        // 3. 执行 42 层 Transformer 前向传播
+        // 3. 执行 42 层 Transformer 前向传播 (步首预切分 PLE 逐层张量)
+        var ple_vec = try ple_inputs.split(42, 2, s);
+        defer ple_vec.deinit();
+
         for (self.layers, 0..) |*l, idx| {
-            const x_next = try self.forwardLayer(x_cur, l, idx, ple_inputs, 0, T, s);
+            var ple_item = ple_vec.get(idx).?;
+            defer ple_item.deinit();
+            var ple_slice = try ple_item.reshape(&.{ 1, T, self.config.hidden_size_per_layer_input }, s);
+            defer ple_slice.deinit();
+
+            const x_next = try self.forwardLayer(x_cur, l, idx, ple_slice, 0, T, s);
             x_cur.deinit();
             x_cur = x_next;
         }
@@ -666,57 +719,31 @@ pub const Gemma4E4BModel = struct {
         var logits_bf16 = try self.lm_head.forwardArray(last_token_2d, s);
         defer logits_bf16.deinit();
 
-        var logits_f32 = try logits_bf16.astype(.float32, s);
-        defer logits_f32.deinit();
+        const best_tok: usize = if (repetition_penalty == 1.0) blk: {
+            var best_tok_arr = try logits_bf16.argmax(1, false, s);
+            defer best_tok_arr.deinit();
+            best_tok_arr.eval();
+            break :blk @intCast(best_tok_arr.itemUint32());
+        } else blk: {
+            var logits_f32 = try logits_bf16.astype(.float32, s);
+            defer logits_f32.deinit();
 
-        const cap = self.config.final_logit_softcapping;
-        var logits = if (cap > 0.0) blk: {
-            var scaled_l = try logits_f32.mulScalar(1.0 / cap, s);
-            defer scaled_l.deinit();
-            var tanh_l = try mlx.Array.tanh(scaled_l, s);
-            defer tanh_l.deinit();
-            break :blk try tanh_l.mulScalar(cap, s);
-        } else try logits_f32.mulScalar(1.0, s);
-        defer logits.deinit();
+            const cap = self.config.final_logit_softcapping;
+            var logits = if (cap > 0.0) blk2: {
+                var scaled_l = try logits_f32.mulScalar(1.0 / cap, s);
+                defer scaled_l.deinit();
+                var tanh_l = try mlx.Array.tanh(scaled_l, s);
+                defer tanh_l.deinit();
+                break :blk2 try tanh_l.mulScalar(cap, s);
+            } else try logits_f32.mulScalar(1.0, s);
+            defer logits.deinit();
 
-        logits.eval();
-        s.synchronize();
+            logits.eval();
+            s.synchronize();
 
-        const logits_slice = logits.dataFloat32();
-
-        var top_indices: [10]usize = undefined;
-        var top_vals: [10]f32 = undefined;
-        @memset(&top_vals, -1e9);
-        for (logits_slice, 0..) |v, i| {
-            if (v > top_vals[9]) {
-                var pos_ins: usize = 9;
-                while (pos_ins > 0 and v > top_vals[pos_ins - 1]) : (pos_ins -= 1) {
-                    top_vals[pos_ins] = top_vals[pos_ins - 1];
-                    top_indices[pos_ins] = top_indices[pos_ins - 1];
-                }
-                top_vals[pos_ins] = v;
-                top_indices[pos_ins] = i;
-            }
-        }
-        var logit_min: f32 = 1e9;
-        var logit_max: f32 = -1e9;
-        for (logits_slice) |v| {
-            if (v < logit_min) logit_min = v;
-            if (v > logit_max) logit_max = v;
-        }
-
-        std.debug.print("\n[Logits Stats]: min={d:.2}, max={d:.2}, len={}\n", .{ logit_min, logit_max, logits_slice.len });
-        std.debug.print("  - Logit for ' I' (564): {d:.2}\n", .{logits_slice[564]});
-        std.debug.print("  - Logit for ' am' (1006): {d:.2}\n", .{logits_slice[1006]});
-        std.debug.print("  - Logit for '一' (237009): {d:.2}\n", .{logits_slice[237009]});
-
-        std.debug.print("\n[Top 10 Prefill Tokens]:\n", .{});
-        for (0..10) |rank| {
-            const t = top_indices[rank];
-            std.debug.print("  #{}: id={}, val={d:.2}\n", .{ rank, t, top_vals[rank] });
-        }
-
-        const best_tok = backend.offload.LmHeadWeights.argmaxWithPenalty(logits_slice, self.config.vocab_size, prompt_tokens, repetition_penalty);
+            const logits_slice = logits.dataFloat32();
+            break :blk backend.offload.LmHeadWeights.argmaxWithPenalty(logits_slice, self.config.vocab_size, prompt_tokens, repetition_penalty);
+        };
 
         self.curr_len = T;
         return best_tok;
@@ -754,9 +781,17 @@ pub const Gemma4E4BModel = struct {
         var ple_inputs = try ple_sum.mulScalar(self.ple.input_scale, s);
         defer ple_inputs.deinit();
 
-        // 3. 执行 42 层 Transformer 解码步
+        // 3. 执行 42 层 Transformer 解码步 (步首预切分 PLE 逐层张量)
+        var ple_vec = try ple_inputs.split(42, 2, s);
+        defer ple_vec.deinit();
+
         for (self.layers, 0..) |*l, idx| {
-            const x_next = try self.forwardLayer(x_cur, l, idx, ple_inputs, pos, 1, s);
+            var ple_item = ple_vec.get(idx).?;
+            defer ple_item.deinit();
+            var ple_slice = try ple_item.reshape(&.{ 1, 1, self.config.hidden_size_per_layer_input }, s);
+            defer ple_slice.deinit();
+
+            const x_next = try self.forwardLayer(x_cur, l, idx, ple_slice, pos, 1, s);
             x_cur.deinit();
             x_cur = x_next;
         }
@@ -772,24 +807,31 @@ pub const Gemma4E4BModel = struct {
         var logits_bf16 = try self.lm_head.forwardArray(h_2d, s);
         defer logits_bf16.deinit();
 
-        var logits_f32 = try logits_bf16.astype(.float32, s);
-        defer logits_f32.deinit();
+        const best_tok: usize = if (repetition_penalty == 1.0) blk: {
+            var best_tok_arr = try logits_bf16.argmax(1, false, s);
+            defer best_tok_arr.deinit();
+            best_tok_arr.asyncEval();
+            break :blk @intCast(best_tok_arr.itemUint32());
+        } else blk: {
+            var logits_f32 = try logits_bf16.astype(.float32, s);
+            defer logits_f32.deinit();
 
-        const cap = self.config.final_logit_softcapping;
-        var logits = if (cap > 0.0) blk: {
-            var scaled_l = try logits_f32.mulScalar(1.0 / cap, s);
-            defer scaled_l.deinit();
-            var tanh_l = try mlx.Array.tanh(scaled_l, s);
-            defer tanh_l.deinit();
-            break :blk try tanh_l.mulScalar(cap, s);
-        } else try logits_f32.mulScalar(1.0, s);
-        defer logits.deinit();
+            const cap = self.config.final_logit_softcapping;
+            var logits = if (cap > 0.0) blk2: {
+                var scaled_l = try logits_f32.mulScalar(1.0 / cap, s);
+                defer scaled_l.deinit();
+                var tanh_l = try mlx.Array.tanh(scaled_l, s);
+                defer tanh_l.deinit();
+                break :blk2 try tanh_l.mulScalar(cap, s);
+            } else try logits_f32.mulScalar(1.0, s);
+            defer logits.deinit();
 
-        logits.eval();
-        s.synchronize();
+            logits.eval();
+            s.synchronize();
 
-        const logits_slice = logits.dataFloat32();
-        const best_tok = backend.offload.LmHeadWeights.argmaxWithPenalty(logits_slice, self.config.vocab_size, history_tokens, repetition_penalty);
+            const logits_slice = logits.dataFloat32();
+            break :blk backend.offload.LmHeadWeights.argmaxWithPenalty(logits_slice, self.config.vocab_size, history_tokens, repetition_penalty);
+        };
 
         self.curr_len = pos + 1;
         return best_tok;
@@ -800,7 +842,7 @@ pub const Gemma4E4BModel = struct {
         x_in: mlx.Array,
         l: *GpuLayerE4B,
         l_idx: usize,
-        ple_inputs: mlx.Array,
+        ple_slice: mlx.Array,
         pos: usize,
         seq_len: usize,
         s: Stream,
@@ -816,20 +858,27 @@ pub const Gemma4E4BModel = struct {
         // 重塑形状为 [1, num_heads, seq_len, head_dim]
         var q_4d_raw = try q_raw.reshape(&.{ 1, seq_len, l.num_heads, l.head_dim }, s);
         defer q_4d_raw.deinit();
-        var q_4d = try q_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-        defer q_4d.deinit();
 
-        // Q RMSNorm
-        var q_normed = try mlx.Array.fastRmsNorm(q_4d, l.q_norm_w, l.rms_norm_eps, s);
+        // Q RMSNorm 在转置前于连续内存上执行 (最高效访存)
+        var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
         defer q_normed.deinit();
 
+        var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+        defer q_4d.deinit();
+
         // 旋转位置编码 (Rotary Position Embedding, RoPE)
-        var q_rot = try mlx.Array.fastRoPE(q_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+        var q_rot = try mlx.Array.fastRoPE(q_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
         defer q_rot.deinit();
 
         // 键值缓存 (Key-Value Cache, KVCache) 维护
-        var full_k: mlx.Array = undefined;
-        var full_v: mlx.Array = undefined;
+        var eff_k: mlx.Array = undefined;
+        var eff_v: mlx.Array = undefined;
+        var eff_k_free: ?mlx.Array = null;
+        var eff_v_free: ?mlx.Array = null;
+        defer if (eff_k_free) |*ek| ek.deinit();
+        defer if (eff_v_free) |*ev| ev.deinit();
+
+        const total_len = pos + seq_len;
 
         if (l.has_kv) {
             var k_raw = try l.k_proj.?.forwardArray(in_norm, s);
@@ -839,57 +888,53 @@ pub const Gemma4E4BModel = struct {
 
             var k_4d_raw = try k_raw.reshape(&.{ 1, seq_len, l.num_kv_heads, l.head_dim }, s);
             defer k_4d_raw.deinit();
-            var k_4d = try k_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-            defer k_4d.deinit();
-
             var v_4d_raw = try v_raw.reshape(&.{ 1, seq_len, l.num_kv_heads, l.head_dim }, s);
             defer v_4d_raw.deinit();
-            var v_4d = try v_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-            defer v_4d.deinit();
 
-            var k_normed = try mlx.Array.fastRmsNorm(k_4d, l.k_norm_w.?, l.rms_norm_eps, s);
+            // K/V RMSNorm 在转置前于连续内存上执行
+            var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
             defer k_normed.deinit();
-            var v_normed = try mlx.Array.fastRmsNorm(v_4d, null, l.rms_norm_eps, s);
+            var v_normed = try mlx.Array.fastRmsNorm(v_4d_raw, null, l.rms_norm_eps, s);
             defer v_normed.deinit();
 
-            var k_rot = try mlx.Array.fastRoPE(k_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+            var k_4d = try k_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer k_4d.deinit();
+            var v_4d = try v_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer v_4d.deinit();
+
+            var k_rot = try mlx.Array.fastRoPE(k_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
             defer k_rot.deinit();
 
-            if (self.gpu_k[l_idx]) |old_k| {
-                const new_k = try mlx.Array.concatenateAxis(&.{ old_k, k_rot }, 2, s);
-                const new_v = try mlx.Array.concatenateAxis(&.{ self.gpu_v[l_idx].?, v_normed }, 2, s);
-                var k_free = old_k;
-                var v_free = self.gpu_v[l_idx].?;
-                self.gpu_k[l_idx] = new_k;
-                self.gpu_v[l_idx] = new_v;
-                k_free.deinit();
-                v_free.deinit();
-            } else {
-                self.gpu_k[l_idx] = try k_rot.mulScalar(1.0, s);
-                self.gpu_v[l_idx] = try v_normed.mulScalar(1.0, s);
+            if (self.gpu_kv[l_idx] == null) {
+                const initial_cap = @max(256, ((total_len + 255) / 256) * 256);
+                self.gpu_kv[l_idx] = try GpuKvCache.init(initial_cap, l.num_kv_heads, l.head_dim, s);
             }
+            const cache = &self.gpu_kv[l_idx].?;
+            try cache.ensureCapacity(total_len, s);
+            const next_k = try cache.k.sliceUpdate4dAxis2(k_rot, l.num_kv_heads, pos, total_len, l.head_dim, s);
+            const next_v = try cache.v.sliceUpdate4dAxis2(v_4d, l.num_kv_heads, pos, total_len, l.head_dim, s);
+            cache.k.deinit();
+            cache.v.deinit();
+            cache.k = next_k;
+            cache.v = next_v;
 
-            full_k = self.gpu_k[l_idx].?;
-            full_v = self.gpu_v[l_idx].?;
-        } else {
-            full_k = self.gpu_k[l.prev_kv_idx].?;
-            full_v = self.gpu_v[l.prev_kv_idx].?;
-        }
-        const total_len = pos + seq_len;
-
-        // 滑动窗口切片 (Sliding Window Mask/Slice)
-        var eff_k = full_k;
-        var eff_v = full_v;
-        var eff_k_free: ?mlx.Array = null;
-        var eff_v_free: ?mlx.Array = null;
-        defer if (eff_k_free) |*ek| ek.deinit();
-        defer if (eff_v_free) |*ev| ev.deinit();
-
-        if (l.is_sliding and total_len > l.sliding_window) {
-            const start_slice = total_len - l.sliding_window;
-            eff_k = try full_k.sliceAxis(2, start_slice, total_len, s);
+            var start_k: usize = 0;
+            if (l.is_sliding and total_len > l.sliding_window) {
+                start_k = total_len - l.sliding_window;
+            }
+            eff_k = try cache.k.slice4dAxis2(l.num_kv_heads, start_k, total_len, l.head_dim, s);
+            eff_v = try cache.v.slice4dAxis2(l.num_kv_heads, start_k, total_len, l.head_dim, s);
             eff_k_free = eff_k;
-            eff_v = try full_v.sliceAxis(2, start_slice, total_len, s);
+            eff_v_free = eff_v;
+        } else {
+            const cache = &self.gpu_kv[l.prev_kv_idx].?;
+            var start_k: usize = 0;
+            if (l.is_sliding and total_len > l.sliding_window) {
+                start_k = total_len - l.sliding_window;
+            }
+            eff_k = try cache.k.slice4dAxis2(l.num_kv_heads, start_k, total_len, l.head_dim, s);
+            eff_v = try cache.v.slice4dAxis2(l.num_kv_heads, start_k, total_len, l.head_dim, s);
+            eff_k_free = eff_k;
             eff_v_free = eff_v;
         }
 
@@ -934,18 +979,12 @@ pub const Gemma4E4BModel = struct {
         defer x2.deinit();
 
         // (4) 逐层输入嵌入增强 (Per-Layer Inputs, PLE)
-        // ple_inputs: [1, seq_len, 42, 256] -> 获取当前层切片 [1, seq_len, 256]
-        var ple_layer_slice_4d = try ple_inputs.sliceAxis(2, l_idx, l_idx + 1, s);
-        defer ple_layer_slice_4d.deinit();
-        var ple_layer_slice = try ple_layer_slice_4d.reshape(&.{ 1, seq_len, l.ple_gate.out_features }, s);
-        defer ple_layer_slice.deinit();
-
         var ple_gate_raw = try l.ple_gate.forwardArray(x2, s);
         defer ple_gate_raw.deinit();
         var ple_gate_act = try ple_gate_raw.gelu(s);
         defer ple_gate_act.deinit();
 
-        var ple_modulated = try mlx.Array.multiply(ple_gate_act, ple_layer_slice, s);
+        var ple_modulated = try mlx.Array.multiply(ple_gate_act, ple_slice, s);
         defer ple_modulated.deinit();
         var ple_projected = try l.ple_proj.forwardArray(ple_modulated, s);
         defer ple_projected.deinit();
@@ -970,6 +1009,7 @@ pub fn main(init: std.process.Init) !void {
 
     var custom_prompt: ?[]const u8 = null;
     var max_new_tokens: usize = 40;
+    var repetition_penalty: f32 = 1.0;
     const default_model_path = "/Users/guangzong/.lmstudio/models/lmstudio-community/gemma-4-E4B-it-MLX-4bit";
     var model_dir: []const u8 = default_model_path;
 
@@ -985,6 +1025,10 @@ pub fn main(init: std.process.Init) !void {
             } else if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--max-tokens")) {
                 if (it.next()) |n_str| {
                     max_new_tokens = std.fmt.parseInt(usize, n_str, 10) catch 40;
+                }
+            } else if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--penalty")) {
+                if (it.next()) |r_str| {
+                    repetition_penalty = std.fmt.parseFloat(f32, r_str) catch 1.0;
                 }
             }
         }
@@ -1066,7 +1110,7 @@ pub fn main(init: std.process.Init) !void {
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
     const p_start = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
 
-    const first_tok = try model.prefill(prompt_tokens, 1.25);
+    const first_tok = try model.prefill(prompt_tokens, repetition_penalty);
 
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
     const p_end = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
@@ -1094,7 +1138,7 @@ pub fn main(init: std.process.Init) !void {
             break;
         }
 
-        const next_tok = try model.decodeStep(current_tok, current_tokens.items, 1.25);
+        const next_tok = try model.decodeStep(current_tok, current_tokens.items, repetition_penalty);
         try current_tokens.append(allocator, next_tok);
         current_tok = next_tok;
         gen_count += 1;
