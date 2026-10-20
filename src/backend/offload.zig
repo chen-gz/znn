@@ -248,13 +248,13 @@ pub const LmHeadWeights = struct {
         if (self.biases) |*b| b.deinit();
     }
 
-    /// 执行 GPU 词表打分投影计算图调度：[..., hidden_size] -> [..., vocab_size]
-    pub fn forwardArray(self: LmHeadWeights, x: mlx.Array, stream: ?Stream) OffloadError!mlx.Array {
+    /// 执行 GPU 词表打分投影计算图调度并保留原生脑浮点 16 (Brain Floating Point 16, BF16) 输出：[..., hidden_size] -> [..., vocab_size]
+    pub fn forwardArrayBf16(self: LmHeadWeights, x: mlx.Array, stream: ?Stream) OffloadError!mlx.Array {
         if (!isAvailable()) return error.OffloadNotSupported;
+        var x_bf16 = try x.astype(.bfloat16, stream);
+        defer x_bf16.deinit();
         if (self.is_quantized) {
-            var x_bf16 = try x.astype(.bfloat16, stream);
-            defer x_bf16.deinit();
-            var logits_bf16 = try x_bf16.quantizedMatmul(
+            return x_bf16.quantizedMatmul(
                 self.w_q.?,
                 self.scales.?,
                 self.biases,
@@ -264,15 +264,16 @@ pub const LmHeadWeights = struct {
                 "affine",
                 stream,
             );
-            defer logits_bf16.deinit();
-            return logits_bf16.astype(.float32, stream);
         } else {
-            var x_bf16 = try x.astype(.bfloat16, stream);
-            defer x_bf16.deinit();
-            var logits_bf16 = try mlx.Array.matmul(x_bf16, self.w_t.?, stream);
-            defer logits_bf16.deinit();
-            return logits_bf16.astype(.float32, stream);
+            return mlx.Array.matmul(x_bf16, self.w_t.?, stream);
         }
+    }
+
+    /// 执行 GPU 词表打分投影计算图调度：[..., hidden_size] -> [..., vocab_size]
+    pub fn forwardArray(self: LmHeadWeights, x: mlx.Array, stream: ?Stream) OffloadError!mlx.Array {
+        var logits_bf16 = try self.forwardArrayBf16(x, stream);
+        defer logits_bf16.deinit();
+        return logits_bf16.astype(.float32, stream);
     }
 
     /// 在已计算的词表对数几率切片上执行分块位图重复惩罚与贪婪采样 (Chunked Bitset Penalty & Fast-Path Argmax)
@@ -1028,6 +1029,7 @@ pub const GpuLayerWeights = struct {
 
         const Helper = struct {
             fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
+                if (!mlx.has_mlx) return 1;
                 const lw: *const GpuLayerWeights = @alignCast(@ptrCast(payload.?));
 
                 var x_handle: mlx.c.mlx_array = .{ .ctx = null };
@@ -1286,28 +1288,26 @@ pub const GpuModelContext = struct {
                 try k_raw.sliceAxis(2, 0, lw.k_dim, s);
             defer v_raw.deinit();
 
-            // (3) 重构形状与转置至 [1, heads, T, head_dim]
+            // (3) 重构形状、在连续内存上执行 Q-Norm/K-Norm/V-Norm，再转置至 [1, heads, T, head_dim]
             var q_4d_raw = try q_raw.reshape(&.{ 1, T, lw.num_heads, lw.head_dim }, s);
             defer q_4d_raw.deinit();
-            var q_4d = try q_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-            defer q_4d.deinit();
-
             var k_4d_raw = try k_raw.reshape(&.{ 1, T, lw.num_kv_heads, lw.head_dim }, s);
             defer k_4d_raw.deinit();
-            var k_4d = try k_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-            defer k_4d.deinit();
-
             var v_4d_raw = try v_raw.reshape(&.{ 1, T, lw.num_kv_heads, lw.head_dim }, s);
             defer v_4d_raw.deinit();
-            var v_4d = try v_4d_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-            defer v_4d.deinit();
 
-            // (4) Q-Norm, K-Norm 与无参数 V-Norm
-            var q_normed = try mlx.Array.fastRmsNorm(q_4d, lw.q_norm_w, lw.rms_norm_eps, s);
+            var q_normed_raw = try mlx.Array.fastRmsNorm(q_4d_raw, lw.q_norm_w, lw.rms_norm_eps, s);
+            defer q_normed_raw.deinit();
+            var k_normed_raw = try mlx.Array.fastRmsNorm(k_4d_raw, lw.k_norm_w, lw.rms_norm_eps, s);
+            defer k_normed_raw.deinit();
+            var v_normed_raw = try mlx.Array.fastRmsNorm(v_4d_raw, null, lw.rms_norm_eps, s);
+            defer v_normed_raw.deinit();
+
+            var q_normed = try q_normed_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
             defer q_normed.deinit();
-            var k_normed = try mlx.Array.fastRmsNorm(k_4d, lw.k_norm_w, lw.rms_norm_eps, s);
+            var k_normed = try k_normed_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
             defer k_normed.deinit();
-            var v_normed = try mlx.Array.fastRmsNorm(v_4d, null, lw.rms_norm_eps, s);
+            var v_normed = try v_normed_raw.transposeAxes(&.{ 0, 2, 1, 3 }, s);
             defer v_normed.deinit();
 
             // (5) 旋转位置编码 (Rotary Position Embedding, RoPE)
@@ -1436,15 +1436,21 @@ pub const GpuModelContext = struct {
         var h_norm = try mlx.Array.fastRmsNorm(last_row_2d, self.final_norm_w, self.final_eps, s);
         defer h_norm.deinit();
 
-        var logits = try self.lm_head.forwardArray(h_norm, s);
-        defer logits.deinit();
-
-        logits.eval();
-
-        const logits_slice = logits.dataFloat32();
-        if (logits_slice.len != self.vocab_size) return error.ShapeMismatch;
-
-        const max_id = LmHeadWeights.argmaxWithPenalty(logits_slice, self.vocab_size, prompt_tokens, repetition_penalty);
+        const max_id: usize = if (repetition_penalty == 1.0) blk: {
+            var logits_bf16 = try self.lm_head.forwardArrayBf16(h_norm, s);
+            defer logits_bf16.deinit();
+            var best_tok_arr = try logits_bf16.argmax(1, false, s);
+            defer best_tok_arr.deinit();
+            best_tok_arr.eval();
+            break :blk @intCast(best_tok_arr.itemUint32());
+        } else blk: {
+            var logits = try self.lm_head.forwardArray(h_norm, s);
+            defer logits.deinit();
+            logits.eval();
+            const logits_slice = logits.dataFloat32();
+            if (logits_slice.len != self.vocab_size) return error.ShapeMismatch;
+            break :blk LmHeadWeights.argmaxWithPenalty(logits_slice, self.vocab_size, prompt_tokens, repetition_penalty);
+        };
         self.curr_len = T;
         return max_id;
     }
@@ -1616,17 +1622,22 @@ pub const GpuModelContext = struct {
         defer h_norm.deinit();
         x_cur.deinit();
 
-        // 最终词表投影 (LM Head MatMul: 自动走 Q8 量化加速或密集矩阵乘)
-        var logits = try self.lm_head.forwardArray(h_norm, s);
-        defer logits.deinit();
-
-        // 单一终点强制求值 (Single Evaluation): 全网 48 层 + RMSNorm + LM Head 一次性在 Metal GPU 流水线中完成
-        logits.eval();
-
-        const logits_slice = logits.dataFloat32();
-        if (logits_slice.len != self.vocab_size) return error.ShapeMismatch;
-
-        const max_id = LmHeadWeights.argmaxWithPenalty(logits_slice, self.vocab_size, recent_tokens, repetition_penalty);
+        // 最终词表投影 (LM Head MatMul: 自动走 Q8 量化加速或密集矩阵乘，当无重复惩罚时直接在 GPU 上执行 BF16 argmax)
+        const max_id: usize = if (repetition_penalty == 1.0) blk: {
+            var logits_bf16 = try self.lm_head.forwardArrayBf16(h_norm, s);
+            defer logits_bf16.deinit();
+            var best_tok_arr = try logits_bf16.argmax(1, false, s);
+            defer best_tok_arr.deinit();
+            best_tok_arr.eval();
+            break :blk @intCast(best_tok_arr.itemUint32());
+        } else blk: {
+            var logits = try self.lm_head.forwardArray(h_norm, s);
+            defer logits.deinit();
+            logits.eval();
+            const logits_slice = logits.dataFloat32();
+            if (logits_slice.len != self.vocab_size) return error.ShapeMismatch;
+            break :blk LmHeadWeights.argmaxWithPenalty(logits_slice, self.vocab_size, recent_tokens, repetition_penalty);
+        };
         self.curr_len += 1;
         return max_id;
     }
@@ -2023,6 +2034,7 @@ test "Q4Weights inside compiled closure" {
 
     const Helper = struct {
         fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, pl: ?*anyopaque) callconv(.c) c_int {
+            if (!mlx.has_mlx) return 1;
             const p: *const Payload = @alignCast(@ptrCast(pl.?));
             var x_handle: mlx.c.mlx_array = .{ .ctx = null };
             if (mlx.c.mlx_vector_array_get(&x_handle, in, 0) != 0 or x_handle.ctx == null) return 1;

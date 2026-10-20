@@ -71,6 +71,7 @@ pub const SafetensorsArchive = struct {
 
         var tensors = std.StringHashMap(TensorMeta).init(allocator);
         errdefer tensors.deinit();
+        try tensors.ensureTotalCapacity(800);
 
         const p1 = try parseHeader(allocator, mmap1, 1, &tensors);
         const p2 = try parseHeader(allocator, mmap2, 2, &tensors);
@@ -185,11 +186,17 @@ pub const PleWeights = struct {
     embed_scale: f32,
     proj_scale: f32,
     input_scale: f32,
+    embed_scale_arr: mlx.Array,
+    proj_scale_arr: mlx.Array,
+    input_scale_arr: mlx.Array,
 
     pub fn deinit(self: *PleWeights) void {
         self.embed_tokens_per_layer.deinit();
         self.model_proj.deinit();
         self.proj_norm_w.deinit();
+        self.embed_scale_arr.deinit();
+        self.proj_scale_arr.deinit();
+        self.input_scale_arr.deinit();
     }
 };
 
@@ -222,6 +229,7 @@ pub const GpuLayerE4B = struct {
     has_kv: bool,
     prev_kv_idx: usize,
     layer_scalar: f32,
+    layer_scalar_w: ?mlx.Array = null,
     is_sliding: bool,
     sliding_window: usize,
     num_heads: usize,
@@ -248,6 +256,7 @@ pub const GpuLayerE4B = struct {
         self.ple_gate.deinit();
         self.ple_proj.deinit();
         self.ple_norm_w.deinit();
+        if (self.layer_scalar_w) |*sw| sw.deinit();
     }
 };
 
@@ -300,7 +309,6 @@ pub const GpuKvCache = struct {
 /// Gemma 4 E4B 完整模型推理引擎
 pub const Gemma4E4BModel = struct {
     allocator: std.mem.Allocator,
-    archive: SafetensorsArchive,
     layers: []GpuLayerE4B,
     ple: PleWeights,
 
@@ -315,20 +323,29 @@ pub const Gemma4E4BModel = struct {
     gpu_kv: [24]?GpuKvCache = [_]?GpuKvCache{null} ** 24,
     curr_len: usize = 0,
     sqrt_hidden: f32,
+    sqrt_hidden_arr: mlx.Array,
+    compiled_gelu_mul: ?mlx.Closure = null,
 
     pub fn loadFromDirectory(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8) !Gemma4E4BModel {
         var archive = try SafetensorsArchive.open(allocator, io, dir_path);
-        errdefer archive.deinit();
+        defer archive.deinit();
 
         const cfg = Gemma4Config.e4b;
         const stream = try Stream.defaultGpu();
+        errdefer {
+            var s_tmp = stream;
+            s_tmp.deinit();
+        }
+
+        mlx.enableCompile();
+        mlx.setCompileMode(.enabled);
 
         // 1. 词表嵌入与 LM Head 权重
         const emb_wq = archive.getTensorBytes("language_model.model.embed_tokens.weight") orelse return error.TensorNotFound;
         const emb_sc = archive.getTensorBytes("language_model.model.embed_tokens.scales") orelse return error.TensorNotFound;
         const emb_bi = archive.getTensorBytes("language_model.model.embed_tokens.biases") orelse return error.TensorNotFound;
 
-        const embed_tokens = try Q4Weights.initFromDirectBuffersCustom(
+        var embed_tokens = try Q4Weights.initFromDirectBuffersCustom(
             emb_wq,
             emb_sc,
             emb_bi,
@@ -339,6 +356,7 @@ pub const Gemma4E4BModel = struct {
             .bfloat16,
             stream,
         );
+        errdefer embed_tokens.deinit();
 
         const norm_bytes = archive.getTensorBytes("language_model.model.norm.weight") orelse return error.TensorNotFound;
         var norm_w = try mlx.Array.fromRawData(@ptrCast(norm_bytes.ptr), &.{cfg.hidden_size}, .bfloat16);
@@ -349,7 +367,7 @@ pub const Gemma4E4BModel = struct {
         const ple_tokens_sc = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.scales") orelse return error.TensorNotFound;
         const ple_tokens_bi = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.biases") orelse return error.TensorNotFound;
 
-        const ple_tokens = try Q4Weights.initFromDirectBuffersCustom(
+        var ple_tokens = try Q4Weights.initFromDirectBuffersCustom(
             ple_tokens_wq,
             ple_tokens_sc,
             ple_tokens_bi,
@@ -360,12 +378,13 @@ pub const Gemma4E4BModel = struct {
             .bfloat16,
             stream,
         );
+        errdefer ple_tokens.deinit();
 
         const ple_proj_wq = archive.getTensorBytes("language_model.model.per_layer_model_projection.weight") orelse return error.TensorNotFound;
         const ple_proj_sc = archive.getTensorBytes("language_model.model.per_layer_model_projection.scales") orelse return error.TensorNotFound;
         const ple_proj_bi = archive.getTensorBytes("language_model.model.per_layer_model_projection.biases") orelse return error.TensorNotFound;
 
-        const ple_model_proj = try Q4Weights.initFromDirectBuffersCustom(
+        var ple_model_proj = try Q4Weights.initFromDirectBuffersCustom(
             ple_proj_wq,
             ple_proj_sc,
             ple_proj_bi,
@@ -376,21 +395,41 @@ pub const Gemma4E4BModel = struct {
             .bfloat16,
             stream,
         );
+        errdefer ple_model_proj.deinit();
 
         const ple_pnorm_bytes = archive.getTensorBytes("language_model.model.per_layer_projection_norm.weight") orelse return error.TensorNotFound;
         var ple_pnorm_w = try mlx.Array.fromRawData(@ptrCast(ple_pnorm_bytes.ptr), &.{cfg.hidden_size_per_layer_input}, .bfloat16);
         errdefer ple_pnorm_w.deinit();
 
-        const ple = PleWeights{
+        const embed_scale_val: f32 = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size_per_layer_input)));
+        const proj_scale_val: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(cfg.hidden_size)));
+        const input_scale_val: f32 = 1.0 / @sqrt(2.0);
+
+        var embed_scale_arr = try mlx.Array.fromScalarBf16(embed_scale_val);
+        errdefer embed_scale_arr.deinit();
+        var proj_scale_arr = try mlx.Array.fromScalarBf16(proj_scale_val);
+        errdefer proj_scale_arr.deinit();
+        var input_scale_arr = try mlx.Array.fromScalarBf16(input_scale_val);
+        errdefer input_scale_arr.deinit();
+
+        var ple = PleWeights{
             .embed_tokens_per_layer = ple_tokens,
             .model_proj = ple_model_proj,
             .proj_norm_w = ple_pnorm_w,
             .num_layers = cfg.num_hidden_layers,
             .ple_dim = cfg.hidden_size_per_layer_input,
-            .embed_scale = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size_per_layer_input))),
-            .proj_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(cfg.hidden_size))),
-            .input_scale = 1.0 / @sqrt(2.0),
+            .embed_scale = embed_scale_val,
+            .proj_scale = proj_scale_val,
+            .input_scale = input_scale_val,
+            .embed_scale_arr = embed_scale_arr,
+            .proj_scale_arr = proj_scale_arr,
+            .input_scale_arr = input_scale_arr,
         };
+        errdefer ple.deinit();
+
+        const sqrt_hidden_val: f32 = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size)));
+        var sqrt_hidden_arr = try mlx.Array.fromScalarBf16(sqrt_hidden_val);
+        errdefer sqrt_hidden_arr.deinit();
 
         // 3. 构建 42 个解码层
         const layers = try allocator.alloc(GpuLayerE4B, cfg.num_hidden_layers);
@@ -449,14 +488,18 @@ pub const Gemma4E4BModel = struct {
             const pom_w = try loadNorm(archive, &name_buf, idx, "post_feedforward_layernorm.weight", cfg.hidden_size);
             const pln_w = try loadNorm(archive, &name_buf, idx, "post_per_layer_input_norm.weight", cfg.hidden_size);
 
-            // 层缩放标量 (Layer Scalar)
+            // 层缩放标量 (Layer Scalar, 直接绑定 BF16 标量张量以消除每步标量创建与类型提升)
             const scalar_name = std.fmt.bufPrint(&name_buf, "language_model.model.layers.{}.layer_scalar", .{idx}) catch unreachable;
             var l_scalar: f32 = 1.0;
+            var l_scalar_w: ?mlx.Array = null;
             if (archive.getTensorBytes(scalar_name)) |sb| {
                 if (sb.len >= 2) {
                     const u16_val = std.mem.readInt(u16, sb[0..2], .little);
                     const f32_val: f32 = @bitCast(@as(u32, u16_val) << 16);
                     l_scalar = f32_val;
+                    if (l_scalar != 1.0) {
+                        l_scalar_w = try mlx.Array.fromRawData(@ptrCast(sb.ptr), &.{1}, .bfloat16);
+                    }
                 }
             }
 
@@ -480,6 +523,7 @@ pub const Gemma4E4BModel = struct {
                 .has_kv = has_kv,
                 .prev_kv_idx = prev_kv_idx,
                 .layer_scalar = l_scalar,
+                .layer_scalar_w = l_scalar_w,
                 .is_sliding = !is_full,
                 .sliding_window = cfg.sliding_window,
                 .num_heads = cfg.num_attention_heads,
@@ -491,9 +535,10 @@ pub const Gemma4E4BModel = struct {
             };
         }
 
+        const compiled_gelu_mul = mlx.Array.compileGeluMul() catch null;
+
         return Gemma4E4BModel{
             .allocator = allocator,
-            .archive = archive,
             .layers = layers,
             .ple = ple,
             .embed_tokens = embed_tokens,
@@ -503,21 +548,27 @@ pub const Gemma4E4BModel = struct {
             .stream = stream,
             .gpu_kv = [_]?GpuKvCache{null} ** 24,
             .curr_len = 0,
-            .sqrt_hidden = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size))),
+            .sqrt_hidden = sqrt_hidden_val,
+            .sqrt_hidden_arr = sqrt_hidden_arr,
+            .compiled_gelu_mul = compiled_gelu_mul,
         };
     }
 
     pub fn deinit(self: *Gemma4E4BModel) void {
         self.resetCache();
+        if (self.compiled_gelu_mul) |*cls| {
+            cls.deinit();
+            self.compiled_gelu_mul = null;
+        }
         for (self.layers) |*l| {
             l.deinit();
         }
         self.allocator.free(self.layers);
         self.ple.deinit();
         self.norm_w.deinit();
+        self.sqrt_hidden_arr.deinit();
         self.embed_tokens.deinit();
         self.stream.deinit();
-        self.archive.deinit();
     }
 
     pub fn resetCache(self: *Gemma4E4BModel) void {
@@ -567,26 +618,27 @@ pub const Gemma4E4BModel = struct {
         return mlx.Array.fromRawData(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
     }
 
-    /// 通过 GPU Metal 算子直接提取词元嵌入并完成反量化与缩放：[1, T, hidden_size]
-    pub fn getEmbeddings(
-        self: *const Gemma4E4BModel,
-        tokens: []const usize,
-        s: Stream,
-    ) !mlx.Array {
+    fn createTokenIndicesArray(self: *const Gemma4E4BModel, tokens: []const usize) !mlx.Array {
         const T = tokens.len;
         const single_tok = [_]i32{if (T > 0) @intCast(tokens[0]) else 0};
-        var indices_arr = if (T == 1)
-            try mlx.Array.fromSliceI32(&single_tok, &.{1})
-        else blk: {
-            const tokens_i32 = try self.allocator.alloc(i32, T);
-            defer self.allocator.free(tokens_i32);
-            for (tokens, 0..) |tok, i| {
-                tokens_i32[i] = @intCast(tok);
-            }
-            break :blk try mlx.Array.fromSliceI32(tokens_i32, &.{T});
-        };
-        defer indices_arr.deinit();
+        if (T == 1) {
+            return mlx.Array.fromSliceI32(&single_tok, &.{1});
+        }
+        const tokens_i32 = try self.allocator.alloc(i32, T);
+        defer self.allocator.free(tokens_i32);
+        for (tokens, 0..) |tok, i| {
+            tokens_i32[i] = @intCast(tok);
+        }
+        return mlx.Array.fromSliceI32(tokens_i32, &.{T});
+    }
 
+    /// 直接基于 GPU 上的词元索引张量提取词元嵌入并完成反量化与 BF16 缩放：[1, T, hidden_size]
+    pub fn getEmbeddingsFromArray(
+        self: *const Gemma4E4BModel,
+        indices_arr: mlx.Array,
+        T: usize,
+        s: Stream,
+    ) !mlx.Array {
         var w_sel = try self.embed_tokens.w_q.takeAxis(indices_arr, 0, s);
         defer w_sel.deinit();
         var sc_sel = try self.embed_tokens.scales.takeAxis(indices_arr, 0, s);
@@ -605,32 +657,30 @@ pub const Gemma4E4BModel = struct {
         );
         defer deq.deinit();
 
-        var scaled = try deq.mulScalar(self.sqrt_hidden, s);
+        var scaled = try mlx.Array.multiply(deq, self.sqrt_hidden_arr, s);
         defer scaled.deinit();
 
         return scaled.reshape(&.{ 1, T, self.config.hidden_size }, s);
     }
 
-    /// 通过 GPU Metal 算子直接提取逐层嵌入并完成反量化与缩放：[1, T, num_layers, ple_dim]
-    pub fn getPleTokens(
+    /// 通过 GPU Metal 算子直接提取词元嵌入并完成反量化与缩放：[1, T, hidden_size]
+    pub fn getEmbeddings(
         self: *const Gemma4E4BModel,
         tokens: []const usize,
         s: Stream,
     ) !mlx.Array {
-        const T = tokens.len;
-        const single_tok = [_]i32{if (T > 0) @intCast(tokens[0]) else 0};
-        var indices_arr = if (T == 1)
-            try mlx.Array.fromSliceI32(&single_tok, &.{1})
-        else blk: {
-            const tokens_i32 = try self.allocator.alloc(i32, T);
-            defer self.allocator.free(tokens_i32);
-            for (tokens, 0..) |tok, i| {
-                tokens_i32[i] = @intCast(tok);
-            }
-            break :blk try mlx.Array.fromSliceI32(tokens_i32, &.{T});
-        };
+        var indices_arr = try self.createTokenIndicesArray(tokens);
         defer indices_arr.deinit();
+        return self.getEmbeddingsFromArray(indices_arr, tokens.len, s);
+    }
 
+    /// 直接基于 GPU 上的词元索引张量提取逐层嵌入并完成反量化与 BF16 缩放：[1, T, num_layers, ple_dim]
+    pub fn getPleTokensFromArray(
+        self: *const Gemma4E4BModel,
+        indices_arr: mlx.Array,
+        T: usize,
+        s: Stream,
+    ) !mlx.Array {
         var w_sel = try self.ple.embed_tokens_per_layer.w_q.takeAxis(indices_arr, 0, s);
         defer w_sel.deinit();
         var sc_sel = try self.ple.embed_tokens_per_layer.scales.takeAxis(indices_arr, 0, s);
@@ -649,10 +699,140 @@ pub const Gemma4E4BModel = struct {
         );
         defer deq.deinit();
 
-        var scaled = try deq.mulScalar(self.ple.embed_scale, s);
+        var scaled = try mlx.Array.multiply(deq, self.ple.embed_scale_arr, s);
         defer scaled.deinit();
 
         return scaled.reshape(&.{ 1, T, self.config.num_hidden_layers, self.config.hidden_size_per_layer_input }, s);
+    }
+
+    /// 通过 GPU Metal 算子直接提取逐层嵌入并完成反量化与缩放：[1, T, num_layers, ple_dim]
+    pub fn getPleTokens(
+        self: *const Gemma4E4BModel,
+        tokens: []const usize,
+        s: Stream,
+    ) !mlx.Array {
+        var indices_arr = try self.createTokenIndicesArray(tokens);
+        defer indices_arr.deinit();
+        return self.getPleTokensFromArray(indices_arr, tokens.len, s);
+    }
+
+    /// 基于 GPU 词元索引张量构建整网 42 层 + 最终 RMSNorm + LM Head 的 BF16 对数几率张量 `[1, vocab_size]`
+    fn forwardTokenArrayToLogits(
+        self: *Gemma4E4BModel,
+        indices_arr: mlx.Array,
+        pos: usize,
+        T: usize,
+        s: Stream,
+    ) !mlx.Array {
+        // 1. 生成词元基础嵌入 [1, T, hidden_size] (BF16)
+        var x_cur = try self.getEmbeddingsFromArray(indices_arr, T, s);
+        errdefer x_cur.deinit();
+
+        // 2. 计算逐层输入嵌入 (Per-Layer Embeddings, PLE): [1, T, 42, 256] (BF16)
+        var ple_tokens_arr = try self.getPleTokensFromArray(indices_arr, T, s);
+        defer ple_tokens_arr.deinit();
+
+        var ple_proj_raw = try self.ple.model_proj.forwardArray(x_cur, s);
+        defer ple_proj_raw.deinit();
+        var ple_proj_scaled = try mlx.Array.multiply(ple_proj_raw, self.ple.proj_scale_arr, s);
+        defer ple_proj_scaled.deinit();
+        var ple_proj_4d = try ple_proj_scaled.reshape(&.{ 1, T, self.config.num_hidden_layers, self.config.hidden_size_per_layer_input }, s);
+        defer ple_proj_4d.deinit();
+        var ple_proj_normed = try mlx.Array.fastRmsNorm(ple_proj_4d, self.ple.proj_norm_w, self.config.rms_norm_eps, s);
+        defer ple_proj_normed.deinit();
+
+        // 融合逐层输入: (proj + tokens) * input_scale (保持纯 BF16)
+        var ple_sum = try mlx.Array.add(ple_proj_normed, ple_tokens_arr, s);
+        defer ple_sum.deinit();
+        var ple_inputs = try mlx.Array.multiply(ple_sum, self.ple.input_scale_arr, s);
+        defer ple_inputs.deinit();
+
+        // 3. 执行 42 层 Transformer 前向传播 (T == 1 时重塑为 [1, 42, 256] 并沿 axis 1 切分，直接获得 [1, 1, 256] 切片，省去 42 次逐层 reshape)
+        if (T == 1) {
+            var ple_3d = try ple_inputs.reshape(&.{ 1, self.config.num_hidden_layers, self.config.hidden_size_per_layer_input }, s);
+            defer ple_3d.deinit();
+            var ple_vec = try ple_3d.split(42, 1, s);
+            defer ple_vec.deinit();
+
+            for (self.layers, 0..) |*l, idx| {
+                var ple_slice = ple_vec.get(idx).?;
+                defer ple_slice.deinit();
+
+                const x_next = try self.forwardLayer(x_cur, l, idx, ple_slice, pos, 1, s);
+                x_cur.deinit();
+                x_cur = x_next;
+            }
+        } else {
+            var ple_vec = try ple_inputs.split(42, 2, s);
+            defer ple_vec.deinit();
+
+            for (self.layers, 0..) |*l, idx| {
+                var ple_item = ple_vec.get(idx).?;
+                defer ple_item.deinit();
+                var ple_slice = try ple_item.reshape(&.{ 1, T, self.config.hidden_size_per_layer_input }, s);
+                defer ple_slice.deinit();
+
+                const x_next = try self.forwardLayer(x_cur, l, idx, ple_slice, pos, T, s);
+                x_cur.deinit();
+                x_cur = x_next;
+            }
+        }
+        defer x_cur.deinit();
+
+        // 4. 最终层归一化与词表投影
+        var h_norm = try mlx.Array.fastRmsNorm(x_cur, self.norm_w, self.config.rms_norm_eps, s);
+        defer h_norm.deinit();
+
+        if (T == 1) {
+            var h_2d = try h_norm.reshape(&.{ 1, self.config.hidden_size }, s);
+            defer h_2d.deinit();
+            return self.lm_head.forwardArray(h_2d, s);
+        } else {
+            var last_token = try h_norm.sliceAxis(1, T - 1, T, s);
+            defer last_token.deinit();
+            var last_token_2d = try last_token.reshape(&.{ 1, self.config.hidden_size }, s);
+            defer last_token_2d.deinit();
+            return self.lm_head.forwardArray(last_token_2d, s);
+        }
+    }
+
+    /// 异步预填充阶段 (Async Prefill)：构建预填充计算图并返回 GPU 上的首词元 ID 张量 (`shape = [1], dtype = uint32`)
+    pub fn prefillAsync(
+        self: *Gemma4E4BModel,
+        prompt_tokens: []const usize,
+    ) !mlx.Array {
+        const T = prompt_tokens.len;
+        if (T == 0) return error.EmptyPrompt;
+        self.resetCache();
+
+        const s = self.stream;
+        var indices_arr = try self.createTokenIndicesArray(prompt_tokens);
+        defer indices_arr.deinit();
+
+        var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, 0, T, s);
+        defer logits_bf16.deinit();
+
+        var best_tok_arr = try logits_bf16.argmax(1, false, s);
+        best_tok_arr.asyncEval();
+        self.curr_len = T;
+        return best_tok_arr;
+    }
+
+    /// 异步单步解码阶段 (Async Pipelined Decode Step)：直接消费上一步在 GPU 上的词元张量 (`shape = [1]`) 构建下一步计算图并异步派发至 Metal 流水线
+    pub fn decodeStepAsync(
+        self: *Gemma4E4BModel,
+        tok_arr: mlx.Array,
+    ) !mlx.Array {
+        const s = self.stream;
+        const pos = self.curr_len;
+
+        var logits_bf16 = try self.forwardTokenArrayToLogits(tok_arr, pos, 1, s);
+        defer logits_bf16.deinit();
+
+        var best_tok_arr = try logits_bf16.argmax(1, false, s);
+        best_tok_arr.asyncEval();
+        self.curr_len = pos + 1;
+        return best_tok_arr;
     }
 
     /// 预填充阶段 (Prefill)：处理 Prompt 词元并初始化 GPU KVCache
@@ -661,90 +841,41 @@ pub const Gemma4E4BModel = struct {
         prompt_tokens: []const usize,
         repetition_penalty: f32,
     ) !usize {
+        if (repetition_penalty == 1.0) {
+            var best_tok_arr = try self.prefillAsync(prompt_tokens);
+            defer best_tok_arr.deinit();
+            return @intCast(best_tok_arr.itemUint32());
+        }
+
         const T = prompt_tokens.len;
         if (T == 0) return error.EmptyPrompt;
         self.resetCache();
 
         const s = self.stream;
+        var indices_arr = try self.createTokenIndicesArray(prompt_tokens);
+        defer indices_arr.deinit();
 
-        // 1. 生成 Prompt 词元基础嵌入 [1, T, hidden_size]
-        var x_cur = try self.getEmbeddings(prompt_tokens, s);
-        errdefer x_cur.deinit();
-
-        // 2. 计算逐层输入嵌入 (Per-Layer Embeddings, PLE): [1, T, 42, 256]
-        var ple_tokens_arr = try self.getPleTokens(prompt_tokens, s);
-        defer ple_tokens_arr.deinit();
-
-        // 上下文投影: inputs_embeds -> per_layer_model_projection * proj_scale -> RMSNorm
-        var ple_proj_raw = try self.ple.model_proj.forwardArray(x_cur, s);
-        defer ple_proj_raw.deinit();
-        var ple_proj_scaled = try ple_proj_raw.mulScalar(self.ple.proj_scale, s);
-        defer ple_proj_scaled.deinit();
-        var ple_proj_4d = try ple_proj_scaled.reshape(&.{ 1, T, self.config.num_hidden_layers, self.config.hidden_size_per_layer_input }, s);
-        defer ple_proj_4d.deinit();
-        var ple_proj_normed = try mlx.Array.fastRmsNorm(ple_proj_4d, self.ple.proj_norm_w, self.config.rms_norm_eps, s);
-        defer ple_proj_normed.deinit();
-
-        // 融合逐层输入: (proj + tokens) * input_scale
-        var ple_sum = try mlx.Array.add(ple_proj_normed, ple_tokens_arr, s);
-        defer ple_sum.deinit();
-        var ple_inputs = try ple_sum.mulScalar(self.ple.input_scale, s);
-        defer ple_inputs.deinit();
-
-        // 3. 执行 42 层 Transformer 前向传播 (步首预切分 PLE 逐层张量)
-        var ple_vec = try ple_inputs.split(42, 2, s);
-        defer ple_vec.deinit();
-
-        for (self.layers, 0..) |*l, idx| {
-            var ple_item = ple_vec.get(idx).?;
-            defer ple_item.deinit();
-            var ple_slice = try ple_item.reshape(&.{ 1, T, self.config.hidden_size_per_layer_input }, s);
-            defer ple_slice.deinit();
-
-            const x_next = try self.forwardLayer(x_cur, l, idx, ple_slice, 0, T, s);
-            x_cur.deinit();
-            x_cur = x_next;
-        }
-        defer x_cur.deinit();
-
-        // 4. 最终层归一化与词表投影
-        var h_norm = try mlx.Array.fastRmsNorm(x_cur, self.norm_w, self.config.rms_norm_eps, s);
-        defer h_norm.deinit();
-
-        var last_token = try h_norm.sliceAxis(1, T - 1, T, s);
-        defer last_token.deinit();
-        var last_token_2d = try last_token.reshape(&.{ 1, self.config.hidden_size }, s);
-        defer last_token_2d.deinit();
-
-        var logits_bf16 = try self.lm_head.forwardArray(last_token_2d, s);
+        var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, 0, T, s);
         defer logits_bf16.deinit();
 
-        const best_tok: usize = if (repetition_penalty == 1.0) blk: {
-            var best_tok_arr = try logits_bf16.argmax(1, false, s);
-            defer best_tok_arr.deinit();
-            best_tok_arr.eval();
-            break :blk @intCast(best_tok_arr.itemUint32());
-        } else blk: {
-            var logits_f32 = try logits_bf16.astype(.float32, s);
-            defer logits_f32.deinit();
+        var logits_f32 = try logits_bf16.astype(.float32, s);
+        defer logits_f32.deinit();
 
-            const cap = self.config.final_logit_softcapping;
-            var logits = if (cap > 0.0) blk2: {
-                var scaled_l = try logits_f32.mulScalar(1.0 / cap, s);
-                defer scaled_l.deinit();
-                var tanh_l = try mlx.Array.tanh(scaled_l, s);
-                defer tanh_l.deinit();
-                break :blk2 try tanh_l.mulScalar(cap, s);
-            } else try logits_f32.mulScalar(1.0, s);
-            defer logits.deinit();
+        const cap = self.config.final_logit_softcapping;
+        var logits = if (cap > 0.0) blk2: {
+            var scaled_l = try logits_f32.mulScalar(1.0 / cap, s);
+            defer scaled_l.deinit();
+            var tanh_l = try mlx.Array.tanh(scaled_l, s);
+            defer tanh_l.deinit();
+            break :blk2 try tanh_l.mulScalar(cap, s);
+        } else try logits_f32.mulScalar(1.0, s);
+        defer logits.deinit();
 
-            logits.eval();
-            s.synchronize();
+        logits.eval();
+        s.synchronize();
 
-            const logits_slice = logits.dataFloat32();
-            break :blk backend.offload.LmHeadWeights.argmaxWithPenalty(logits_slice, self.config.vocab_size, prompt_tokens, repetition_penalty);
-        };
-
+        const logits_slice = logits.dataFloat32();
+        const best_tok = backend.offload.LmHeadWeights.argmaxWithPenalty(logits_slice, self.config.vocab_size, prompt_tokens, repetition_penalty);
         self.curr_len = T;
         return best_tok;
     }
@@ -759,80 +890,37 @@ pub const Gemma4E4BModel = struct {
         const s = self.stream;
         const pos = self.curr_len;
 
-        // 1. 单词元嵌入
-        var x_cur = try self.getEmbeddings(&.{tok}, s);
-        errdefer x_cur.deinit();
+        const single_tok = [_]i32{@intCast(tok)};
+        var indices_arr = try mlx.Array.fromSliceI32(&single_tok, &.{1});
+        defer indices_arr.deinit();
 
-        // 2. 单词元 PLE
-        var ple_tokens_arr = try self.getPleTokens(&.{tok}, s);
-        defer ple_tokens_arr.deinit();
-
-        var ple_proj_raw = try self.ple.model_proj.forwardArray(x_cur, s);
-        defer ple_proj_raw.deinit();
-        var ple_proj_scaled = try ple_proj_raw.mulScalar(self.ple.proj_scale, s);
-        defer ple_proj_scaled.deinit();
-        var ple_proj_4d = try ple_proj_scaled.reshape(&.{ 1, 1, self.config.num_hidden_layers, self.config.hidden_size_per_layer_input }, s);
-        defer ple_proj_4d.deinit();
-        var ple_proj_normed = try mlx.Array.fastRmsNorm(ple_proj_4d, self.ple.proj_norm_w, self.config.rms_norm_eps, s);
-        defer ple_proj_normed.deinit();
-
-        var ple_sum = try mlx.Array.add(ple_proj_normed, ple_tokens_arr, s);
-        defer ple_sum.deinit();
-        var ple_inputs = try ple_sum.mulScalar(self.ple.input_scale, s);
-        defer ple_inputs.deinit();
-
-        // 3. 执行 42 层 Transformer 解码步 (步首预切分 PLE 逐层张量)
-        var ple_vec = try ple_inputs.split(42, 2, s);
-        defer ple_vec.deinit();
-
-        for (self.layers, 0..) |*l, idx| {
-            var ple_item = ple_vec.get(idx).?;
-            defer ple_item.deinit();
-            var ple_slice = try ple_item.reshape(&.{ 1, 1, self.config.hidden_size_per_layer_input }, s);
-            defer ple_slice.deinit();
-
-            const x_next = try self.forwardLayer(x_cur, l, idx, ple_slice, pos, 1, s);
-            x_cur.deinit();
-            x_cur = x_next;
+        if (repetition_penalty == 1.0) {
+            var best_tok_arr = try self.decodeStepAsync(indices_arr);
+            defer best_tok_arr.deinit();
+            return @intCast(best_tok_arr.itemUint32());
         }
-        defer x_cur.deinit();
 
-        // 4. 最终层归一化与词表投影
-        var h_norm = try mlx.Array.fastRmsNorm(x_cur, self.norm_w, self.config.rms_norm_eps, s);
-        defer h_norm.deinit();
-
-        var h_2d = try h_norm.reshape(&.{ 1, self.config.hidden_size }, s);
-        defer h_2d.deinit();
-
-        var logits_bf16 = try self.lm_head.forwardArray(h_2d, s);
+        var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, pos, 1, s);
         defer logits_bf16.deinit();
 
-        const best_tok: usize = if (repetition_penalty == 1.0) blk: {
-            var best_tok_arr = try logits_bf16.argmax(1, false, s);
-            defer best_tok_arr.deinit();
-            best_tok_arr.asyncEval();
-            break :blk @intCast(best_tok_arr.itemUint32());
-        } else blk: {
-            var logits_f32 = try logits_bf16.astype(.float32, s);
-            defer logits_f32.deinit();
+        var logits_f32 = try logits_bf16.astype(.float32, s);
+        defer logits_f32.deinit();
 
-            const cap = self.config.final_logit_softcapping;
-            var logits = if (cap > 0.0) blk2: {
-                var scaled_l = try logits_f32.mulScalar(1.0 / cap, s);
-                defer scaled_l.deinit();
-                var tanh_l = try mlx.Array.tanh(scaled_l, s);
-                defer tanh_l.deinit();
-                break :blk2 try tanh_l.mulScalar(cap, s);
-            } else try logits_f32.mulScalar(1.0, s);
-            defer logits.deinit();
+        const cap = self.config.final_logit_softcapping;
+        var logits = if (cap > 0.0) blk2: {
+            var scaled_l = try logits_f32.mulScalar(1.0 / cap, s);
+            defer scaled_l.deinit();
+            var tanh_l = try mlx.Array.tanh(scaled_l, s);
+            defer tanh_l.deinit();
+            break :blk2 try tanh_l.mulScalar(cap, s);
+        } else try logits_f32.mulScalar(1.0, s);
+        defer logits.deinit();
 
-            logits.eval();
-            s.synchronize();
+        logits.eval();
+        s.synchronize();
 
-            const logits_slice = logits.dataFloat32();
-            break :blk backend.offload.LmHeadWeights.argmaxWithPenalty(logits_slice, self.config.vocab_size, history_tokens, repetition_penalty);
-        };
-
+        const logits_slice = logits.dataFloat32();
+        const best_tok = backend.offload.LmHeadWeights.argmaxWithPenalty(logits_slice, self.config.vocab_size, history_tokens, repetition_penalty);
         self.curr_len = pos + 1;
         return best_tok;
     }
@@ -855,19 +943,22 @@ pub const Gemma4E4BModel = struct {
         var q_raw = try l.q_proj.forwardArray(in_norm, s);
         defer q_raw.deinit();
 
-        // 重塑形状为 [1, num_heads, seq_len, head_dim]
-        var q_4d_raw = try q_raw.reshape(&.{ 1, seq_len, l.num_heads, l.head_dim }, s);
-        defer q_4d_raw.deinit();
-
-        // Q RMSNorm 在转置前于连续内存上执行 (最高效访存)
-        var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
-        defer q_normed.deinit();
-
-        var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-        defer q_4d.deinit();
-
-        // 旋转位置编码 (Rotary Position Embedding, RoPE)
-        var q_rot = try mlx.Array.fastRoPE(q_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+        // 当 seq_len == 1 (自回归解码步) 时，[1, 1, num_heads, head_dim] 与 [1, num_heads, 1, head_dim] 物理内存完全等价，直接重塑即可省去 transposeAxes
+        var q_rot: mlx.Array = if (seq_len == 1) blk: {
+            var q_4d_raw = try q_raw.reshape(&.{ 1, l.num_heads, 1, l.head_dim }, s);
+            defer q_4d_raw.deinit();
+            var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
+            defer q_normed.deinit();
+            break :blk try mlx.Array.fastRoPE(q_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+        } else blk: {
+            var q_4d_raw = try q_raw.reshape(&.{ 1, seq_len, l.num_heads, l.head_dim }, s);
+            defer q_4d_raw.deinit();
+            var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
+            defer q_normed.deinit();
+            var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer q_4d.deinit();
+            break :blk try mlx.Array.fastRoPE(q_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+        };
         defer q_rot.deinit();
 
         // 键值缓存 (Key-Value Cache, KVCache) 维护
@@ -886,23 +977,39 @@ pub const Gemma4E4BModel = struct {
             var v_raw = try l.v_proj.?.forwardArray(in_norm, s);
             defer v_raw.deinit();
 
-            var k_4d_raw = try k_raw.reshape(&.{ 1, seq_len, l.num_kv_heads, l.head_dim }, s);
-            defer k_4d_raw.deinit();
-            var v_4d_raw = try v_raw.reshape(&.{ 1, seq_len, l.num_kv_heads, l.head_dim }, s);
-            defer v_4d_raw.deinit();
+            var k_rot: mlx.Array = undefined;
+            var v_4d: mlx.Array = undefined;
+            if (seq_len == 1) {
+                var k_4d_raw = try k_raw.reshape(&.{ 1, l.num_kv_heads, 1, l.head_dim }, s);
+                defer k_4d_raw.deinit();
+                var v_4d_raw = try v_raw.reshape(&.{ 1, l.num_kv_heads, 1, l.head_dim }, s);
+                defer v_4d_raw.deinit();
 
-            // K/V RMSNorm 在转置前于连续内存上执行
-            var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
-            defer k_normed.deinit();
-            var v_normed = try mlx.Array.fastRmsNorm(v_4d_raw, null, l.rms_norm_eps, s);
-            defer v_normed.deinit();
+                var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
+                defer k_normed.deinit();
+                v_4d = try mlx.Array.fastRmsNorm(v_4d_raw, null, l.rms_norm_eps, s);
+                errdefer v_4d.deinit();
 
-            var k_4d = try k_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-            defer k_4d.deinit();
-            var v_4d = try v_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+                k_rot = try mlx.Array.fastRoPE(k_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+            } else {
+                var k_4d_raw = try k_raw.reshape(&.{ 1, seq_len, l.num_kv_heads, l.head_dim }, s);
+                defer k_4d_raw.deinit();
+                var v_4d_raw = try v_raw.reshape(&.{ 1, seq_len, l.num_kv_heads, l.head_dim }, s);
+                defer v_4d_raw.deinit();
+
+                var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
+                defer k_normed.deinit();
+                var v_normed = try mlx.Array.fastRmsNorm(v_4d_raw, null, l.rms_norm_eps, s);
+                defer v_normed.deinit();
+
+                var k_4d = try k_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+                defer k_4d.deinit();
+                v_4d = try v_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+                errdefer v_4d.deinit();
+
+                k_rot = try mlx.Array.fastRoPE(k_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+            }
             defer v_4d.deinit();
-
-            var k_rot = try mlx.Array.fastRoPE(k_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
             defer k_rot.deinit();
 
             if (self.gpu_kv[l_idx] == null) {
@@ -943,9 +1050,13 @@ pub const Gemma4E4BModel = struct {
         var attn_out_4d = try mlx.Array.fastScaledDotProductAttention(q_rot, eff_k, eff_v, 1.0, is_causal, s);
         defer attn_out_4d.deinit();
 
-        var attn_trans = try attn_out_4d.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-        defer attn_trans.deinit();
-        var attn_2d = try attn_trans.reshape(&.{ 1, seq_len, l.num_heads * l.head_dim }, s);
+        var attn_2d = if (seq_len == 1)
+            try attn_out_4d.reshape(&.{ 1, 1, l.num_heads * l.head_dim }, s)
+        else blk: {
+            var attn_trans = try attn_out_4d.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+            defer attn_trans.deinit();
+            break :blk try attn_trans.reshape(&.{ 1, seq_len, l.num_heads * l.head_dim }, s);
+        };
         defer attn_2d.deinit();
 
         var o_out = try l.o_proj.forwardArray(attn_2d, s);
@@ -956,7 +1067,7 @@ pub const Gemma4E4BModel = struct {
         var x1 = try mlx.Array.add(x_in, post_attn, s);
         defer x1.deinit();
 
-        // (3) 门控多层感知机 (Gated MLP: GeGLU with GELU approx)
+        // (3) 门控多层感知机 (Gated MLP: Fused Compiled GeGLU)
         var pre_mlp = try mlx.Array.fastRmsNorm(x1, l.pre_mlp_w, l.rms_norm_eps, s);
         defer pre_mlp.deinit();
 
@@ -965,9 +1076,7 @@ pub const Gemma4E4BModel = struct {
         var up_out = try l.up_proj.forwardArray(pre_mlp, s);
         defer up_out.deinit();
 
-        var gelu_gate = try gate_out.gelu(s);
-        defer gelu_gate.deinit();
-        var hidden = try mlx.Array.multiply(gelu_gate, up_out, s);
+        var hidden = try mlx.Array.fusedGeluMul(gate_out, up_out, self.compiled_gelu_mul, s);
         defer hidden.deinit();
 
         var down_out = try l.down_proj.forwardArray(hidden, s);
@@ -978,13 +1087,11 @@ pub const Gemma4E4BModel = struct {
         var x2 = try mlx.Array.add(x1, post_mlp, s);
         defer x2.deinit();
 
-        // (4) 逐层输入嵌入增强 (Per-Layer Inputs, PLE)
+        // (4) 逐层输入嵌入增强 (Per-Layer Inputs, PLE: Fused Compiled GeGLU)
         var ple_gate_raw = try l.ple_gate.forwardArray(x2, s);
         defer ple_gate_raw.deinit();
-        var ple_gate_act = try ple_gate_raw.gelu(s);
-        defer ple_gate_act.deinit();
 
-        var ple_modulated = try mlx.Array.multiply(ple_gate_act, ple_slice, s);
+        var ple_modulated = try mlx.Array.fusedGeluMul(ple_gate_raw, ple_slice, self.compiled_gelu_mul, s);
         defer ple_modulated.deinit();
         var ple_projected = try l.ple_proj.forwardArray(ple_modulated, s);
         defer ple_projected.deinit();
@@ -992,19 +1099,18 @@ pub const Gemma4E4BModel = struct {
         var ple_normed = try mlx.Array.fastRmsNorm(ple_projected, l.ple_norm_w, l.rms_norm_eps, s);
         defer ple_normed.deinit();
         var x3 = try mlx.Array.add(x2, ple_normed, s);
-        defer x3.deinit();
 
-        // (5) 层缩放标量 (Layer Scalar)
-        if (l.layer_scalar != 1.0) {
-            return x3.mulScalar(l.layer_scalar, s);
-        } else {
-            return x3.mulScalar(1.0, s);
+        // (5) 层缩放标量 (Layer Scalar, 仅当 != 1.0 时执行 BF16 张量乘法)
+        if (l.layer_scalar_w) |sw| {
+            defer x3.deinit();
+            return mlx.Array.multiply(x3, sw, s);
         }
+        return x3;
     }
 };
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = std.heap.page_allocator;
+    const allocator = std.heap.smp_allocator;
     const io = init.io;
 
     var custom_prompt: ?[]const u8 = null;
@@ -1110,7 +1216,16 @@ pub fn main(init: std.process.Init) !void {
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
     const p_start = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
 
-    const first_tok = try model.prefill(prompt_tokens, repetition_penalty);
+    var first_tok_arr_opt: ?mlx.Array = if (repetition_penalty == 1.0)
+        try model.prefillAsync(prompt_tokens)
+    else
+        null;
+    defer if (first_tok_arr_opt) |*a| a.deinit();
+
+    const first_tok: usize = if (first_tok_arr_opt) |a|
+        @intCast(a.itemUint32())
+    else
+        try model.prefill(prompt_tokens, repetition_penalty);
 
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
     const p_end = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
@@ -1129,25 +1244,67 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("[#{}]", .{first_tok});
     }
 
-    // Decode 循环
+    // Decode 循环：当 repetition_penalty == 1.0 时启用双阶段 GPU 异步流水线 (2-Stage Async GPU Pipelining)，
+    // 使 CPU 构建第 t+1 步计算图与 GPU 执行第 t 步 Metal 内核完全重叠，彻底消除步间气泡
     var current_tok = first_tok;
     const decode_start_ns = p_end;
 
-    while (gen_count < max_new_tokens) {
-        if (current_tok == gemma4.Gemma4Vocabulary.EOS or current_tok == gemma4.Gemma4Vocabulary.EOT) {
-            break;
+    if (repetition_penalty == 1.0) {
+        if (gen_count < max_new_tokens and current_tok != gemma4.Gemma4Vocabulary.EOS and current_tok != gemma4.Gemma4Vocabulary.EOT) {
+            var pending_tok_arr = try model.decodeStepAsync(first_tok_arr_opt.?);
+            first_tok_arr_opt.?.deinit();
+            first_tok_arr_opt = null;
+
+            while (gen_count < max_new_tokens) {
+                // 在等待当前步 GPU 完成前，直接以 GPU 词元张量预构建并异步派发下一步计算图
+                var next_pending_opt: ?mlx.Array = if (gen_count + 1 < max_new_tokens)
+                    try model.decodeStepAsync(pending_tok_arr)
+                else
+                    null;
+
+                const next_tok: usize = @intCast(pending_tok_arr.itemUint32());
+                pending_tok_arr.deinit();
+
+                try current_tokens.append(allocator, next_tok);
+                current_tok = next_tok;
+                gen_count += 1;
+
+                const piece = vocab.decode(next_tok);
+                if (piece.len > 0) {
+                    std.debug.print("{s}", .{piece});
+                } else {
+                    std.debug.print("[#{}]", .{next_tok});
+                }
+
+                if (current_tok == gemma4.Gemma4Vocabulary.EOS or current_tok == gemma4.Gemma4Vocabulary.EOT) {
+                    if (next_pending_opt) |*np| np.deinit();
+                    break;
+                }
+
+                if (next_pending_opt) |np| {
+                    pending_tok_arr = np;
+                } else {
+                    break;
+                }
+            }
         }
+    } else {
+        while (gen_count < max_new_tokens) {
+            if (current_tok == gemma4.Gemma4Vocabulary.EOS or current_tok == gemma4.Gemma4Vocabulary.EOT) {
+                break;
+            }
 
-        const next_tok = try model.decodeStep(current_tok, current_tokens.items, repetition_penalty);
-        try current_tokens.append(allocator, next_tok);
-        current_tok = next_tok;
-        gen_count += 1;
+            const next_tok = try model.decodeStep(current_tok, current_tokens.items, repetition_penalty);
+            try current_tokens.append(allocator, next_tok);
+            current_tok = next_tok;
+            gen_count += 1;
 
-        const piece = vocab.decode(next_tok);
-        if (piece.len > 0) {
-            std.debug.print("{s}", .{piece});
-        } else {
-            std.debug.print("[#{}]", .{next_tok});
+            const piece = vocab.decode(next_tok);
+            if (piece.len > 0) {
+                std.debug.print("{s}", .{piece});
+            } else {
+                std.debug.print("[#{}]", .{next_tok});
+            }
         }
     }
 

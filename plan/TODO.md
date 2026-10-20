@@ -84,18 +84,21 @@
 | **显存峰值占用** | **~5.8 GB** | **~3.9 GB** | Zig 内存占用更紧凑 |
 | **输出精度与内容** | 100% 基准 | 100% 对齐 | **完全位一致 (Bit-exact)** |
 
-#### 2. 四大核心性能瓶颈深度剖析与优化成果
+#### 2. 核心性能瓶颈深度剖析与优化成果
 1. **键值缓存：256 步长预分配（In-Place） vs 逐步动态拼接（Concatenate）——【已解决】**
    - 实现 `GpuKvCache` 结构体：初始预分配 256 步长 $[1, \text{num\_kv}, 256, \text{head\_dim}]$ 显存缓冲。
    - 使用 `sliceUpdate4dAxis2` 与 `slice4dAxis2` 进行原地切片定点更新，彻底消除了单步 48 次 `concatenateAxis` 显存反复重分配与历史数据重拷。
-2. **GPU 异步流水线调度（`async_eval`）与零拷贝标量回读——【已解决】**
-   - 移除单步内无谓的 `s.synchronize()` 强同步阻塞，引入 `mlx.Array.asyncEval` 将计算入队至 Metal GPU 命令队列。
-   - 实现 GPU 端原生 `argmax` 规约与 `itemUint32()` 4 字节标量回读，完全消除了每步 1MB (262,144 floats) 全词表 Logits 从 GPU 到 CPU 的高耗时搬运。
-3. **逐层嵌入增强 (PLE) 步首预切分与零堆分配嵌入索引——【已解决】**
-   - 在进入 42 层 Transformer 循环前，使用 `split(42, 2)` 一次性预切分 PLE 逐层张量，消除循环体内 84 次切片调度。
-   - 对单词元嵌入与 PLE 索引提取改用栈分配直接初始化，单步解码实现零堆分配开销。
-4. **Q/K/V 归一化连续内存优化——【已解决】**
-   - 将 Q/K/V 投影后的 FastRMSNorm 调整至张量转置之前执行，确保 Metal 归一化内核始终运行在连续内存布局上，避免转置后的非连续跨步访存损失。
+2. **根除 `bfloat16 -> float32` 全网隐式精度污染（消除每步 592 个额外 `astype` 内核与 2x KV 带宽）——【已解决】**
+   - 诊断发现 C++ `mlx_array_new_float32` 创建的是强类型 `float32` 张量（不同于 Python `float` 弱类型标量）。此前 `mulScalar` 与 `gelu` 使用 `fromScalarF32` 导致 `bfloat16` 激活从 `getEmbeddings` 起被 `promote_types(bfloat16, float32)` 强制提升为 `float32`。
+   - 这一隐式提升导致每步 296 次 `quantizedMatmul` 在 GPU 上动态发射 **592 个 `astype(bfloat16 -> float32)` 内核**转换权重 `scales` 与 `biases`，并将 24 层 `GpuKvCache` 提升为 `float32`。
+   - 通过 `fromScalarBf16`、`fromScalarTyped` 与模型初始化期预分配的常驻 `bfloat16` 标量张量，确保全网 42 层、KV 缓存与 LM Head 100% 运行在原生 16-bit `bfloat16` 快速通道。
+3. **真正的双级 GPU 异步流水线重叠（`prefillAsync` + `decodeStepAsync`）——【已解决】**
+   - 修复此前 `best_tok_arr.asyncEval()` 后紧接 `best_tok_arr.itemUint32()` 导致 CPU 在当前步立刻同步阻塞等待 GPU 完成的假异步问题。
+   - 直接将第 $t$ 步的 GPU `argmax` 输出张量（`[1]`, `uint32`）传入第 $t+1$ 步的 `takeAxis` 构建并 `asyncEval` 入队第 $t+1$ 步计算图，随后再提取第 $t$ 步词元 ID，使 CPU 图构建与 GPU 内核执行实现 100% 并发重叠。
+4. **开启 MLX 静态图编译与 `compiled_gelu_mul` 算子融合——【已解决】**
+   - 启用 `mlx.enableCompile()` 并通过 `compileGeluMul` (`shapeless = true`) 将 MLP 与 PLE 的 6 步 `GELU(gate) * up` 逐元素链融合为单一 Metal 内核，每步减少 **420 次 Metal 内核启动**。
+5. **单步解码 (`seq_len == 1`) 零转置与零冗余节点快车道 + `smp_allocator` 极速加载——【已解决】**
+   - 在 `seq_len == 1` 时消除每步 42 次 `ple_item.reshape`、132 次 `[1, 1, H, D] <-> [1, H, 1, D]` `transposeAxes` 与 42 次 `mulScalar(1.0)`；主程序改用 `std.heap.smp_allocator` 并在加载后立即释放 `SafetensorsArchive` 映射。
 
 #### 3. 落地实施任务清单 (Actionable P0 Tasks)
 - [x] **P0.1 块式预分配与切片原地更新 KVCache (`step = 256`)**：
@@ -104,12 +107,11 @@
 - [x] **P0.2 GPU 原生 Argmax 采样算子与轻量回读**：
   - 在 `src/backend/mlx.zig` 中暴露 `mlx.Array.argmax(axis, keepdims, stream)` 算子与 `dataUint32()` / `itemUint32()`。
   - 在自回归解码主循环中，直接在 Metal GPU 上完成 `argmax` 规约，将 CPU 拷贝数据量从 1 MB (262,144 floats) 骤降至 4 字节 (1 个 uint32 ID)。
-- [x] **P0.3 双缓冲异步执行管线 (`async_eval`) 消除 GPU 同步停顿**：
-  - 改造解码循环，移除单步内的 `s.synchronize()` 强同步。
-  - 引入 `mlx.Array.asyncEval` 异步入队 Metal GPU 计算队列，消除无谓驱动气泡。
-- [x] **P0.4 逐层嵌入输入 (PLE) 步首预切分与单词元栈分配**：
-  - 将 `getPleTokens` 与投影输出在进入 42 层循环前使用 `split(42, 2)` 一次性切分出 42 个层级张量引用，消除循环体内部高频触发的 `sliceAxis` 与 `reshape` C API 往返。
-  - 单词元提取使用栈数组与 `fromSliceI32`，消除循环中的单步堆内存分配。
+- [x] **P0.3 真双级异步执行管线 (`decodeStepAsync`) 消除 GPU 同步停顿**：
+  - 改造解码循环，利用 GPU `argmax` 张量直接驱动下一步 `takeAxis` 嵌入查表并先行 `asyncEval()`，随后再同步读取上一步词元，彻底消除步间 CPU-GPU 气泡。
+- [x] **P0.4 逐层嵌入输入 (PLE) 步首预切分、单步零转置快车道与原生 `bfloat16` 精度锁定**：
+  - 将 `getPleTokens` 与投影输出在进入 42 层循环前使用 `split(42, 2)` 一次性切分出 42 个层级张量引用，并在 `seq_len == 1` 时跳过全部冗余 `reshape` 与 `transposeAxes`。
+  - 修复 `mulScalar` / `gelu` 标量类型提升并接入 `compileGeluMul` 静态融合内核，锁死全网 16-bit `bfloat16` 高速通道。
 
 ---
 

@@ -12,7 +12,12 @@ pub const has_mlx: bool = (builtin.os.tag == .macos and builtin.cpu.arch == .aar
 
 pub const c = if (has_mlx) @cImport({
     @cInclude("mlx/c/mlx.h");
-}) else struct {};
+}) else struct {
+    pub const mlx_array = extern struct { ctx: ?*anyopaque = null };
+    pub const mlx_vector_array = extern struct { ctx: ?*anyopaque = null };
+    pub const mlx_closure = extern struct { ctx: ?*anyopaque = null };
+    pub const mlx_stream = extern struct { ctx: ?*anyopaque = null };
+};
 
 pub const MlxError = error{
     MlxNotSupported,
@@ -265,7 +270,7 @@ pub const Array = struct {
     pub fn fromRawData(
         data: *const anyopaque,
         shape_dims: []const usize,
-        dtype: DType,
+        dt: DType,
     ) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         if (shape_dims.len == 0 or shape_dims.len > 8) return error.InvalidShape;
@@ -279,14 +284,14 @@ pub const Array = struct {
             data,
             &c_shape,
             @intCast(shape_dims.len),
-            @intFromEnum(dtype),
+            @intFromEnum(dt),
         );
         if (arr.ctx == null) return error.MlxOperationFailed;
         return .{ .handle = arr };
     }
 
     /// 创建全零数组 (Zeros)
-    pub fn zeros(shape_dims: []const usize, dtype: DType, stream: ?Stream) !Array {
+    pub fn zeros(shape_dims: []const usize, dt: DType, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         if (shape_dims.len == 0 or shape_dims.len > 8) return error.InvalidShape;
 
@@ -303,7 +308,7 @@ pub const Array = struct {
             &res.handle,
             &c_shape,
             shape_dims.len,
-            @intFromEnum(dtype),
+            @intFromEnum(dt),
             s,
         );
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -316,6 +321,46 @@ pub const Array = struct {
         const arr = c.mlx_array_new_float32(val);
         if (arr.ctx == null) return error.MlxOperationFailed;
         return .{ .handle = arr };
+    }
+
+    /// 将单精度浮点数按 IEEE 754 最近偶数舍入转换为脑浮点 16 (Brain Floating Point 16, BF16) 的 16 位位宽表示
+    pub fn f32ToBf16Bits(val: f32) u16 {
+        const bits: u32 = @bitCast(val);
+        if ((bits & 0x7f800000) == 0x7f800000 and (bits & 0x007fffff) != 0) {
+            return @truncate((bits >> 16) | 0x0040);
+        }
+        const lsb = (bits >> 16) & 1;
+        const rounding_bias = @as(u32, 0x00007fff) + lsb;
+        return @truncate((bits + rounding_bias) >> 16);
+    }
+
+    /// 从单精度浮点标量创建脑浮点 16 (Brain Floating Point 16, BF16) MLX 0 维标量数组
+    pub fn fromScalarBf16(val: f32) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        const bf16_bits = f32ToBf16Bits(val);
+        var dummy_shape: [1]c_int = .{0};
+        const arr = c.mlx_array_new_data(&bf16_bits, &dummy_shape, 0, c.MLX_BFLOAT16);
+        if (arr.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = arr };
+    }
+
+    /// 从单精度浮点标量创建半精度浮点 16 (Float16, FP16) MLX 0 维标量数组
+    pub fn fromScalarF16(val: f32) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        const f16_val: f16 = @floatCast(val);
+        var dummy_shape: [1]c_int = .{0};
+        const arr = c.mlx_array_new_data(&f16_val, &dummy_shape, 0, c.MLX_FLOAT16);
+        if (arr.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = arr };
+    }
+
+    /// 从单精度浮点标量创建与指定数据类型对齐的 MLX 0 维标量数组（避免 bfloat16/float16 张量被隐式提升为 float32）
+    pub fn fromScalarTyped(val: f32, target_dtype: DType) !Array {
+        return switch (target_dtype) {
+            .bfloat16 => fromScalarBf16(val),
+            .float16 => fromScalarF16(val),
+            else => fromScalarF32(val),
+        };
     }
 
     /// 从 32 位整型标量创建 MLX 标量数组
@@ -350,6 +395,37 @@ pub const Array = struct {
         );
         if (arr.ctx == null) return error.MlxOperationFailed;
         return .{ .handle = arr };
+    }
+
+    /// 从原始数据指针与形状维度零拷贝 (Zero-Copy) 创建 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
+    pub fn fromRawDataZeroCopy(
+        data: *const anyopaque,
+        shape_dims: []const usize,
+        dt: DType,
+    ) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (shape_dims.len == 0 or shape_dims.len > 8) return error.InvalidShape;
+
+        var c_shape: [8]c_int = undefined;
+        for (shape_dims, 0..) |dim, i| {
+            c_shape[i] = @intCast(dim);
+        }
+
+        const arr = c.mlx_array_new_data_managed(
+            @constCast(data),
+            &c_shape,
+            @intCast(shape_dims.len),
+            @intFromEnum(dt),
+            &noopDtor,
+        );
+        if (arr.ctx == null) return error.MlxOperationFailed;
+        return .{ .handle = arr };
+    }
+
+    /// 获取数组元素数据类型 (Element Data Type)
+    pub fn dtype(self: Array) DType {
+        if (!has_mlx or self.handle.ctx == null) return .float32;
+        return @enumFromInt(c.mlx_array_dtype(self.handle));
     }
 
     /// 获取数组元素总数
@@ -834,21 +910,21 @@ pub const Array = struct {
         return res;
     }
 
-    /// 标量乘法：`res = self * val`
+    /// 标量乘法：`res = self * val`（自动保持输入张量的数据精度，防止 bfloat16/float16 被隐式提升为 float32）
     pub fn mulScalar(self: Array, val: f32, stream: ?Stream) !Array {
-        var s_arr = try fromScalarF32(val);
+        var s_arr = try fromScalarTyped(val, self.dtype());
         defer s_arr.deinit();
         return multiply(self, s_arr, stream);
     }
 
     /// 数据类型转换 (Data Type Conversion / Astype)
-    pub fn astype(self: Array, dtype: DType, stream: ?Stream) !Array {
+    pub fn astype(self: Array, dt: DType, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
         const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
         defer maybeFreeStream(s, stream);
 
-        const rc = c.mlx_astype(&res.handle, self.handle, @intFromEnum(dtype), s);
+        const rc = c.mlx_astype(&res.handle, self.handle, @intFromEnum(dt), s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
         return res;
     }
@@ -914,10 +990,11 @@ pub const Array = struct {
     }
 
     /// 高斯误差线性单元激活函数 (Gaussian Error Linear Unit, GELU)
-    /// 数学公式：GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+    /// 数学公式：GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))（自动保持输入张量精度）
     pub fn gelu(self: Array, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
-        var s_scale = try fromScalarF32(0.7071067811865475);
+        const dt = self.dtype();
+        var s_scale = try fromScalarTyped(0.7071067811865475, dt);
         defer s_scale.deinit();
         var x_scaled = try multiply(self, s_scale, stream);
         defer x_scaled.deinit();
@@ -925,17 +1002,61 @@ pub const Array = struct {
         var erf_val = try x_scaled.erf(stream);
         defer erf_val.deinit();
 
-        var s_one = try fromScalarF32(1.0);
+        var s_one = try fromScalarTyped(1.0, dt);
         defer s_one.deinit();
         var one_plus_erf = try add(s_one, erf_val, stream);
         defer one_plus_erf.deinit();
 
-        var s_half = try fromScalarF32(0.5);
+        var s_half = try fromScalarTyped(0.5, dt);
         defer s_half.deinit();
         var half_x = try multiply(self, s_half, stream);
         defer half_x.deinit();
 
         return multiply(half_x, one_plus_erf, stream);
+    }
+
+    /// 门控高斯误差线性单元融合激活乘法：`out = GELU(gate) * up`
+    /// 若提供了预编译的静态闭包 (Closure)，则直接派发单内核融合算子，将 6 次 Metal 内核启动合并为 1 次寄存器级融合执行
+    pub fn fusedGeluMul(gate: Array, up: Array, compiled: ?Closure, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (compiled) |cls| {
+            var in_vec = VectorArray.fromArrays(&.{ gate, up });
+            defer in_vec.deinit();
+            var out_vec = try cls.apply(in_vec);
+            defer out_vec.deinit();
+            if (out_vec.get(0)) |res| return res;
+        }
+        var act = try gate.gelu(stream);
+        defer act.deinit();
+        return multiply(act, up, stream);
+    }
+
+    /// 静态编译门控高斯误差线性单元算子融合闭包 (`out = GELU(gate) * up`，支持任意形状 `shapeless = true`)
+    pub fn compileGeluMul() !Closure {
+        if (!has_mlx) return error.MlxNotSupported;
+        const Helper = struct {
+            fn compute(vres: [*c]c.mlx_vector_array, in: c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
+                if (!has_mlx) return 1;
+                _ = payload;
+                var gate_h: c.mlx_array = .{ .ctx = null };
+                var up_h: c.mlx_array = .{ .ctx = null };
+                if (c.mlx_vector_array_get(&gate_h, in, 0) != 0 or gate_h.ctx == null) return 1;
+                if (c.mlx_vector_array_get(&up_h, in, 1) != 0 or up_h.ctx == null) return 1;
+                const gate = Array{ .handle = gate_h };
+                const up = Array{ .handle = up_h };
+
+                var act = gate.gelu(null) catch return 1;
+                defer act.deinit();
+                var out = multiply(act, up, null) catch return 1;
+                defer out.deinit();
+
+                const res_vec = c.mlx_vector_array_new_data(&[_]c.mlx_array{out.handle}, 1);
+                _ = c.mlx_vector_array_set(vres, res_vec);
+                _ = c.mlx_vector_array_free(res_vec);
+                return 0;
+            }
+        };
+        return compile(Helper.compute, null, true);
     }
 
     /// 门控高斯误差线性单元激活 (Gated Gaussian Error Linear Unit, GeGLU)
@@ -1639,6 +1760,7 @@ test "MLX GPU backend matmul and fast kernels" {
     // 11. 验证计算图函数闭包静态编译 (Closure & compile)
     const Helper = struct {
         fn compute(vres: [*c]c.mlx_vector_array, in: c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
+            if (!has_mlx) return 1;
             _ = payload;
             var x_handle: c.mlx_array = .{ .ctx = null };
             if (c.mlx_vector_array_get(&x_handle, in, 0) != 0 or x_handle.ctx == null) return 1;
@@ -1684,6 +1806,33 @@ test "MLX GPU backend matmul and fast kernels" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), out_comp_slice[0], 1e-3);
     // x=1: gelu(1) + 1.0 = 0.8413447 + 1.0 = 1.8413447
     try std.testing.expectApproxEqAbs(@as(f32, 1.8413447), out_comp_slice[1], 1e-3);
+
+    // 12. 验证脑浮点数 (Brain Floating Point 16-bit, bfloat16) 标量精度保持与融合门控激活 (fusedGeluMul)
+    const bf16_bits = Array.f32ToBf16Bits(2.0);
+    try std.testing.expectEqual(@as(u16, 0x4000), bf16_bits);
+
+    var s_bf16 = try Array.fromScalarBf16(2.0);
+    defer s_bf16.deinit();
+    try std.testing.expectEqual(DType.bfloat16, s_bf16.dtype());
+
+    var x_bf16 = try in_comp_arr.astype(.bfloat16, stream);
+    defer x_bf16.deinit();
+    try std.testing.expectEqual(DType.bfloat16, x_bf16.dtype());
+
+    var scaled_bf16 = try x_bf16.mulScalar(2.0, stream);
+    defer scaled_bf16.deinit();
+    try std.testing.expectEqual(DType.bfloat16, scaled_bf16.dtype());
+
+    var gelu_bf16 = try x_bf16.gelu(stream);
+    defer gelu_bf16.deinit();
+    try std.testing.expectEqual(DType.bfloat16, gelu_bf16.dtype());
+
+    var compiled_gm = try Array.compileGeluMul();
+    defer compiled_gm.deinit();
+    var fused_gm_bf16 = try Array.fusedGeluMul(x_bf16, scaled_bf16, compiled_gm, stream);
+    defer fused_gm_bf16.deinit();
+    try std.testing.expectEqual(DType.bfloat16, fused_gm_bf16.dtype());
 }
+
 
 

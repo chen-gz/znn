@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **修复全网 bfloat16 隐式 float32 精度提升、启用真双缓冲异步流水线 (`decodeStepAsync`) 与 JIT 编译 GeGLU 宏内核融合 (`src/backend/mlx.zig`, `examples/gemma4_e4b.zig`, `src/backend/offload.zig`, `plan/TODO.md`)**:
+  - **彻底根除 `bfloat16 -> float32` 全网隐式精度污染 (`src/backend/mlx.zig`, `examples/gemma4_e4b.zig`)**：定位并修复 C++ `mlx_array_new_float32` 强类型标量在 `mulScalar` 与 `gelu` 中与 `bfloat16` 张量相乘时触发 `promote_types(bfloat16, float32) -> float32` 的核心性能缺陷。此前该隐式类型提升导致从第 0 层嵌入起全网激活变为 `float32`，不仅迫使每步 296 次 `quantizedMatmul` 在 GPU 上额外动态派发 **592 个 `astype(bfloat16 -> float32)` 权重缩放/偏置转换内核**、降级运行 32-bit QMV 内核，还将 24 层 `GpuKvCache` 隐式提升为 `float32`（带宽翻倍）。新增 `f32ToBf16Bits`、`fromScalarBf16`、`fromScalarTyped` 与 `dtype()`，并在模型加载期预分配常驻 `bfloat16` 标量数组（`sqrt_hidden_arr`、`ple` 缩放标量与 42 层 `layer_scalar_w`），确保全网 42 层前向、KV 缓存与 LM Head 100% 运行在原生 16-bit `bfloat16` 快速通道。
+  - **实现真正的 CPU-GPU 双级异步流水线重叠 (`prefillAsync` / `decodeStepAsync`)**：修复此前 `best_tok_arr.asyncEval()` 后紧接 `best_tok_arr.itemUint32()` 导致 CPU 在同一步立刻阻塞等待 GPU 完成的假异步问题。新增 `getEmbeddingsFromArray`、`getPleTokensFromArray` 与 `decodeStepAsync`，直接将第 $t$ 步的 GPU `argmax` 输出张量（`[1]`, `uint32`）作为 `takeAxis` 索引构建并异步入队第 $t+1$ 步的 42 层计算图，随后再读取第 $t$ 步词元 ID，实现第 $t+1$ 步 CPU 图构建与第 $t$ 步 GPU 内核执行的 100% 并发重叠。
+  - **开启 MLX 静态图编译与 `compiled_gelu_mul` 算子融合 (`src/backend/mlx.zig`, `examples/gemma4_e4b.zig`)**：在 `examples/gemma4_e4b.zig` 中启用 `mlx.enableCompile()`，并通过 `mlx.Array.compileGeluMul` (`shapeless = true`) 将 MLP 与 PLE 门控中的 6 步逐元素激活链 `0.5 * x * (1 + erf(x * 0.7071)) * up` 静态编译为单一 Metal 融合内核，每步解码将 504 次逐元素 Metal 内核启动压减至 84 次（减少 **420 次内核派发/步**）。
+  - **单步解码 (`seq_len == 1`) 零转置与零冗余算子快车道 (`examples/gemma4_e4b.zig`, `src/backend/offload.zig`)**：在 `seq_len == 1` 时跳过 `forwardTokenArrayToLogits` 中 42 次 `ple_item.reshape`、跳过 `forwardLayer` 中 `[1, 1, H, D] <-> [1, H, 1, D]` 的 132 次无意义 `transposeAxes` 视图节点构造，并跳过 `layer_scalar == 1.0` 时的 42 次恒等乘法；同时在 `LmHeadWeights.forwardArrayBf16` 中支持 GPU 原生 `bfloat16` `argmax` 采样。
+  - **消除 `page_allocator` 系统调用风暴与 Safetensors 双倍内存驻留 (`examples/gemma4_e4b.zig`)**：将 `main` 分配器由每次分配触发内核 `mmap`/`munmap` 的 `std.heap.page_allocator` 切换为多线程池化 `std.heap.smp_allocator`，预分配 `SafetensorsArchive` 哈希表容量，并在权重加载至 Metal 缓存后立即 `archive.deinit()` 释放 3.8 GB 文件映射，大幅压缩冷启动耗时与内存占用。
+
 - **Gemma 4 E4B 性能极限对齐与 Phase 0 (P0) 优化全面落地 (`examples/gemma4_e4b.zig`, `src/backend/mlx.zig`, `plan/TODO.md`)**:
   - 实现块式预分配显存键值缓存 (`GpuKvCache`，`step = 256`)：通过 `sliceUpdate4dAxis2` 与 `slice4dAxis2` 进行原地切片定点更新，彻底消除单步自回归解码中 24 个独立 KV 层共 48 次 `concatenateAxis` 显存反复重分配与历史数据重拷。
   - 引入 GPU 原生 `argmax` 与 4 字节轻量标量回读 (`mlx.Array.argmax`, `dataUint32`, `itemUint32`)：自回归解码直接在 Metal GPU 上完成最大值索引规约，彻底消除每步 1 MB (262,144 个 float32) 全词表 Logits 从 GPU 到 CPU 的同步回读瓶颈。
