@@ -82,6 +82,8 @@ pub const Gemma4Config = struct {
     rms_norm_eps: f32 = 1e-6,
     final_logit_softcapping: f32 = 30.0,
     max_position_embeddings: usize = 262144,
+    hidden_size_per_layer_input: usize = 0,
+    num_kv_shared_layers: usize = 0,
 
     // 特殊词元 ID
     bos_token_id: u32 = 2,
@@ -92,6 +94,25 @@ pub const Gemma4Config = struct {
     pub fn defaultConfig() Gemma4Config {
         return .{};
     }
+
+    /// Gemma 4 E4B (4B 级高效端侧模型配置，42 层混合架构与逐层嵌入增强)
+    pub const e4b: Gemma4Config = .{
+        .vocab_size = 262144,
+        .hidden_size = 2560,
+        .intermediate_size = 10240,
+        .num_hidden_layers = 42,
+        .num_attention_heads = 8,
+        .num_key_value_heads = 2,
+        .num_global_key_value_heads = 2,
+        .head_dim = 256,
+        .global_head_dim = 512,
+        .sliding_window = 512,
+        .rms_norm_eps = 1e-6,
+        .final_logit_softcapping = 30.0,
+        .max_position_embeddings = 131072,
+        .hidden_size_per_layer_input = 256,
+        .num_kv_shared_layers = 18,
+    };
 
     /// 小型测试配置（用于单测与快速验证，结构完全对齐 Gemma 4 规范）
     pub const tiny_test: Gemma4Config = .{
@@ -1177,7 +1198,7 @@ pub const Gemma4Vocabulary = struct {
             var best_len: usize = 0;
             var best_token: ?usize = null;
 
-            // 1. 尝试匹配以   (0xe2, 0x96, 0x81) 开头的词元
+            // 1. 尝试匹配以空格 ' ' (0x20) 开头的词元
             var cand_buf: [256]u8 = undefined;
             if (at_start or text[idx] == ' ') {
                 const effective_idx = if (text[idx] == ' ') idx + 1 else idx;
@@ -1185,12 +1206,10 @@ pub const Gemma4Vocabulary = struct {
                 var sub_len = max_check - effective_idx;
                 while (sub_len > 0) : (sub_len -= 1) {
                     const chunk = text[effective_idx .. effective_idx + sub_len];
-                    if (3 + chunk.len <= cand_buf.len) {
-                        cand_buf[0] = 0xe2;
-                        cand_buf[1] = 0x96;
-                        cand_buf[2] = 0x81;
-                        @memcpy(cand_buf[3 .. 3 + chunk.len], chunk);
-                        if (self.findToken(cand_buf[0 .. 3 + chunk.len])) |tok| {
+                    if (1 + chunk.len <= cand_buf.len) {
+                        cand_buf[0] = ' ';
+                        @memcpy(cand_buf[1 .. 1 + chunk.len], chunk);
+                        if (self.findToken(cand_buf[0 .. 1 + chunk.len])) |tok| {
                             best_token = tok;
                             best_len = (if (text[idx] == ' ') @as(usize, 1) else 0) + sub_len;
                             break;

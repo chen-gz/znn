@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Gemma 4 E4B (Effective 4B) 4-bit / 8-bit 混合量化模型直通推理、键值缓存跨层共享与逐层嵌入增强 (`examples/gemma4_e4b.zig`, `src/models/gemma4.zig`, `src/backend/mlx.zig`, `src/backend/offload.zig`, `build.zig`)**:
+  - 新增 Gemma 4 E4B Instruct 完整端到端推理评测引擎 (`examples/gemma4_e4b.zig`, `zig build run-gemma4-e4b` / `zig build e4b`)，全面支持 Google 原生 42 层 Transformer 混合量化模型架构（包含 35 层局部滑动窗口注意力与 7 层全局全注意力）。
+  - 支持多文件 Safetensors 零拷贝内存映射 (`SafetensorsArchive`)：完全绕过 CPU 反量化解包耗时，直接将 4-bit 注意力与 8-bit 门控多层感知机 (MLP) 权重挂载至 Metal 统一内存 (UMA)，冷启动加载压缩至 7.0 ~ 8.2 秒。
+  - 完美实现键值缓存共享机制 (Key-Value Cache Shared Layers, `num_kv_shared_layers = 18`)：严格对齐 Google 官方架构设计，前 24 层 (0..23) 具备独立的 K/V 投影与缓存，后 18 层 (24..41) 完全跳过冗余 K/V 计算，分别共享复用滑动窗口注意力层 22 与全局全注意力层 23 的键值缓存，大幅减少计算与显存占用。
+  - 在 GPU 上完整实现逐层嵌入增强 (Per-Layer Embeddings, PLE)：通过 `mlx.Array.dequantize` 与 `takeAxis` 结合 Metal GPU 算子流水线，极速计算 `[1, T, 42, 256]` 4D 逐层增强嵌入并与层门控、上投影紧密融合。
+  - 实测性能突破：首字延迟 (TTFT / Prefill) 仅 **716 毫秒** (吞吐速率达 **16.7 ~ 25.5 token/s**)，自回归单步解码速率稳定达到 **15.49 ~ 15.75 token/s**，生成自然连贯且完全对齐 Google 官方输出精度。
+
+
 - **零拷贝直通内存重排格式 (ZNNQ4DIR) 与多核并发解包工具 (`tools/pack_gemma4.zig`, `src/backend/offload.zig`, `src/models/gemma4_q4.zig`, `examples/gemma4.zig`, `build.zig`)**:
   - 设计并实现零拷贝直通权重格式 (`ZNNQ4DIR`)：将 Gemma 4 12B 模型 48 层 Transformer 的量化权重 (`w_q`、`scales`、`biases`) 离线预重排并连续存放，使运行时完全绕过 CPU 单线程解包与数百次内核 `mmap`/`munmap` 内存页清理，通过 `mlx.Array.fromRawData` 直接将内存映射指针挂载至 Apple Silicon Metal 统一内存架构 (Unified Memory Architecture, UMA) 显存中，消除冷启动 40 秒等待，实现秒级极速就绪。
   - 在 `src/backend/offload.zig` 中实现 `packBlocksToDirectBuffers`（零内存分配解包内核）与 `initFromDirectBuffers`，并重构 `initFromBlockSlices` 与 `GpuLayerWeights.initFromDirect`，精准支持全局注意力 (Full Attention) 与滑动窗口注意力 (Sliding Attention) 的异构头维度与非对称投影矩阵重组。

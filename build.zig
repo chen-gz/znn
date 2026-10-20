@@ -136,6 +136,15 @@ const examples = [_]ExampleTarget{
         .alias_desc = "Run the Gemma 4 architecture and 4-bit (Q4) quantized inference example (alias for run-gemma4)",
         .forward_args = true,
     },
+    .{
+        .name = "gemma4-e4b",
+        .src = "examples/gemma4_e4b.zig",
+        .run_step = "run-gemma4-e4b",
+        .run_desc = "Run the Gemma 4 E4B (Effective 4B) quantized inference benchmark and test",
+        .alias_step = "e4b",
+        .alias_desc = "Run the Gemma 4 E4B inference benchmark and test (alias for run-gemma4-e4b)",
+        .forward_args = true,
+    },
 };
 
 pub fn build(b: *std.Build) void {
