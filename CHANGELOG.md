@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Gemma 4 E4B 性能极限对齐与 Phase 0 (P0) 优化全面落地 (`examples/gemma4_e4b.zig`, `src/backend/mlx.zig`, `plan/TODO.md`)**:
+  - 实现块式预分配显存键值缓存 (`GpuKvCache`，`step = 256`)：通过 `sliceUpdate4dAxis2` 与 `slice4dAxis2` 进行原地切片定点更新，彻底消除单步自回归解码中 24 个独立 KV 层共 48 次 `concatenateAxis` 显存反复重分配与历史数据重拷。
+  - 引入 GPU 原生 `argmax` 与 4 字节轻量标量回读 (`mlx.Array.argmax`, `dataUint32`, `itemUint32`)：自回归解码直接在 Metal GPU 上完成最大值索引规约，彻底消除每步 1 MB (262,144 个 float32) 全词表 Logits 从 GPU 到 CPU 的同步回读瓶颈。
+  - 支持双缓冲异步执行管线与非阻塞入队 (`mlx.Array.asyncEval`, `fromScalarI32`)：移除单步内无谓的 `s.synchronize()` 强同步阻塞，使 Metal GPU 始终保持饱和流水线运行；单词元嵌入索引提取采用栈缓冲区直接构造，消除自回归解码循环中的单步堆内存分配。
+  - 优化 Q/K/V 投影归一化内存连续性：将投影后的 FastRMSNorm 提前至张量转置前在连续内存上完成，避免转置后的非连续跨步访存与 Metal 内核复制开销。
+  - 步首预切分逐层嵌入增强 (Per-Layer Embeddings, PLE)：通过 `split(42, 2)` 在进入 42 层循环前一次性切分出 42 个层级张量，消除循环体内 84 次切片 C API 调度。
+  - 性能与精度实测：在保持与 Google 官方 Python MLX 100% 位一致输出的前提下，解码吞吐稳定在 **16.0 ~ 16.5 token/s**，与 Python MLX 实际 21.93 token/s 的差距由 2.1 倍大幅收窄至 1.3 倍。
+
 - **Gemma 4 E4B (Effective 4B) 4-bit / 8-bit 混合量化模型直通推理、键值缓存跨层共享与逐层嵌入增强 (`examples/gemma4_e4b.zig`, `src/models/gemma4.zig`, `src/backend/mlx.zig`, `src/backend/offload.zig`, `build.zig`)**:
   - 新增 Gemma 4 E4B Instruct 完整端到端推理评测引擎 (`examples/gemma4_e4b.zig`, `zig build run-gemma4-e4b` / `zig build e4b`)，全面支持 Google 原生 42 层 Transformer 混合量化模型架构（包含 35 层局部滑动窗口注意力与 7 层全局全注意力）。
   - 支持多文件 Safetensors 零拷贝内存映射 (`SafetensorsArchive`)：完全绕过 CPU 反量化解包耗时，直接将 4-bit 注意力与 8-bit 门控多层感知机 (MLP) 权重挂载至 Metal 统一内存 (UMA)，冷启动加载压缩至 7.0 ~ 8.2 秒。
