@@ -118,6 +118,40 @@ pub fn setCompileMode(mode: CompileMode) void {
     }
 }
 
+/// 清理 Apple 机器学习拓展 (Machine Learning Explore, MLX) 缓存池中的未激活显存
+pub fn clearCache() void {
+    if (has_mlx) {
+        _ = c.mlx_clear_cache();
+    }
+}
+
+/// 设置 Apple 机器学习拓展 (Machine Learning Explore, MLX) 固定物理内存 (Wired Memory) 锁定上限（字节）
+pub fn setWiredLimit(limit: usize) usize {
+    if (!has_mlx) return 0;
+    var prev: usize = 0;
+    _ = c.mlx_set_wired_limit(&prev, limit);
+    return prev;
+}
+
+/// 自动查询当前默认图形处理器 (Graphics Processing Unit, GPU) 的推荐最大工作集大小 (`max_recommended_working_set_size`)，
+/// 并将其设置为统一内存固定物理页锁定上限 (Wired Memory Limit)，防止推理过程中页面被操作系统换出
+pub fn configureOptimalWiredMemory() usize {
+    if (!has_mlx) return 0;
+    var dev = c.mlx_device_new();
+    defer _ = c.mlx_device_free(dev);
+    if (c.mlx_get_default_device(&dev) != 0) return 0;
+
+    var info = c.mlx_device_info_new();
+    defer _ = c.mlx_device_info_free(info);
+    if (c.mlx_device_info_get(&info, dev) != 0) return 0;
+
+    var max_working_set: usize = 0;
+    if (c.mlx_device_info_get_size(&max_working_set, info, "max_recommended_working_set_size") == 0 and max_working_set > 0) {
+        return setWiredLimit(max_working_set);
+    }
+    return 0;
+}
+
 /// MLX 数组向量容器 (VectorArray)
 pub const VectorArray = struct {
     handle: if (has_mlx) c.mlx_vector_array else ?*anyopaque,
