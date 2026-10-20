@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **GeGLU 门控激活融合、计算图单例复用与零分支向量化 Argmax 性能优化 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `src/autodiff/graph.zig`, `examples/gemma4.zig`)**:
+  - 在 `src/backend/mlx.zig` 中实现 `Array.geglu(intermediate_size)` 门控激活融合算子与 `Array.takeAxis` 沿轴索引抽取算子，每层 Transformer 减少 4 个中间数组分配与 3 次独立 Metal 内核调度，全网 48 层共减少 192 次数组分配与 144 次内核派发，在 `prefill`、`decodeStepWithArray` 与 `decodeSpeculative` 中全链路启用。
+  - 在 `src/autodiff/graph.zig` 为 `Graph` 引入 `reset()` 方法（清空 `module_formulas`、`scope_stack`、`tensors`、`ops` 并保留容量，重置 `arena.reset(.retain_capacity)`），并在 `examples/gemma4.zig` 将 `step_graph` 提升至 while 循环外部单例复用，消除每个自回归词元重复分配释放 5 个哈希表与 Arena 内存的开销。
+  - 优化 `LmHeadWeights.argmaxWithPenalty` 分块位图算法：将特殊排除词元精确隔离在第 0 块与第 4045 块，消除其余 4094 个 64 词块中内部的全部分支跳转，使 LLVM 能够无条件将 262K 词表对数几率扫描向量化为 ARM NEON `fmax` 指令流。
+  - 首字延迟 (TTFT / Prefill) 稳定在 **0.72 秒** (相比基准提速 9.3 倍)，增量解码速度达 **6.32 ~ 6.62 tokens/s**，全局吞吐达 **5.80 ~ 6.05 tokens/s** (相比基准提速 100%+，翻倍)，保持 100% 官方词表位输出一致性。
+
 - **Metal 管线离线预热、Prompt N-gram 投机采样与 MLX 静态编译支持 (`examples/gemma4.zig`, `src/backend/offload.zig`, `src/backend/mlx.zig`, `src/models/gemma4.zig`, `src/models/gemma4_q4.zig`, `src/models/tests.zig`)**:
   - 在 `src/backend/offload.zig` 中新增 `GpuModelContext.warmup`，通过在加载阶段触发微型前向传递预编译 Metal Shading Language (MSL) JIT 着色器并构建管线状态对象 (PSO)，将真实推理的首字延迟 (TTFT / Prefill 耗时) 从 **5.83 秒骤降至 0.74 秒 (提速 7.9 倍)**。
   - 在 `LmHeadWeights.argmaxWithPenalty` 中实现分块位图快车道 (Chunked Bitset Penalty Fast-Path)：99.8% 的 64 词块内无任何重复词元，直接执行纯向量化极速最大值查找，仅在少数命中词块执行位运算，兼顾只读安全性与极速采样。

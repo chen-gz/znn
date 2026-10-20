@@ -172,6 +172,16 @@ pub const Array = struct {
         return .{ .handle = arr };
     }
 
+    /// 从 32 位有符号整型切片数据创建 MLX 数组 (Int32 Array Creation)
+    pub fn fromSliceI32(slice: []const i32, shape_dims: []const usize) !Array {
+        return fromRawData(slice.ptr, shape_dims, .int32);
+    }
+
+    /// 从 32 位无符号整型切片数据创建 MLX 数组 (UInt32 Array Creation)
+    pub fn fromSliceU32(slice: []const u32, shape_dims: []const usize) !Array {
+        return fromRawData(slice.ptr, shape_dims, .uint32);
+    }
+
     /// 从原始数据指针与形状维度创建 MLX 数组 (Raw Pointer Array Creation)
     pub fn fromRawData(
         data: *const anyopaque,
@@ -676,6 +686,18 @@ pub const Array = struct {
         return res;
     }
 
+    /// 沿指定轴按索引提取张量子集 (Take Along Axis / GPU Embedding Lookup)
+    pub fn takeAxis(self: Array, indices: Array, axis: c_int, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
+        defer maybeFreeStream(s, stream);
+
+        const rc = c.mlx_take_axis(&res.handle, self.handle, indices.handle, axis, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
     /// 标量乘法：`res = self * val`
     pub fn mulScalar(self: Array, val: f32, stream: ?Stream) !Array {
         var s_arr = try fromScalarF32(val);
@@ -778,6 +800,19 @@ pub const Array = struct {
         defer half_x.deinit();
 
         return multiply(half_x, one_plus_erf, stream);
+    }
+
+    /// 门控高斯误差线性单元激活 (Gated Gaussian Error Linear Unit, GeGLU)
+    /// 沿最后一轴将门控与上升投影切分为两半，计算 `out = GELU(gate) * up`
+    pub fn geglu(self: Array, intermediate_size: usize, stream: ?Stream) !Array {
+        const last_axis = self.ndim() - 1;
+        var gate = try self.sliceAxis(last_axis, 0, intermediate_size, stream);
+        defer gate.deinit();
+        var up = try self.sliceAxis(last_axis, intermediate_size, intermediate_size * 2, stream);
+        defer up.deinit();
+        var act = try gate.gelu(stream);
+        defer act.deinit();
+        return multiply(act, up, stream);
     }
 
     /// 批量评估多个 MLX 数组 (多算子并行批处理调度，消除重复的主机-设备同步开销)
@@ -1366,6 +1401,41 @@ test "MLX GPU backend matmul and fast kernels" {
     defer attn2.deinit();
     attn2.eval();
     stream.synchronize();
+
+    // 9. 验证 takeAxis 沿指定轴批量查表 (Take Axis / GPU Embedding Lookup)
+    const emb_table_data = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 }; // [3, 2]
+    var emb_table = try Array.fromSlice(&emb_table_data, &.{ 3, 2 });
+    defer emb_table.deinit();
+
+    const idx_data = [_]i32{ 2, 0 };
+    var idx_arr = try Array.fromSliceI32(&idx_data, &.{2});
+    defer idx_arr.deinit();
+
+    var taken = try emb_table.takeAxis(idx_arr, 0, stream);
+    defer taken.deinit();
+    taken.eval();
+    const taken_out = taken.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 4), taken_out.len);
+    // idx 2 -> 5.0, 6.0; idx 0 -> 1.0, 2.0
+    try std.testing.expectEqual(@as(f32, 5.0), taken_out[0]);
+    try std.testing.expectEqual(@as(f32, 6.0), taken_out[1]);
+    try std.testing.expectEqual(@as(f32, 1.0), taken_out[2]);
+    try std.testing.expectEqual(@as(f32, 2.0), taken_out[3]);
+
+    // 10. 验证 geglu (Gated GELU) 激活计算
+    const geglu_in = [_]f32{ 0.0, 1.0, 2.0, 3.0 }; // gate=[0.0, 1.0], up=[2.0, 3.0]
+    var geglu_arr = try Array.fromSlice(&geglu_in, &.{ 1, 4 });
+    defer geglu_arr.deinit();
+
+    var geglu_res = try geglu_arr.geglu(2, stream);
+    defer geglu_res.deinit();
+    geglu_res.eval();
+    const geglu_out = geglu_res.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 2), geglu_out.len);
+    // GELU(0) * 2.0 = 0.0
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), geglu_out[0], 1e-4);
+    // GELU(1) * 3.0 = 0.8413447 * 3.0 = 2.524034
+    try std.testing.expectApproxEqAbs(@as(f32, 2.524034), geglu_out[1], 1e-4);
 }
 
 
