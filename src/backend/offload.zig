@@ -714,6 +714,7 @@ pub const GpuLayerWeights = struct {
     rope_theta: f32,
     partial_rotary_factor: f32,
     rms_norm_eps: f32,
+    compiled_mlp: ?mlx.Closure = null,
 
     pub fn initFromBlocks(
         allocator: std.mem.Allocator,
@@ -839,10 +840,69 @@ pub const GpuLayerWeights = struct {
             .rope_theta = rope_theta,
             .partial_rotary_factor = partial_rotary_factor,
             .rms_norm_eps = rms_norm_eps,
+            .compiled_mlp = null,
         };
     }
 
+    /// 使用 Apple MLX Metal 即时编译 (Just-In-Time Compilation, JIT) 编译门控多层感知机 (Multi-Layer Perceptron, MLP) 宏内核闭包
+    pub fn initCompiledMlp(self: *GpuLayerWeights) !void {
+        if (!isAvailable()) return;
+        if (self.compiled_mlp != null) return;
+
+        const Helper = struct {
+            fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
+                const lw: *const GpuLayerWeights = @alignCast(@ptrCast(payload.?));
+
+                var x_handle: mlx.c.mlx_array = .{ .ctx = null };
+                if (mlx.c.mlx_vector_array_get(&x_handle, in, 0) != 0 or x_handle.ctx == null) return 1;
+                const x1 = mlx.Array{ .handle = x_handle };
+
+                // 1. pre_mlp_norm
+                var pre_mlp = mlx.Array.fastRmsNorm(x1, lw.pre_mlp_w, lw.rms_norm_eps, null) catch return 1;
+                defer pre_mlp.deinit();
+
+                // 2. fused_gate_up
+                var gate_up = lw.fused_gate_up.forwardArray(pre_mlp, null) catch return 1;
+                defer gate_up.deinit();
+
+                // 3. geglu
+                var fused = gate_up.geglu(lw.intermediate_size, null) catch return 1;
+                defer fused.deinit();
+
+                // 4. down_proj
+                var down = lw.down_proj.forwardArray(fused, null) catch return 1;
+                defer down.deinit();
+
+                // 5. post_mlp_norm
+                var post_mlp = mlx.Array.fastRmsNorm(down, lw.post_mlp_w, lw.rms_norm_eps, null) catch return 1;
+                defer post_mlp.deinit();
+
+                // 6. residual add
+                var x2 = mlx.Array.add(x1, post_mlp, null) catch return 1;
+                defer x2.deinit();
+
+                // 7. layer scaling
+                var res_arr = if (lw.layer_scalar != 1.0)
+                    (x2.mulScalar(lw.layer_scalar, null) catch return 1)
+                else
+                    x2;
+                defer if (lw.layer_scalar != 1.0) res_arr.deinit();
+
+                const res_vec = mlx.c.mlx_vector_array_new_data(&[_]mlx.c.mlx_array{res_arr.handle}, 1);
+                _ = mlx.c.mlx_vector_array_set(vres, res_vec);
+                _ = mlx.c.mlx_vector_array_free(res_vec);
+                return 0;
+            }
+        };
+
+        self.compiled_mlp = try mlx.compile(Helper.compute, self, false);
+    }
+
     pub fn deinit(self: *GpuLayerWeights) void {
+        if (self.compiled_mlp) |*c_cls| {
+            c_cls.deinit();
+            self.compiled_mlp = null;
+        }
         self.fused_qkv.deinit();
         self.o_proj.deinit();
         self.fused_gate_up.deinit();
@@ -905,6 +965,10 @@ pub const GpuModelContext = struct {
 
         mlx.enableCompile();
         mlx.setCompileMode(.enabled);
+
+        for (layers) |*lw| {
+            lw.initCompiledMlp() catch {};
+        }
 
         return GpuModelContext{
             .allocator = allocator,
@@ -1331,31 +1395,42 @@ pub const GpuModelContext = struct {
             var x1 = try mlx.Array.add(x_cur, post_attn, s);
             defer x1.deinit();
 
-            // 10. 门控多层感知机 (Fused Gate-Up GEMV + GeGLU 融合激活)
-            var pre_mlp = try mlx.Array.fastRmsNorm(x1, lw.pre_mlp_w, lw.rms_norm_eps, s);
-            defer pre_mlp.deinit();
+            // 10. 门控多层感知机 (Fused Gate-Up GEMV + GeGLU 融合激活 + 静态编译宏内核)
+            var x2: mlx.Array = undefined;
+            if (lw.compiled_mlp) |c_mlp| {
+                var in_vec = mlx.VectorArray.fromArrays(&.{x1});
+                defer in_vec.deinit();
+                var out_vec = try c_mlp.apply(in_vec);
+                defer out_vec.deinit();
+                x2 = out_vec.get(0).?;
+            } else {
+                var pre_mlp = try mlx.Array.fastRmsNorm(x1, lw.pre_mlp_w, lw.rms_norm_eps, s);
+                defer pre_mlp.deinit();
 
-            var gate_up = try lw.fused_gate_up.forwardArray(pre_mlp, s);
-            defer gate_up.deinit();
+                var gate_up = try lw.fused_gate_up.forwardArray(pre_mlp, s);
+                defer gate_up.deinit();
 
-            var fused = try gate_up.geglu(lw.intermediate_size, s);
-            defer fused.deinit();
+                var fused = try gate_up.geglu(lw.intermediate_size, s);
+                defer fused.deinit();
 
-            var down = try lw.down_proj.forwardArray(fused, s);
-            defer down.deinit();
+                var down = try lw.down_proj.forwardArray(fused, s);
+                defer down.deinit();
 
-            // 11. 前馈后层归一化、残差相加与层缩放
-            var post_mlp = try mlx.Array.fastRmsNorm(down, lw.post_mlp_w, lw.rms_norm_eps, s);
-            defer post_mlp.deinit();
-            var x2 = try mlx.Array.add(x1, post_mlp, s);
+                // 11. 前馈后层归一化、残差相加与层缩放
+                var post_mlp = try mlx.Array.fastRmsNorm(down, lw.post_mlp_w, lw.rms_norm_eps, s);
+                defer post_mlp.deinit();
+                var add_res = try mlx.Array.add(x1, post_mlp, s);
+
+                if (lw.layer_scalar != 1.0) {
+                    x2 = try add_res.mulScalar(lw.layer_scalar, s);
+                    add_res.deinit();
+                } else {
+                    x2 = add_res;
+                }
+            }
 
             var old_x = x_cur;
-            if (lw.layer_scalar != 1.0) {
-                x_cur = try x2.mulScalar(lw.layer_scalar, s);
-                x2.deinit();
-            } else {
-                x_cur = x2;
-            }
+            x_cur = x2;
             old_x.deinit();
         }
 
@@ -1505,30 +1580,41 @@ pub const GpuModelContext = struct {
             var x1 = try mlx.Array.add(x_cur, post_attn, s);
             defer x1.deinit();
 
-            // (10) 门控多层感知机 (Fused Gate-Up GEMV)
-            var pre_mlp = try mlx.Array.fastRmsNorm(x1, lw.pre_mlp_w, lw.rms_norm_eps, s);
-            defer pre_mlp.deinit();
+            // (10) 门控多层感知机 (Fused Gate-Up GEMV + GeGLU 融合激活 + 静态编译宏内核)
+            var x2: mlx.Array = undefined;
+            if (lw.compiled_mlp) |c_mlp| {
+                var in_vec = mlx.VectorArray.fromArrays(&.{x1});
+                defer in_vec.deinit();
+                var out_vec = try c_mlp.apply(in_vec);
+                defer out_vec.deinit();
+                x2 = out_vec.get(0).?;
+            } else {
+                var pre_mlp = try mlx.Array.fastRmsNorm(x1, lw.pre_mlp_w, lw.rms_norm_eps, s);
+                defer pre_mlp.deinit();
 
-            var gate_up = try lw.fused_gate_up.forwardArray(pre_mlp, s);
-            defer gate_up.deinit();
+                var gate_up = try lw.fused_gate_up.forwardArray(pre_mlp, s);
+                defer gate_up.deinit();
 
-            var fused = try gate_up.geglu(lw.intermediate_size, s);
-            defer fused.deinit();
-            var down = try lw.down_proj.forwardArray(fused, s);
-            defer down.deinit();
+                var fused = try gate_up.geglu(lw.intermediate_size, s);
+                defer fused.deinit();
+                var down = try lw.down_proj.forwardArray(fused, s);
+                defer down.deinit();
 
-            // (11) 前馈后层归一化、残差相加与层缩放
-            var post_mlp = try mlx.Array.fastRmsNorm(down, lw.post_mlp_w, lw.rms_norm_eps, s);
-            defer post_mlp.deinit();
-            var x2 = try mlx.Array.add(x1, post_mlp, s);
+                // (11) 前馈后层归一化、残差相加与层缩放
+                var post_mlp = try mlx.Array.fastRmsNorm(down, lw.post_mlp_w, lw.rms_norm_eps, s);
+                defer post_mlp.deinit();
+                var add_res = try mlx.Array.add(x1, post_mlp, s);
+
+                if (lw.layer_scalar != 1.0) {
+                    x2 = try add_res.mulScalar(lw.layer_scalar, s);
+                    add_res.deinit();
+                } else {
+                    x2 = add_res;
+                }
+            }
 
             var old_x = x_cur;
-            if (lw.layer_scalar != 1.0) {
-                x_cur = try x2.mulScalar(lw.layer_scalar, s);
-                x2.deinit();
-            } else {
-                x_cur = x2;
-            }
+            x_cur = x2;
             old_x.deinit();
         }
 
@@ -1737,4 +1823,63 @@ test "LmHeadWeights argmaxWithPenalty dynamic vocab and negative logits" {
     // 对正数与负数同时施加惩罚，验证负数乘以 penalty 的分支与越界 token 过滤
     const neg_logits = [_]f32{ -2.0, -1.0, -0.5, -3.0 };
     try std.testing.expectEqual(@as(usize, 1), LmHeadWeights.argmaxWithPenalty(&neg_logits, 4, &.{ 2, 999999 }, 4.0));
+}
+
+test "Q4Weights inside compiled closure" {
+    if (!isAvailable()) return;
+    var stream = try Stream.defaultGpu();
+    defer stream.deinit();
+
+    var raw_block: [18]u8 = undefined;
+    const scale_bits: u16 = 0x3C00; // 1.0 in f16
+    std.mem.writeInt(u16, raw_block[0..2], scale_bits, .little);
+    @memset(raw_block[2..18], 0x88); // weight = 8 - 8 = 0
+
+    var q4_w = try Q4Weights.initFromBlocks(std.testing.allocator, &raw_block, 32, 1, stream);
+    defer q4_w.deinit();
+
+    const Payload = struct {
+        w: *const Q4Weights,
+        stream: ?Stream,
+    };
+    var payload = Payload{ .w = &q4_w, .stream = stream };
+
+    const Helper = struct {
+        fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, pl: ?*anyopaque) callconv(.c) c_int {
+            const p: *const Payload = @alignCast(@ptrCast(pl.?));
+            var x_handle: mlx.c.mlx_array = .{ .ctx = null };
+            if (mlx.c.mlx_vector_array_get(&x_handle, in, 0) != 0 or x_handle.ctx == null) return 1;
+            const x = mlx.Array{ .handle = x_handle };
+
+            var res = p.w.forwardArray(x, p.stream) catch return 1;
+            defer res.deinit();
+
+            const res_vec = mlx.c.mlx_vector_array_new_data(&[_]mlx.c.mlx_array{res.handle}, 1);
+            _ = mlx.c.mlx_vector_array_set(vres, res_vec);
+            _ = mlx.c.mlx_vector_array_free(res_vec);
+            return 0;
+        }
+    };
+
+    var compiled = try mlx.compile(Helper.compute, &payload, false);
+    defer compiled.deinit();
+
+    var x_vec: [32]f32 = undefined;
+    for (&x_vec) |*v| v.* = 1.0;
+    var in_arr = try mlx.Array.fromSlice(&x_vec, &.{ 1, 32 });
+    defer in_arr.deinit();
+
+    var in_vec = mlx.VectorArray.fromArrays(&.{in_arr});
+    defer in_vec.deinit();
+
+    var out_vec = try compiled.apply(in_vec);
+    defer out_vec.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), out_vec.size());
+    var out_arr = out_vec.get(0).?;
+    defer out_arr.deinit();
+    out_arr.eval();
+    const data = out_arr.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 1), data.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), data[0], 1e-3);
 }
