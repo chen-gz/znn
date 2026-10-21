@@ -165,7 +165,7 @@ pub const GpuLayerE4B = struct {
     rms_norm_eps: f32,
     compiled_tail: ?mlx.Closure = null,
 
-    /// 静态编译当前解码层注意力投影之后的全尾部计算图 (Post-Attention + Gated MLP + PLE + LayerScalar)
+    /// 静态编译当前解码层单步解码阶段 (`seq_len == 1`) 注意力投影之后的全尾部计算图 (Post-Attention + Gated MLP + PLE + LayerScalar)
     /// 将每层 20+ 个独立 C API 调度节点收拢为单一预编译静态闭包，由 MLX JIT 自动跨算子融合所有逐元素激活与残差连接
     pub fn initCompiledTail(self: *GpuLayerE4B) void {
         if (!mlx.has_mlx) return;
@@ -217,21 +217,9 @@ pub const GpuLayerE4B = struct {
                 var ple_gate_raw = l.ple_gate.forwardArray(x2, null) catch return 1;
                 defer ple_gate_raw.deinit();
 
-                var ple_modulated = if (ple_slice.ndim() == 3) blk: {
-                    var act_ple = ple_gate_raw.gelu(null) catch return 1;
-                    defer act_ple.deinit();
-                    break :blk mlx.Array.multiply(act_ple, ple_slice, null) catch return 1;
-                } else blk: {
-                    const seq_len = ple_gate_raw.dimSize(1);
-                    const ple_dim = ple_gate_raw.dimSize(2);
-                    var ple_gate_4d = ple_gate_raw.reshape(&.{ 1, seq_len, 1, ple_dim }, null) catch return 1;
-                    defer ple_gate_4d.deinit();
-                    var act_ple = ple_gate_4d.gelu(null) catch return 1;
-                    defer act_ple.deinit();
-                    var ple_mod_4d = mlx.Array.multiply(act_ple, ple_slice, null) catch return 1;
-                    defer ple_mod_4d.deinit();
-                    break :blk ple_mod_4d.reshape(&.{ 1, seq_len, ple_dim }, null) catch return 1;
-                };
+                var act_ple = ple_gate_raw.gelu(null) catch return 1;
+                defer act_ple.deinit();
+                var ple_modulated = mlx.Array.multiply(act_ple, ple_slice, null) catch return 1;
                 defer ple_modulated.deinit();
 
                 var ple_projected = l.ple_proj.forwardArray(ple_modulated, null) catch return 1;
@@ -1203,8 +1191,11 @@ pub const Gemma4E4BModel = struct {
     ) !mlx.Array {
         var x_cur: mlx.Array = undefined;
         var ple_inputs: mlx.Array = undefined;
-        if (self.compiled_ple_prep) |cls| {
-            const prep_out = try cls.apply1To2(indices_arr);
+        // 仅在单步解码 (T == 1) 时启用形状特化 (shapeless = false) 的静态编译闭包 compiled_ple_prep；
+        // 预填充阶段 (T > 1) 的序列长度 T 随用户 Prompt 动态变化，直接走下方基于 shapeless = true 融合算子
+        // (compiled_add_mul) 的路径，避免在真实 Prompt 预填充时因新序列长度触发 MLX 重新追踪与 Metal 着色器重编译导致首字延迟 (TTFT) 飙升
+        if (T == 1 and self.compiled_ple_prep != null) {
+            const prep_out = try self.compiled_ple_prep.?.apply1To2(indices_arr);
             x_cur = prep_out[0];
             ple_inputs = prep_out[1];
         } else {
@@ -1569,8 +1560,13 @@ pub const Gemma4E4BModel = struct {
         var o_out = try l.o_proj.forwardArray(attn_2d, s);
         defer o_out.deinit();
 
-        if (l.compiled_tail) |cls| {
-            return cls.apply3(x_in, o_out, ple_slice);
+        // 仅在单步自回归解码 (seq_len == 1) 时调用形状特化 (shapeless = false) 的 42 层 compiled_tail 静态闭包；
+        // 预填充阶段 (seq_len > 1) 直接走下方基于全局 shapeless = true 融合闭包 (compiled_gelu_mul / compiled_add_mul) 的路径，
+        // 彻底避免任意新 Prompt 长度触发 42 个层尾闭包的图重追踪与 Metal 管线状态对象 (Pipeline State Object, PSO) JIT 重编译
+        if (seq_len == 1) {
+            if (l.compiled_tail) |cls| {
+                return cls.apply3(x_in, o_out, ple_slice);
+            }
         }
 
         var post_attn = try mlx.Array.fastRmsNorm(o_out, l.post_attn_w, l.rms_norm_eps, s);
