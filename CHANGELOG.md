@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Gemma 4 E4B 全链路图编译、环形滑动窗口 KV 缓存与预融合顺序权重直通缓存 (`src/backend/mlx.zig`, `examples/gemma4_e4b.zig`, `build.zig`, `plan/TODO.md`)**:
+  - **42 层注意力后全尾部子图静态编译 (`GpuLayerE4B.initCompiledTail` / `Closure.apply3`)**：在 `GpuLayerE4B` 中将 `o_proj` 之后的完整计算链（`post_attn` RMSNorm → 残差加 `x1` → `pre_mlp` RMSNorm → `fused_gate_up` QMV → `split` → GeGLU → `down_proj` QMV → `post_mlp` RMSNorm → 残差加 `x2` → `ple_gate` QMV → 3D/4D GeGLU → `ple_proj` QMV → `ple_norm` RMSNorm → 残差加 + `layer_scalar` 缩放）通过 `mlx.compile` 编译为每层单一静态闭包 `compiled_tail`。每步解码消除约 **600+ 次细粒度 C API 调用与计算图节点构造**，并由 MLX JIT 自动跨算子融合全部残差、缩放与激活内核。
+  - **步首词元嵌入与逐层输入预计算子图静态编译 (`PlePrepContext` / `Closure.apply1To2`)**：将 `embed_tokens` 反量化缩放、`embed_tokens_per_layer` 反量化缩放、`per_layer_model_projection` QMV、`proj_norm` RMSNorm 与 `(proj + tokens) * input_scale` 整合成单一堆常驻上下文静态编译闭包 `compiled_ple_prep`，一次调用直接输出 `(x_cur, ple_inputs)`。
+  - **局部滑动窗口层固定容量环形 KV 缓存 (`GpuKvCache.computeWriteRange` / `RotatingKVCache`)**：为 20 个局部滑动窗口 KV 层预分配精确等于 `sliding_window = 512` 的固定容量显存，并在单步解码超过 512 步 (`pos >= 512`) 时以 `pos % 512` 原地环形覆写最旧词元槽位、直接复用整块 `[1, num_kv, 512, head_dim]` 缓冲区而不触发任何 `ensureCapacity` 扩容或 `slice4dAxis2` 视图分配。
+  - **预融合顺序二进制权重直通缓存 (`gemma4_e4b_direct.bin`, 魔数 `"ZNN4E4B1"`)**：首次从 Safetensors 加载时自动将全部权重（含预拼接的 24 层 `qkv_proj` 与 42 层 `fused_gate_up`）按精确加载顺序流式写入 `<model_dir>/gemma4_e4b_direct.bin`；后续启动通过 `DirectCacheReader` 与 `MADV.SEQUENTIAL | MADV.WILLNEED` 单遍顺序映射直读，彻底省去双文件 JSON 解析、52 MB `fuse_scratch` 暂存分配与 2.3 GB 权重拼接 `memcpy`。
+  - **新增 `gemma4_e4b_tests` 单元测试套件 (`build.zig`, `examples/gemma4_e4b.zig`)**：验证环形滑动窗口 KV 缓存边界回绕逻辑与预融合顺序二进制缓存大小/头部校验。
+
 - **Gemma 4 E4B 自回归解码 (Decode) 极限提速：融合 QKV / Gate+Up 量化矩阵乘、编译残差缩放闭包与共享 KV 切片复用 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `examples/gemma4_e4b.zig`, `plan/TODO.md`)**:
   - **24 层注意力 QKV 投影与 42 层 MLP Gate+Up 投影矩阵融合 (`initFusedFromDirectBuffersCustom`)**：在模型加载阶段通过单一复用的暂存缓冲将前 24 个 KV 拥有层的 `q_proj`、`k_proj`、`v_proj`（4-bit）沿输出维度合并为单一 `qkv_proj` 矩阵，并将全部 42 层的 `gate_proj` 与 `up_proj`（8-bit）沿输出维度合并为单一 `fused_gate_up` 矩阵。每生成一个词元直接消除 **90 次 `quantized_matmul` (QMV) Metal 内核启动**（48 次 QKV + 42 次 Gate/Up），消除 `in_norm` 与 `pre_mlp` 的 90 次重复显存读取，并将原本线程组数量过少的小维度 `k_proj`/`v_proj`（`N = 512`）合并进高占用率大矩阵内核。
   - **静态编译残差相加与缩放融合闭包 (`compileAddMul` / `fusedAddMul`)**：在 `src/backend/mlx.zig` 中新增 `(a + b) * scale` 静态编译融合算子，用于融合每层末尾的 `(x2 + ple_normed) * layer_scalar` 以及步首的 `(ple_proj_normed + ple_tokens) * input_scale`，每生成一个词元再消除 **43 次逐元素 Metal 内核启动**与 43 次全局显存中间往返（连同 QMV 融合每步共减少 **133 次 Metal GPU 内核派发**）。

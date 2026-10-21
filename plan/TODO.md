@@ -245,10 +245,10 @@
     - [x] 彻底消除原本每步 145 次 CPU-GPU 驱动同步停顿，实现全网单一终点强制求值（Single Evaluation）。
     - [x] 解决巨型词表 LM Head 混合精度隐式上采样开销：输入隐状态通过 `astype(.bfloat16)` 与 2.01 GB 权重对齐，LM Head 延迟从 **235.6 ms 降至 20.9 ms**（提速 **11.3 倍**）。
     - [x] 修复 CPU KVCache 同步动态步长计算，Gemma 4 12B Q4 增量解码速度从 0.51 tokens/s 跃升至 **5.25 tokens/s**（稳态单步 150 ms，达到 **6.55 tokens/s**，真实提速 **超 10.3 倍**）。
-  - [ ] **Phase 4 后续性能极致突破路径（推进目标：12B 模型达到 10~15+ tokens/s）**：
-    - [ ] **路径 A (权重列拼接融合)**：在模型初始化时将注意力 Q/K/V 权重在输出维度水平拼接为一个融合 QKV 量化张量，MLP gate/up 拼接为一个融合 GateUp 张量，将每层 7 次 QMM 减少至 4 次，全网减少 144 次 Metal 内核调度开销。
-    - [ ] **路径 B (GPU 预分配静态 KVCache 环形缓冲区)**：在 GPU 端直接分配固定 `[1, num_kv, max_seq_len, head_dim]` 连续显存，每步直接按索引写入（In-place Scatter），消除动态 `concatenateAxis` 与 `sliceAxis` 的内存重新分配与指针变动。
-    - [ ] **路径 C (MLX 图静态编译 `mlx_compile`)**：利用 `deps/mlx-c/include/mlx/c/compile.h` 中的 `mlx_compile` 将形状固定的自回归单步解码图一次性编译为 Metal Compute Pipeline 静态拓扑，彻底规避运行期命令编码器开销。
+  - [ ] **Phase 4 后续性能极致突破路径（推进目标：12B 模型达到 10~15+ tokens/s，E4B 已率先全面落地 A/B/C）**：
+    - [x] **路径 A (权重列拼接融合)**：在模型初始化时将注意力 Q/K/V 权重在输出维度水平拼接为一个融合 QKV 量化张量，MLP gate/up 拼接为一个融合 GateUp 张量，全网每步减少 90 次 QMV Metal 内核调度开销（已在 `Gemma4E4BModel` 与 `Q4Weights.initFusedFromDirectBuffersCustom` 落地，并支持 `gemma4_e4b_direct.bin` 预融合顺序缓存）。
+    - [x] **路径 B (GPU 预分配静态 KVCache 环形缓冲区)**：在 GPU 端直接分配固定 `[1, num_kv, sliding_window, head_dim]` 连续显存，单步解码超长时通过 `pos % sliding_window` 原地环形覆写（`GpuKvCache.computeWriteRange`），消除动态 `concatenateAxis` 扩容与 `slice4dAxis2` 分配。
+    - [x] **路径 C (MLX 图静态编译 `mlx_compile`)**：利用 `deps/mlx-c/include/mlx/c/compile.h` 中的 `mlx_compile` 将步首 Embedding+PLE 子图 (`compiled_ple_prep`) 与 42 层注意力后全尾部子图 (`compiled_tail`) 静态编译为 Metal 融合计算管线，大幅削减运行期 C API 与命令编码器开销。
     - [ ] **路径 D (投机采样 / 草稿模型 Speculative Decoding)**：利用轻量草稿模型（如 1B/2B 级或紧凑蒸馏头）在 CPU 快速推测 4~6 个候选词元，主模型 12B 在 GPU 上单次批处理前向完成多词元并行验证与接收，实现端到端有效吞吐翻倍。
 
 
