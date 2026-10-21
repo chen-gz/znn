@@ -521,6 +521,67 @@ pub const Q4Weights = struct {
         };
     }
 
+    /// 从多个已打包的直接字节切片沿输出维度 (axis 0) 串联构建单一融合 GPU 量化权重矩阵 (Fused Q4Weights)
+    /// 例如：将 Q/K/V 三个投影或 Gate/Up 两个投影合并为单一矩阵，使用复用的 `scratch_buf` 一次构建对齐的 MLX 张量
+    pub fn initFusedFromDirectBuffersCustom(
+        w_q_slices: []const []const u8,
+        scales_slices: []const []const u8,
+        biases_slices: []const []const u8,
+        scratch_buf: []u8,
+        in_features: usize,
+        total_out_features: usize,
+        group_size: i32,
+        bits: i32,
+        sb_dtype: mlx.DType,
+        stream: ?Stream,
+    ) OffloadError!Q4Weights {
+        _ = stream;
+        if (!isAvailable()) return error.OffloadNotSupported;
+        if (w_q_slices.len == 0 or w_q_slices.len != scales_slices.len or w_q_slices.len != biases_slices.len) {
+            return error.ShapeMismatch;
+        }
+
+        const w_dims = [_]usize{ total_out_features, in_features / @as(usize, @intCast(@divExact(32, bits))) };
+        const sb_dims = [_]usize{ total_out_features, in_features / @as(usize, @intCast(group_size)) };
+
+        var offset: usize = 0;
+        for (w_q_slices) |s| {
+            if (offset + s.len > scratch_buf.len) return error.ShapeMismatch;
+            @memcpy(scratch_buf[offset .. offset + s.len], s);
+            offset += s.len;
+        }
+        var w_q = try mlx.Array.fromRawData(@ptrCast(scratch_buf.ptr), &w_dims, .uint32);
+        errdefer w_q.deinit();
+
+        offset = 0;
+        for (scales_slices) |s| {
+            if (offset + s.len > scratch_buf.len) return error.ShapeMismatch;
+            @memcpy(scratch_buf[offset .. offset + s.len], s);
+            offset += s.len;
+        }
+        var scales = try mlx.Array.fromRawData(@ptrCast(scratch_buf.ptr), &sb_dims, sb_dtype);
+        errdefer scales.deinit();
+
+        offset = 0;
+        for (biases_slices) |s| {
+            if (offset + s.len > scratch_buf.len) return error.ShapeMismatch;
+            @memcpy(scratch_buf[offset .. offset + s.len], s);
+            offset += s.len;
+        }
+        var biases = try mlx.Array.fromRawData(@ptrCast(scratch_buf.ptr), &sb_dims, sb_dtype);
+        errdefer biases.deinit();
+
+        return .{
+            .w_q = w_q,
+            .scales = scales,
+            .biases = biases,
+            .in_features = in_features,
+            .out_features = total_out_features,
+            .group_size = group_size,
+            .bits = bits,
+        };
+    }
+
     /// 从多个 Q4Block 权重切片直接沿输出维度 (axis 0) 串联构建融合 GPU 硬件加速量化权重矩阵 (Fused Q4Weights)
     /// 例如：同时传入 gate_proj 与 up_proj 的切片，直接构建单一大矩阵 [gate_out + up_out, in_features]
     pub fn initFromBlockSlices(

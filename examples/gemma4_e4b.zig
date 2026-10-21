@@ -202,10 +202,8 @@ pub const PleWeights = struct {
 
 /// 单个解码层的 GPU 硬件加速权重结构
 pub const GpuLayerE4B = struct {
-    // 4-bit 量化注意力投影 (Attention Projections)
-    q_proj: Q4Weights,
-    k_proj: ?Q4Weights = null,
-    v_proj: ?Q4Weights = null,
+    // 4-bit 量化注意力投影 (Attention Projections: has_kv 层为融合 QKV 矩阵，共享 KV 层为独立 Q 矩阵)
+    qkv_proj: Q4Weights,
     o_proj: Q4Weights,
 
     // 均方根层归一化权重 (RMSNorm Weights)
@@ -216,9 +214,8 @@ pub const GpuLayerE4B = struct {
     pre_mlp_w: mlx.Array,
     post_mlp_w: mlx.Array,
 
-    // 8-bit 量化门控前馈多层感知机 (8-bit Quantized Gated MLP Projections)
-    gate_proj: Q4Weights,
-    up_proj: Q4Weights,
+    // 8-bit 量化门控前馈多层感知机 (8-bit Quantized Gated MLP Projections: Gate + Up 沿输出维度融合为单一矩阵)
+    fused_gate_up: Q4Weights,
     down_proj: Q4Weights,
 
     // 逐层嵌入门控与上投影 (Per-Layer Inputs Gating & Projection)
@@ -240,9 +237,7 @@ pub const GpuLayerE4B = struct {
     rms_norm_eps: f32,
 
     pub fn deinit(self: *GpuLayerE4B) void {
-        self.q_proj.deinit();
-        if (self.k_proj) |*k| k.deinit();
-        if (self.v_proj) |*v| v.deinit();
+        self.qkv_proj.deinit();
         self.o_proj.deinit();
         self.input_norm_w.deinit();
         self.q_norm_w.deinit();
@@ -250,8 +245,7 @@ pub const GpuLayerE4B = struct {
         self.post_attn_w.deinit();
         self.pre_mlp_w.deinit();
         self.post_mlp_w.deinit();
-        self.gate_proj.deinit();
-        self.up_proj.deinit();
+        self.fused_gate_up.deinit();
         self.down_proj.deinit();
         self.ple_gate.deinit();
         self.ple_proj.deinit();
@@ -264,6 +258,8 @@ pub const GpuLayerE4B = struct {
 pub const GpuKvCache = struct {
     k: mlx.Array,
     v: mlx.Array,
+    step_eff_k: ?mlx.Array = null,
+    step_eff_v: ?mlx.Array = null,
     capacity: usize,
     num_kv: usize,
     head_dim: usize,
@@ -275,13 +271,27 @@ pub const GpuKvCache = struct {
         return .{
             .k = k,
             .v = v,
+            .step_eff_k = null,
+            .step_eff_v = null,
             .capacity = capacity,
             .num_kv = num_kv,
             .head_dim = head_dim,
         };
     }
 
+    pub fn clearStepSlices(self: *GpuKvCache) void {
+        if (self.step_eff_k) |*ek| {
+            ek.deinit();
+            self.step_eff_k = null;
+        }
+        if (self.step_eff_v) |*ev| {
+            ev.deinit();
+            self.step_eff_v = null;
+        }
+    }
+
     pub fn deinit(self: *GpuKvCache) void {
+        self.clearStepSlices();
         self.k.deinit();
         self.v.deinit();
     }
@@ -325,6 +335,7 @@ pub const Gemma4E4BModel = struct {
     sqrt_hidden: f32,
     sqrt_hidden_arr: mlx.Array,
     compiled_gelu_mul: ?mlx.Closure = null,
+    compiled_add_mul: ?mlx.Closure = null,
 
     pub const LoadOptions = struct {
         warmup: bool = true,
@@ -449,9 +460,13 @@ pub const Gemma4E4BModel = struct {
         var sqrt_hidden_arr = try mlx.Array.fromScalarBf16(sqrt_hidden_val);
         errdefer sqrt_hidden_arr.deinit();
 
-        // 3. 构建 42 个解码层
+        // 3. 构建 42 个解码层（分配单一复用的拼接缓冲以融合 QKV 与 Gate+Up 权重矩阵）
         const layers = try allocator.alloc(GpuLayerE4B, cfg.num_hidden_layers);
         errdefer allocator.free(layers);
+
+        const max_fused_bytes = (cfg.intermediate_size * 2) * (cfg.hidden_size / 4) * @sizeOf(u32);
+        const fuse_scratch = try allocator.alloc(u8, max_fused_bytes);
+        defer allocator.free(fuse_scratch);
 
         // 预设键值缓存共享映射表 (Key-Value Cache Shared Mapping Table)
         // 当 num_kv_shared_layers = 18 时，前 24 层 (0..23) 具备独立的 K/V 投影；后 18 层 (24..41) 共享复用层 22 (局部滑动窗口) 与层 23 (全局全注意力) 的键值缓存。
@@ -476,22 +491,39 @@ pub const Gemma4E4BModel = struct {
             const has_kv = (idx < cfg.num_hidden_layers - cfg.num_kv_shared_layers);
             const prev_kv_idx = PREVIOUS_KVS[idx];
 
-            // 注意力投影权重绑定 (Attention Projections)
-            const q_proj = try loadQ4(archive, &name_buf, idx, "self_attn.q_proj", cfg.hidden_size, out_q, 64, 4, stream);
-            var k_proj: ?Q4Weights = null;
-            var v_proj: ?Q4Weights = null;
+            // 注意力投影权重绑定：前 24 层将 Q/K/V 融合为单一矩阵，每步减少 48 次 QMV 内核派发
             var kn_w: ?mlx.Array = null;
-
-            if (has_kv) {
-                k_proj = try loadQ4(archive, &name_buf, idx, "self_attn.k_proj", cfg.hidden_size, out_kv, 64, 4, stream);
-                v_proj = try loadQ4(archive, &name_buf, idx, "self_attn.v_proj", cfg.hidden_size, out_kv, 64, 4, stream);
+            const qkv_proj = if (has_kv) blk: {
                 kn_w = try loadNorm(archive, &name_buf, idx, "self_attn.k_norm.weight", hd);
-            }
+                break :blk try loadFusedQ4(
+                    archive,
+                    &name_buf,
+                    fuse_scratch,
+                    idx,
+                    &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" },
+                    cfg.hidden_size,
+                    out_q + 2 * out_kv,
+                    64,
+                    4,
+                    stream,
+                );
+            } else try loadQ4(archive, &name_buf, idx, "self_attn.q_proj", cfg.hidden_size, out_q, 64, 4, stream);
+
             const o_proj = try loadQ4(archive, &name_buf, idx, "self_attn.o_proj", out_q, cfg.hidden_size, 64, 4, stream);
 
-            // 门控前馈网络 (8-bit Quantized MLP)
-            const gate_proj = try loadQ4(archive, &name_buf, idx, "mlp.gate_proj", cfg.hidden_size, cfg.intermediate_size, 64, 8, stream);
-            const up_proj = try loadQ4(archive, &name_buf, idx, "mlp.up_proj", cfg.hidden_size, cfg.intermediate_size, 64, 8, stream);
+            // 门控前馈网络 (8-bit Quantized MLP)：将 gate_proj 与 up_proj 沿输出维度融合为单一矩阵，每步减少 42 次 QMV 内核派发
+            const fused_gate_up = try loadFusedQ4(
+                archive,
+                &name_buf,
+                fuse_scratch,
+                idx,
+                &.{ "mlp.gate_proj", "mlp.up_proj" },
+                cfg.hidden_size,
+                cfg.intermediate_size * 2,
+                64,
+                8,
+                stream,
+            );
             const down_proj = try loadQ4(archive, &name_buf, idx, "mlp.down_proj", cfg.intermediate_size, cfg.hidden_size, 64, 8, stream);
 
             // 逐层嵌入门控与上投影 (PLE Gating & Projection)
@@ -522,9 +554,7 @@ pub const Gemma4E4BModel = struct {
             }
 
             layers[idx] = .{
-                .q_proj = q_proj,
-                .k_proj = k_proj,
-                .v_proj = v_proj,
+                .qkv_proj = qkv_proj,
                 .o_proj = o_proj,
                 .input_norm_w = in_w,
                 .q_norm_w = qn_w,
@@ -532,8 +562,7 @@ pub const Gemma4E4BModel = struct {
                 .post_attn_w = pa_w,
                 .pre_mlp_w = pm_w,
                 .post_mlp_w = pom_w,
-                .gate_proj = gate_proj,
-                .up_proj = up_proj,
+                .fused_gate_up = fused_gate_up,
                 .down_proj = down_proj,
                 .ple_gate = ple_gate,
                 .ple_proj = ple_proj,
@@ -554,6 +583,7 @@ pub const Gemma4E4BModel = struct {
         }
 
         const compiled_gelu_mul = mlx.Array.compileGeluMul() catch null;
+        const compiled_add_mul = mlx.Array.compileAddMul() catch null;
 
         // 4. 在加载期预分配 24 个独立 KV 层的显存缓冲区，消除 Prefill 首字延迟中的 48 次 zeros 内核分配开销
         var gpu_kv: [24]?GpuKvCache = [_]?GpuKvCache{null} ** 24;
@@ -581,6 +611,7 @@ pub const Gemma4E4BModel = struct {
             .sqrt_hidden = sqrt_hidden_val,
             .sqrt_hidden_arr = sqrt_hidden_arr,
             .compiled_gelu_mul = compiled_gelu_mul,
+            .compiled_add_mul = compiled_add_mul,
         };
         errdefer model.deinit();
 
@@ -603,6 +634,10 @@ pub const Gemma4E4BModel = struct {
             cls.deinit();
             self.compiled_gelu_mul = null;
         }
+        if (self.compiled_add_mul) |*cls| {
+            cls.deinit();
+            self.compiled_add_mul = null;
+        }
         for (self.layers) |*l| {
             l.deinit();
         }
@@ -616,6 +651,11 @@ pub const Gemma4E4BModel = struct {
 
     /// 重置键值缓存游标（保留已分配的 256 步容量显存块直接覆写，消除重复分配释放开销）
     pub fn resetCache(self: *Gemma4E4BModel) void {
+        for (&self.gpu_kv) |*kv_opt| {
+            if (kv_opt.*) |*c| {
+                c.clearStepSlices();
+            }
+        }
         self.curr_len = 0;
     }
 
@@ -660,6 +700,45 @@ pub const Gemma4E4BModel = struct {
             b_bytes,
             in_f,
             out_f,
+            group_size,
+            bits,
+            .bfloat16,
+            stream,
+        );
+    }
+
+    fn loadFusedQ4(
+        archive: SafetensorsArchive,
+        buf: *[128]u8,
+        scratch_buf: []u8,
+        l_idx: usize,
+        subs: []const []const u8,
+        in_f: usize,
+        total_out_f: usize,
+        group_size: i32,
+        bits: i32,
+        stream: Stream,
+    ) !Q4Weights {
+        var w_slices: [3][]const u8 = undefined;
+        var s_slices: [3][]const u8 = undefined;
+        var b_slices: [3][]const u8 = undefined;
+
+        for (subs, 0..) |sub, i| {
+            const w_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.weight", .{ l_idx, sub });
+            w_slices[i] = archive.getTensorBytes(w_name) orelse return error.TensorNotFound;
+            const s_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.scales", .{ l_idx, sub });
+            s_slices[i] = archive.getTensorBytes(s_name) orelse return error.TensorNotFound;
+            const b_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.biases", .{ l_idx, sub });
+            b_slices[i] = archive.getTensorBytes(b_name) orelse return error.TensorNotFound;
+        }
+
+        return Q4Weights.initFusedFromDirectBuffersCustom(
+            w_slices[0..subs.len],
+            s_slices[0..subs.len],
+            b_slices[0..subs.len],
+            scratch_buf,
+            in_f,
+            total_out_f,
             group_size,
             bits,
             .bfloat16,
@@ -796,10 +875,8 @@ pub const Gemma4E4BModel = struct {
         var ple_proj_normed = try mlx.Array.fastRmsNorm(ple_proj_4d, self.ple.proj_norm_w, self.config.rms_norm_eps, s);
         defer ple_proj_normed.deinit();
 
-        // 融合逐层输入: (proj + tokens) * input_scale (保持纯 BF16)
-        var ple_sum = try mlx.Array.add(ple_proj_normed, ple_tokens_arr, s);
-        defer ple_sum.deinit();
-        var ple_inputs = try mlx.Array.multiply(ple_sum, self.ple.input_scale_arr, s);
+        // 融合逐层输入: (proj + tokens) * input_scale (保持纯 BF16，通过静态编译闭包融合加法与缩放)
+        var ple_inputs = try mlx.Array.fusedAddMul(ple_proj_normed, ple_tokens_arr, self.ple.input_scale_arr, self.compiled_add_mul, s);
         defer ple_inputs.deinit();
 
         // 3. 执行 42 层 Transformer 前向传播：
@@ -994,29 +1071,12 @@ pub const Gemma4E4BModel = struct {
         var in_norm = try mlx.Array.fastRmsNorm(x_in, l.input_norm_w, l.rms_norm_eps, s);
         defer in_norm.deinit();
 
-        // (2) 注意力查询投影: Q
-        var q_raw = try l.q_proj.forwardArray(in_norm, s);
-        defer q_raw.deinit();
+        // (2) 注意力投影与键值缓存 (Attention QKV Projection & KVCache)
+        var qkv_raw = try l.qkv_proj.forwardArray(in_norm, s);
+        defer qkv_raw.deinit();
 
-        // 当 seq_len == 1 (自回归解码步) 时，[1, 1, num_heads, head_dim] 与 [1, num_heads, 1, head_dim] 物理内存完全等价，直接重塑即可省去 transposeAxes
-        var q_rot: mlx.Array = if (seq_len == 1) blk: {
-            var q_4d_raw = try q_raw.reshape(&.{ 1, l.num_heads, 1, l.head_dim }, s);
-            defer q_4d_raw.deinit();
-            var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
-            defer q_normed.deinit();
-            break :blk try mlx.Array.fastRoPE(q_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
-        } else blk: {
-            var q_4d_raw = try q_raw.reshape(&.{ 1, seq_len, l.num_heads, l.head_dim }, s);
-            defer q_4d_raw.deinit();
-            var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
-            defer q_normed.deinit();
-            var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-            defer q_4d.deinit();
-            break :blk try mlx.Array.fastRoPE(q_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
-        };
-        defer q_rot.deinit();
-
-        // 键值缓存 (Key-Value Cache, KVCache) 维护
+        var q_rot: mlx.Array = undefined;
+        errdefer q_rot.deinit();
         var eff_k: mlx.Array = undefined;
         var eff_v: mlx.Array = undefined;
         var eff_k_free: ?mlx.Array = null;
@@ -1027,18 +1087,24 @@ pub const Gemma4E4BModel = struct {
         const total_len = pos + seq_len;
 
         if (l.has_kv) {
-            var k_raw = try l.k_proj.?.forwardArray(in_norm, s);
-            defer k_raw.deinit();
-            var v_raw = try l.v_proj.?.forwardArray(in_norm, s);
-            defer v_raw.deinit();
-
+            const total_heads = l.num_heads + 2 * l.num_kv_heads;
             var k_rot: mlx.Array = undefined;
             var v_4d: mlx.Array = undefined;
+
             if (seq_len == 1) {
-                var k_4d_raw = try k_raw.reshape(&.{ 1, l.num_kv_heads, 1, l.head_dim }, s);
+                var qkv_4d = try qkv_raw.reshape(&.{ 1, total_heads, 1, l.head_dim }, s);
+                defer qkv_4d.deinit();
+
+                var q_4d_raw = try qkv_4d.sliceAxis(1, 0, l.num_heads, s);
+                defer q_4d_raw.deinit();
+                var k_4d_raw = try qkv_4d.sliceAxis(1, l.num_heads, l.num_heads + l.num_kv_heads, s);
                 defer k_4d_raw.deinit();
-                var v_4d_raw = try v_raw.reshape(&.{ 1, l.num_kv_heads, 1, l.head_dim }, s);
+                var v_4d_raw = try qkv_4d.sliceAxis(1, l.num_heads + l.num_kv_heads, total_heads, s);
                 defer v_4d_raw.deinit();
+
+                var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
+                defer q_normed.deinit();
+                q_rot = try mlx.Array.fastRoPE(q_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
 
                 var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
                 defer k_normed.deinit();
@@ -1047,10 +1113,21 @@ pub const Gemma4E4BModel = struct {
 
                 k_rot = try mlx.Array.fastRoPE(k_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
             } else {
-                var k_4d_raw = try k_raw.reshape(&.{ 1, seq_len, l.num_kv_heads, l.head_dim }, s);
+                var qkv_4d = try qkv_raw.reshape(&.{ 1, seq_len, total_heads, l.head_dim }, s);
+                defer qkv_4d.deinit();
+
+                var q_4d_raw = try qkv_4d.sliceAxis(2, 0, l.num_heads, s);
+                defer q_4d_raw.deinit();
+                var k_4d_raw = try qkv_4d.sliceAxis(2, l.num_heads, l.num_heads + l.num_kv_heads, s);
                 defer k_4d_raw.deinit();
-                var v_4d_raw = try v_raw.reshape(&.{ 1, seq_len, l.num_kv_heads, l.head_dim }, s);
+                var v_4d_raw = try qkv_4d.sliceAxis(2, l.num_heads + l.num_kv_heads, total_heads, s);
                 defer v_4d_raw.deinit();
+
+                var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
+                defer q_normed.deinit();
+                var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+                defer q_4d.deinit();
+                q_rot = try mlx.Array.fastRoPE(q_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
 
                 var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
                 defer k_normed.deinit();
@@ -1086,19 +1163,36 @@ pub const Gemma4E4BModel = struct {
             }
             eff_k = try cache.k.slice4dAxis2(l.num_kv_heads, start_k, total_len, l.head_dim, s);
             eff_v = try cache.v.slice4dAxis2(l.num_kv_heads, start_k, total_len, l.head_dim, s);
-            eff_k_free = eff_k;
-            eff_v_free = eff_v;
-        } else {
-            const cache = &self.gpu_kv[l.prev_kv_idx].?;
-            var start_k: usize = 0;
-            if (l.is_sliding and total_len > l.sliding_window) {
-                start_k = total_len - l.sliding_window;
+            if (l_idx == 22 or l_idx == 23) {
+                cache.clearStepSlices();
+                cache.step_eff_k = eff_k;
+                cache.step_eff_v = eff_v;
+            } else {
+                eff_k_free = eff_k;
+                eff_v_free = eff_v;
             }
-            eff_k = try cache.k.slice4dAxis2(l.num_kv_heads, start_k, total_len, l.head_dim, s);
-            eff_v = try cache.v.slice4dAxis2(l.num_kv_heads, start_k, total_len, l.head_dim, s);
-            eff_k_free = eff_k;
-            eff_v_free = eff_v;
+        } else {
+            if (seq_len == 1) {
+                var q_4d_raw = try qkv_raw.reshape(&.{ 1, l.num_heads, 1, l.head_dim }, s);
+                defer q_4d_raw.deinit();
+                var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
+                defer q_normed.deinit();
+                q_rot = try mlx.Array.fastRoPE(q_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+            } else {
+                var q_4d_raw = try qkv_raw.reshape(&.{ 1, seq_len, l.num_heads, l.head_dim }, s);
+                defer q_4d_raw.deinit();
+                var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
+                defer q_normed.deinit();
+                var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+                defer q_4d.deinit();
+                q_rot = try mlx.Array.fastRoPE(q_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+            }
+
+            const cache = &self.gpu_kv[l.prev_kv_idx].?;
+            eff_k = cache.step_eff_k.?;
+            eff_v = cache.step_eff_v.?;
         }
+        defer q_rot.deinit();
 
         // 缩放点积注意力 (Scaled Dot-Product Attention, SDPA, scaling = 1.0)
         const is_causal = (seq_len > 1);
@@ -1122,13 +1216,17 @@ pub const Gemma4E4BModel = struct {
         var x1 = try mlx.Array.add(x_in, post_attn, s);
         defer x1.deinit();
 
-        // (3) 门控多层感知机 (Gated MLP: Fused Compiled GeGLU)
+        // (3) 门控多层感知机 (Gated MLP: Fused Gate+Up QMV + Compiled GeGLU)
         var pre_mlp = try mlx.Array.fastRmsNorm(x1, l.pre_mlp_w, l.rms_norm_eps, s);
         defer pre_mlp.deinit();
 
-        var gate_out = try l.gate_proj.forwardArray(pre_mlp, s);
+        var gate_up = try l.fused_gate_up.forwardArray(pre_mlp, s);
+        defer gate_up.deinit();
+        var gu_vec = try gate_up.split(2, 2, s);
+        defer gu_vec.deinit();
+        var gate_out = gu_vec.get(0).?;
         defer gate_out.deinit();
-        var up_out = try l.up_proj.forwardArray(pre_mlp, s);
+        var up_out = gu_vec.get(1).?;
         defer up_out.deinit();
 
         var hidden = try mlx.Array.fusedGeluMul(gate_out, up_out, self.compiled_gelu_mul, s);
@@ -1165,14 +1263,12 @@ pub const Gemma4E4BModel = struct {
 
         var ple_normed = try mlx.Array.fastRmsNorm(ple_projected, l.ple_norm_w, l.rms_norm_eps, s);
         defer ple_normed.deinit();
-        var x3 = try mlx.Array.add(x2, ple_normed, s);
 
-        // (5) 层缩放标量 (Layer Scalar, 仅当 != 1.0 时执行 BF16 张量乘法)
+        // (5) 残差相加与层缩放标量融合 (Fused Residual Add + Layer Scalar Multiply)
         if (l.layer_scalar_w) |sw| {
-            defer x3.deinit();
-            return mlx.Array.multiply(x3, sw, s);
+            return mlx.Array.fusedAddMul(x2, ple_normed, sw, self.compiled_add_mul, s);
         }
-        return x3;
+        return mlx.Array.add(x2, ple_normed, s);
     }
 };
 
@@ -1285,7 +1381,8 @@ pub fn main(init: std.process.Init) !void {
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
     const start_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
 
-    // Prefill 阶段
+    // Prefill 阶段：对齐官方 mlx_lm.generate_step 流水线，在等待 Prefill GPU 执行完成的同时，
+    // 提前构建并异步入队第 1 个 Decode 步的计算图，实现 Prefill -> Decode 零气泡无缝衔接
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
     const p_start = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
 
@@ -1294,6 +1391,12 @@ pub fn main(init: std.process.Init) !void {
     else
         null;
     defer if (first_tok_arr_opt) |*a| a.deinit();
+
+    var pending_tok_arr_opt: ?mlx.Array = if (first_tok_arr_opt != null and max_new_tokens > 1)
+        try model.decodeStepAsync(first_tok_arr_opt.?)
+    else
+        null;
+    errdefer if (pending_tok_arr_opt) |*p| p.deinit();
 
     const first_tok: usize = if (first_tok_arr_opt) |a|
         @intCast(a.itemUint32())
@@ -1323,10 +1426,13 @@ pub fn main(init: std.process.Init) !void {
     const decode_start_ns = p_end;
 
     if (repetition_penalty == 1.0) {
-        if (gen_count < max_new_tokens and current_tok != gemma4.Gemma4Vocabulary.EOS and current_tok != gemma4.Gemma4Vocabulary.EOT) {
-            var pending_tok_arr = try model.decodeStepAsync(first_tok_arr_opt.?);
-            first_tok_arr_opt.?.deinit();
+        if (first_tok_arr_opt) |*a| {
+            a.deinit();
             first_tok_arr_opt = null;
+        }
+        if (gen_count < max_new_tokens and current_tok != gemma4.Gemma4Vocabulary.EOS and current_tok != gemma4.Gemma4Vocabulary.EOT) {
+            var pending_tok_arr = pending_tok_arr_opt.?;
+            pending_tok_arr_opt = null;
 
             while (gen_count < max_new_tokens) {
                 // 在等待当前步 GPU 完成前，直接以 GPU 词元张量预构建并异步派发下一步计算图
@@ -1360,6 +1466,9 @@ pub fn main(init: std.process.Init) !void {
                     break;
                 }
             }
+        } else if (pending_tok_arr_opt) |*p| {
+            p.deinit();
+            pending_tok_arr_opt = null;
         }
     } else {
         while (gen_count < max_new_tokens) {

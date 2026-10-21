@@ -104,6 +104,10 @@
    - **消除 `T > 1` 预填充中 42 次非连续 PLE `reshape` 触发的 GPU 拷贝内核**：当 `T > 1` 时，`ple_inputs.split(42, 2)` 产生的 `[1, T, 1, 256]` 切片在维度 1 上非连续，直接对其调用 `reshape(&.{1, T, 256})` 会迫使 MLX 在每层启动 1 次 GPU 连续化拷贝内核（共 42 次拷贝内核）。通过将连续的 `ple_gate_raw` (`[1, T, 256]`) 零拷贝重塑为 `[1, T, 1, 256]` 并在 `fusedGeluMul` 输出连续张量后零拷贝重塑回 `[1, T, 256]`，消除了全部 42 次非连续拷贝内核。
    - **`GpuKvCache` 初始预分配与跨轮次零分配复用 (`resetCache`)**：在加载期一次性分配 24 个 KV 层的 256 步缓冲区，`resetCache()` 仅将 `curr_len` 归零并保留缓冲区，消除每次 `prefill` 内动态派发 48 次 `mlx_zeros` 内核的开销。
    - **Metal Wired Memory 锁定 (`configureOptimalWiredMemory`)**：调用 `mlx.configureOptimalWiredMemory()` 锁定推荐工作集上限 (`max_recommended_working_set_size`)，防止大模型运行期间显存页被系统换出。
+7. **自回归解码 (Decode) 90 次 QMV 矩阵融合、43 次编译残差缩放融合与共享 KV 视图复用（每步再减 133 个 Metal 内核）——【已解决】**
+   - **24 层注意力 QKV 融合 (`qkv_proj`) 与 42 层 MLP Gate+Up 融合 (`fused_gate_up`)**：通过 `Q4Weights.initFusedFromDirectBuffersCustom` 在加载期将前 24 层的 `q_proj + k_proj + v_proj`（4-bit）合并为单一矩阵、将全部 42 层的 `gate_proj + up_proj`（8-bit）合并为单一矩阵。每生成一个词元直接减少 **90 次 `quantized_matmul` (QMV) Metal 内核启动**（从 344 次降至 254 次）与 90 次 `in_norm` / `pre_mlp` 重复读取，并解决了小维度 `k_proj`/`v_proj`（`N = 512`）线程组占用率不足的瓶颈。
+   - **静态编译残差相加与层缩放融合 (`compileAddMul` / `fusedAddMul`)**：将 42 层末尾的 `(x2 + ple_normed) * layer_scalar_w` 与步首的 `(ple_proj_normed + ple_tokens_arr) * input_scale_arr` 编译融合为单一 Metal 内核，每步减少 **43 次逐元素 Metal 内核启动**与 43 次中间张量显存读写。
+   - **18 个键值共享层 (`24..41`) 的单步有效切片缓存 (`step_eff_k` / `step_eff_v`) 与 Prefill → Decode 首步预入队**：在层 22 与层 23 缓存当前步 `slice4dAxis2` 结果供后 18 层直接复用（省去每步 36 次冗余 `mlx_slice` 调用），并在等待 `prefillAsync` 完成前提前入队第 1 个 Decode 步计算图，消除解码首步图构建气泡。
 
 #### 3. 落地实施任务清单 (Actionable P0 Tasks)
 - [x] **P0.1 块式预分配与切片原地更新 KVCache (`step = 256`)**：
@@ -119,6 +123,8 @@
   - 修复 `mulScalar` / `gelu` 标量类型提升并接入 `compileGeluMul` 静态融合内核，锁死全网 16-bit `bfloat16` 高速通道。
 - [x] **P0.5 预填充 (Prefill / TTFT) 零拷贝 4D 门控融合、算子管线预热与输出精度 100% 位一致保障**：
   - 消除 `T > 1` 时 42 层非连续 `ple_item.reshape` 触发的 GPU 拷贝内核，预分配并跨 `resetCache()` 复用 24 层 `GpuKvCache`，增加 `warmup()` 预编译 `T > 1` / `T = 1` Metal 管线，首字延迟压缩至 94.2ms，并确保权重直通分配与 Google 官方 Python MLX 100% 位一致。
+- [x] **P0.6 自回归解码 QKV / Gate+Up 量化矩阵融合、编译残差缩放融合与共享 KV 切片复用**：
+  - 融合 24 层 `qkv_proj` 与 42 层 `fused_gate_up`、新增 `compileAddMul` 融合 `(a + b) * scale`、缓存层 22/23 单步 KV 切片供 18 个共享层直接复用，并在等待 Prefill 完成前预入队第 1 步 Decode，每步再消除 133 次 Metal GPU 内核启动与 36 次切片调用。
 
 ---
 

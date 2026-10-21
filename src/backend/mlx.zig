@@ -1068,6 +1068,53 @@ pub const Array = struct {
         return compile(Helper.compute, null, true);
     }
 
+    /// 残差相加与标量缩放融合算子：`out = (a + b) * scale`
+    /// 若提供了预编译的静态闭包 (Closure)，则直接派发单内核融合算子，将 2 次逐元素内核启动与中间显存读写合并为 1 次寄存器级执行
+    pub fn fusedAddMul(a: Array, b: Array, scale: Array, compiled: ?Closure, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (compiled) |cls| {
+            var in_vec = VectorArray.fromArrays(&.{ a, b, scale });
+            defer in_vec.deinit();
+            var out_vec = try cls.apply(in_vec);
+            defer out_vec.deinit();
+            if (out_vec.get(0)) |res| return res;
+        }
+        var sum = try add(a, b, stream);
+        defer sum.deinit();
+        return multiply(sum, scale, stream);
+    }
+
+    /// 静态编译残差相加与标量缩放融合闭包 (`out = (a + b) * scale`，支持任意形状 `shapeless = true`)
+    pub fn compileAddMul() !Closure {
+        if (!has_mlx) return error.MlxNotSupported;
+        const Helper = struct {
+            fn compute(vres: [*c]c.mlx_vector_array, in: c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
+                if (!has_mlx) return 1;
+                _ = payload;
+                var a_h: c.mlx_array = .{ .ctx = null };
+                var b_h: c.mlx_array = .{ .ctx = null };
+                var s_h: c.mlx_array = .{ .ctx = null };
+                if (c.mlx_vector_array_get(&a_h, in, 0) != 0 or a_h.ctx == null) return 1;
+                if (c.mlx_vector_array_get(&b_h, in, 1) != 0 or b_h.ctx == null) return 1;
+                if (c.mlx_vector_array_get(&s_h, in, 2) != 0 or s_h.ctx == null) return 1;
+                const a_arr = Array{ .handle = a_h };
+                const b_arr = Array{ .handle = b_h };
+                const s_arr = Array{ .handle = s_h };
+
+                var sum = add(a_arr, b_arr, null) catch return 1;
+                defer sum.deinit();
+                var out = multiply(sum, s_arr, null) catch return 1;
+                defer out.deinit();
+
+                const res_vec = c.mlx_vector_array_new_data(&[_]c.mlx_array{out.handle}, 1);
+                _ = c.mlx_vector_array_set(vres, res_vec);
+                _ = c.mlx_vector_array_free(res_vec);
+                return 0;
+            }
+        };
+        return compile(Helper.compute, null, true);
+    }
+
     /// 门控高斯误差线性单元激活 (Gated Gaussian Error Linear Unit, GeGLU)
     /// 沿最后一轴将门控与上升投影切分为两半，计算 `out = GELU(gate) * up`
     pub fn geglu(self: Array, intermediate_size: usize, stream: ?Stream) !Array {
