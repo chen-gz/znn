@@ -189,6 +189,7 @@ pub fn build(b: *std.Build) void {
     const mod_tests = b.addTest(.{
         .root_module = mod,
         .name = "root_tests",
+        .use_llvm = true,
     });
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const install_mod_tests = b.addInstallArtifact(mod_tests, .{});
@@ -242,6 +243,7 @@ pub fn build(b: *std.Build) void {
             const exe_test = b.addTest(.{
                 .root_module = exe.root_module,
                 .name = tname,
+                .use_llvm = true,
             });
             const run_exe_test = b.addRunArtifact(exe_test);
             const install_exe_test = b.addInstallArtifact(exe_test, .{});
