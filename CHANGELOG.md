@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **修复 Gemma 4 E4B 预填充首字延迟 (Prefill / TTFT) 退化：隔离单步解码形状特化静态编译闭包与动态长度预填充路径 (`src/models/gemma4_e4b.zig`)**:
+  - **根因定位**：`compiled_ple_prep`（步首词元嵌入与逐层输入预计算闭包）与 42 层 `GpuLayerE4B.compiled_tail`（注意力后全尾部闭包）因包含依赖序列长度 $T$ 的 `reshape` 与 `split` 算子，以形状特化模式 (`shapeless = false`) 编译。此前在 `T > 1` 的预填充阶段无条件调用这 43 个闭包，导致虽然 `warmup()` 预热了 `T = 2` 与 `T = 1`，但真实推理遇到任意新 Prompt 长度（如 `T = 12`）时会同时触发 **43 个编译闭包的形状缓存未命中 (Shape Cache Miss)**，迫使 MLX 在 TTFT 计时窗口内同步重新追踪 43 张计算图并 JIT 编译 43 个新的 Metal 管线状态对象 (PSO)，使预填充首字延迟从 ~94ms 退化至数倍。
+  - **精准分流 (`T == 1` vs `T > 1`)**：在 `forwardTokenArrayToLogits` 与 `forwardLayer` 中严格限定仅在单步自回归解码 (`T == 1` / `seq_len == 1`) 时调用 `compiled_ple_prep` 与 42 层 `compiled_tail`（该路径在 `warmup()` 的 `decodeStepAsync` 中已 100% 完成 `T = 1` 编译缓存）；而在预填充阶段 (`T > 1`) 直接执行基于全局形状无关 (`shapeless = true`) 融合闭包 `compiled_gelu_mul` 与 `compiled_add_mul` 的算子路径（该路径在 `warmup()` 的 `prefillAsync` 中已完成 3D/4D 预热且对任意 Prompt 长度 $T$ 零重编译复用），并同步简化 `initCompiledTail` 中仅针对 3D `ple_slice` (`[1, 1, 256]`) 的门控计算逻辑。
+
 - **系统架构与模块边界重构：下沉 `Gemma4E4BModel` 至 `src/models/`、统一 `SafetensorsArchive` 与 `GpuKvCache`、独立 `src/backend/tests.zig` (`src/models/gemma4_e4b.zig`, `src/nn/serialization.zig`, `src/backend/offload.zig`, `src/backend/tests.zig`, `examples/gemma4_e4b.zig`, `tools/quantize_gemma4.zig`)**:
   - **下沉 `Gemma4E4BModel` 核心模型实现至 `src/models/gemma4_e4b.zig`**：将原本位于示例脚本 `examples/gemma4_e4b.zig` 中的 `PleWeights`、`PlePrepContext`、`GpuLayerE4B` 与 `Gemma4E4BModel` 完整迁移至正式库模块 `src/models/gemma4_e4b.zig`，并在 `src/models.zig` 与 `src/root.zig` 门面层统一导出；`examples/gemma4_e4b.zig` 精简为约 230 行的轻量命令行评测驱动程序。
   - **统一零拷贝 `SafetensorsArchive` 内存映射解析器至 `src/nn/serialization.zig`**：在 `src/nn/serialization.zig` 中统一提供 `TensorMeta` 与 `SafetensorsArchive`（同时支持双分片目录 `open` 与单文件 `openSingleFile`），消除 `src/models/gemma4_e4b.zig` 与 `tools/quantize_gemma4.zig` 中的重复 Safetensors 头部解析与 `mmap` 逻辑。
