@@ -143,6 +143,8 @@ pub const sampleTopK = transformer.sampleTopK;
 // 6. 权重序列化 (Serialization - Safetensors)
 pub const saveModel = serialization.saveModel;
 pub const loadModel = serialization.loadModel;
+pub const TensorMeta = serialization.TensorMeta;
+pub const SafetensorsArchive = serialization.SafetensorsArchive;
 
 // ============================================================================
 

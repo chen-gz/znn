@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **系统架构与模块边界重构：下沉 `Gemma4E4BModel` 至 `src/models/`、统一 `SafetensorsArchive` 与 `GpuKvCache`、独立 `src/backend/tests.zig` (`src/models/gemma4_e4b.zig`, `src/nn/serialization.zig`, `src/backend/offload.zig`, `src/backend/tests.zig`, `examples/gemma4_e4b.zig`, `tools/quantize_gemma4.zig`)**:
+  - **下沉 `Gemma4E4BModel` 核心模型实现至 `src/models/gemma4_e4b.zig`**：将原本位于示例脚本 `examples/gemma4_e4b.zig` 中的 `PleWeights`、`PlePrepContext`、`GpuLayerE4B` 与 `Gemma4E4BModel` 完整迁移至正式库模块 `src/models/gemma4_e4b.zig`，并在 `src/models.zig` 与 `src/root.zig` 门面层统一导出；`examples/gemma4_e4b.zig` 精简为约 230 行的轻量命令行评测驱动程序。
+  - **统一零拷贝 `SafetensorsArchive` 内存映射解析器至 `src/nn/serialization.zig`**：在 `src/nn/serialization.zig` 中统一提供 `TensorMeta` 与 `SafetensorsArchive`（同时支持双分片目录 `open` 与单文件 `openSingleFile`），消除 `src/models/gemma4_e4b.zig` 与 `tools/quantize_gemma4.zig` 中的重复 Safetensors 头部解析与 `mmap` 逻辑。
+  - **上提块式预分配与环形滑动窗口 `GpuKvCache` 至 `src/backend/offload.zig`**：将 `GpuKvCache`（含 `WriteRange` 与 `computeWriteRange` 固定容量环形覆写计算）提取为 `src/backend/offload.zig` 的通用 GPU 显存键值缓存原语，理顺 `backend` 与 `models` 的职责边界。
+  - **抽离 `backend` 包内联测试至独立 `src/backend/tests.zig`**：将 `src/backend/mlx.zig` 与 `src/backend/offload.zig` 末尾约 730 行内联 `test` 块以及 `GpuKvCache` 单元测试统一收拢至 `src/backend/tests.zig`，并将 `Gemma4E4BModel` 缓存布局测试纳入 `src/models/tests.zig`，使全仓 6 大核心子包（`backend`、`tensor`、`autodiff`、`nn`、`models`、`root`）形成 100% 一致的 `tests.zig` 组织规范。
+
 - **Gemma 4 E4B 全链路图编译、环形滑动窗口 KV 缓存与预融合顺序权重直通缓存 (`src/backend/mlx.zig`, `examples/gemma4_e4b.zig`, `build.zig`, `plan/TODO.md`)**:
   - **42 层注意力后全尾部子图静态编译 (`GpuLayerE4B.initCompiledTail` / `Closure.apply3`)**：在 `GpuLayerE4B` 中将 `o_proj` 之后的完整计算链（`post_attn` RMSNorm → 残差加 `x1` → `pre_mlp` RMSNorm → `fused_gate_up` QMV → `split` → GeGLU → `down_proj` QMV → `post_mlp` RMSNorm → 残差加 `x2` → `ple_gate` QMV → 3D/4D GeGLU → `ple_proj` QMV → `ple_norm` RMSNorm → 残差加 + `layer_scalar` 缩放）通过 `mlx.compile` 编译为每层单一静态闭包 `compiled_tail`。每步解码消除约 **600+ 次细粒度 C API 调用与计算图节点构造**，并由 MLX JIT 自动跨算子融合全部残差、缩放与激活内核。
   - **步首词元嵌入与逐层输入预计算子图静态编译 (`PlePrepContext` / `Closure.apply1To2`)**：将 `embed_tokens` 反量化缩放、`embed_tokens_per_layer` 反量化缩放、`per_layer_model_projection` QMV、`proj_norm` RMSNorm 与 `(proj + tokens) * input_scale` 整合成单一堆常驻上下文静态编译闭包 `compiled_ple_prep`，一次调用直接输出 `(x_cur, ple_inputs)`。

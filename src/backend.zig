@@ -18,4 +18,5 @@ test {
     _ = @import("backend/cblas.zig");
     _ = @import("backend/mlx.zig");
     _ = @import("backend/offload.zig");
+    _ = @import("backend/tests.zig");
 }
