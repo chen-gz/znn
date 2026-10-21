@@ -144,7 +144,6 @@ const examples = [_]ExampleTarget{
         .alias_step = "e4b",
         .alias_desc = "Run the Gemma 4 E4B inference benchmark and test (alias for run-gemma4-e4b)",
         .forward_args = true,
-        .test_name = "gemma4_e4b_tests",
     },
 };
 

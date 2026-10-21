@@ -3,18 +3,9 @@ const znn = @import("zig_ml");
 
 const Q4Block = znn.tensor.quant.Q4Block;
 const bf16 = znn.tensor.bf16;
+const SafetensorsArchive = znn.nn.SafetensorsArchive;
 
 const MAGIC = "ZNNQ4G02"; // 8 bytes magic header
-
-fn getTensorRange(meta_obj: std.json.ObjectMap, name: []const u8) !struct { start: usize, end: usize, shape: []const usize } {
-    const v = meta_obj.get(name) orelse return error.TensorNotFound;
-    if (v != .object) return error.InvalidHeader;
-    const offsets_v = v.object.get("data_offsets") orelse return error.InvalidHeader;
-    if (offsets_v != .array or offsets_v.array.items.len != 2) return error.InvalidHeader;
-    const start: usize = @intCast(offsets_v.array.items[0].integer);
-    const end: usize = @intCast(offsets_v.array.items[1].integer);
-    return .{ .start = start, .end = end, .shape = &.{} };
-}
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -26,37 +17,13 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("🚀 ZNN Gemma 4 12B -> 4-bit (Q4) Streaming Quantization Tool\n", .{});
     std.debug.print("======================================================================\n\n", .{});
 
+    std.debug.print("1. Opening Safetensors file: {s}\n", .{model_path});
+    var archive = try SafetensorsArchive.openSingleFile(allocator, io, model_path);
+    defer archive.deinit();
+
+    std.debug.print("2. Parsed Header metadata successfully (Total tensors: {})\n", .{archive.tensors.count()});
+
     const cwd = std.Io.Dir.cwd();
-    var in_file = try cwd.openFile(io, model_path, .{});
-    defer in_file.close(io);
-
-    const stat = try in_file.stat(io);
-    const total_bytes = @as(usize, @intCast(stat.size));
-    std.debug.print("1. Opening Safetensors file: {s} ({d:.2} GB)\n", .{
-        model_path, @as(f64, @floatFromInt(total_bytes)) / (1024.0 * 1024.0 * 1024.0),
-    });
-
-    const mmap_ptr = try std.posix.mmap(
-        null,
-        total_bytes,
-        .{ .READ = true },
-        .{ .TYPE = .SHARED },
-        in_file.handle,
-        0,
-    );
-    defer std.posix.munmap(mmap_ptr);
-
-    const header_len = std.mem.readInt(u64, mmap_ptr[0..8], .little);
-    const header_slice = mmap_ptr[8 .. 8 + header_len];
-    const data_start = 8 + header_len;
-    const payload = mmap_ptr[data_start..];
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, header_slice, .{});
-    defer parsed.deinit();
-
-    const meta = parsed.value.object;
-    std.debug.print("2. Parsed Header metadata successfully (Total tensors: {})\n", .{meta.count() - 1});
-
     var out_file = try cwd.createFile(io, out_path, .{});
     defer out_file.close(io);
 
@@ -68,16 +35,14 @@ pub fn main(init: std.process.Init) !void {
 
     // 写入 norm.weight (3840 floats)
     {
-        const norm_meta = try getTensorRange(meta, "model.language_model.norm.weight");
-        const norm_bytes = payload[norm_meta.start..norm_meta.end];
+        const norm_bytes = archive.getTensorBytes("model.language_model.norm.weight") orelse return error.TensorNotFound;
         std.debug.print("3. Writing final norm ({d:.2} KB)...\n", .{@as(f64, @floatFromInt(norm_bytes.len)) / 1024.0});
         try writer.writeAll(norm_bytes);
     }
 
     // 写入 embed_tokens.weight (262144 * 3840 BF16 = 1920 MB)
     {
-        const emb_meta = try getTensorRange(meta, "model.language_model.embed_tokens.weight");
-        const emb_bytes = payload[emb_meta.start..emb_meta.end];
+        const emb_bytes = archive.getTensorBytes("model.language_model.embed_tokens.weight") orelse return error.TensorNotFound;
         std.debug.print("4. Streaming embed_tokens ({d:.2} MB)...\n", .{@as(f64, @floatFromInt(emb_bytes.len)) / (1024.0 * 1024.0)});
         try writer.writeAll(emb_bytes);
         try writer.flush();
@@ -106,8 +71,8 @@ pub fn main(init: std.process.Init) !void {
         var key_buf: [128]u8 = undefined;
         for (bf16_names) |name| {
             const key = try std.fmt.bufPrint(&key_buf, "model.language_model.layers.{}.{s}", .{ layer_idx, name });
-            const r = try getTensorRange(meta, key);
-            try writer.writeAll(payload[r.start..r.end]);
+            const raw_bytes = archive.getTensorBytes(key) orelse return error.TensorNotFound;
+            try writer.writeAll(raw_bytes);
         }
 
         // 写入需要量化为 Q4 的投影矩阵
@@ -133,8 +98,7 @@ pub fn main(init: std.process.Init) !void {
 
         for (q_names) |name| {
             const key = try std.fmt.bufPrint(&key_buf, "model.language_model.layers.{}.{s}", .{ layer_idx, name });
-            const r = try getTensorRange(meta, key);
-            const raw_bytes = payload[r.start..r.end];
+            const raw_bytes = archive.getTensorBytes(key) orelse return error.TensorNotFound;
             const u16_slice: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, raw_bytes));
             const num_blocks = u16_slice.len / Q4Block.QK;
 

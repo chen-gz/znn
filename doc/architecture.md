@@ -16,7 +16,8 @@ src/
 │   ├── cblas.zig                 # macOS Accelerate (AMX) 构建期链接与跨平台 8 路 SIMD GEMM 后备内核
 │   ├── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
 │   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定与 GPU 数组算子
-│   └── offload.zig               # 硬件加速统一卸载基础设施 (GEMM, RMSNorm, RoPE, SDPA, Q4Weights, GpuModelContext)
+│   ├── offload.zig               # 硬件加速统一卸载基础设施 (GEMM, RMSNorm, RoPE, SDPA, Q4Weights, GpuKvCache, GpuModelContext)
+│   └── tests.zig                 # 硬件计算后端与 GPU 算子卸载单元测试集
 ├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, Q4Block, ops)
 ├── tensor/
 │   ├── shape.zig                 # 8D Shape 维度系统、跨步推导与 NumPy 广播规则
@@ -52,7 +53,7 @@ src/
 │   ├── attention.zig             # ScaledDotProductAttention, KVCache, CausalSelfAttention (MHA/GQA/MQA), MLACache, MLALayer
 │   ├── transformer.zig           # Embedding, MLP, SwiGLU, MoELayer, TransformerBlock, TransformerDecoder, GPT
 │   ├── llm.zig                   # LoRALinear, SFT/DPO/GRPO 对齐损失函数与 Top-K/Top-P 采样
-│   ├── serialization.zig         # 零依赖 Safetensors (F32/BF16/F16) 模型权重序列化与无序偏移量加载
+│   ├── serialization.zig         # 零依赖 Safetensors (F32/BF16/F16) 零拷贝内存映射归档解析 (SafetensorsArchive) 与模型权重序列化
 │   ├── visualization.zig         # Schema 2.0 节点/边枚举、作用域解析与局部图构建器 LocalGraphBuilder
 │   ├── graph_ir.zig              # 模型层级树构建 (graph_ir.build) 与 JSON 序列化导出 (nn.generateJson / nn.exportJson)
 │   ├── model_graph.schema.json   # 模型图 JSON Schema (draft 2020-12, Schema 2.0)
@@ -61,11 +62,12 @@ src/
 │   ├── tests_init.zig            # 权重自动初始化与增益推导专项测试
 │   ├── tests_module.zig          # 编译期反射协议、字段路径命名与权重共享 (Tied Weights) 生命周期测试
 │   └── tests_vis.zig             # 可视化作用域归属、Schema 2.0 黄金边集与 18 个经典模型导出测试
-├── models.zig                    # 专用模型门面 (导出 gemma4, gemma4_q4)
+├── models.zig                    # 专用模型门面 (导出 gemma4, gemma4_q4, gemma4_e4b, Gemma4E4BModel)
 ├── models/
 │   ├── gemma4.zig                # Gemma 4 架构全精度实现 (GemmaRMSNorm, Gemma4Attention, Gemma4ForCausalLM, TinyGemma4)
 │   ├── gemma4_q4.zig             # Gemma 4 架构 4-bit 量化实现 (Q4Linear, Gemma4Q4Attention, Gemma4Q4ForCausalLM, TinyQ4Gemma4)
-│   └── tests.zig                 # Gemma 4 架构与 4-bit 量化推理单元测试
+│   ├── gemma4_e4b.zig            # Gemma 4 E4B (Effective 4B) 4-bit/8-bit 混合量化端侧推理引擎 (PleWeights, GpuLayerE4B, Gemma4E4BModel)
+│   └── tests.zig                 # Gemma 4 全精度、4-bit 量化与 E4B 推理引擎单元测试
 ├── optim.zig                     # SGD, Adam, AdamW 优化器、4 类学习率调度器、梯度裁剪与 ZNNO 检查点
 ├── engine.zig                    # 分类任务训练与无梯度评估引擎 (Step / Epoch 执行器)
 ├── dataset.zig                   # MNIST/Fashion-MNIST IDX 加载器、DataLoader、BPETokenizer 与 BinaryMmapDataset

@@ -19,6 +19,10 @@ pub const offload = backend.offload;
 
 pub const gemma4 = models.gemma4;
 pub const gemma4_q4 = models.gemma4_q4;
+pub const gemma4_e4b = models.gemma4_e4b;
+pub const Gemma4E4BModel = models.Gemma4E4BModel;
+pub const SafetensorsArchive = nn.SafetensorsArchive;
+pub const TensorMeta = nn.TensorMeta;
 
 pub const TSNE = manifold.TSNE;
 pub const TSNEOptions = manifold.TSNEOptions;

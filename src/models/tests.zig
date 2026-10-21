@@ -8,6 +8,8 @@ const models = @import("../models.zig");
 const Tensor = tensor.Tensor;
 const gemma4 = models.gemma4;
 const gemma4_q4 = models.gemma4_q4;
+const gemma4_e4b = models.gemma4_e4b;
+const Gemma4E4BModel = gemma4_e4b.Gemma4E4BModel;
 
 test "Gemma 4 specialized operators, modules, and CausalLM forward" {
     const allocator = std.testing.allocator;
@@ -312,5 +314,24 @@ test "Gemma 4 SpeculativeDraftEngine Markov and N-gram proposal" {
     const draft2 = engine.proposeDraft(&cur_seq2, &buf);
     try std.testing.expect(draft2 != null);
     try std.testing.expectEqualSlices(usize, &[_]usize{600}, draft2.?);
+}
+
+test "Gemma4E4BModel direct binary weight cache layout and reader verification" {
+    const cfg = gemma4.Gemma4Config.e4b;
+    const expected_bytes = Gemma4E4BModel.computeExpectedDirectCacheSize(cfg);
+    // Gemma 4 E4B 4-bit 注意力/PLE + 8-bit MLP 混合量化权重总大小约为 5.95 GB (高于 5.5 GB，低于 6.5 GB)
+    try std.testing.expect(expected_bytes > 5_500_000_000);
+    try std.testing.expect(expected_bytes < 6_500_000_000);
+
+    var mock_buf: [32]u8 = undefined;
+    @memcpy(mock_buf[0..8], Gemma4E4BModel.DIRECT_CACHE_MAGIC);
+    std.mem.writeInt(u64, mock_buf[8..16], Gemma4E4BModel.DIRECT_CACHE_VERSION, .little);
+    @memset(mock_buf[16..32], 0xAB);
+
+    var reader = try Gemma4E4BModel.DirectCacheReader.init(&mock_buf, 32);
+    const payload = try reader.readBytes(16);
+    try std.testing.expectEqual(@as(usize, 16), payload.len);
+    try std.testing.expectEqual(@as(u8, 0xAB), payload[0]);
+    try std.testing.expectError(error.InvalidDirectCache, reader.readBytes(1));
 }
 

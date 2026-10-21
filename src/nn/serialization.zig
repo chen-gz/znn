@@ -1,7 +1,210 @@
 const std = @import("std");
+const backend = @import("../backend.zig");
+const mlx = backend.mlx;
 const tensor = @import("../tensor.zig");
 const Tensor = tensor.Tensor;
 const module = @import("module.zig");
+
+// ============================================================================
+// Safetensors 零拷贝内存映射归档解析器 (Zero-Copy Memory-Mapped Safetensors Archive)
+// ============================================================================
+
+/// Safetensors 格式中的张量元数据 (Tensor Metadata)
+pub const TensorMeta = struct {
+    file_idx: u8, // 1 或 2
+    start: usize,
+    end: usize,
+    shape: [8]usize,
+    shape_len: u8,
+    dtype: mlx.DType,
+};
+
+/// Safetensors 文件头解析与零拷贝内存映射句柄 (Memory-Mapped Safetensors Archive)
+pub const SafetensorsArchive = struct {
+    allocator: std.mem.Allocator,
+    mmap1: []const u8,
+    mmap2: []const u8,
+    payload1: []const u8,
+    payload2: []const u8,
+    tensors: std.StringHashMap(TensorMeta),
+
+    /// 打开包含双分片 (`model-00001-of-00002.safetensors` 与 `model-00002-of-00002.safetensors`) 的模型目录
+    pub fn open(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8) !SafetensorsArchive {
+        const file1_path = try std.fs.path.join(allocator, &.{ dir_path, "model-00001-of-00002.safetensors" });
+        defer allocator.free(file1_path);
+        const file2_path = try std.fs.path.join(allocator, &.{ dir_path, "model-00002-of-00002.safetensors" });
+        defer allocator.free(file2_path);
+
+        const cwd = std.Io.Dir.cwd();
+        var f1 = try cwd.openFile(io, file1_path, .{});
+        defer f1.close(io);
+        const stat1 = try f1.stat(io);
+        const mmap1 = try std.posix.mmap(
+            null,
+            @as(usize, @intCast(stat1.size)),
+            .{ .READ = true },
+            .{ .TYPE = .SHARED },
+            f1.handle,
+            0,
+        );
+        errdefer std.posix.munmap(@alignCast(mmap1));
+
+        var f2 = try cwd.openFile(io, file2_path, .{});
+        defer f2.close(io);
+        const stat2 = try f2.stat(io);
+        const mmap2 = try std.posix.mmap(
+            null,
+            @as(usize, @intCast(stat2.size)),
+            .{ .READ = true },
+            .{ .TYPE = .SHARED },
+            f2.handle,
+            0,
+        );
+        errdefer std.posix.munmap(@alignCast(mmap2));
+
+        // 建议内核预读 (Kernel Pre-fetching via madvise)
+        _ = std.posix.madvise(mmap1.ptr, mmap1.len, std.posix.MADV.WILLNEED) catch {};
+        _ = std.posix.madvise(mmap2.ptr, mmap2.len, std.posix.MADV.WILLNEED) catch {};
+
+        var tensors = std.StringHashMap(TensorMeta).init(allocator);
+        errdefer tensors.deinit();
+        try tensors.ensureTotalCapacity(800);
+
+        const p1 = try parseHeader(allocator, mmap1, 1, &tensors);
+        const p2 = try parseHeader(allocator, mmap2, 2, &tensors);
+
+        return SafetensorsArchive{
+            .allocator = allocator,
+            .mmap1 = mmap1,
+            .mmap2 = mmap2,
+            .payload1 = p1,
+            .payload2 = p2,
+            .tensors = tensors,
+        };
+    }
+
+    /// 打开单个 `.safetensors` 权重文件并构建零拷贝内存映射索引
+    pub fn openSingleFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8) !SafetensorsArchive {
+        const cwd = std.Io.Dir.cwd();
+        var f1 = try cwd.openFile(io, file_path, .{});
+        defer f1.close(io);
+        const stat1 = try f1.stat(io);
+        const mmap1 = try std.posix.mmap(
+            null,
+            @as(usize, @intCast(stat1.size)),
+            .{ .READ = true },
+            .{ .TYPE = .SHARED },
+            f1.handle,
+            0,
+        );
+        errdefer std.posix.munmap(@alignCast(mmap1));
+
+        _ = std.posix.madvise(mmap1.ptr, mmap1.len, std.posix.MADV.WILLNEED) catch {};
+
+        var tensors = std.StringHashMap(TensorMeta).init(allocator);
+        errdefer tensors.deinit();
+        try tensors.ensureTotalCapacity(512);
+
+        const p1 = try parseHeader(allocator, mmap1, 1, &tensors);
+
+        return SafetensorsArchive{
+            .allocator = allocator,
+            .mmap1 = mmap1,
+            .mmap2 = &.{},
+            .payload1 = p1,
+            .payload2 = &.{},
+            .tensors = tensors,
+        };
+    }
+
+    pub fn deinit(self: *SafetensorsArchive) void {
+        var it = self.tensors.keyIterator();
+        while (it.next()) |k| {
+            self.allocator.free(k.*);
+        }
+        self.tensors.deinit();
+        if (self.mmap1.len > 0) std.posix.munmap(@alignCast(self.mmap1));
+        if (self.mmap2.len > 0) std.posix.munmap(@alignCast(self.mmap2));
+    }
+
+    fn parseHeader(
+        allocator: std.mem.Allocator,
+        mmap_slice: []const u8,
+        file_idx: u8,
+        tensors: *std.StringHashMap(TensorMeta),
+    ) ![]const u8 {
+        if (mmap_slice.len < 8) return error.InvalidSafetensorsHeader;
+        const header_len = std.mem.readInt(u64, mmap_slice[0..8], .little);
+        if (8 + header_len > mmap_slice.len) return error.InvalidSafetensorsHeader;
+
+        const header_bytes = mmap_slice[8 .. 8 + header_len];
+        const payload = mmap_slice[8 + header_len ..];
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, header_bytes, .{});
+        defer parsed.deinit();
+
+        if (parsed.value != .object) return error.InvalidSafetensorsHeader;
+        var it = parsed.value.object.iterator();
+        while (it.next()) |entry| {
+            if (std.mem.eql(u8, entry.key_ptr.*, "__metadata__")) continue;
+            if (entry.value_ptr.* != .object) continue;
+            const obj = entry.value_ptr.*.object;
+
+            const offsets_v = obj.get("data_offsets") orelse continue;
+            if (offsets_v != .array or offsets_v.array.items.len != 2) continue;
+            const start: usize = @intCast(offsets_v.array.items[0].integer);
+            const end: usize = @intCast(offsets_v.array.items[1].integer);
+
+            const dtype_v = obj.get("dtype") orelse continue;
+            var dt: mlx.DType = .float32;
+            if (dtype_v == .string) {
+                if (std.mem.eql(u8, dtype_v.string, "U32")) {
+                    dt = .uint32;
+                } else if (std.mem.eql(u8, dtype_v.string, "BF16")) {
+                    dt = .bfloat16;
+                } else if (std.mem.eql(u8, dtype_v.string, "F16")) {
+                    dt = .float16;
+                } else if (std.mem.eql(u8, dtype_v.string, "F32")) {
+                    dt = .float32;
+                }
+            }
+
+            var shape: [8]usize = undefined;
+            var shape_len: u8 = 0;
+            if (obj.get("shape")) |sv| {
+                if (sv == .array and sv.array.items.len <= 8) {
+                    for (sv.array.items, 0..) |dim_v, d_i| {
+                        shape[d_i] = @intCast(dim_v.integer);
+                    }
+                    shape_len = @intCast(sv.array.items.len);
+                }
+            }
+
+            const key_dup = try allocator.dupe(u8, entry.key_ptr.*);
+            try tensors.put(key_dup, .{
+                .file_idx = file_idx,
+                .start = start,
+                .end = end,
+                .shape = shape,
+                .shape_len = shape_len,
+                .dtype = dt,
+            });
+        }
+
+        return payload;
+    }
+
+    pub fn getTensorBytes(self: *const SafetensorsArchive, name: []const u8) ?[]const u8 {
+        const meta = self.tensors.get(name) orelse return null;
+        const payload = if (meta.file_idx == 1) self.payload1 else self.payload2;
+        if (meta.end > payload.len) return null;
+        return payload[meta.start..meta.end];
+    }
+
+    pub fn getTensorMeta(self: *const SafetensorsArchive, name: []const u8) ?TensorMeta {
+        return self.tensors.get(name);
+    }
+};
 
 // ============================================================================
 // Safetensors 格式模型权重序列化与反序列化

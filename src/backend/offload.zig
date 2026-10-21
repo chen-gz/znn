@@ -1945,234 +1945,106 @@ pub const GpuModelContext = struct {
     }
 };
 
-test "backend offload infrastructure" {
-    if (!isAvailable()) return;
+/// 块式预分配显存键值缓存 (Pre-allocated Chunked GPU Key-Value Cache, GPU KVCache)
+pub const GpuKvCache = struct {
+    k: mlx.Array,
+    v: mlx.Array,
+    step_eff_k: ?mlx.Array = null,
+    step_eff_v: ?mlx.Array = null,
+    capacity: usize,
+    num_kv: usize,
+    head_dim: usize,
 
-    var stream = try Stream.defaultGpu();
-    defer stream.deinit();
+    pub fn init(capacity: usize, num_kv: usize, head_dim: usize, stream: Stream) !GpuKvCache {
+        var k = try mlx.Array.zeros(&.{ 1, num_kv, capacity, head_dim }, .bfloat16, stream);
+        errdefer k.deinit();
+        const v = try mlx.Array.zeros(&.{ 1, num_kv, capacity, head_dim }, .bfloat16, stream);
+        return .{
+            .k = k,
+            .v = v,
+            .step_eff_k = null,
+            .step_eff_v = null,
+            .capacity = capacity,
+            .num_kv = num_kv,
+            .head_dim = head_dim,
+        };
+    }
 
-    // 1. 验证 LmHeadWeights 词表投影卸载
-    // 构造 4 个词元、维度为 2 的测试词表 (BF16)
-    // token 0: [1.0, 0.0] -> 0x3f80, 0x0000
-    // token 1: [0.0, 2.0] -> 0x0000, 0x4000
-    // token 2: [3.0, 3.0] -> 0x4040, 0x4040 (最大值目标)
-    // token 3: [0.5, 0.5] -> 0x3f00, 0x3f00
-    const embed_u16 = [_]u16{
-        0x3f80, 0x0000,
-        0x0000, 0x4000,
-        0x4040, 0x4040,
-        0x3f00, 0x3f00,
-    };
-
-    var lm_head = try LmHeadWeights.init(&embed_u16, 4, 2, stream);
-    defer lm_head.deinit();
-
-    const h_last = [_]f32{ 1.0, 1.0 };
-    // 无重复惩罚时，token 2 得分 1.0*3.0 + 1.0*3.0 = 6.0 最高
-    const best_tok = try lm_head.sampleNext(&h_last, &.{}, 1.0, stream);
-    try std.testing.expectEqual(@as(usize, 2), best_tok);
-
-    // 对 token 2 施加极端惩罚 10.0，使得分变为 0.6，此时 token 1 得分 2.0 胜出
-    const penalized_tok = try lm_head.sampleNext(&h_last, &.{2}, 10.0, stream);
-    try std.testing.expectEqual(@as(usize, 1), penalized_tok);
-
-    // 2. 验证 Q4Weights 硬件量化矩阵乘法卸载
-    var raw_block: [18]u8 = undefined;
-    const scale_bits: u16 = 0x3c00; // f16 = 1.0
-    std.mem.writeInt(u16, raw_block[0..2], scale_bits, .little);
-    // 所有权重置为 (10 - 8) = 2.0 (低 4 位为 10 即 0xA，高 4 位为 10 即 0xA)
-    @memset(raw_block[2..18], 0xAA);
-
-    var q4_w = try Q4Weights.initFromBlocks(std.testing.allocator, &raw_block, 32, 1, stream);
-    defer q4_w.deinit();
-
-    var x_vec: [32]f32 = undefined;
-    for (&x_vec) |*v| v.* = 1.0;
-    var out_res: [1]f32 = undefined;
-
-    const DummyTensor = struct {
-        data: []f32,
-        shape: struct {
-            dims: [2]usize,
-            len: usize = 2,
-        },
-    };
-    var x_t = DummyTensor{ .data = &x_vec, .shape = .{ .dims = .{ 1, 32 }, .len = 2 } };
-    var out_t = DummyTensor{ .data = &out_res, .shape = .{ .dims = .{ 1, 1 }, .len = 2 } };
-
-    try q4MatMul(&x_t, &out_t, &q4_w, stream);
-    stream.synchronize();
-
-    // 32 个 1.0 与 2.0 的点积 = 64.0
-    try std.testing.expectApproxEqAbs(@as(f32, 64.0), out_res[0], 1e-2);
-
-    // 3. 验证融合量化矩阵 (Fused Q4Weights: initFromBlockSlices)
-    var raw_block_a: [18]u8 = undefined;
-    std.mem.writeInt(u16, raw_block_a[0..2], scale_bits, .little);
-    @memset(raw_block_a[2..18], 0xAA); // weight = 2.0
-
-    var raw_block_b: [18]u8 = undefined;
-    std.mem.writeInt(u16, raw_block_b[0..2], scale_bits, .little);
-    @memset(raw_block_b[2..18], 0xBB); // weight = 11 - 8 = 3.0
-
-    var fused_q4 = try Q4Weights.initFromBlockSlices(
-        std.testing.allocator,
-        &.{ &raw_block_a, &raw_block_b },
-        32,
-        &.{ 1, 1 },
-        stream,
-    );
-    defer fused_q4.deinit();
-
-    var in_arr = try mlx.Array.fromSlice(&x_vec, &.{ 1, 32 });
-    defer in_arr.deinit();
-
-    var in_bf16 = try in_arr.astype(.bfloat16, stream);
-    defer in_bf16.deinit();
-
-    var norm_bf16 = try mlx.Array.fastRmsNorm(in_bf16, null, 1e-6, stream);
-    defer norm_bf16.deinit();
-    norm_bf16.eval();
-    stream.synchronize();
-
-    var fused_bf16_out = try fused_q4.forwardArray(in_bf16, stream);
-    defer fused_bf16_out.deinit();
-    fused_bf16_out.eval();
-    stream.synchronize();
-
-    var fused_out = try fused_q4.forwardArray(in_arr, stream);
-    defer fused_out.deinit();
-
-    var shape_buf: [8]usize = undefined;
-    const fused_nd = try fused_out.shape(&shape_buf);
-    try std.testing.expectEqual(@as(usize, 2), fused_nd);
-    try std.testing.expectEqual(@as(usize, 1), shape_buf[0]);
-    try std.testing.expectEqual(@as(usize, 2), shape_buf[1]);
-
-    // 切片验证: sliceAxis 产生子张量并支持后续算子
-    var slice_a = try fused_out.sliceAxis(1, 0, 1, stream);
-    defer slice_a.deinit();
-    var slice_b = try fused_out.sliceAxis(1, 1, 2, stream);
-    defer slice_b.deinit();
-
-    // 验证 gelu 与 multiply
-    var act = try slice_a.gelu(stream);
-    defer act.deinit();
-    var mul = try mlx.Array.multiply(act, slice_b, stream);
-    defer mul.deinit();
-
-    fused_out.eval();
-    const f_data = fused_out.dataFloat32();
-    try std.testing.expectApproxEqAbs(@as(f32, 64.0), f_data[0], 1e-2);
-    try std.testing.expectApproxEqAbs(@as(f32, 96.0), f_data[1], 1e-2);
-}
-
-test "LmHeadWeights argmaxWithPenalty dynamic vocab and negative logits" {
-    const logits = [_]f32{ 1.0, 2.0, 6.0, -0.5 };
-    // 无重复惩罚时，token 2 (6.0) 最大
-    try std.testing.expectEqual(@as(usize, 2), LmHeadWeights.argmaxWithPenalty(&logits, 4, &.{}, 1.0));
-    // 对 token 2 施加 10.0 惩罚 -> 6.0 / 10.0 = 0.6，此时 token 1 (2.0) 最大
-    try std.testing.expectEqual(@as(usize, 1), LmHeadWeights.argmaxWithPenalty(&logits, 4, &.{2}, 10.0));
-    // 对正数与负数同时施加惩罚，验证负数乘以 penalty 的分支与越界 token 过滤
-    const neg_logits = [_]f32{ -2.0, -1.0, -0.5, -3.0 };
-    try std.testing.expectEqual(@as(usize, 1), LmHeadWeights.argmaxWithPenalty(&neg_logits, 4, &.{ 2, 999999 }, 4.0));
-}
-
-test "Q4Weights inside compiled closure" {
-    if (!isAvailable()) return;
-    var stream = try Stream.defaultGpu();
-    defer stream.deinit();
-
-    var raw_block: [18]u8 = undefined;
-    const scale_bits: u16 = 0x3C00; // 1.0 in f16
-    std.mem.writeInt(u16, raw_block[0..2], scale_bits, .little);
-    @memset(raw_block[2..18], 0x88); // weight = 8 - 8 = 0
-
-    var q4_w = try Q4Weights.initFromBlocks(std.testing.allocator, &raw_block, 32, 1, stream);
-    defer q4_w.deinit();
-
-    const Payload = struct {
-        w: *const Q4Weights,
-        stream: ?Stream,
-    };
-    var payload = Payload{ .w = &q4_w, .stream = stream };
-
-    const Helper = struct {
-        fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, pl: ?*anyopaque) callconv(.c) c_int {
-            if (!mlx.has_mlx) return 1;
-            const p: *const Payload = @alignCast(@ptrCast(pl.?));
-            var x_handle: mlx.c.mlx_array = .{ .ctx = null };
-            if (mlx.c.mlx_vector_array_get(&x_handle, in, 0) != 0 or x_handle.ctx == null) return 1;
-            const x = mlx.Array{ .handle = x_handle };
-
-            var res = p.w.forwardArray(x, p.stream) catch return 1;
-            defer res.deinit();
-
-            const res_vec = mlx.c.mlx_vector_array_new_data(&[_]mlx.c.mlx_array{res.handle}, 1);
-            _ = mlx.c.mlx_vector_array_set(vres, res_vec);
-            _ = mlx.c.mlx_vector_array_free(res_vec);
-            return 0;
+    pub fn clearStepSlices(self: *GpuKvCache) void {
+        if (self.step_eff_k) |*ek| {
+            ek.deinit();
+            self.step_eff_k = null;
         }
+        if (self.step_eff_v) |*ev| {
+            ev.deinit();
+            self.step_eff_v = null;
+        }
+    }
+
+    pub fn deinit(self: *GpuKvCache) void {
+        self.clearStepSlices();
+        self.k.deinit();
+        self.v.deinit();
+    }
+
+    pub const WriteRange = struct {
+        write_start: usize,
+        write_stop: usize,
+        slice_start: usize,
+        slice_stop: usize,
+        use_full_buffer: bool,
     };
 
-    var compiled = try mlx.compile(Helper.compute, &payload, false);
-    defer compiled.deinit();
+    /// 计算键值缓存写入与注意力读取范围（支持局部滑动窗口层的固定容量环形覆写 RotatingKVCache）
+    /// 当局部滑动窗口层处于单步解码 (`seq_len == 1`) 且序列位置达到窗口容量上限 (`pos >= sliding_window`) 时，
+    /// 直接以 `pos % sliding_window` 原地环形覆写最旧词元槽位并直接复用完整缓存张量，消除扩容拷贝与切片视图分配开销
+    pub fn computeWriteRange(
+        capacity: usize,
+        is_sliding: bool,
+        sliding_window: usize,
+        pos: usize,
+        seq_len: usize,
+    ) WriteRange {
+        const total_len = pos + seq_len;
+        if (is_sliding and seq_len == 1 and pos >= sliding_window and capacity == sliding_window) {
+            const write_idx = pos % sliding_window;
+            return .{
+                .write_start = write_idx,
+                .write_stop = write_idx + 1,
+                .slice_start = 0,
+                .slice_stop = sliding_window,
+                .use_full_buffer = true,
+            };
+        }
+        var start_k: usize = 0;
+        if (is_sliding and total_len > sliding_window) {
+            start_k = total_len - sliding_window;
+        }
+        return .{
+            .write_start = pos,
+            .write_stop = total_len,
+            .slice_start = start_k,
+            .slice_stop = total_len,
+            .use_full_buffer = (start_k == 0 and total_len == capacity),
+        };
+    }
 
-    var x_vec: [32]f32 = undefined;
-    for (&x_vec) |*v| v.* = 1.0;
-    var in_arr = try mlx.Array.fromSlice(&x_vec, &.{ 1, 32 });
-    defer in_arr.deinit();
+    pub fn ensureCapacity(self: *GpuKvCache, required: usize, stream: Stream) !void {
+        if (required <= self.capacity) return;
+        const add_cap: usize = ((required - self.capacity + 255) / 256) * 256;
+        const new_cap = self.capacity + add_cap;
+        var pad_k = try mlx.Array.zeros(&.{ 1, self.num_kv, add_cap, self.head_dim }, .bfloat16, stream);
+        defer pad_k.deinit();
+        var pad_v = try mlx.Array.zeros(&.{ 1, self.num_kv, add_cap, self.head_dim }, .bfloat16, stream);
+        defer pad_v.deinit();
 
-    var in_vec = mlx.VectorArray.fromArrays(&.{in_arr});
-    defer in_vec.deinit();
+        const exp_k = try mlx.Array.concatenateAxis(&.{ self.k, pad_k }, 2, stream);
+        const exp_v = try mlx.Array.concatenateAxis(&.{ self.v, pad_v }, 2, stream);
 
-    var out_vec = try compiled.apply(in_vec);
-    defer out_vec.deinit();
-
-    try std.testing.expectEqual(@as(usize, 1), out_vec.size());
-    var out_arr = out_vec.get(0).?;
-    defer out_arr.deinit();
-    out_arr.eval();
-    const data = out_arr.dataFloat32();
-    try std.testing.expectEqual(@as(usize, 1), data.len);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), data[0], 1e-3);
-}
-
-test "Q4Weights initFromDirectBuffers fast path" {
-    if (!isAvailable()) return;
-    var stream = try Stream.defaultGpu();
-    defer stream.deinit();
-
-    var raw_block: [18]u8 = undefined;
-    const scale_bits: u16 = 0x3C00; // 1.0 in f16
-    std.mem.writeInt(u16, raw_block[0..2], scale_bits, .little);
-    @memset(raw_block[2..18], 0x88); // weight = 8 - 8 = 0
-
-    var w_q_buf: [4]u32 = undefined;
-    var scales_buf: [1]f16 = undefined;
-    var biases_buf: [1]f16 = undefined;
-
-    Q4Weights.packBlocksToDirectBuffers(&.{&raw_block}, &.{1}, 32, &w_q_buf, &scales_buf, &biases_buf);
-
-    var q4_direct = try Q4Weights.initFromDirectBuffers(
-        std.mem.sliceAsBytes(&w_q_buf),
-        std.mem.sliceAsBytes(&scales_buf),
-        std.mem.sliceAsBytes(&biases_buf),
-        32,
-        1,
-        stream,
-    );
-    defer q4_direct.deinit();
-
-    var x_vec: [32]f32 = undefined;
-    for (&x_vec) |*v| v.* = 1.0;
-    var in_arr = try mlx.Array.fromSlice(&x_vec, &.{ 1, 32 });
-    defer in_arr.deinit();
-
-    var out_arr = try q4_direct.forwardArray(in_arr, stream);
-    defer out_arr.deinit();
-    out_arr.eval();
-    const data = out_arr.dataFloat32();
-    try std.testing.expectEqual(@as(usize, 1), data.len);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), data[0], 1e-3);
-}
+        self.k.deinit();
+        self.v.deinit();
+        self.k = exp_k;
+        self.v = exp_v;
+        self.capacity = new_cap;
+    }
+};
