@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Gemma 4 E4B 自回归解码 (Decode) 极限提速：融合 QKV / Gate+Up 量化矩阵乘、编译残差缩放闭包与共享 KV 切片复用 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `examples/gemma4_e4b.zig`, `plan/TODO.md`)**:
+  - **24 层注意力 QKV 投影与 42 层 MLP Gate+Up 投影矩阵融合 (`initFusedFromDirectBuffersCustom`)**：在模型加载阶段通过单一复用的暂存缓冲将前 24 个 KV 拥有层的 `q_proj`、`k_proj`、`v_proj`（4-bit）沿输出维度合并为单一 `qkv_proj` 矩阵，并将全部 42 层的 `gate_proj` 与 `up_proj`（8-bit）沿输出维度合并为单一 `fused_gate_up` 矩阵。每生成一个词元直接消除 **90 次 `quantized_matmul` (QMV) Metal 内核启动**（48 次 QKV + 42 次 Gate/Up），消除 `in_norm` 与 `pre_mlp` 的 90 次重复显存读取，并将原本线程组数量过少的小维度 `k_proj`/`v_proj`（`N = 512`）合并进高占用率大矩阵内核。
+  - **静态编译残差相加与缩放融合闭包 (`compileAddMul` / `fusedAddMul`)**：在 `src/backend/mlx.zig` 中新增 `(a + b) * scale` 静态编译融合算子，用于融合每层末尾的 `(x2 + ple_normed) * layer_scalar` 以及步首的 `(ple_proj_normed + ple_tokens) * input_scale`，每生成一个词元再消除 **43 次逐元素 Metal 内核启动**与 43 次全局显存中间往返（连同 QMV 融合每步共减少 **133 次 Metal GPU 内核派发**）。
+  - **18 个键值共享层 (`24..41`) 的单步 KV 切片缓存复用 (`step_eff_k` / `step_eff_v`)**：在层 22 与层 23 完成 `slice4dAxis2` 后将当前步有效 KV 视图缓存在 `GpuKvCache` 中，使后续 18 个共享层直接零开销复用同一 `mlx.Array` 节点，每步消除 36 次冗余 `mlx_slice` C API 调用与计算图节点构造。
+  - **Prefill → Decode 零气泡首步预入队**：在等待 `prefillAsync` GPU 完成前先行构建并 `asyncEval` 入队第 1 个 Decode 步的计算图，将第 1 步解码的 42 层图构建耗时完全隐藏在 Prefill GPU 执行窗口内。
+
 - **Gemma 4 E4B 预填充首字延迟 (Prefill / TTFT) 优化、算子管线预热与生成稳定性修复 (`src/backend/mlx.zig`, `src/backend/offload.zig`, `examples/gemma4_e4b.zig`, `plan/TODO.md`)**:
   - **修复未对齐权重映射导致的 NaN 与 `<pad>` 词元退化**：定位并修复此前尝试对 `SafetensorsArchive` 非对齐文件偏移使用 `mlx_array_new_data_managed` 直通导致 Metal GPU 内核静默失败、Logits 全为 NaN 触发连续生成 `<pad>` (Token 0) 的缺陷。恢复可靠的 `mlx.Array.fromRawData` 统一内存直通加载，并在权重加载完成后立即调用 `archive.deinit()` 卸载文件映射，保持 100% 位一致输出。
   - **Metal 管线与多维融合闭包离线预热 (`Gemma4E4BModel.warmup`)**：在模型加载收尾阶段自动执行微型预填充 (`T = 2`) 与单步解码 (`T = 1`) 预热传递，提前完成 GEMM 模式 `quantized_matmul`、因果掩码 `fast_scaled_dot_product_attention` 以及 3D/4D `compiled_gelu_mul` 闭包的 Metal Shading Language (MSL) JIT 编译与管线状态对象 (PSO) 缓存，使真实 Prompt 预填充首字延迟 (TTFT) 从 768ms **骤降至 94.23ms**（吞吐率达 127.4 token/s，支持 `--no-warmup` 命令行开关）。
