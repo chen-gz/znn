@@ -200,6 +200,92 @@ pub const PleWeights = struct {
     }
 };
 
+/// 步首词元嵌入与逐层输入预计算静态编译上下文 (Step-Head Embedding & PLE Preprocessing Compiled Context)
+/// 分配于堆内存以保证跨函数返回时的指针地址恒定，供 `mlx.compile` 闭包稳定引用
+pub const PlePrepContext = struct {
+    embed_tokens: Q4Weights,
+    sqrt_hidden_arr: mlx.Array,
+    ple: PleWeights,
+    hidden_size: usize,
+    rms_norm_eps: f32,
+
+    pub fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
+        if (!mlx.has_mlx) return 1;
+        const ctx: *const PlePrepContext = @ptrCast(@alignCast(payload orelse return 1));
+        var idx_h: mlx.c.mlx_array = .{ .ctx = null };
+        if (mlx.c.mlx_vector_array_get(&idx_h, in, 0) != 0 or idx_h.ctx == null) return 1;
+        const indices_arr = mlx.Array{ .handle = idx_h };
+        const T = indices_arr.dimSize(0);
+        if (T == 0) return 1;
+
+        var w_sel = ctx.embed_tokens.w_q.takeAxis(indices_arr, 0, null) catch return 1;
+        defer w_sel.deinit();
+        var sc_sel = ctx.embed_tokens.scales.takeAxis(indices_arr, 0, null) catch return 1;
+        defer sc_sel.deinit();
+        var bi_sel = ctx.embed_tokens.biases.takeAxis(indices_arr, 0, null) catch return 1;
+        defer bi_sel.deinit();
+
+        var deq = mlx.Array.dequantize(
+            w_sel,
+            sc_sel,
+            bi_sel,
+            ctx.embed_tokens.group_size,
+            ctx.embed_tokens.bits,
+            "affine",
+            null,
+        ) catch return 1;
+        defer deq.deinit();
+
+        var scaled = mlx.Array.multiply(deq, ctx.sqrt_hidden_arr, null) catch return 1;
+        defer scaled.deinit();
+        var x_cur = scaled.reshape(&.{ 1, T, ctx.hidden_size }, null) catch return 1;
+        defer x_cur.deinit();
+
+        var pw_sel = ctx.ple.embed_tokens_per_layer.w_q.takeAxis(indices_arr, 0, null) catch return 1;
+        defer pw_sel.deinit();
+        var psc_sel = ctx.ple.embed_tokens_per_layer.scales.takeAxis(indices_arr, 0, null) catch return 1;
+        defer psc_sel.deinit();
+        var pbi_sel = ctx.ple.embed_tokens_per_layer.biases.takeAxis(indices_arr, 0, null) catch return 1;
+        defer pbi_sel.deinit();
+
+        var pdeq = mlx.Array.dequantize(
+            pw_sel,
+            psc_sel,
+            pbi_sel,
+            ctx.ple.embed_tokens_per_layer.group_size,
+            ctx.ple.embed_tokens_per_layer.bits,
+            "affine",
+            null,
+        ) catch return 1;
+        defer pdeq.deinit();
+
+        var pscaled = mlx.Array.multiply(pdeq, ctx.ple.embed_scale_arr, null) catch return 1;
+        defer pscaled.deinit();
+        var ple_tokens_arr = pscaled.reshape(&.{ 1, T, ctx.ple.num_layers, ctx.ple.ple_dim }, null) catch return 1;
+        defer ple_tokens_arr.deinit();
+
+        var ple_proj_raw = ctx.ple.model_proj.forwardArray(x_cur, null) catch return 1;
+        defer ple_proj_raw.deinit();
+        var ple_proj_scaled = mlx.Array.multiply(ple_proj_raw, ctx.ple.proj_scale_arr, null) catch return 1;
+        defer ple_proj_scaled.deinit();
+        var ple_proj_4d = ple_proj_scaled.reshape(&.{ 1, T, ctx.ple.num_layers, ctx.ple.ple_dim }, null) catch return 1;
+        defer ple_proj_4d.deinit();
+        var ple_proj_normed = mlx.Array.fastRmsNorm(ple_proj_4d, ctx.ple.proj_norm_w, ctx.rms_norm_eps, null) catch return 1;
+        defer ple_proj_normed.deinit();
+
+        var ple_sum = mlx.Array.add(ple_proj_normed, ple_tokens_arr, null) catch return 1;
+        defer ple_sum.deinit();
+        var ple_inputs = mlx.Array.multiply(ple_sum, ctx.ple.input_scale_arr, null) catch return 1;
+        defer ple_inputs.deinit();
+
+        const out_handles = [_]mlx.c.mlx_array{ x_cur.handle, ple_inputs.handle };
+        const res_vec = mlx.c.mlx_vector_array_new_data(&out_handles, 2);
+        _ = mlx.c.mlx_vector_array_set(vres, res_vec);
+        _ = mlx.c.mlx_vector_array_free(res_vec);
+        return 0;
+    }
+};
+
 /// 单个解码层的 GPU 硬件加速权重结构
 pub const GpuLayerE4B = struct {
     // 4-bit 量化注意力投影 (Attention Projections: has_kv 层为融合 QKV 矩阵，共享 KV 层为独立 Q 矩阵)
@@ -235,8 +321,103 @@ pub const GpuLayerE4B = struct {
     rot_dim: usize,
     rope_theta: f32,
     rms_norm_eps: f32,
+    compiled_tail: ?mlx.Closure = null,
+
+    /// 静态编译当前解码层注意力投影之后的全尾部计算图 (Post-Attention + Gated MLP + PLE + LayerScalar)
+    /// 将每层 20+ 个独立 C API 调度节点收拢为单一预编译静态闭包，由 MLX JIT 自动跨算子融合所有逐元素激活与残差连接
+    pub fn initCompiledTail(self: *GpuLayerE4B) void {
+        if (!mlx.has_mlx) return;
+        const Helper = struct {
+            fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
+                if (!mlx.has_mlx) return 1;
+                const l: *const GpuLayerE4B = @ptrCast(@alignCast(payload orelse return 1));
+                var x_in_h: mlx.c.mlx_array = .{ .ctx = null };
+                var o_out_h: mlx.c.mlx_array = .{ .ctx = null };
+                var ple_slice_h: mlx.c.mlx_array = .{ .ctx = null };
+                if (mlx.c.mlx_vector_array_get(&x_in_h, in, 0) != 0 or x_in_h.ctx == null) return 1;
+                if (mlx.c.mlx_vector_array_get(&o_out_h, in, 1) != 0 or o_out_h.ctx == null) return 1;
+                if (mlx.c.mlx_vector_array_get(&ple_slice_h, in, 2) != 0 or ple_slice_h.ctx == null) return 1;
+
+                const x_in = mlx.Array{ .handle = x_in_h };
+                const o_out = mlx.Array{ .handle = o_out_h };
+                const ple_slice = mlx.Array{ .handle = ple_slice_h };
+
+                var post_attn = mlx.Array.fastRmsNorm(o_out, l.post_attn_w, l.rms_norm_eps, null) catch return 1;
+                defer post_attn.deinit();
+                var x1 = mlx.Array.add(x_in, post_attn, null) catch return 1;
+                defer x1.deinit();
+
+                var pre_mlp = mlx.Array.fastRmsNorm(x1, l.pre_mlp_w, l.rms_norm_eps, null) catch return 1;
+                defer pre_mlp.deinit();
+
+                var gate_up = l.fused_gate_up.forwardArray(pre_mlp, null) catch return 1;
+                defer gate_up.deinit();
+                var gu_vec = gate_up.split(2, 2, null) catch return 1;
+                defer gu_vec.deinit();
+                var gate_out = gu_vec.get(0) orelse return 1;
+                defer gate_out.deinit();
+                var up_out = gu_vec.get(1) orelse return 1;
+                defer up_out.deinit();
+
+                var act_mlp = gate_out.gelu(null) catch return 1;
+                defer act_mlp.deinit();
+                var hidden = mlx.Array.multiply(act_mlp, up_out, null) catch return 1;
+                defer hidden.deinit();
+
+                var down_out = l.down_proj.forwardArray(hidden, null) catch return 1;
+                defer down_out.deinit();
+
+                var post_mlp = mlx.Array.fastRmsNorm(down_out, l.post_mlp_w, l.rms_norm_eps, null) catch return 1;
+                defer post_mlp.deinit();
+                var x2 = mlx.Array.add(x1, post_mlp, null) catch return 1;
+                defer x2.deinit();
+
+                var ple_gate_raw = l.ple_gate.forwardArray(x2, null) catch return 1;
+                defer ple_gate_raw.deinit();
+
+                var ple_modulated = if (ple_slice.ndim() == 3) blk: {
+                    var act_ple = ple_gate_raw.gelu(null) catch return 1;
+                    defer act_ple.deinit();
+                    break :blk mlx.Array.multiply(act_ple, ple_slice, null) catch return 1;
+                } else blk: {
+                    const seq_len = ple_gate_raw.dimSize(1);
+                    const ple_dim = ple_gate_raw.dimSize(2);
+                    var ple_gate_4d = ple_gate_raw.reshape(&.{ 1, seq_len, 1, ple_dim }, null) catch return 1;
+                    defer ple_gate_4d.deinit();
+                    var act_ple = ple_gate_4d.gelu(null) catch return 1;
+                    defer act_ple.deinit();
+                    var ple_mod_4d = mlx.Array.multiply(act_ple, ple_slice, null) catch return 1;
+                    defer ple_mod_4d.deinit();
+                    break :blk ple_mod_4d.reshape(&.{ 1, seq_len, ple_dim }, null) catch return 1;
+                };
+                defer ple_modulated.deinit();
+
+                var ple_projected = l.ple_proj.forwardArray(ple_modulated, null) catch return 1;
+                defer ple_projected.deinit();
+                var ple_normed = mlx.Array.fastRmsNorm(ple_projected, l.ple_norm_w, l.rms_norm_eps, null) catch return 1;
+                defer ple_normed.deinit();
+
+                var out = if (l.layer_scalar_w) |sw| blk: {
+                    var sum = mlx.Array.add(x2, ple_normed, null) catch return 1;
+                    defer sum.deinit();
+                    break :blk mlx.Array.multiply(sum, sw, null) catch return 1;
+                } else mlx.Array.add(x2, ple_normed, null) catch return 1;
+                defer out.deinit();
+
+                const res_vec = mlx.c.mlx_vector_array_new_data(&[_]mlx.c.mlx_array{out.handle}, 1);
+                _ = mlx.c.mlx_vector_array_set(vres, res_vec);
+                _ = mlx.c.mlx_vector_array_free(res_vec);
+                return 0;
+            }
+        };
+        self.compiled_tail = mlx.compile(Helper.compute, self, false) catch null;
+    }
 
     pub fn deinit(self: *GpuLayerE4B) void {
+        if (self.compiled_tail) |*ct| {
+            ct.deinit();
+            self.compiled_tail = null;
+        }
         self.qkv_proj.deinit();
         self.o_proj.deinit();
         self.input_norm_w.deinit();
@@ -296,6 +477,48 @@ pub const GpuKvCache = struct {
         self.v.deinit();
     }
 
+    pub const WriteRange = struct {
+        write_start: usize,
+        write_stop: usize,
+        slice_start: usize,
+        slice_stop: usize,
+        use_full_buffer: bool,
+    };
+
+    /// 计算键值缓存写入与注意力读取范围（支持局部滑动窗口层的固定容量环形覆写 RotatingKVCache）
+    /// 当局部滑动窗口层处于单步解码 (`seq_len == 1`) 且序列位置达到窗口容量上限 (`pos >= sliding_window`) 时，
+    /// 直接以 `pos % sliding_window` 原地环形覆写最旧词元槽位并直接复用完整缓存张量，消除扩容拷贝与切片视图分配开销
+    pub fn computeWriteRange(
+        capacity: usize,
+        is_sliding: bool,
+        sliding_window: usize,
+        pos: usize,
+        seq_len: usize,
+    ) WriteRange {
+        const total_len = pos + seq_len;
+        if (is_sliding and seq_len == 1 and pos >= sliding_window and capacity == sliding_window) {
+            const write_idx = pos % sliding_window;
+            return .{
+                .write_start = write_idx,
+                .write_stop = write_idx + 1,
+                .slice_start = 0,
+                .slice_stop = sliding_window,
+                .use_full_buffer = true,
+            };
+        }
+        var start_k: usize = 0;
+        if (is_sliding and total_len > sliding_window) {
+            start_k = total_len - sliding_window;
+        }
+        return .{
+            .write_start = pos,
+            .write_stop = total_len,
+            .slice_start = start_k,
+            .slice_stop = total_len,
+            .use_full_buffer = (start_k == 0 and total_len == capacity),
+        };
+    }
+
     pub fn ensureCapacity(self: *GpuKvCache, required: usize, stream: Stream) !void {
         if (required <= self.capacity) return;
         const add_cap: usize = ((required - self.capacity + 255) / 256) * 256;
@@ -336,6 +559,114 @@ pub const Gemma4E4BModel = struct {
     sqrt_hidden_arr: mlx.Array,
     compiled_gelu_mul: ?mlx.Closure = null,
     compiled_add_mul: ?mlx.Closure = null,
+    ple_prep_ctx: ?*PlePrepContext = null,
+    compiled_ple_prep: ?mlx.Closure = null,
+
+    pub const DIRECT_CACHE_MAGIC = "ZNN4E4B1";
+    pub const DIRECT_CACHE_VERSION: u64 = 1;
+    pub const DIRECT_CACHE_FILENAME = "gemma4_e4b_direct.bin";
+
+    pub const Q4ByteLengths = struct {
+        w_len: usize,
+        s_len: usize,
+        b_len: usize,
+
+        pub fn total(self: Q4ByteLengths) usize {
+            return self.w_len + self.s_len + self.b_len;
+        }
+    };
+
+    pub fn q4ByteLengths(in_f: usize, out_f: usize, group_size: usize, bits: usize) Q4ByteLengths {
+        const pack_factor = 32 / bits;
+        const w_len = out_f * (in_f / pack_factor) * @sizeOf(u32);
+        const s_len = out_f * (in_f / group_size) * @sizeOf(u16);
+        return .{ .w_len = w_len, .s_len = s_len, .b_len = s_len };
+    }
+
+    /// 计算预融合顺序二进制权重缓存 (`gemma4_e4b_direct.bin`) 的精确字节总长度
+    pub fn computeExpectedDirectCacheSize(cfg: Gemma4Config) usize {
+        var total: usize = 16; // 8B magic ("ZNN4E4B1") + 8B version (u64)
+        total += q4ByteLengths(cfg.hidden_size, cfg.vocab_size, 64, 4).total();
+        total += cfg.hidden_size * @sizeOf(u16);
+        total += q4ByteLengths(cfg.num_hidden_layers * cfg.hidden_size_per_layer_input, cfg.vocab_size, 64, 4).total();
+        total += q4ByteLengths(cfg.hidden_size, cfg.num_hidden_layers * cfg.hidden_size_per_layer_input, 64, 4).total();
+        total += cfg.hidden_size_per_layer_input * @sizeOf(u16);
+
+        for (0..cfg.num_hidden_layers) |idx| {
+            const is_full = ((idx + 1) % 6 == 0);
+            const hd = if (is_full) cfg.global_head_dim else cfg.head_dim;
+            const out_q = cfg.num_attention_heads * hd;
+            const out_kv = cfg.num_key_value_heads * hd;
+            const has_kv = (idx < cfg.num_hidden_layers - cfg.num_kv_shared_layers);
+
+            if (has_kv) {
+                total += hd * @sizeOf(u16);
+                total += q4ByteLengths(cfg.hidden_size, out_q + 2 * out_kv, 64, 4).total();
+            } else {
+                total += q4ByteLengths(cfg.hidden_size, out_q, 64, 4).total();
+            }
+            total += q4ByteLengths(out_q, cfg.hidden_size, 64, 4).total();
+            total += q4ByteLengths(cfg.hidden_size, cfg.intermediate_size * 2, 64, 8).total();
+            total += q4ByteLengths(cfg.intermediate_size, cfg.hidden_size, 64, 8).total();
+            total += q4ByteLengths(cfg.hidden_size, cfg.hidden_size_per_layer_input, 64, 4).total();
+            total += q4ByteLengths(cfg.hidden_size_per_layer_input, cfg.hidden_size, 64, 4).total();
+            total += cfg.hidden_size * @sizeOf(u16);
+            total += hd * @sizeOf(u16);
+            total += cfg.hidden_size * @sizeOf(u16) * 4;
+            total += @sizeOf(u16);
+        }
+        return total;
+    }
+
+    pub const DirectCacheReader = struct {
+        data: []const u8,
+        offset: usize = 16,
+
+        pub fn init(data: []const u8, expected_size: usize) !DirectCacheReader {
+            if (data.len != expected_size or data.len < 16) return error.InvalidDirectCache;
+            if (!std.mem.eql(u8, data[0..8], DIRECT_CACHE_MAGIC)) return error.InvalidDirectCache;
+            const ver = std.mem.readInt(u64, data[8..16], .little);
+            if (ver != DIRECT_CACHE_VERSION) return error.InvalidDirectCache;
+            return .{ .data = data, .offset = 16 };
+        }
+
+        pub fn readBytes(self: *DirectCacheReader, len: usize) ![]const u8 {
+            if (self.offset + len > self.data.len) return error.InvalidDirectCache;
+            const s = self.data[self.offset .. self.offset + len];
+            self.offset += len;
+            return s;
+        }
+
+        pub fn readQ4(
+            self: *DirectCacheReader,
+            in_f: usize,
+            out_f: usize,
+            group_size: i32,
+            bits: i32,
+            stream: Stream,
+        ) !Q4Weights {
+            const lens = q4ByteLengths(in_f, out_f, @intCast(group_size), @intCast(bits));
+            const w_bytes = try self.readBytes(lens.w_len);
+            const s_bytes = try self.readBytes(lens.s_len);
+            const b_bytes = try self.readBytes(lens.b_len);
+            return Q4Weights.initFromDirectBuffersCustom(
+                w_bytes,
+                s_bytes,
+                b_bytes,
+                in_f,
+                out_f,
+                group_size,
+                bits,
+                .bfloat16,
+                stream,
+            );
+        }
+
+        pub fn readNorm(self: *DirectCacheReader, dim: usize) !mlx.Array {
+            const bytes = try self.readBytes(dim * @sizeOf(u16));
+            return mlx.Array.fromRawData(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
+        }
+    };
 
     pub const LoadOptions = struct {
         warmup: bool = true,
@@ -355,10 +686,70 @@ pub const Gemma4E4BModel = struct {
         dir_path: []const u8,
         options: LoadOptions,
     ) !Gemma4E4BModel {
-        var archive = try SafetensorsArchive.open(allocator, io, dir_path);
-        defer archive.deinit();
-
         const cfg = Gemma4Config.e4b;
+        const expected_cache_bytes = computeExpectedDirectCacheSize(cfg);
+        const cache_path = try std.fs.path.join(allocator, &.{ dir_path, DIRECT_CACHE_FILENAME });
+        defer allocator.free(cache_path);
+
+        const cwd = std.Io.Dir.cwd();
+        var direct_mmap_opt: ?[]align(std.heap.page_size_min) const u8 = null;
+        if (cwd.openFile(io, cache_path, .{})) |cf_val| {
+            var cf = cf_val;
+            defer cf.close(io);
+            if (cf.stat(io)) |st| {
+                if (@as(usize, @intCast(st.size)) == expected_cache_bytes) {
+                    if (std.posix.mmap(
+                        null,
+                        expected_cache_bytes,
+                        .{ .READ = true },
+                        .{ .TYPE = .SHARED },
+                        cf.handle,
+                        0,
+                    )) |mapped| {
+                        _ = std.posix.madvise(mapped.ptr, mapped.len, std.posix.MADV.SEQUENTIAL | std.posix.MADV.WILLNEED) catch {};
+                        if (std.mem.eql(u8, mapped[0..8], DIRECT_CACHE_MAGIC) and
+                            std.mem.readInt(u64, mapped[8..16], .little) == DIRECT_CACHE_VERSION)
+                        {
+                            direct_mmap_opt = mapped;
+                        } else {
+                            std.posix.munmap(@alignCast(mapped));
+                        }
+                    } else |_| {}
+                }
+            } else |_| {}
+        } else |_| {}
+        defer if (direct_mmap_opt) |mapped| std.posix.munmap(@alignCast(mapped));
+
+        var archive_opt: ?SafetensorsArchive = if (direct_mmap_opt == null)
+            try SafetensorsArchive.open(allocator, io, dir_path)
+        else
+            null;
+        defer if (archive_opt) |*arch| arch.deinit();
+
+        const tmp_cache_path = try std.fs.path.join(allocator, &.{ dir_path, DIRECT_CACHE_FILENAME ++ ".tmp" });
+        defer allocator.free(tmp_cache_path);
+        var cache_out_file_opt: ?std.Io.File = if (direct_mmap_opt == null)
+            (cwd.createFile(io, tmp_cache_path, .{}) catch null)
+        else
+            null;
+        var cache_write_buf: [65536]u8 = undefined;
+        var cache_fwriter: std.Io.File.Writer = undefined;
+        var cache_writer_opt: ?*std.Io.Writer = null;
+        var cache_write_ok: bool = true;
+        if (cache_out_file_opt) |*cf_out| {
+            cache_fwriter = cf_out.writer(io, &cache_write_buf);
+            const w = &cache_fwriter.interface;
+            w.writeAll(DIRECT_CACHE_MAGIC) catch {
+                cache_write_ok = false;
+            };
+            const ver_bytes = std.mem.toBytes(@as(u64, DIRECT_CACHE_VERSION));
+            w.writeAll(&ver_bytes) catch {
+                cache_write_ok = false;
+            };
+            if (cache_write_ok) cache_writer_opt = w;
+        }
+        defer if (cache_out_file_opt) |*cf_out| cf_out.close(io);
+
         const stream = try Stream.defaultGpu();
         errdefer {
             var s_tmp = stream;
@@ -369,65 +760,114 @@ pub const Gemma4E4BModel = struct {
         mlx.enableCompile();
         mlx.setCompileMode(.enabled);
 
-        // 1. 词表嵌入与 LM Head 权重（UMA 零拷贝挂载，消除 3.8 GB 内存复制）
-        const emb_wq = archive.getTensorBytes("language_model.model.embed_tokens.weight") orelse return error.TensorNotFound;
-        const emb_sc = archive.getTensorBytes("language_model.model.embed_tokens.scales") orelse return error.TensorNotFound;
-        const emb_bi = archive.getTensorBytes("language_model.model.embed_tokens.biases") orelse return error.TensorNotFound;
+        var direct_reader: DirectCacheReader = if (direct_mmap_opt) |mapped|
+            try DirectCacheReader.init(mapped, expected_cache_bytes)
+        else
+            .{ .data = &.{} };
 
-        var embed_tokens = try Q4Weights.initFromDirectBuffersCustom(
-            emb_wq,
-            emb_sc,
-            emb_bi,
-            cfg.hidden_size,
-            cfg.vocab_size,
-            64,
-            4,
-            .bfloat16,
-            stream,
-        );
+        // 1. 词表嵌入与 LM Head 权重
+        var embed_tokens: Q4Weights = undefined;
+        var norm_w: mlx.Array = undefined;
+        var ple_tokens: Q4Weights = undefined;
+        var ple_model_proj: Q4Weights = undefined;
+        var ple_pnorm_w: mlx.Array = undefined;
+
+        if (direct_mmap_opt != null) {
+            embed_tokens = try direct_reader.readQ4(cfg.hidden_size, cfg.vocab_size, 64, 4, stream);
+            errdefer embed_tokens.deinit();
+            norm_w = try direct_reader.readNorm(cfg.hidden_size);
+            errdefer norm_w.deinit();
+            ple_tokens = try direct_reader.readQ4(cfg.num_hidden_layers * cfg.hidden_size_per_layer_input, cfg.vocab_size, 64, 4, stream);
+            errdefer ple_tokens.deinit();
+            ple_model_proj = try direct_reader.readQ4(cfg.hidden_size, cfg.num_hidden_layers * cfg.hidden_size_per_layer_input, 64, 4, stream);
+            errdefer ple_model_proj.deinit();
+            ple_pnorm_w = try direct_reader.readNorm(cfg.hidden_size_per_layer_input);
+        } else {
+            const archive = archive_opt.?;
+            const emb_wq = archive.getTensorBytes("language_model.model.embed_tokens.weight") orelse return error.TensorNotFound;
+            const emb_sc = archive.getTensorBytes("language_model.model.embed_tokens.scales") orelse return error.TensorNotFound;
+            const emb_bi = archive.getTensorBytes("language_model.model.embed_tokens.biases") orelse return error.TensorNotFound;
+            if (cache_writer_opt) |w| {
+                w.writeAll(emb_wq) catch { cache_write_ok = false; };
+                w.writeAll(emb_sc) catch { cache_write_ok = false; };
+                w.writeAll(emb_bi) catch { cache_write_ok = false; };
+            }
+
+            embed_tokens = try Q4Weights.initFromDirectBuffersCustom(
+                emb_wq,
+                emb_sc,
+                emb_bi,
+                cfg.hidden_size,
+                cfg.vocab_size,
+                64,
+                4,
+                .bfloat16,
+                stream,
+            );
+            errdefer embed_tokens.deinit();
+
+            const norm_bytes = archive.getTensorBytes("language_model.model.norm.weight") orelse return error.TensorNotFound;
+            if (cache_writer_opt) |w| {
+                w.writeAll(norm_bytes[0 .. cfg.hidden_size * @sizeOf(u16)]) catch { cache_write_ok = false; };
+            }
+            norm_w = try mlx.Array.fromRawData(@ptrCast(norm_bytes.ptr), &.{cfg.hidden_size}, .bfloat16);
+            errdefer norm_w.deinit();
+
+            // 2. 逐层嵌入输入结构 (Per-Layer Embeddings, PLE)
+            const ple_tokens_wq = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.weight") orelse return error.TensorNotFound;
+            const ple_tokens_sc = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.scales") orelse return error.TensorNotFound;
+            const ple_tokens_bi = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.biases") orelse return error.TensorNotFound;
+            if (cache_writer_opt) |w| {
+                w.writeAll(ple_tokens_wq) catch { cache_write_ok = false; };
+                w.writeAll(ple_tokens_sc) catch { cache_write_ok = false; };
+                w.writeAll(ple_tokens_bi) catch { cache_write_ok = false; };
+            }
+
+            ple_tokens = try Q4Weights.initFromDirectBuffersCustom(
+                ple_tokens_wq,
+                ple_tokens_sc,
+                ple_tokens_bi,
+                cfg.num_hidden_layers * cfg.hidden_size_per_layer_input,
+                cfg.vocab_size,
+                64,
+                4,
+                .bfloat16,
+                stream,
+            );
+            errdefer ple_tokens.deinit();
+
+            const ple_proj_wq = archive.getTensorBytes("language_model.model.per_layer_model_projection.weight") orelse return error.TensorNotFound;
+            const ple_proj_sc = archive.getTensorBytes("language_model.model.per_layer_model_projection.scales") orelse return error.TensorNotFound;
+            const ple_proj_bi = archive.getTensorBytes("language_model.model.per_layer_model_projection.biases") orelse return error.TensorNotFound;
+            if (cache_writer_opt) |w| {
+                w.writeAll(ple_proj_wq) catch { cache_write_ok = false; };
+                w.writeAll(ple_proj_sc) catch { cache_write_ok = false; };
+                w.writeAll(ple_proj_bi) catch { cache_write_ok = false; };
+            }
+
+            ple_model_proj = try Q4Weights.initFromDirectBuffersCustom(
+                ple_proj_wq,
+                ple_proj_sc,
+                ple_proj_bi,
+                cfg.hidden_size,
+                cfg.num_hidden_layers * cfg.hidden_size_per_layer_input,
+                64,
+                4,
+                .bfloat16,
+                stream,
+            );
+            errdefer ple_model_proj.deinit();
+
+            const ple_pnorm_bytes = archive.getTensorBytes("language_model.model.per_layer_projection_norm.weight") orelse return error.TensorNotFound;
+            if (cache_writer_opt) |w| {
+                w.writeAll(ple_pnorm_bytes[0 .. cfg.hidden_size_per_layer_input * @sizeOf(u16)]) catch { cache_write_ok = false; };
+            }
+            ple_pnorm_w = try mlx.Array.fromRawData(@ptrCast(ple_pnorm_bytes.ptr), &.{cfg.hidden_size_per_layer_input}, .bfloat16);
+        }
         errdefer embed_tokens.deinit();
-
-        const norm_bytes = archive.getTensorBytes("language_model.model.norm.weight") orelse return error.TensorNotFound;
-        var norm_w = try mlx.Array.fromRawData(@ptrCast(norm_bytes.ptr), &.{cfg.hidden_size}, .bfloat16);
         errdefer norm_w.deinit();
-
-        // 2. 逐层嵌入输入结构 (Per-Layer Embeddings, PLE)
-        const ple_tokens_wq = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.weight") orelse return error.TensorNotFound;
-        const ple_tokens_sc = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.scales") orelse return error.TensorNotFound;
-        const ple_tokens_bi = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.biases") orelse return error.TensorNotFound;
-
-        var ple_tokens = try Q4Weights.initFromDirectBuffersCustom(
-            ple_tokens_wq,
-            ple_tokens_sc,
-            ple_tokens_bi,
-            cfg.num_hidden_layers * cfg.hidden_size_per_layer_input,
-            cfg.vocab_size,
-            64,
-            4,
-            .bfloat16,
-            stream,
-        );
         errdefer ple_tokens.deinit();
-
-        const ple_proj_wq = archive.getTensorBytes("language_model.model.per_layer_model_projection.weight") orelse return error.TensorNotFound;
-        const ple_proj_sc = archive.getTensorBytes("language_model.model.per_layer_model_projection.scales") orelse return error.TensorNotFound;
-        const ple_proj_bi = archive.getTensorBytes("language_model.model.per_layer_model_projection.biases") orelse return error.TensorNotFound;
-
-        var ple_model_proj = try Q4Weights.initFromDirectBuffersCustom(
-            ple_proj_wq,
-            ple_proj_sc,
-            ple_proj_bi,
-            cfg.hidden_size,
-            cfg.num_hidden_layers * cfg.hidden_size_per_layer_input,
-            64,
-            4,
-            .bfloat16,
-            stream,
-        );
         errdefer ple_model_proj.deinit();
-
-        const ple_pnorm_bytes = archive.getTensorBytes("language_model.model.per_layer_projection_norm.weight") orelse return error.TensorNotFound;
-        var ple_pnorm_w = try mlx.Array.fromRawData(@ptrCast(ple_pnorm_bytes.ptr), &.{cfg.hidden_size_per_layer_input}, .bfloat16);
         errdefer ple_pnorm_w.deinit();
 
         const embed_scale_val: f32 = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size_per_layer_input)));
@@ -460,13 +900,16 @@ pub const Gemma4E4BModel = struct {
         var sqrt_hidden_arr = try mlx.Array.fromScalarBf16(sqrt_hidden_val);
         errdefer sqrt_hidden_arr.deinit();
 
-        // 3. 构建 42 个解码层（分配单一复用的拼接缓冲以融合 QKV 与 Gate+Up 权重矩阵）
+        // 3. 构建 42 个解码层（若命中顺序直通缓存则无需分配 52MB 拼接缓冲并消除 2.3GB 内存拷贝）
         const layers = try allocator.alloc(GpuLayerE4B, cfg.num_hidden_layers);
         errdefer allocator.free(layers);
 
         const max_fused_bytes = (cfg.intermediate_size * 2) * (cfg.hidden_size / 4) * @sizeOf(u32);
-        const fuse_scratch = try allocator.alloc(u8, max_fused_bytes);
-        defer allocator.free(fuse_scratch);
+        const fuse_scratch: []u8 = if (direct_mmap_opt == null)
+            try allocator.alloc(u8, max_fused_bytes)
+        else
+            &.{};
+        defer if (direct_mmap_opt == null) allocator.free(fuse_scratch);
 
         // 预设键值缓存共享映射表 (Key-Value Cache Shared Mapping Table)
         // 当 num_kv_shared_layers = 18 时，前 24 层 (0..23) 具备独立的 K/V 投影；后 18 层 (24..41) 共享复用层 22 (局部滑动窗口) 与层 23 (全局全注意力) 的键值缓存。
@@ -491,65 +934,117 @@ pub const Gemma4E4BModel = struct {
             const has_kv = (idx < cfg.num_hidden_layers - cfg.num_kv_shared_layers);
             const prev_kv_idx = PREVIOUS_KVS[idx];
 
-            // 注意力投影权重绑定：前 24 层将 Q/K/V 融合为单一矩阵，每步减少 48 次 QMV 内核派发
             var kn_w: ?mlx.Array = null;
-            const qkv_proj = if (has_kv) blk: {
-                kn_w = try loadNorm(archive, &name_buf, idx, "self_attn.k_norm.weight", hd);
-                break :blk try loadFusedQ4(
+            var qkv_proj: Q4Weights = undefined;
+            var o_proj: Q4Weights = undefined;
+            var fused_gate_up: Q4Weights = undefined;
+            var down_proj: Q4Weights = undefined;
+            var ple_gate: Q4Weights = undefined;
+            var ple_proj: Q4Weights = undefined;
+            var in_w: mlx.Array = undefined;
+            var qn_w: mlx.Array = undefined;
+            var pa_w: mlx.Array = undefined;
+            var pm_w: mlx.Array = undefined;
+            var pom_w: mlx.Array = undefined;
+            var pln_w: mlx.Array = undefined;
+            var l_scalar: f32 = 1.0;
+            var l_scalar_w: ?mlx.Array = null;
+
+            if (direct_mmap_opt != null) {
+                if (has_kv) {
+                    kn_w = try direct_reader.readNorm(hd);
+                    qkv_proj = try direct_reader.readQ4(cfg.hidden_size, out_q + 2 * out_kv, 64, 4, stream);
+                } else {
+                    qkv_proj = try direct_reader.readQ4(cfg.hidden_size, out_q, 64, 4, stream);
+                }
+                o_proj = try direct_reader.readQ4(out_q, cfg.hidden_size, 64, 4, stream);
+                fused_gate_up = try direct_reader.readQ4(cfg.hidden_size, cfg.intermediate_size * 2, 64, 8, stream);
+                down_proj = try direct_reader.readQ4(cfg.intermediate_size, cfg.hidden_size, 64, 8, stream);
+                ple_gate = try direct_reader.readQ4(cfg.hidden_size, cfg.hidden_size_per_layer_input, 64, 4, stream);
+                ple_proj = try direct_reader.readQ4(cfg.hidden_size_per_layer_input, cfg.hidden_size, 64, 4, stream);
+
+                in_w = try direct_reader.readNorm(cfg.hidden_size);
+                qn_w = try direct_reader.readNorm(hd);
+                pa_w = try direct_reader.readNorm(cfg.hidden_size);
+                pm_w = try direct_reader.readNorm(cfg.hidden_size);
+                pom_w = try direct_reader.readNorm(cfg.hidden_size);
+                pln_w = try direct_reader.readNorm(cfg.hidden_size);
+
+                const sb = try direct_reader.readBytes(2);
+                const u16_val = std.mem.readInt(u16, sb[0..2], .little);
+                const f32_val: f32 = @bitCast(@as(u32, u16_val) << 16);
+                l_scalar = f32_val;
+                if (l_scalar != 1.0) {
+                    l_scalar_w = try mlx.Array.fromRawData(@ptrCast(sb.ptr), &.{1}, .bfloat16);
+                }
+            } else {
+                const archive = archive_opt.?;
+                // 注意力投影权重绑定：前 24 层将 Q/K/V 融合为单一矩阵，每步减少 48 次 QMV 内核派发
+                qkv_proj = if (has_kv) blk: {
+                    kn_w = try loadNorm(archive, &name_buf, idx, "self_attn.k_norm.weight", hd, cache_writer_opt, &cache_write_ok);
+                    break :blk try loadFusedQ4(
+                        archive,
+                        &name_buf,
+                        fuse_scratch,
+                        idx,
+                        &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" },
+                        cfg.hidden_size,
+                        out_q + 2 * out_kv,
+                        64,
+                        4,
+                        stream,
+                        cache_writer_opt,
+                        &cache_write_ok,
+                    );
+                } else try loadQ4(archive, &name_buf, idx, "self_attn.q_proj", cfg.hidden_size, out_q, 64, 4, stream, cache_writer_opt, &cache_write_ok);
+
+                o_proj = try loadQ4(archive, &name_buf, idx, "self_attn.o_proj", out_q, cfg.hidden_size, 64, 4, stream, cache_writer_opt, &cache_write_ok);
+
+                // 门控前馈网络 (8-bit Quantized MLP)：将 gate_proj 与 up_proj 沿输出维度融合为单一矩阵，每步减少 42 次 QMV 内核派发
+                fused_gate_up = try loadFusedQ4(
                     archive,
                     &name_buf,
                     fuse_scratch,
                     idx,
-                    &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" },
+                    &.{ "mlp.gate_proj", "mlp.up_proj" },
                     cfg.hidden_size,
-                    out_q + 2 * out_kv,
+                    cfg.intermediate_size * 2,
                     64,
-                    4,
+                    8,
                     stream,
+                    cache_writer_opt,
+                    &cache_write_ok,
                 );
-            } else try loadQ4(archive, &name_buf, idx, "self_attn.q_proj", cfg.hidden_size, out_q, 64, 4, stream);
+                down_proj = try loadQ4(archive, &name_buf, idx, "mlp.down_proj", cfg.intermediate_size, cfg.hidden_size, 64, 8, stream, cache_writer_opt, &cache_write_ok);
 
-            const o_proj = try loadQ4(archive, &name_buf, idx, "self_attn.o_proj", out_q, cfg.hidden_size, 64, 4, stream);
+                // 逐层嵌入门控与上投影 (PLE Gating & Projection)
+                ple_gate = try loadQ4(archive, &name_buf, idx, "per_layer_input_gate", cfg.hidden_size, cfg.hidden_size_per_layer_input, 64, 4, stream, cache_writer_opt, &cache_write_ok);
+                ple_proj = try loadQ4(archive, &name_buf, idx, "per_layer_projection", cfg.hidden_size_per_layer_input, cfg.hidden_size, 64, 4, stream, cache_writer_opt, &cache_write_ok);
 
-            // 门控前馈网络 (8-bit Quantized MLP)：将 gate_proj 与 up_proj 沿输出维度融合为单一矩阵，每步减少 42 次 QMV 内核派发
-            const fused_gate_up = try loadFusedQ4(
-                archive,
-                &name_buf,
-                fuse_scratch,
-                idx,
-                &.{ "mlp.gate_proj", "mlp.up_proj" },
-                cfg.hidden_size,
-                cfg.intermediate_size * 2,
-                64,
-                8,
-                stream,
-            );
-            const down_proj = try loadQ4(archive, &name_buf, idx, "mlp.down_proj", cfg.intermediate_size, cfg.hidden_size, 64, 8, stream);
+                // 均方根层归一化权重 (RMSNorm Weights)
+                in_w = try loadNorm(archive, &name_buf, idx, "input_layernorm.weight", cfg.hidden_size, cache_writer_opt, &cache_write_ok);
+                qn_w = try loadNorm(archive, &name_buf, idx, "self_attn.q_norm.weight", hd, cache_writer_opt, &cache_write_ok);
+                pa_w = try loadNorm(archive, &name_buf, idx, "post_attention_layernorm.weight", cfg.hidden_size, cache_writer_opt, &cache_write_ok);
+                pm_w = try loadNorm(archive, &name_buf, idx, "pre_feedforward_layernorm.weight", cfg.hidden_size, cache_writer_opt, &cache_write_ok);
+                pom_w = try loadNorm(archive, &name_buf, idx, "post_feedforward_layernorm.weight", cfg.hidden_size, cache_writer_opt, &cache_write_ok);
+                pln_w = try loadNorm(archive, &name_buf, idx, "post_per_layer_input_norm.weight", cfg.hidden_size, cache_writer_opt, &cache_write_ok);
 
-            // 逐层嵌入门控与上投影 (PLE Gating & Projection)
-            const ple_gate = try loadQ4(archive, &name_buf, idx, "per_layer_input_gate", cfg.hidden_size, cfg.hidden_size_per_layer_input, 64, 4, stream);
-            const ple_proj = try loadQ4(archive, &name_buf, idx, "per_layer_projection", cfg.hidden_size_per_layer_input, cfg.hidden_size, 64, 4, stream);
-
-            // 均方根层归一化权重 (RMSNorm Weights)
-            const in_w = try loadNorm(archive, &name_buf, idx, "input_layernorm.weight", cfg.hidden_size);
-            const qn_w = try loadNorm(archive, &name_buf, idx, "self_attn.q_norm.weight", hd);
-            const pa_w = try loadNorm(archive, &name_buf, idx, "post_attention_layernorm.weight", cfg.hidden_size);
-            const pm_w = try loadNorm(archive, &name_buf, idx, "pre_feedforward_layernorm.weight", cfg.hidden_size);
-            const pom_w = try loadNorm(archive, &name_buf, idx, "post_feedforward_layernorm.weight", cfg.hidden_size);
-            const pln_w = try loadNorm(archive, &name_buf, idx, "post_per_layer_input_norm.weight", cfg.hidden_size);
-
-            // 层缩放标量 (Layer Scalar, 直接绑定 BF16 标量张量以消除每步标量创建与类型提升)
-            const scalar_name = std.fmt.bufPrint(&name_buf, "language_model.model.layers.{}.layer_scalar", .{idx}) catch unreachable;
-            var l_scalar: f32 = 1.0;
-            var l_scalar_w: ?mlx.Array = null;
-            if (archive.getTensorBytes(scalar_name)) |sb| {
-                if (sb.len >= 2) {
-                    const u16_val = std.mem.readInt(u16, sb[0..2], .little);
-                    const f32_val: f32 = @bitCast(@as(u32, u16_val) << 16);
-                    l_scalar = f32_val;
-                    if (l_scalar != 1.0) {
-                        l_scalar_w = try mlx.Array.fromRawData(@ptrCast(sb.ptr), &.{1}, .bfloat16);
+                // 层缩放标量 (Layer Scalar, 直接绑定 BF16 标量张量以消除每步标量创建与类型提升)
+                const scalar_name = std.fmt.bufPrint(&name_buf, "language_model.model.layers.{}.layer_scalar", .{idx}) catch unreachable;
+                var scalar_bf16_bytes = [2]u8{ 0x80, 0x3F }; // 1.0 in BF16 little-endian
+                if (archive.getTensorBytes(scalar_name)) |sb| {
+                    if (sb.len >= 2) {
+                        scalar_bf16_bytes = sb[0..2].*;
+                        const u16_val = std.mem.readInt(u16, sb[0..2], .little);
+                        const f32_val: f32 = @bitCast(@as(u32, u16_val) << 16);
+                        l_scalar = f32_val;
+                        if (l_scalar != 1.0) {
+                            l_scalar_w = try mlx.Array.fromRawData(@ptrCast(sb.ptr), &.{1}, .bfloat16);
+                        }
                     }
+                }
+                if (cache_writer_opt) |w| {
+                    w.writeAll(&scalar_bf16_bytes) catch { cache_write_ok = false; };
                 }
             }
 
@@ -580,10 +1075,42 @@ pub const Gemma4E4BModel = struct {
                 .rope_theta = rope_theta,
                 .rms_norm_eps = cfg.rms_norm_eps,
             };
+            layers[idx].initCompiledTail();
+        }
+
+        if (cache_writer_opt) |w| {
+            w.flush() catch { cache_write_ok = false; };
+        }
+        if (cache_out_file_opt) |*cf_out| {
+            cf_out.close(io);
+            cache_out_file_opt = null;
+            if (cache_write_ok) {
+                cwd.rename(tmp_cache_path, cwd, cache_path, io) catch {};
+            }
         }
 
         const compiled_gelu_mul = mlx.Array.compileGeluMul() catch null;
         const compiled_add_mul = mlx.Array.compileAddMul() catch null;
+
+        var ple_prep_ctx: ?*PlePrepContext = null;
+        var compiled_ple_prep: ?mlx.Closure = null;
+        if (mlx.has_mlx) {
+            if (allocator.create(PlePrepContext)) |ctx_ptr| {
+                ctx_ptr.* = .{
+                    .embed_tokens = embed_tokens,
+                    .sqrt_hidden_arr = sqrt_hidden_arr,
+                    .ple = ple,
+                    .hidden_size = cfg.hidden_size,
+                    .rms_norm_eps = cfg.rms_norm_eps,
+                };
+                ple_prep_ctx = ctx_ptr;
+                compiled_ple_prep = mlx.compile(PlePrepContext.compute, ctx_ptr, false) catch null;
+            } else |_| {}
+        }
+        errdefer {
+            if (compiled_ple_prep) |*cls| cls.deinit();
+            if (ple_prep_ctx) |ctx_ptr| allocator.destroy(ctx_ptr);
+        }
 
         // 4. 在加载期预分配 24 个独立 KV 层的显存缓冲区，消除 Prefill 首字延迟中的 48 次 zeros 内核分配开销
         var gpu_kv: [24]?GpuKvCache = [_]?GpuKvCache{null} ** 24;
@@ -594,7 +1121,8 @@ pub const Gemma4E4BModel = struct {
         }
         for (0..24) |kv_idx| {
             const l_ref = layers[kv_idx];
-            gpu_kv[kv_idx] = try GpuKvCache.init(256, l_ref.num_kv_heads, l_ref.head_dim, stream);
+            const init_cap: usize = if (l_ref.is_sliding) l_ref.sliding_window else 256;
+            gpu_kv[kv_idx] = try GpuKvCache.init(init_cap, l_ref.num_kv_heads, l_ref.head_dim, stream);
         }
 
         var model = Gemma4E4BModel{
@@ -612,6 +1140,8 @@ pub const Gemma4E4BModel = struct {
             .sqrt_hidden_arr = sqrt_hidden_arr,
             .compiled_gelu_mul = compiled_gelu_mul,
             .compiled_add_mul = compiled_add_mul,
+            .ple_prep_ctx = ple_prep_ctx,
+            .compiled_ple_prep = compiled_ple_prep,
         };
         errdefer model.deinit();
 
@@ -629,6 +1159,14 @@ pub const Gemma4E4BModel = struct {
                 c.deinit();
                 kv_opt.* = null;
             }
+        }
+        if (self.compiled_ple_prep) |*cls| {
+            cls.deinit();
+            self.compiled_ple_prep = null;
+        }
+        if (self.ple_prep_ctx) |ctx_ptr| {
+            self.allocator.destroy(ctx_ptr);
+            self.ple_prep_ctx = null;
         }
         if (self.compiled_gelu_mul) |*cls| {
             cls.deinit();
@@ -686,6 +1224,8 @@ pub const Gemma4E4BModel = struct {
         group_size: i32,
         bits: i32,
         stream: Stream,
+        cache_writer_opt: ?*std.Io.Writer,
+        cache_write_ok: *bool,
     ) !Q4Weights {
         const w_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.weight", .{ l_idx, sub });
         const w_bytes = archive.getTensorBytes(w_name) orelse return error.TensorNotFound;
@@ -693,6 +1233,12 @@ pub const Gemma4E4BModel = struct {
         const s_bytes = archive.getTensorBytes(s_name) orelse return error.TensorNotFound;
         const b_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.biases", .{ l_idx, sub });
         const b_bytes = archive.getTensorBytes(b_name) orelse return error.TensorNotFound;
+
+        if (cache_writer_opt) |w| {
+            w.writeAll(w_bytes) catch { cache_write_ok.* = false; };
+            w.writeAll(s_bytes) catch { cache_write_ok.* = false; };
+            w.writeAll(b_bytes) catch { cache_write_ok.* = false; };
+        }
 
         return Q4Weights.initFromDirectBuffersCustom(
             w_bytes,
@@ -718,6 +1264,8 @@ pub const Gemma4E4BModel = struct {
         group_size: i32,
         bits: i32,
         stream: Stream,
+        cache_writer_opt: ?*std.Io.Writer,
+        cache_write_ok: *bool,
     ) !Q4Weights {
         var w_slices: [3][]const u8 = undefined;
         var s_slices: [3][]const u8 = undefined;
@@ -730,6 +1278,12 @@ pub const Gemma4E4BModel = struct {
             s_slices[i] = archive.getTensorBytes(s_name) orelse return error.TensorNotFound;
             const b_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.biases", .{ l_idx, sub });
             b_slices[i] = archive.getTensorBytes(b_name) orelse return error.TensorNotFound;
+        }
+
+        if (cache_writer_opt) |w| {
+            for (w_slices[0..subs.len]) |ws| w.writeAll(ws) catch { cache_write_ok.* = false; };
+            for (s_slices[0..subs.len]) |ss| w.writeAll(ss) catch { cache_write_ok.* = false; };
+            for (b_slices[0..subs.len]) |bs| w.writeAll(bs) catch { cache_write_ok.* = false; };
         }
 
         return Q4Weights.initFusedFromDirectBuffersCustom(
@@ -746,9 +1300,20 @@ pub const Gemma4E4BModel = struct {
         );
     }
 
-    fn loadNorm(archive: SafetensorsArchive, buf: *[128]u8, l_idx: usize, sub: []const u8, dim: usize) !mlx.Array {
+    fn loadNorm(
+        archive: SafetensorsArchive,
+        buf: *[128]u8,
+        l_idx: usize,
+        sub: []const u8,
+        dim: usize,
+        cache_writer_opt: ?*std.Io.Writer,
+        cache_write_ok: *bool,
+    ) !mlx.Array {
         const name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}", .{ l_idx, sub });
         const bytes = archive.getTensorBytes(name) orelse return error.TensorNotFound;
+        if (cache_writer_opt) |w| {
+            w.writeAll(bytes[0 .. dim * @sizeOf(u16)]) catch { cache_write_ok.* = false; };
+        }
         return mlx.Array.fromRawData(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
     }
 
@@ -858,25 +1423,34 @@ pub const Gemma4E4BModel = struct {
         T: usize,
         s: Stream,
     ) !mlx.Array {
-        // 1. 生成词元基础嵌入 [1, T, hidden_size] (BF16)
-        var x_cur = try self.getEmbeddingsFromArray(indices_arr, T, s);
+        var x_cur: mlx.Array = undefined;
+        var ple_inputs: mlx.Array = undefined;
+        if (self.compiled_ple_prep) |cls| {
+            const prep_out = try cls.apply1To2(indices_arr);
+            x_cur = prep_out[0];
+            ple_inputs = prep_out[1];
+        } else {
+            // 1. 生成词元基础嵌入 [1, T, hidden_size] (BF16)
+            x_cur = try self.getEmbeddingsFromArray(indices_arr, T, s);
+            errdefer x_cur.deinit();
+
+            // 2. 计算逐层输入嵌入 (Per-Layer Embeddings, PLE): [1, T, 42, 256] (BF16)
+            var ple_tokens_arr = try self.getPleTokensFromArray(indices_arr, T, s);
+            defer ple_tokens_arr.deinit();
+
+            var ple_proj_raw = try self.ple.model_proj.forwardArray(x_cur, s);
+            defer ple_proj_raw.deinit();
+            var ple_proj_scaled = try mlx.Array.multiply(ple_proj_raw, self.ple.proj_scale_arr, s);
+            defer ple_proj_scaled.deinit();
+            var ple_proj_4d = try ple_proj_scaled.reshape(&.{ 1, T, self.config.num_hidden_layers, self.config.hidden_size_per_layer_input }, s);
+            defer ple_proj_4d.deinit();
+            var ple_proj_normed = try mlx.Array.fastRmsNorm(ple_proj_4d, self.ple.proj_norm_w, self.config.rms_norm_eps, s);
+            defer ple_proj_normed.deinit();
+
+            // 融合逐层输入: (proj + tokens) * input_scale (保持纯 BF16，通过静态编译闭包融合加法与缩放)
+            ple_inputs = try mlx.Array.fusedAddMul(ple_proj_normed, ple_tokens_arr, self.ple.input_scale_arr, self.compiled_add_mul, s);
+        }
         errdefer x_cur.deinit();
-
-        // 2. 计算逐层输入嵌入 (Per-Layer Embeddings, PLE): [1, T, 42, 256] (BF16)
-        var ple_tokens_arr = try self.getPleTokensFromArray(indices_arr, T, s);
-        defer ple_tokens_arr.deinit();
-
-        var ple_proj_raw = try self.ple.model_proj.forwardArray(x_cur, s);
-        defer ple_proj_raw.deinit();
-        var ple_proj_scaled = try mlx.Array.multiply(ple_proj_raw, self.ple.proj_scale_arr, s);
-        defer ple_proj_scaled.deinit();
-        var ple_proj_4d = try ple_proj_scaled.reshape(&.{ 1, T, self.config.num_hidden_layers, self.config.hidden_size_per_layer_input }, s);
-        defer ple_proj_4d.deinit();
-        var ple_proj_normed = try mlx.Array.fastRmsNorm(ple_proj_4d, self.ple.proj_norm_w, self.config.rms_norm_eps, s);
-        defer ple_proj_normed.deinit();
-
-        // 融合逐层输入: (proj + tokens) * input_scale (保持纯 BF16，通过静态编译闭包融合加法与缩放)
-        var ple_inputs = try mlx.Array.fusedAddMul(ple_proj_normed, ple_tokens_arr, self.ple.input_scale_arr, self.compiled_add_mul, s);
         defer ple_inputs.deinit();
 
         // 3. 执行 42 层 Transformer 前向传播：
@@ -1145,31 +1719,37 @@ pub const Gemma4E4BModel = struct {
             defer k_rot.deinit();
 
             if (self.gpu_kv[l_idx] == null) {
-                const initial_cap = @max(256, ((total_len + 255) / 256) * 256);
+                const default_cap: usize = if (l.is_sliding) l.sliding_window else 256;
+                const initial_cap = @max(default_cap, ((total_len + 255) / 256) * 256);
                 self.gpu_kv[l_idx] = try GpuKvCache.init(initial_cap, l.num_kv_heads, l.head_dim, s);
             }
             const cache = &self.gpu_kv[l_idx].?;
-            try cache.ensureCapacity(total_len, s);
-            const next_k = try cache.k.sliceUpdate4dAxis2(k_rot, l.num_kv_heads, pos, total_len, l.head_dim, s);
-            const next_v = try cache.v.sliceUpdate4dAxis2(v_4d, l.num_kv_heads, pos, total_len, l.head_dim, s);
+            const range = GpuKvCache.computeWriteRange(cache.capacity, l.is_sliding, l.sliding_window, pos, seq_len);
+            try cache.ensureCapacity(range.write_stop, s);
+            const next_k = try cache.k.sliceUpdate4dAxis2(k_rot, l.num_kv_heads, range.write_start, range.write_stop, l.head_dim, s);
+            const next_v = try cache.v.sliceUpdate4dAxis2(v_4d, l.num_kv_heads, range.write_start, range.write_stop, l.head_dim, s);
             cache.k.deinit();
             cache.v.deinit();
             cache.k = next_k;
             cache.v = next_v;
 
-            var start_k: usize = 0;
-            if (l.is_sliding and total_len > l.sliding_window) {
-                start_k = total_len - l.sliding_window;
-            }
-            eff_k = try cache.k.slice4dAxis2(l.num_kv_heads, start_k, total_len, l.head_dim, s);
-            eff_v = try cache.v.slice4dAxis2(l.num_kv_heads, start_k, total_len, l.head_dim, s);
-            if (l_idx == 22 or l_idx == 23) {
-                cache.clearStepSlices();
-                cache.step_eff_k = eff_k;
-                cache.step_eff_v = eff_v;
+            if (range.use_full_buffer) {
+                eff_k = cache.k;
+                eff_v = cache.v;
+                if (l_idx == 22 or l_idx == 23) {
+                    cache.clearStepSlices();
+                }
             } else {
-                eff_k_free = eff_k;
-                eff_v_free = eff_v;
+                eff_k = try cache.k.slice4dAxis2(l.num_kv_heads, range.slice_start, range.slice_stop, l.head_dim, s);
+                eff_v = try cache.v.slice4dAxis2(l.num_kv_heads, range.slice_start, range.slice_stop, l.head_dim, s);
+                if (l_idx == 22 or l_idx == 23) {
+                    cache.clearStepSlices();
+                    cache.step_eff_k = eff_k;
+                    cache.step_eff_v = eff_v;
+                } else {
+                    eff_k_free = eff_k;
+                    eff_v_free = eff_v;
+                }
             }
         } else {
             if (seq_len == 1) {
@@ -1189,8 +1769,8 @@ pub const Gemma4E4BModel = struct {
             }
 
             const cache = &self.gpu_kv[l.prev_kv_idx].?;
-            eff_k = cache.step_eff_k.?;
-            eff_v = cache.step_eff_v.?;
+            eff_k = cache.step_eff_k orelse cache.k;
+            eff_v = cache.step_eff_v orelse cache.v;
         }
         defer q_rot.deinit();
 
@@ -1210,6 +1790,10 @@ pub const Gemma4E4BModel = struct {
 
         var o_out = try l.o_proj.forwardArray(attn_2d, s);
         defer o_out.deinit();
+
+        if (l.compiled_tail) |cls| {
+            return cls.apply3(x_in, o_out, ple_slice);
+        }
 
         var post_attn = try mlx.Array.fastRmsNorm(o_out, l.post_attn_w, l.rms_norm_eps, s);
         defer post_attn.deinit();
@@ -1508,4 +2092,62 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("   - 自回归解码速率     : {d:.2} token/s (纯 Metal GPU 流水线)\n", .{decode_speed});
     std.debug.print("   - 端到端总生成耗时   : {d:.2} 秒\n", .{total_time_s});
     std.debug.print("================================================================================\n\n", .{});
+}
+
+test "GpuKvCache rotating sliding-window wrap-around range calculation" {
+    // 1. 局部滑动窗口层在未满窗口容量时按线性偏移写入并切片
+    const r_prefill = GpuKvCache.computeWriteRange(512, true, 512, 0, 12);
+    try std.testing.expectEqual(@as(usize, 0), r_prefill.write_start);
+    try std.testing.expectEqual(@as(usize, 12), r_prefill.write_stop);
+    try std.testing.expectEqual(@as(usize, 0), r_prefill.slice_start);
+    try std.testing.expectEqual(@as(usize, 12), r_prefill.slice_stop);
+    try std.testing.expect(!r_prefill.use_full_buffer);
+
+    // 2. 局部滑动窗口层恰好填满第 512 个词元槽位 (pos = 511, seq_len = 1) 时启用整块缓冲区零切片复用
+    const r_exact = GpuKvCache.computeWriteRange(512, true, 512, 511, 1);
+    try std.testing.expectEqual(@as(usize, 511), r_exact.write_start);
+    try std.testing.expectEqual(@as(usize, 512), r_exact.write_stop);
+    try std.testing.expectEqual(@as(usize, 0), r_exact.slice_start);
+    try std.testing.expectEqual(@as(usize, 512), r_exact.slice_stop);
+    try std.testing.expect(r_exact.use_full_buffer);
+
+    // 3. 局部滑动窗口层超出 512 窗口 (pos = 512, 513, 1025) 时环形回绕覆写最旧槽位并保持整块缓冲区零切片复用
+    const r_wrap0 = GpuKvCache.computeWriteRange(512, true, 512, 512, 1);
+    try std.testing.expectEqual(@as(usize, 0), r_wrap0.write_start);
+    try std.testing.expectEqual(@as(usize, 1), r_wrap0.write_stop);
+    try std.testing.expectEqual(@as(usize, 0), r_wrap0.slice_start);
+    try std.testing.expectEqual(@as(usize, 512), r_wrap0.slice_stop);
+    try std.testing.expect(r_wrap0.use_full_buffer);
+
+    const r_wrap1 = GpuKvCache.computeWriteRange(512, true, 512, 1025, 1);
+    try std.testing.expectEqual(@as(usize, 1), r_wrap1.write_start);
+    try std.testing.expectEqual(@as(usize, 2), r_wrap1.write_stop);
+    try std.testing.expect(r_wrap1.use_full_buffer);
+
+    // 4. 全局全注意力层 (is_sliding = false) 保持线性追加增长
+    const r_global = GpuKvCache.computeWriteRange(768, false, 512, 512, 1);
+    try std.testing.expectEqual(@as(usize, 512), r_global.write_start);
+    try std.testing.expectEqual(@as(usize, 513), r_global.write_stop);
+    try std.testing.expectEqual(@as(usize, 0), r_global.slice_start);
+    try std.testing.expectEqual(@as(usize, 513), r_global.slice_stop);
+    try std.testing.expect(!r_global.use_full_buffer);
+}
+
+test "Gemma4E4BModel direct binary weight cache layout and reader verification" {
+    const cfg = Gemma4Config.e4b;
+    const expected_bytes = Gemma4E4BModel.computeExpectedDirectCacheSize(cfg);
+    // Gemma 4 E4B 4-bit 注意力/PLE + 8-bit MLP 混合量化权重总大小约为 5.95 GB (高于 5.5 GB，低于 6.5 GB)
+    try std.testing.expect(expected_bytes > 5_500_000_000);
+    try std.testing.expect(expected_bytes < 6_500_000_000);
+
+    var mock_buf: [32]u8 = undefined;
+    @memcpy(mock_buf[0..8], Gemma4E4BModel.DIRECT_CACHE_MAGIC);
+    std.mem.writeInt(u64, mock_buf[8..16], Gemma4E4BModel.DIRECT_CACHE_VERSION, .little);
+    @memset(mock_buf[16..32], 0xAB);
+
+    var reader = try Gemma4E4BModel.DirectCacheReader.init(&mock_buf, 32);
+    const payload = try reader.readBytes(16);
+    try std.testing.expectEqual(@as(usize, 16), payload.len);
+    try std.testing.expectEqual(@as(u8, 0xAB), payload[0]);
+    try std.testing.expectError(error.InvalidDirectCache, reader.readBytes(1));
 }

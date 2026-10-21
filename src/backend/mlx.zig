@@ -213,6 +213,49 @@ pub const Closure = struct {
         }
         return res;
     }
+
+    /// 零分配快速执行单输入双输出编译闭包：`{ out0, out1 } = cls(a)`
+    pub fn apply1To2(self: Closure, a: Array) !struct { Array, Array } {
+        if (!has_mlx or self.handle.ctx == null) return error.MlxNotSupported;
+        const raw_in = [_]c.mlx_array{a.handle};
+        const in_vec = c.mlx_vector_array_new_data(&raw_in, 1);
+        defer _ = c.mlx_vector_array_free(in_vec);
+
+        var out_vec = c.mlx_vector_array_new();
+        defer _ = c.mlx_vector_array_free(out_vec);
+        if (c.mlx_closure_apply(&out_vec, self.handle, in_vec) != 0 or out_vec.ctx == null) {
+            return error.MlxOperationFailed;
+        }
+        var out0 = Array.init();
+        var out1 = Array.init();
+        if (c.mlx_vector_array_get(&out0.handle, out_vec, 0) != 0 or out0.handle.ctx == null) {
+            return error.MlxOperationFailed;
+        }
+        if (c.mlx_vector_array_get(&out1.handle, out_vec, 1) != 0 or out1.handle.ctx == null) {
+            out0.deinit();
+            return error.MlxOperationFailed;
+        }
+        return .{ out0, out1 };
+    }
+
+    /// 零分配快速执行三输入单输出编译闭包：`res = cls(a, b, d)`
+    pub fn apply3(self: Closure, a: Array, b: Array, d: Array) !Array {
+        if (!has_mlx or self.handle.ctx == null) return error.MlxNotSupported;
+        const raw_in = [_]c.mlx_array{ a.handle, b.handle, d.handle };
+        const in_vec = c.mlx_vector_array_new_data(&raw_in, 3);
+        defer _ = c.mlx_vector_array_free(in_vec);
+
+        var out_vec = c.mlx_vector_array_new();
+        defer _ = c.mlx_vector_array_free(out_vec);
+        if (c.mlx_closure_apply(&out_vec, self.handle, in_vec) != 0 or out_vec.ctx == null) {
+            return error.MlxOperationFailed;
+        }
+        var res = Array.init();
+        if (c.mlx_vector_array_get(&res.handle, out_vec, 0) != 0 or res.handle.ctx == null) {
+            return error.MlxOperationFailed;
+        }
+        return res;
+    }
 };
 
 /// 静态编译函数闭包 (Compile Closure)，通过 Metal 即时编译 (Just-In-Time Compilation, JIT) 融合计算图内核
@@ -615,6 +658,13 @@ pub const Array = struct {
     pub fn ndim(self: Array) usize {
         if (!has_mlx or self.handle.ctx == null) return 0;
         return c.mlx_array_ndim(self.handle);
+    }
+
+    /// 获取指定轴的维度大小 (Dimension Size Along Axis)
+    pub fn dimSize(self: Array, axis: c_int) usize {
+        if (!has_mlx or self.handle.ctx == null) return 0;
+        const d = c.mlx_array_dim(self.handle, axis);
+        return if (d > 0) @intCast(d) else 0;
     }
 
     fn maybeFreeStream(s: c.mlx_stream, custom: ?Stream) void {
