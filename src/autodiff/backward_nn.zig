@@ -1271,6 +1271,100 @@ pub fn backwardNN(self: *Op) !void {
                 }
             }
         },
+        .TopK => {
+            const X = self.inputs[0];
+            const values = self.outputs[0];
+            const indices = self.outputs[1];
+            if (X.requires_grad) {
+                const E = X.shape.dims[X.shape.len - 1];
+                const K = self.context.TopK.k;
+                const N = X.shape.numel() / E;
+                for (0..N) |n| {
+                    for (0..K) |k| {
+                        const e_raw: usize = @intFromFloat(indices.data[n * K + k]);
+                        const e: usize = @min(e_raw, E - 1);
+                        X.grad[n * E + e] += values.grad[n * K + k];
+                    }
+                }
+            }
+        },
+        .GatherMatMul => {
+            const X = self.inputs[0];
+            const indices = self.inputs[1];
+            const Y = self.outputs[0];
+            const ctx = self.context.GatherMatMul;
+            const E = ctx.num_experts;
+            const weights = self.inputs[2 .. 2 + E];
+            const biases = if (ctx.has_bias) self.inputs[2 + E .. 2 + 2 * E] else null;
+
+            const N = indices.shape.dims[0];
+            const K = indices.shape.dims[1];
+            const in_dim = weights[0].shape.dims[0];
+            const out_dim = weights[0].shape.dims[1];
+            const x_n_stride: usize = X.strides.dims[0];
+            const x_k_stride: usize = (X.shape.len - 2) * in_dim;
+
+            for (0..N) |n| {
+                for (0..K) |k| {
+                    const e_raw: usize = @intFromFloat(indices.data[n * K + k]);
+                    const e: usize = @min(e_raw, E - 1);
+                    const x_offset = n * x_n_stride + k * x_k_stride;
+                    const y_offset = (n * K + k) * out_dim;
+                    const x_ptr = X.data.ptr + x_offset;
+                    const dy_ptr = Y.grad.ptr + y_offset;
+                    const w_e = weights[e];
+
+                    if (X.requires_grad) {
+                        const dx_ptr = X.grad.ptr + x_offset;
+                        c.cblas_sgemm(
+                            c.CblasRowMajor,
+                            c.CblasNoTrans,
+                            c.CblasTrans,
+                            1,
+                            @intCast(in_dim),
+                            @intCast(out_dim),
+                            1.0,
+                            dy_ptr,
+                            @intCast(out_dim),
+                            w_e.data.ptr,
+                            @intCast(out_dim),
+                            1.0,
+                            dx_ptr,
+                            @intCast(in_dim),
+                        );
+                    }
+
+                    if (w_e.requires_grad) {
+                        c.cblas_sgemm(
+                            c.CblasRowMajor,
+                            c.CblasTrans,
+                            c.CblasNoTrans,
+                            @intCast(in_dim),
+                            @intCast(out_dim),
+                            1,
+                            1.0,
+                            x_ptr,
+                            @intCast(in_dim),
+                            dy_ptr,
+                            @intCast(out_dim),
+                            1.0,
+                            w_e.grad.ptr,
+                            @intCast(out_dim),
+                        );
+                    }
+
+                    if (biases) |bs| {
+                        const b_e = bs[e];
+                        if (b_e.requires_grad) {
+                            const dy_slice = Y.grad[y_offset .. y_offset + out_dim];
+                            for (b_e.grad[0..out_dim], dy_slice) |*bg, dy_val| {
+                                bg.* += dy_val;
+                            }
+                        }
+                    }
+                }
+            }
+        },
         else => unreachable,
     }
 }

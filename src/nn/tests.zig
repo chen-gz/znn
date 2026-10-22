@@ -1446,11 +1446,17 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
     // Graph mode forward + backward
     const out_g = try moe.forward(&graph, x);
 
-    // Verify true sparse execution: only 1 routed expert (1 Gelu op) was recorded in the graph, not 3
+    // Verify branchless indexed execution: 1 TopK, 2 GatherMatMul (c_fc & c_proj), and 1 Gelu op in the graph
+    var topk_count: usize = 0;
+    var gather_mm_count: usize = 0;
     var gelu_count: usize = 0;
     for (graph.ops.items) |op| {
+        if (op.op_type == .TopK) topk_count += 1;
+        if (op.op_type == .GatherMatMul) gather_mm_count += 1;
         if (op.op_type == .Gelu) gelu_count += 1;
     }
+    try std.testing.expectEqual(@as(usize, 1), topk_count);
+    try std.testing.expectEqual(@as(usize, 2), gather_mm_count);
     try std.testing.expectEqual(@as(usize, 1), gelu_count);
 
     const loss = try graph.sum(out_g, null, false);
@@ -1484,6 +1490,27 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
     for (out_g.data, out_e.data) |vg, ve| {
         try std.testing.expectApproxEqAbs(vg, ve, 1e-4);
     }
+
+    // Static graph replay (`graph.forward()`) when router preference switches from Expert 0 to Expert 2:
+    // Because TopK and GatherMatMul have zero host-side `if` graph pruning, replaying the static graph
+    // dynamically routes to Expert 2 without rebuilding the graph.
+    moe.gate.bias.data[0] = -1.0;
+    moe.gate.bias.data[1] = -1.0;
+    moe.gate.bias.data[2] = 3.0;
+    graph.zeroGrad();
+    nn.zeroGradModel(&moe);
+    try graph.forward();
+    try graph.backward(loss);
+
+    for (moe.routed_experts[0].c_proj.weight.grad) |g| {
+        try std.testing.expectEqual(@as(f32, 0.0), g);
+    }
+    for (moe.routed_experts[1].c_proj.weight.grad) |g| {
+        try std.testing.expectEqual(@as(f32, 0.0), g);
+    }
+    var exp2_grad_norm: f32 = 0.0;
+    for (moe.routed_experts[2].c_proj.weight.grad) |g| exp2_grad_norm += @abs(g);
+    try std.testing.expect(exp2_grad_norm > 0.0);
 
     // Verify norm_topk_prob = true with top_k = 2 renormalizes selected expert weights and propagates gradients
     var moe_norm = try MoELayer.init(allocator, 4, 8, 3, 0, 2);

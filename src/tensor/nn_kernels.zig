@@ -579,3 +579,151 @@ pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator) 
         return Y;
     }
 }
+
+/// 前 K 大元素选择结果 (Top-K Selection Result)
+pub const TopKResult = struct {
+    values: *Tensor,
+    indices: *Tensor,
+};
+
+/// 无分支前 K 大元素原地选择内核 (Branchless Top-K Selection In-Place Kernel)：
+/// 沿最后一维 `E` 选出最大的 `k` 个元素及其下标，全程使用无分支比较算术累加（零数据依赖 `if` 跳转），
+/// 相同数值按较小列下标优先打破平局，确保每个排名 `r in 0..k` 严格对应唯一专家下标。
+pub fn topKInto(self: *const Tensor, k: usize, values_out: *Tensor, indices_out: *Tensor) !void {
+    if (self.shape.len == 0) return error.IncompatibleDimensions;
+    const E = self.shape.dims[self.shape.len - 1];
+    if (k == 0 or k > E) return error.InvalidArgument;
+    const N = self.shape.numel() / E;
+
+    @memset(values_out.data, 0.0);
+    @memset(indices_out.data, 0.0);
+
+    for (0..N) |n| {
+        const row_in = self.data[n * E .. (n + 1) * E];
+        const row_vals = values_out.data[n * k .. (n + 1) * k];
+        const row_idxs = indices_out.data[n * k .. (n + 1) * k];
+
+        for (0..E) |j| {
+            const v_j = row_in[j];
+            var rank: usize = 0;
+            for (0..E) |m| {
+                const v_m = row_in[m];
+                const greater: usize = @intFromBool(v_m > v_j);
+                const tie_earlier: usize = @intFromBool((v_m == v_j) and (m < j));
+                rank += greater | tie_earlier;
+            }
+            for (0..k) |r| {
+                const match_f: f32 = @floatFromInt(@intFromBool(rank == r));
+                row_vals[r] += v_j * match_f;
+                row_idxs[r] += @as(f32, @floatFromInt(j)) * match_f;
+            }
+        }
+    }
+}
+
+/// 沿最后一维选出前 K 大元素及其对应下标 (Top-K Selection)
+pub fn topK(self: *Tensor, k: usize, allocator: std.mem.Allocator) !TopKResult {
+    if (self.shape.len == 0) return error.IncompatibleDimensions;
+    const E = self.shape.dims[self.shape.len - 1];
+    if (k == 0 or k > E) return error.InvalidArgument;
+
+    var out_dims = [_]usize{0} ** 8;
+    for (0..self.shape.len - 1) |d| {
+        out_dims[d] = self.shape.dims[d];
+    }
+    out_dims[self.shape.len - 1] = k;
+
+    const values = try zeros(allocator, out_dims[0..self.shape.len]);
+    errdefer free(allocator, values);
+    const indices = try zeros(allocator, out_dims[0..self.shape.len]);
+    errdefer free(allocator, indices);
+
+    try topKInto(self, k, values, indices);
+    return .{ .values = values, .indices = indices };
+}
+
+/// 索引收集矩阵乘法原地内核 (Indexed Gather Matrix Multiplication In-Place Kernel, GatherMatMul)：
+/// 针对每个词元 `n in 0..N` 与选中的前 `K` 个槽位 `k in 0..K`，直接通过下标 `e = indices[n, k]`
+/// 寻址第 `e` 个专家的权重矩阵 `weights[e]`（及可选偏置 `biases[e]`）并调用基础线性代数子程序 (Basic Linear Algebra Subprograms, BLAS)
+/// 单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM)，仅激活每词元选中的 `K` 个专家且无数据依赖分支。
+pub fn gatherMatMulInto(
+    self: *const Tensor,
+    indices: *const Tensor,
+    weights: []const *Tensor,
+    biases: ?[]const *Tensor,
+    out: *Tensor,
+) !void {
+    if (indices.shape.len != 2 or weights.len == 0) return error.IncompatibleDimensions;
+    if (self.shape.len != 2 and self.shape.len != 3) return error.IncompatibleDimensions;
+
+    const N = indices.shape.dims[0];
+    const K = indices.shape.dims[1];
+    const E = weights.len;
+    const in_dim = weights[0].shape.dims[0];
+    const out_dim = weights[0].shape.dims[1];
+
+    if (self.shape.dims[0] != N or self.shape.dims[self.shape.len - 1] != in_dim) return error.ShapeMismatch;
+    if (self.shape.len == 3 and self.shape.dims[1] != K) return error.ShapeMismatch;
+    if (biases) |bs| {
+        if (bs.len != E) return error.ShapeMismatch;
+    }
+
+    const x_n_stride: usize = self.strides.dims[0];
+    const x_k_stride: usize = (self.shape.len - 2) * in_dim;
+
+    for (0..N) |n| {
+        for (0..K) |k| {
+            const e_raw: usize = @intFromFloat(indices.data[n * K + k]);
+            const e: usize = @min(e_raw, E - 1);
+            const x_ptr = self.data.ptr + n * x_n_stride + k * x_k_stride;
+            const w_ptr = weights[e].data.ptr;
+            const y_offset = (n * K + k) * out_dim;
+            const y_slice = out.data[y_offset .. y_offset + out_dim];
+
+            c.cblas_sgemm(
+                c.CblasRowMajor,
+                c.CblasNoTrans,
+                c.CblasNoTrans,
+                1,
+                @intCast(out_dim),
+                @intCast(in_dim),
+                1.0,
+                x_ptr,
+                @intCast(in_dim),
+                w_ptr,
+                @intCast(out_dim),
+                0.0,
+                y_slice.ptr,
+                @intCast(out_dim),
+            );
+
+            if (biases) |bs| {
+                const b_slice = bs[e].data[0..out_dim];
+                for (y_slice, b_slice) |*y_val, b_val| {
+                    y_val.* += b_val;
+                }
+            }
+        }
+    }
+}
+
+/// 索引收集矩阵乘法 (Indexed Gather Matrix Multiplication, GatherMatMul)：
+/// 输入 `self` 为 `[N, in_dim]` 或 `[N, K, in_dim]`，`indices` 为 `[N, K]`，返回 `[N, K, out_dim]`。
+pub fn gatherMatMul(
+    self: *Tensor,
+    indices: *Tensor,
+    weights: []const *Tensor,
+    biases: ?[]const *Tensor,
+    allocator: std.mem.Allocator,
+) !*Tensor {
+    if (indices.shape.len != 2 or weights.len == 0) return error.IncompatibleDimensions;
+    const N = indices.shape.dims[0];
+    const K = indices.shape.dims[1];
+    const out_dim = weights[0].shape.dims[1];
+
+    const Y = try zeros(allocator, &.{ N, K, out_dim });
+    errdefer free(allocator, Y);
+    try gatherMatMulInto(self, indices, weights, biases, Y);
+    return Y;
+}
+

@@ -343,8 +343,8 @@ flowchart LR
    - 采用双路投影结构：$\text{SwiGLU}(x) = (\text{SiLU}(x W_{\text{gate}}) \odot (x W_{\text{up}})) W_{\text{down}}$；
    - 相比传统两层 MLP 具备更优秀的表征容量与训练稳定性。
 4. **混合专家网络 (`MoELayer`, `nn/transformer.zig`)**：
-   - 先对门控路由网络（Router）的全量专家打分执行 Softmax 归一化，再乘以 Top-K 二值掩码（可选 `norm_topk_prob` 跨 Top-K 重归一化），确保即使在 `top_k == 1` 时门控网络也能获得非零反向梯度；
-   - 统计批次内被至少一个 Token 选中的活跃专家集合 (`expert_active`)，在前向与反向传播中直接跳过未被激活的路由专家（在 `nn.initModel` 前的未初始化建图阶段自动纳入全部专家以完成两阶段参数初始化）。
+   - 先对门控路由网络（Router）的全量专家打分执行 Softmax 归一化，再通过计算图一等算子 `TopK`（无分支比较排名累加）提取每词元胜出的前 $K$ 个概率 `values [N, K]` 与专家下标 `indices [N, K]`（可选 `norm_topk_prob` 跨 Top-K 重归一化），确保即使在 `top_k == 1` 时门控网络也能获得非零反向梯度；
+   - 采用索引收集专家矩阵乘法算子 `GatherMatMul`（对标 MLX `mlx_gather_mm` / `SwitchMLP`），在静态形状 `[N, K, D]` 上直接按 `indices[n, k]` 寻址第 $e$ 个专家的权重与偏置，使计算量严格保持 $O(N \cdot K)$（每词元仅激活 $K$ 个专家，未选中专家零计算、零梯度），同时彻底消除主机端与数据依赖的 `if` 分支，支持完整静态图 `graph.forward()` 重演与 GPU 卸载。
 5. **参数高效微调 (`LoRALinear`, `nn/llm.zig`)**：
    - 冻结预训练基础权重 $W_0$，挂载并联低秩可学习矩阵 $A \in \mathbb{R}^{d \times r}$ 与 $B \in \mathbb{R}^{r \times k}$；
    - 前向变换：$h = x W_0 + \frac{\alpha}{r} (x A) B$；
