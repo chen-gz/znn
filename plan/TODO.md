@@ -40,8 +40,8 @@
   [`CausalSelfAttention`](../src/nn/attention.zig) 与 [`MLALayer`](../src/nn/attention.zig) 已实现单层 `forwardInference`（支持 `KVCache` 与 `MLACache`），但 [`CausalSelfAttention.forward`](../src/nn/attention.zig) 训练时仍物化 $O(T^2)$ 注意力矩阵（待引入 FlashAttention 分块在线 Softmax），且 [`GPT`](../src/nn/transformer.zig)（尚无增量生成接口）与 [`Gemma4ForCausalLM`](../src/models/gemma4.zig) / [`Gemma4Q4ForCausalLM`](../src/models/gemma4.zig) 尚未跨层串联增量 `KVCache` 实现端到端 $O(T)$ 单步解码与交互式多轮对话 CLI (Chat REPL)；[`examples/gemma4.zig`](../examples/gemma4.zig) 每生成一个 Token 都重算整段序列。
 * **注意力实现分散**：
   [`Gemma4Attention`](../src/models/gemma4.zig) 未复用 [`ScaledDotProductAttention`](../src/nn/attention.zig)，独立实现掩码与 Softmax，并物化 `repeatKV` 与多次转置。
-* **混合专家网络稀疏计算**：
-  [`MoELayer.forward`](../src/nn/transformer.zig) 以 Top-K 掩码严格置零非选中专家的门控概率，但仍对全部路由专家在所有 Token 上执行稠密前向（`expert_active` 计算后未被使用），计算量约为稀疏实现的 E/K 倍。
+* **混合专家网络 Token 级 Gather/Scatter 分发**：
+  [`MoELayer.forward`](../src/nn/transformer.zig) 已实现专家级稀疏跳过（仅对当前批次内 `expert_active` 为真的被选中专家执行前向与反向计算，完全跳过未命中专家），但在单个活跃专家内部仍对批次内全部 $N$ 个 Token 矩阵乘后再乘门控掩码，后续可进一步实现按专家 Gather 命中的 Token 子集 → 专家前向 → Scatter-Add 加权合并。
 * **视觉算子库高阶扩展**：
   已支持可配置 `stride`/`padding` 的 `im2col` [`Conv1D`](../src/nn/core.zig)、[`Conv2D`](../src/nn/core.zig)、[`ConvTranspose1D`](../src/nn/core.zig)、[`ConvTranspose2D`](../src/nn/core.zig)、[`MaxPool1D`](../src/nn/normalization.zig)、[`AvgPool1D`](../src/nn/normalization.zig)、[`MaxPool2D`](../src/nn/normalization.zig)、[`AvgPool2D`](../src/nn/normalization.zig)、[`AdaptiveAvgPool1D`](../src/nn/normalization.zig)、[`AdaptiveAvgPool2D`](../src/nn/normalization.zig)、[`BatchNorm1d`](../src/nn/normalization.zig)、[`BatchNorm2d`](../src/nn/normalization.zig) 与 [`GroupNorm`](../src/nn/normalization.zig)，后续可按需扩展 `Conv3D`、`AdaptiveMaxPool2D` 与 `PixelShuffle`。
 * **混合精度与分布式训练原语**：
@@ -297,8 +297,8 @@
   - [ ] `KVCache` 支持动态扩容与分页块分配（Paged KV Cache），提升自回归解码吞吐。
   - [x] 在 [`CausalSelfAttention`](../src/nn/attention.zig) 中支持 **Grouped-Query Attention (GQA)** 与 **Multi-Query Attention (MQA)**。
   - [x] 实现 **Multi-Head Latent Attention (MLA)** 与极简低秩 `MLACache` 矩阵吸收推理。
-  - [x] 实现混合专家前馈网络 **MoELayer**（DeepSeekMoE 细粒度路由、共享专家与 Top-K 门控）。
-  - [ ] **MoELayer 稀疏 Token 分发**：按专家 gather 选中 Token → 专家前向 → scatter-add 加权合并，替代当前对全部专家的稠密计算（固定容量填充以获得静态形状，设计 Phase 3）。
+  - [x] 实现混合专家前馈网络 **MoELayer**（DeepSeekMoE 细粒度路由、共享专家、先 Softmax 后 Top-K 掩码门控与 `expert_active` 专家级稀疏跳过）。
+  - [ ] **MoELayer Token 级 Gather/Scatter 分发**：按专家 gather 选中 Token 子集 → 专家前向 → scatter-add 加权合并（固定容量填充以获得静态形状，设计 Phase 3）。
   - [x] 实现强化学习 **GRPO** (Group Relative Policy Optimization) 组内优势函数与带 KL 惩罚损失函数。
 
 - [x] **3.2 解耦优化器与训练基建 (Optimizers & Training Infrastructure)**

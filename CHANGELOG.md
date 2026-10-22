@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **修复 `MoELayer` 混合专家门控梯度消失缺陷、恢复真稀疏专家跳过与局部图死分支端口过滤 (`src/nn/transformer.zig`, `src/nn/visualization.zig`, `src/nn/tests.zig`, `examples/models/deepseek_moe.json`)**:
+  - **修复 `top_k == 1` 时门控网络梯度恒为 0 与双重掩码冗余 (`src/nn/transformer.zig`)**：移除此前先对非 Top-K 位置加 `-1e9` 再执行 Softmax、随后又乘二值 `keep_node` 的双重掩码逻辑（该实现会导致 `top_k == 1` 时胜出专家的 Softmax 输出恒为 `1.0`，由 $\frac{\partial p_i}{\partial z_i} = p_i(1 - p_i) = 0$ 造成门控网络 `gate.weight` 与 `gate.bias` 梯度完全消失，且切断未选中专家的竞争负梯度）。改为对齐 DeepSeekMoE / Switch Transformer 标准范式：先对全量路由专家 logits 执行 `graph.softmax(gate_logits)`，再乘以命名的 `{scope}.top_k_mask` 二值缓冲区（并新增可选 `norm_topk_prob: bool = false` 字段支持在 $K > 1$ 时对选中专家概率重归一化）。
+  - **恢复并完善 `expert_active` 专家级真稀疏执行与两阶段初始化兼容 (`src/nn/transformer.zig`)**：在路由专家遍历中恢复 `if (!expert_active[e]) continue;` 稀疏跳过，使未被当前批次任何词元命中的路由专家真正跳过前向与反向计算；同时通过 `isUninitialized()` 检测 `nn.initModel` 之前的全零建图阶段并自动纳入全部路由专家以完成两阶段参数发现与初始化，并为 `MLP`、`SwiGLU` 与 `MoELayer` 补全 `resetParameters`。
+  - **消除 Top-K 栈缓冲区硬编码上限并补全输入校验 (`src/nn/transformer.zig`)**：将 `top_indices` 与 `top_vals` 由固定 `[64]` 栈数组改为从 `graph.arenaAllocator()` 动态分配，并在 `MoELayer.init` 与 `MoELayer.forward` 中补全超参数与输入张量维度校验（`error.InvalidConfiguration`、`error.IncompatibleDimensions`、`error.ShapeMismatch`）。
+  - **修复多输出算子（`Split`）稀疏未消费分支在可视化局部图中产生幽灵 `@out` 端口 (`src/nn/visualization.zig`)**：在 `LocalGraphBuilder.build` 中过滤多输出算子（`p.outputs.len > 1` 且至少有一个输出已被消费）中未被稀疏分支消费的未命名子输出，避免被跳过的路由专家对应的 `prob_cols[e]` 被误判为模块终端输出端口。
+
 - **修复 Gemma 4 E4B 预填充首字延迟 (Prefill / TTFT) 退化：隔离单步解码形状特化静态编译闭包与动态长度预填充路径 (`src/models/gemma4_e4b.zig`)**:
   - **根因定位**：`compiled_ple_prep`（步首词元嵌入与逐层输入预计算闭包）与 42 层 `GpuLayerE4B.compiled_tail`（注意力后全尾部闭包）因包含依赖序列长度 $T$ 的 `reshape` 与 `split` 算子，以形状特化模式 (`shapeless = false`) 编译。此前在 `T > 1` 的预填充阶段无条件调用这 43 个闭包，导致虽然 `warmup()` 预热了 `T = 2` 与 `T = 1`，但真实推理遇到任意新 Prompt 长度（如 `T = 12`）时会同时触发 **43 个编译闭包的形状缓存未命中 (Shape Cache Miss)**，迫使 MLX 在 TTFT 计时窗口内同步重新追踪 43 张计算图并 JIT 编译 43 个新的 Metal 管线状态对象 (PSO)，使预填充首字延迟从 ~94ms 退化至数倍。
   - **精准分流 (`T == 1` vs `T > 1`)**：在 `forwardTokenArrayToLogits` 与 `forwardLayer` 中严格限定仅在单步自回归解码 (`T == 1` / `seq_len == 1`) 时调用 `compiled_ple_prep` 与 42 层 `compiled_tail`（该路径在 `warmup()` 的 `decodeStepAsync` 中已 100% 完成 `T = 1` 编译缓存）；而在预填充阶段 (`T > 1`) 直接执行基于全局形状无关 (`shapeless = true`) 融合闭包 `compiled_gelu_mul` 与 `compiled_add_mul` 的算子路径（该路径在 `warmup()` 的 `prefillAsync` 中已完成 3D/4D 预热且对任意 Prompt 长度 $T$ 零重编译复用），并同步简化 `initCompiledTail` 中仅针对 3D `ple_slice` (`[1, 1, 256]`) 的门控计算逻辑。

@@ -1423,12 +1423,19 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
     try testing_init.initFromOnes(&moe, allocator, random, &.{ 2, 4 });
     defer nn.deinitModel(&moe, allocator);
 
-    // Force gate weights so expert 0 always wins for positive inputs
+    // Verify all 3 routed experts were initialized by initModel during pre-init graph discovery
+    for (moe.routed_experts) |exp| {
+        var w_norm: f32 = 0.0;
+        for (exp.c_fc.weight.data) |v| w_norm += @abs(v);
+        try std.testing.expect(w_norm > 0.0);
+    }
+
+    // Force gate weights so expert 0 wins for positive inputs while keeping finite logits
     @memset(moe.gate.weight.data, 0.0);
     @memset(moe.gate.bias.data, 0.0);
-    moe.gate.bias.data[0] = 10.0;
-    moe.gate.bias.data[1] = -10.0;
-    moe.gate.bias.data[2] = -10.0;
+    moe.gate.bias.data[0] = 2.0;
+    moe.gate.bias.data[1] = -1.0;
+    moe.gate.bias.data[2] = -1.0;
 
     var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
@@ -1438,6 +1445,14 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
 
     // Graph mode forward + backward
     const out_g = try moe.forward(&graph, x);
+
+    // Verify true sparse execution: only 1 routed expert (1 Gelu op) was recorded in the graph, not 3
+    var gelu_count: usize = 0;
+    for (graph.ops.items) |op| {
+        if (op.op_type == .Gelu) gelu_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), gelu_count);
+
     const loss = try graph.sum(out_g, null, false);
     try graph.backward(loss);
 
@@ -1453,13 +1468,45 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
         try std.testing.expectEqual(@as(f32, 0.0), g);
     }
 
-    // Eager mode forward should match Graph mode output
+    // Even with top_k == 1, router gate must receive non-zero gradients (post-softmax Top-K gating)
+    var gate_w_grad_norm: f32 = 0.0;
+    for (moe.gate.weight.grad) |g| gate_w_grad_norm += @abs(g);
+    try std.testing.expect(gate_w_grad_norm > 0.0);
+
+    var gate_b_grad_norm: f32 = 0.0;
+    for (moe.gate.bias.grad) |g| gate_b_grad_norm += @abs(g);
+    try std.testing.expect(gate_b_grad_norm > 0.0);
+
+    // Inference mode forward should match Graph mode output
     var out_e_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer out_e_graph.deinit();
     const out_e = try moe.forward(&out_e_graph, x);
     for (out_g.data, out_e.data) |vg, ve| {
         try std.testing.expectApproxEqAbs(vg, ve, 1e-4);
     }
+
+    // Verify norm_topk_prob = true with top_k = 2 renormalizes selected expert weights and propagates gradients
+    var moe_norm = try MoELayer.init(allocator, 4, 8, 3, 0, 2);
+    moe_norm.norm_topk_prob = true;
+    try testing_init.initFromOnes(&moe_norm, allocator, random, &.{ 2, 4 });
+    defer nn.deinitModel(&moe_norm, allocator);
+
+    var g_norm = autodiff.Graph.initDefault(allocator);
+    defer g_norm.deinit();
+    const x_norm = try g_norm.tensor(2, 4, true);
+    @memset(x_norm.data, 0.5);
+    const out_norm = try moe_norm.forward(&g_norm, x_norm);
+    const loss_norm = try g_norm.sum(out_norm, null, false);
+    try g_norm.backward(loss_norm);
+    var norm_gate_grad: f32 = 0.0;
+    for (moe_norm.gate.weight.grad) |g| norm_gate_grad += @abs(g);
+    try std.testing.expect(norm_gate_grad > 0.0);
+
+    // Verify shape validation errors
+    const bad_rank = try g_norm.tensorND(&.{ 1, 2, 2, 4 }, false);
+    try std.testing.expectError(error.IncompatibleDimensions, moe.forward(&g_norm, bad_rank));
+    const bad_dim = try g_norm.tensor(2, 5, false);
+    try std.testing.expectError(error.ShapeMismatch, moe.forward(&g_norm, bad_dim));
 }
 
 test "Recurrent zero initial states are named module buffers" {
