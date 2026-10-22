@@ -343,8 +343,8 @@ flowchart LR
    - 采用双路投影结构：$\text{SwiGLU}(x) = (\text{SiLU}(x W_{\text{gate}}) \odot (x W_{\text{up}})) W_{\text{down}}$；
    - 相比传统两层 MLP 具备更优秀的表征容量与训练稳定性。
 4. **混合专家网络 (`MoELayer`, `nn/transformer.zig`)**：
-   - 基于门控路由网络（Router）对 Token 进行 Top-K 专家打分，以 Top-K 掩码严格置零非选中专家的门控概率，并与共享专家输出融合；
-   - 当前对全部路由专家在所有 Token 上执行稠密前向，再按门控概率加权合并（稀疏 Token 分发见 [`plan/TODO.md`](../plan/TODO.md) 3.1）。
+   - 先对门控路由网络（Router）的全量专家打分执行 Softmax 归一化，再乘以 Top-K 二值掩码（可选 `norm_topk_prob` 跨 Top-K 重归一化），确保即使在 `top_k == 1` 时门控网络也能获得非零反向梯度；
+   - 统计批次内被至少一个 Token 选中的活跃专家集合 (`expert_active`)，在前向与反向传播中直接跳过未被激活的路由专家（在 `nn.initModel` 前的未初始化建图阶段自动纳入全部专家以完成两阶段参数初始化）。
 5. **参数高效微调 (`LoRALinear`, `nn/llm.zig`)**：
    - 冻结预训练基础权重 $W_0$，挂载并联低秩可学习矩阵 $A \in \mathbb{R}^{d \times r}$ 与 $B \in \mathbb{R}^{r \times k}$；
    - 前向变换：$h = x W_0 + \frac{\alpha}{r} (x A) B$；

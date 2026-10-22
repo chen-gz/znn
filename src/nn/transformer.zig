@@ -16,6 +16,7 @@ const createPersistentTensor = core.createPersistentTensor;
 const freePersistentTensor = core.freePersistentTensor;
 const initWeights = core.initWeights;
 const InitMethod = core.InitMethod;
+const InitOptions = core.InitOptions;
 
 // 注意力子模块符号导出
 pub const KVCache = attention.KVCache;
@@ -123,6 +124,14 @@ pub const MLP = struct {
         };
     }
 
+    /// 库内标准参数初始化：在已分配的张量上按 options 重新填充权重与偏置，不分配内存，也不设置 is_custom_initialized 标记
+    pub fn resetParameters(self: *MLP, random: std.Random, options: InitOptions) void {
+        var fc_opts = options;
+        fc_opts.nonlinearity = .gelu;
+        self.c_fc.resetParameters(random, fc_opts);
+        self.c_proj.resetParameters(random, options);
+    }
+
     /// 模块标准数学变换公式
     pub const formula = "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}";
 
@@ -189,6 +198,15 @@ pub const SwiGLU = struct {
         };
     }
 
+    /// 库内标准参数初始化：在已分配的张量上按 options 重新填充权重与偏置，不分配内存，也不设置 is_custom_initialized 标记
+    pub fn resetParameters(self: *SwiGLU, random: std.Random, options: InitOptions) void {
+        var gate_opts = options;
+        gate_opts.nonlinearity = .silu;
+        self.w_gate.resetParameters(random, gate_opts);
+        self.w_up.resetParameters(random, options);
+        self.w_down.resetParameters(random, options);
+    }
+
     /// 模块标准数学变换公式
     pub const formula = "y = (\\text{SiLU}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
 
@@ -249,6 +267,7 @@ pub const MoELayer = struct {
     num_routed_experts: usize,
     num_shared_experts: usize,
     top_k: usize,
+    norm_topk_prob: bool = false,
     gate: Linear,
     routed_experts: []MLP,
     shared_experts: []MLP,
@@ -266,6 +285,9 @@ pub const MoELayer = struct {
         top_k: usize,
     ) !MoELayer {
         std.debug.assert(top_k > 0 and top_k <= num_routed_experts);
+        if (dim == 0 or hidden_dim == 0 or num_routed_experts == 0 or top_k == 0 or top_k > num_routed_experts) {
+            return error.InvalidConfiguration;
+        }
 
         const gate = try Linear.init(allocator, dim, num_routed_experts);
         errdefer deinitModel(&gate, allocator);
@@ -305,10 +327,43 @@ pub const MoELayer = struct {
         };
     }
 
+    /// 库内标准参数初始化：在已分配的门控层与全部专家张量上按 options 重新填充权重与偏置
+    pub fn resetParameters(self: *MoELayer, random: std.Random, options: InitOptions) void {
+        self.gate.resetParameters(random, options);
+        for (self.routed_experts) |*exp| {
+            exp.resetParameters(random, options);
+        }
+        for (self.shared_experts) |*exp| {
+            exp.resetParameters(random, options);
+        }
+    }
+
+    /// 判断混合专家层是否仍处于刚分配内存、尚未执行参数初始化的全零状态
+    fn isUninitialized(self: *const MoELayer) bool {
+        if (self.gate.weight.is_custom_initialized or self.gate.bias.is_custom_initialized) return false;
+        for (self.gate.weight.data) |v| {
+            if (v != 0.0) return false;
+        }
+        for (self.gate.bias.data) |v| {
+            if (v != 0.0) return false;
+        }
+        for (self.routed_experts) |exp| {
+            if (exp.c_fc.weight.is_custom_initialized or exp.c_proj.weight.is_custom_initialized) return false;
+            for (exp.c_fc.weight.data) |v| {
+                if (v != 0.0) return false;
+            }
+            for (exp.c_proj.weight.data) |v| {
+                if (v != 0.0) return false;
+            }
+        }
+        return true;
+    }
+
     pub fn forward(self: *const MoELayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
         const old_shape = x.shape;
+        if (old_shape.len != 2 and old_shape.len != 3) return error.IncompatibleDimensions;
         const is_3d = (old_shape.len == 3);
         var x_2d = x;
 
@@ -316,43 +371,50 @@ pub const MoELayer = struct {
             const B = old_shape.dims[0];
             const T = old_shape.dims[1];
             const D = old_shape.dims[2];
+            if (D != self.dim) return error.ShapeMismatch;
             x_2d = try graph.reshape(x, &.{ B * T, D });
+        } else if (old_shape.dims[1] != self.dim) {
+            return error.ShapeMismatch;
         }
 
         const N = x_2d.shape.dims[0];
         const E = self.num_routed_experts;
         const K = self.top_k;
+        const arena = graph.arenaAllocator();
 
         // 1. 门控打分: [N, D] -> [N, E]
         const gate_logits = try self.gate.forward(graph, x_2d);
 
-        // 2. 构造前 K 项 (Top-K) 掩码并执行归一化指数函数 (Softmax) 归一化
-        const mask_node = try graph.tensorND(&.{ N, E }, false);
-        mask_node.is_buffer = true;
-        const mask_data = mask_node.data;
-        @memset(mask_data, -1e9);
+        // 2. 先对全量路由专家得分执行归一化指数函数 (Softmax)，再按前 K 项 (Top-K) 二值掩码截取门控权重
+        // 先执行归一化指数函数 (Softmax) 可保证即使在 K = 1 时，被选中专家的概率 p_i < 1，门控网络仍能获得非零梯度
+        const raw_probs = try graph.softmax(gate_logits); // [N, E]
 
         const keep_node = try graph.tensorND(&.{ N, E }, false);
         keep_node.is_buffer = true;
+        const scope = graph.currentScope();
+        if (scope.len > 0) {
+            keep_node.name = try std.fmt.allocPrint(arena, "{s}.top_k_mask", .{scope});
+        } else {
+            keep_node.setName("top_k_mask");
+        }
         const keep_mask = keep_node.data;
         @memset(keep_mask, 0.0);
 
-        const expert_active = try graph.arenaAllocator().alloc(bool, E);
+        const expert_active = try arena.alloc(bool, E);
         @memset(expert_active, false);
+
+        const top_indices = try arena.alloc(usize, K);
+        const top_vals = try arena.alloc(f32, K);
 
         // 对每一行寻找前 K 项 (Top-K) 个最大的索引
         for (0..N) |row| {
             const row_logits = gate_logits.data[row * E .. (row + 1) * E];
 
-            var top_indices: [64]usize = undefined;
-            var top_vals: [64]f32 = undefined;
-            std.debug.assert(K <= 64);
-
             for (0..K) |k| {
                 top_indices[k] = k;
                 top_vals[k] = row_logits[k];
             }
-            // 对初始 K 个排序
+            // 对初始 K 个按降序排列
             for (0..K) |i| {
                 for (i + 1..K) |j| {
                     if (top_vals[j] > top_vals[i]) {
@@ -385,21 +447,27 @@ pub const MoELayer = struct {
 
             for (0..K) |k| {
                 const e_idx = top_indices[k];
-                mask_data[row * E + e_idx] = 0.0;
                 keep_mask[row * E + e_idx] = 1.0;
                 expert_active[e_idx] = true;
             }
         }
 
-        var total_routed: *Tensor = undefined;
+        // 若模型处于参数初始化前的全零建图阶段，将全部路由专家加入计算图以完成完整参数发现与初始化
+        if (graph.enable_grad and self.isUninitialized()) {
+            @memset(expert_active, true);
+        }
 
-        const masked_logits = try graph.add(gate_logits, mask_node);
-        const raw_probs = try graph.softmax(masked_logits); // [N, E]
-        const probs = try graph.mul(raw_probs, keep_node); // 严格置零非前 K 项 (Top-K) 概率
+        var probs = try graph.mul(raw_probs, keep_node); // 严格置零非前 K 项 (Top-K) 概率
+        if (self.norm_topk_prob and K > 1) {
+            const prob_sum = try graph.sum(probs, 1, true);
+            const eps_sum = try graph.addScalar(prob_sum, 1e-12);
+            probs = try graph.div(probs, eps_sum);
+        }
         const prob_cols = try graph.split(probs, E, 1); // E 个 [N, 1]
 
         var acc: ?*Tensor = null;
         for (self.routed_experts, 0..) |exp, e| {
+            if (!expert_active[e]) continue;
             const exp_out = try exp.forward(graph, x_2d); // [N, D]
             const weighted = try graph.mul(exp_out, prob_cols[e]); // [N, D] * [N, 1] -> [N, D]
             if (acc) |a| {
@@ -408,7 +476,7 @@ pub const MoELayer = struct {
                 acc = weighted;
             }
         }
-        total_routed = acc.?;
+        const total_routed = acc.?;
 
         // 3. 计算常驻共享专家 (Shared Experts)
         var total_shared: ?*Tensor = null;

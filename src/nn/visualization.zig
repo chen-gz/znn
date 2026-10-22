@@ -816,8 +816,19 @@ pub const LocalGraphBuilder = struct {
 
         // 2. 图终端输出 (没有任何消费者的算子输出)
         for (self.graph.ops.items) |p| {
+            var any_output_consumed = false;
+            if (p.outputs.len > 1) {
+                for (p.outputs) |out_t| {
+                    if (self.consumers.contains(out_t)) {
+                        any_output_consumed = true;
+                        break;
+                    }
+                }
+            }
             for (p.outputs) |t| {
                 if (self.consumers.contains(t)) continue;
+                // 多输出算子（如 Split）中未被稀疏分支消费的未命名子输出属于死分支，不应导出为终端输出端口
+                if (p.outputs.len > 1 and any_output_consumed and t.name == null) continue;
                 const walk = try self.walkBack(t);
                 const pv = self.producerVertex(walk.origin);
                 if (pv == .external or pv == .transparent) continue;
