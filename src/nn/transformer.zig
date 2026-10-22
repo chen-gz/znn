@@ -338,27 +338,6 @@ pub const MoELayer = struct {
         }
     }
 
-    /// 判断混合专家层是否仍处于刚分配内存、尚未执行参数初始化的全零状态
-    fn isUninitialized(self: *const MoELayer) bool {
-        if (self.gate.weight.is_custom_initialized or self.gate.bias.is_custom_initialized) return false;
-        for (self.gate.weight.data) |v| {
-            if (v != 0.0) return false;
-        }
-        for (self.gate.bias.data) |v| {
-            if (v != 0.0) return false;
-        }
-        for (self.routed_experts) |exp| {
-            if (exp.c_fc.weight.is_custom_initialized or exp.c_proj.weight.is_custom_initialized) return false;
-            for (exp.c_fc.weight.data) |v| {
-                if (v != 0.0) return false;
-            }
-            for (exp.c_proj.weight.data) |v| {
-                if (v != 0.0) return false;
-            }
-        }
-        return true;
-    }
-
     pub fn forward(self: *const MoELayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
@@ -377,7 +356,6 @@ pub const MoELayer = struct {
             return error.ShapeMismatch;
         }
 
-        const N = x_2d.shape.dims[0];
         const E = self.num_routed_experts;
         const K = self.top_k;
         const arena = graph.arenaAllocator();
@@ -385,100 +363,45 @@ pub const MoELayer = struct {
         // 1. 门控打分: [N, D] -> [N, E]
         const gate_logits = try self.gate.forward(graph, x_2d);
 
-        // 2. 先对全量路由专家得分执行归一化指数函数 (Softmax)，再按前 K 项 (Top-K) 二值掩码截取门控权重
-        // 先执行归一化指数函数 (Softmax) 可保证即使在 K = 1 时，被选中专家的概率 p_i < 1，门控网络仍能获得非零梯度
+        // 2. 先对全量路由专家得分执行归一化指数函数 (Softmax)，再通过无分支前 K 项选择算子 (TopK)
+        // 提取每词元胜出的前 K 个门控概率 values [N, K] 与专家下标 indices [N, K]
         const raw_probs = try graph.softmax(gate_logits); // [N, E]
+        const topk = try graph.topK(raw_probs, K);
+        var topk_probs = topk.values; // [N, K]
 
-        const keep_node = try graph.tensorND(&.{ N, E }, false);
-        keep_node.is_buffer = true;
-        const scope = graph.currentScope();
-        if (scope.len > 0) {
-            keep_node.name = try std.fmt.allocPrint(arena, "{s}.top_k_mask", .{scope});
-        } else {
-            keep_node.setName("top_k_mask");
-        }
-        const keep_mask = keep_node.data;
-        @memset(keep_mask, 0.0);
-
-        const expert_active = try arena.alloc(bool, E);
-        @memset(expert_active, false);
-
-        const top_indices = try arena.alloc(usize, K);
-        const top_vals = try arena.alloc(f32, K);
-
-        // 对每一行寻找前 K 项 (Top-K) 个最大的索引
-        for (0..N) |row| {
-            const row_logits = gate_logits.data[row * E .. (row + 1) * E];
-
-            for (0..K) |k| {
-                top_indices[k] = k;
-                top_vals[k] = row_logits[k];
-            }
-            // 对初始 K 个按降序排列
-            for (0..K) |i| {
-                for (i + 1..K) |j| {
-                    if (top_vals[j] > top_vals[i]) {
-                        const tmp_v = top_vals[i];
-                        top_vals[i] = top_vals[j];
-                        top_vals[j] = tmp_v;
-                        const tmp_idx = top_indices[i];
-                        top_indices[i] = top_indices[j];
-                        top_indices[j] = tmp_idx;
-                    }
-                }
-            }
-
-            for (K..E) |e| {
-                const val = row_logits[e];
-                if (val > top_vals[K - 1]) {
-                    top_vals[K - 1] = val;
-                    top_indices[K - 1] = e;
-                    var pos = K - 1;
-                    while (pos > 0 and top_vals[pos] > top_vals[pos - 1]) : (pos -= 1) {
-                        const tmp_v = top_vals[pos - 1];
-                        top_vals[pos - 1] = top_vals[pos];
-                        top_vals[pos] = tmp_v;
-                        const tmp_idx = top_indices[pos - 1];
-                        top_indices[pos - 1] = top_indices[pos];
-                        top_indices[pos] = tmp_idx;
-                    }
-                }
-            }
-
-            for (0..K) |k| {
-                const e_idx = top_indices[k];
-                keep_mask[row * E + e_idx] = 1.0;
-                expert_active[e_idx] = true;
-            }
-        }
-
-        // 若模型处于参数初始化前的全零建图阶段，将全部路由专家加入计算图以完成完整参数发现与初始化
-        if (graph.enable_grad and self.isUninitialized()) {
-            @memset(expert_active, true);
-        }
-
-        var probs = try graph.mul(raw_probs, keep_node); // 严格置零非前 K 项 (Top-K) 概率
         if (self.norm_topk_prob and K > 1) {
-            const prob_sum = try graph.sum(probs, 1, true);
+            const prob_sum = try graph.sum(topk_probs, 1, true);
             const eps_sum = try graph.addScalar(prob_sum, 1e-12);
-            probs = try graph.div(probs, eps_sum);
+            topk_probs = try graph.div(topk_probs, eps_sum);
         }
-        const prob_cols = try graph.split(probs, E, 1); // E 个 [N, 1]
 
-        var acc: ?*Tensor = null;
+        // 3. 索引收集专家矩阵乘法 (GatherMatMul)：
+        // 直接按 topk.indices [N, K] 寻址被选中的 K 个专家权重并执行升维、高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活与降维，
+        // 复杂度严格为 O(N * K)，零主机端或数据依赖 if 分支
+        const fc_weights = try arena.alloc(*Tensor, E);
+        const fc_biases = try arena.alloc(*Tensor, E);
+        const proj_weights = try arena.alloc(*Tensor, E);
+        const proj_biases = try arena.alloc(*Tensor, E);
         for (self.routed_experts, 0..) |exp, e| {
-            if (!expert_active[e]) continue;
-            const exp_out = try exp.forward(graph, x_2d); // [N, D]
-            const weighted = try graph.mul(exp_out, prob_cols[e]); // [N, D] * [N, 1] -> [N, D]
-            if (acc) |a| {
-                acc = try graph.add(a, weighted);
-            } else {
-                acc = weighted;
-            }
+            fc_weights[e] = exp.c_fc.weight;
+            fc_biases[e] = exp.c_fc.bias;
+            proj_weights[e] = exp.c_proj.weight;
+            proj_biases[e] = exp.c_proj.bias;
         }
-        const total_routed = acc.?;
 
-        // 3. 计算常驻共享专家 (Shared Experts)
+        const routed_out = blk: {
+            const routed_scope = try graph.enterChildScope("routed_experts", "ModuleList");
+            defer routed_scope.exit();
+            const h1 = try graph.gatherMatMul(x_2d, topk.indices, fc_weights, fc_biases); // [N, K, hidden_dim]
+            const a1 = try graph.gelu(h1); // [N, K, hidden_dim]
+            break :blk try graph.gatherMatMul(a1, topk.indices, proj_weights, proj_biases); // [N, K, D]
+        };
+
+        const probs_3d = try graph.unsqueeze(topk_probs, 2); // [N, K, 1]
+        const weighted_routed = try graph.mul(routed_out, probs_3d); // [N, K, D]
+        const total_routed = try graph.sum(weighted_routed, 1, false); // [N, D]
+
+        // 4. 计算常驻共享专家 (Shared Experts)
         var total_shared: ?*Tensor = null;
         for (self.shared_experts) |exp| {
             const s_out = try exp.forward(graph, x_2d);
@@ -490,7 +413,7 @@ pub const MoELayer = struct {
             }
         }
 
-        // 4. 合并路由专家 (Routed Experts) 与共享专家 (Shared Experts)
+        // 5. 合并路由专家 (Routed Experts) 与共享专家 (Shared Experts)
         var final_2d = total_routed;
         if (total_shared) |s| {
             final_2d = try graph.add(total_routed, s);

@@ -724,6 +724,8 @@ pub const Graph = struct {
     pub const rope = graph_nn.rope;
     pub const batchMatMul = graph_nn.batchMatMul;
     pub const embedding = graph_nn.embedding;
+    pub const topK = graph_nn.topK;
+    pub const gatherMatMul = graph_nn.gatherMatMul;
     pub const q4MatMul = graph_nn.q4MatMul;
     pub const scaledDotProductAttention = graph_nn.scaledDotProductAttention;
 

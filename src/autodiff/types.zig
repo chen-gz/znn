@@ -61,6 +61,8 @@ pub const OpType = enum {
     Dropout, // 随机丢弃正则化
     RoPE, // 旋转位置编码 (Rotary Position Embedding, RoPE)
     Embedding, // 嵌入查找 (Embedding Lookup)
+    TopK, // 无分支前 K 大元素与下标选择 (Branchless Top-K Selection, TopK)
+    GatherMatMul, // 索引收集专家矩阵乘法 (Indexed Gather Matrix Multiplication, GatherMatMul)
 
     // --- 损失函数与正则化 (Loss Functions & Regularization) ---
     MseLoss, // 均方误差损失函数 (Mean Squared Error, MSE Loss)
@@ -124,6 +126,8 @@ pub const OpType = enum {
             .Dropout => "y = \\frac{m \\odot x}{1 - p}",
             .RoPE => "y_t = R_{\\Theta, t} x_t",
             .Embedding => "y = W_e[\\text{indices}]",
+            .TopK => "(v, \\text{idx}) = \\text{TopK}(x, k)",
+            .GatherMatMul => "y_{n, k} = x_{n, k} W_{\\text{idx}[n, k]} + b_{\\text{idx}[n, k]}",
             .MseLoss => "\\mathcal{L} = \\frac{1}{N} \\sum (y - \\hat{y})^2",
             .BceLoss => "\\mathcal{L} = -\\frac{1}{N} \\sum [y \\log \\hat{y} + (1-y) \\log(1-\\hat{y})]",
             .BceWithLogitsLoss => "\\mathcal{L} = \\max(x, 0) - x \\cdot y + \\log(1 + e^{-|x|})",
@@ -294,6 +298,13 @@ pub const OpContext = union(enum) {
         partial_rotary_factor: f32 = 1.0,
     },
     Embedding: void,
+    TopK: struct {
+        k: usize,
+    },
+    GatherMatMul: struct {
+        num_experts: usize,
+        has_bias: bool,
+    },
 
     // --- 损失函数与正则化 ---
     MseLoss: void,

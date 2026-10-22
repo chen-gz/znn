@@ -808,6 +808,11 @@ pub const Tensor = struct {
     pub const repeatKV = nn_kernels.repeatKV;
     pub const batchMatMul = nn_kernels.batchMatMul;
     pub const embedding = nn_kernels.embedding;
+    pub const TopKResult = nn_kernels.TopKResult;
+    pub const topKInto = nn_kernels.topKInto;
+    pub const topK = nn_kernels.topK;
+    pub const gatherMatMulInto = nn_kernels.gatherMatMulInto;
+    pub const gatherMatMul = nn_kernels.gatherMatMul;
 
     // --- Reductions, mutations, comparisons, slicing, and sorting delegated to reductions.zig ---
     pub const clone = reductions.clone;

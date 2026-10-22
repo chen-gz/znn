@@ -820,3 +820,100 @@ pub fn q4MatMul(
         false,
     );
 }
+
+/// 无分支前 K 大元素与下标选择算子 (Branchless Top-K Selection Operator, TopK)：
+/// 沿输入张量最后一维选出前 `k` 大元素 `values` 与对应专家下标 `indices`，
+/// 全程无数据依赖 `if` 跳转，反向传播将 `values.grad` 按 `indices` 路由回原位置。
+pub fn topK(self: *Graph, X: *Tensor, k: usize) !Tensor.TopKResult {
+    const allocator = self.arena.allocator();
+    const res = try X.topK(k, allocator);
+    const req_grad = self.enable_grad and X.requires_grad;
+
+    res.values.scope = self.currentScope();
+    res.values.requires_grad = req_grad;
+    if (req_grad) {
+        res.values.grad = try allocator.alloc(f32, res.values.data.len);
+        @memset(res.values.grad, 0.0);
+    }
+    try self.tensors.append(self.backing_allocator, res.values);
+
+    res.indices.scope = self.currentScope();
+    res.indices.requires_grad = false;
+    try self.tensors.append(self.backing_allocator, res.indices);
+
+    if (self.enable_grad) {
+        const inps = try allocator.alloc(*Tensor, 1);
+        inps[0] = X;
+        const outs = try allocator.alloc(*Tensor, 2);
+        outs[0] = res.values;
+        outs[1] = res.indices;
+
+        const o = try allocator.create(Op);
+        o.* = Op{
+            .op_type = .TopK,
+            .inputs = inps,
+            .outputs = outs,
+            .context = .{ .TopK = .{ .k = k } },
+        };
+        res.values.creator = o.handle();
+        res.indices.creator = o.handle();
+        try self.recordOp(o);
+    }
+
+    return res;
+}
+
+/// 索引收集专家矩阵乘法算子 (Indexed Gather Matrix Multiplication Operator, GatherMatMul)：
+/// 根据 `indices` (`[N, K]`) 对每个词元选中的 `K` 个专家权重 `weights[e]`（及可选偏置 `biases[e]`）
+/// 直接寻址并执行矩阵乘法，仅激活 `K` 个被选中专家且无任何主机端或数据依赖 `if` 分支。
+pub fn gatherMatMul(
+    self: *Graph,
+    X: *Tensor,
+    indices: *Tensor,
+    weights: []const *Tensor,
+    biases: ?[]const *Tensor,
+) !*Tensor {
+    const allocator = self.arena.allocator();
+    const E = weights.len;
+    const has_bias = biases != null;
+    const Y = try X.gatherMatMul(indices, weights, biases, allocator);
+
+    var req_grad = false;
+    if (self.enable_grad) {
+        if (X.requires_grad) req_grad = true;
+        for (weights) |w| {
+            if (w.requires_grad) req_grad = true;
+        }
+        if (biases) |bs| {
+            for (bs) |b| {
+                if (b.requires_grad) req_grad = true;
+            }
+        }
+    }
+
+    const total_inputs = 2 + E + (if (has_bias) E else 0);
+    const inps = try allocator.alloc(*Tensor, total_inputs);
+    inps[0] = X;
+    inps[1] = indices;
+    for (weights, 0..) |w, i| {
+        inps[2 + i] = w;
+    }
+    if (biases) |bs| {
+        for (bs, 0..) |b, i| {
+            inps[2 + E + i] = b;
+        }
+    }
+
+    return self.registerSingleOutputOp(
+        Y,
+        inps,
+        .GatherMatMul,
+        .{
+            .GatherMatMul = .{
+                .num_experts = E,
+                .has_bias = has_bias,
+            },
+        },
+        req_grad,
+    );
+}

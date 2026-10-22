@@ -297,8 +297,8 @@
   - [ ] `KVCache` 支持动态扩容与分页块分配（Paged KV Cache），提升自回归解码吞吐。
   - [x] 在 [`CausalSelfAttention`](../src/nn/attention.zig) 中支持 **Grouped-Query Attention (GQA)** 与 **Multi-Query Attention (MQA)**。
   - [x] 实现 **Multi-Head Latent Attention (MLA)** 与极简低秩 `MLACache` 矩阵吸收推理。
-  - [x] 实现混合专家前馈网络 **MoELayer**（DeepSeekMoE 细粒度路由、共享专家、先 Softmax 后 Top-K 掩码门控与 `expert_active` 专家级稀疏跳过）。
-  - [ ] **MoELayer Token 级 Gather/Scatter 分发**：按专家 gather 选中 Token 子集 → 专家前向 → scatter-add 加权合并（固定容量填充以获得静态形状，设计 Phase 3）。
+  - [x] 实现混合专家前馈网络 **MoELayer**（DeepSeekMoE 细粒度路由、共享专家、无分支 `TopK` + `GatherMatMul` 索引收集矩阵乘法，实现零主机端/数据依赖 `if` 分支的 $O(N \cdot K)$ 稀疏专家执行）。
+  - [x] **MoELayer Token 级 Gather/Scatter 分发**：通过一等算子 `TopK` 与 `GatherMatMul` 按 `(n, k)` 索引直接寻址被选中的 $K$ 个专家权重并在静态形状 `[N, K, D]` 上完成前向与反向归约。
   - [x] 实现强化学习 **GRPO** (Group Relative Policy Optimization) 组内优势函数与带 KL 惩罚损失函数。
 
 - [x] **3.2 解耦优化器与训练基建 (Optimizers & Training Infrastructure)**

@@ -116,17 +116,21 @@ fn isParam(t: *const Tensor) bool {
     return t.creator == null and t.requires_grad;
 }
 
-/// 算子所属模块：以创建时记录的作用域为准；若算子的参数属于该作用域更深层的子模块
-/// (子模块 forward 未接入作用域栈)，则以参数所属模块为准。
+/// 算子所属模块：以创建时记录的作用域为准；若算子的全部参数均属于该作用域内更深层的公共子模块
+/// (例如子模块 forward 未接入作用域栈)，则取各参数所属模块的最近公共祖先作用域。
 pub fn opScope(op: *const Op) []const u8 {
-    var s = op.scope;
+    var param_common: ?[]const u8 = null;
     for (op.inputs) |inp| {
         if (!isParam(inp)) continue;
         const n = inp.name orelse continue;
         const ps = extractModuleScope(n) orelse continue;
-        if (ps.len > s.len and isWithinScope(ps, s)) s = ps;
+        if (!isWithinScope(ps, op.scope)) continue;
+        param_common = if (param_common) |pc| commonScope(pc, ps) else ps;
     }
-    return s;
+    if (param_common) |pc| {
+        if (pc.len > op.scope.len) return pc;
+    }
+    return op.scope;
 }
 
 /// 张量所属模块：算子输出取其算子作用域；参数取其名称前缀；输入与常量取创建时的作用域
@@ -382,10 +386,10 @@ pub fn collectGraphOps(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayLi
         const elements = out.data.len;
         const bytes = elements * @sizeOf(f32);
 
-        var inp_shape_buf: [256]u8 = undefined;
-        var inp_shape_len: usize = 0;
-        var param_shape_buf: [256]u8 = undefined;
-        var param_shape_len: usize = 0;
+        var inp_shape_list: std.ArrayList(u8) = .empty;
+        defer inp_shape_list.deinit(allocator);
+        var param_shape_list: std.ArrayList(u8) = .empty;
+        defer param_shape_list.deinit(allocator);
 
         for (op.inputs) |inp| {
             var s_buf: [64]u8 = undefined;
@@ -407,31 +411,27 @@ pub fn collectGraphOps(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayLi
 
             if (isParam(inp)) {
                 const p_name = if (inp.name) |pn| (if (std.mem.lastIndexOf(u8, pn, ".")) |dot| pn[dot + 1 ..] else pn) else "param";
-                if (param_shape_len > 0) {
-                    param_shape_buf[param_shape_len] = ',';
-                    param_shape_buf[param_shape_len + 1] = ' ';
-                    param_shape_len += 2;
+                if (param_shape_list.items.len > 0) {
+                    try param_shape_list.appendSlice(allocator, ", ");
                 }
-                const formatted = std.fmt.bufPrint(param_shape_buf[param_shape_len..], "{s}: {s}", .{ p_name, single_shape }) catch "";
-                param_shape_len += formatted.len;
+                const formatted = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ p_name, single_shape });
+                defer allocator.free(formatted);
+                try param_shape_list.appendSlice(allocator, formatted);
             } else {
-                if (inp_shape_len > 0) {
-                    inp_shape_buf[inp_shape_len] = ',';
-                    inp_shape_buf[inp_shape_len + 1] = ' ';
-                    inp_shape_len += 2;
+                if (inp_shape_list.items.len > 0) {
+                    try inp_shape_list.appendSlice(allocator, ", ");
                 }
-                const formatted = std.fmt.bufPrint(inp_shape_buf[inp_shape_len..], "{s}", .{single_shape}) catch "";
-                inp_shape_len += formatted.len;
+                try inp_shape_list.appendSlice(allocator, single_shape);
             }
         }
 
-        const input_shape = if (inp_shape_len > 0)
-            try allocator.dupe(u8, inp_shape_buf[0..inp_shape_len])
+        const input_shape = if (inp_shape_list.items.len > 0)
+            try allocator.dupe(u8, inp_shape_list.items)
         else
             try allocator.dupe(u8, "None");
 
-        const param_shape = if (param_shape_len > 0)
-            try allocator.dupe(u8, param_shape_buf[0..param_shape_len])
+        const param_shape = if (param_shape_list.items.len > 0)
+            try allocator.dupe(u8, param_shape_list.items)
         else
             try allocator.dupe(u8, "None (Stateless)");
 

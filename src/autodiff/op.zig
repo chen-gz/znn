@@ -333,6 +333,16 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         .Embedding => {
             copyFromEager(self.outputs[0], try self.inputs[0].embedding(self.inputs[1], allocator), allocator);
         },
+        .TopK => {
+            try self.inputs[0].topKInto(self.context.TopK.k, self.outputs[0], self.outputs[1]);
+        },
+        .GatherMatMul => {
+            const ctx = self.context.GatherMatMul;
+            const E = ctx.num_experts;
+            const weights = self.inputs[2 .. 2 + E];
+            const biases: ?[]const *Tensor = if (ctx.has_bias) self.inputs[2 + E .. 2 + 2 * E] else null;
+            try self.inputs[0].gatherMatMulInto(self.inputs[1], weights, biases, self.outputs[0]);
+        },
         .L2Loss => {
             copyFromEager(self.outputs[0], try self.inputs[0].l2Loss(self.context.L2Loss.lambda, allocator), allocator);
         },
@@ -464,6 +474,8 @@ pub fn backward(self: *Op) !void {
         .RoPE,
         .BatchMatMul,
         .Embedding,
+        .TopK,
+        .GatherMatMul,
         => try backward_nn.backwardNN(self),
 
         .L2Loss,

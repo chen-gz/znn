@@ -265,6 +265,13 @@ pub fn computeParamFans(self: *const Graph, t: *const Tensor) ParamFans {
                 if (op.inputs[1] == t) return .{ .fan_in = rows, .fan_out = cols };
                 if (op.inputs[0] == t) return .{ .fan_in = cols, .fan_out = rows };
             },
+            .GatherMatMul => {
+                if (dims.len != 2 or op.inputs.len < 3) continue;
+                const E = op.context.GatherMatMul.num_experts;
+                for (op.inputs[2 .. 2 + E]) |w_inp| {
+                    if (w_inp == t) return .{ .fan_in = dims[0], .fan_out = dims[1] };
+                }
+            },
             .Conv1D => {
                 if (dims.len != 3 or op.inputs.len < 2 or op.inputs[1] != t) continue;
                 const receptive = dims[2];
@@ -457,7 +464,7 @@ pub fn detectConsumerActivation(self: *Graph, target: *Tensor) init_mod.Nonlinea
                         .Gelu => return .gelu,
                         .Silu => return .silu,
                         .LeakyRelu => return .{ .leaky_relu = op.context.LeakyRelu.alpha },
-                        .MatMul, .Conv1D, .Conv2D, .ConvTranspose1D, .ConvTranspose2D => {
+                        .MatMul, .GatherMatMul, .Conv1D, .Conv2D, .ConvTranspose1D, .ConvTranspose2D => {
                             if (!passed_projection and op.outputs.len > 0) {
                                 passed_projection = true;
                                 current = op.outputs[0];
