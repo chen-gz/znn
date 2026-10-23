@@ -1600,6 +1600,8 @@ fn runWholeModelScaleBenchmarks(
             allocator: std.mem.Allocator,
             prompt16: [16]usize,
             prompt8: [8]usize,
+            /// 带 1.25 重复惩罚的贪婪采样：基准测量确定性的解码路径
+            sampler: backend.sampling.Sampler = .init(.{ .temperature = 0.0, .repetition_penalty = 1.25 }),
 
             pub fn init(alloc: std.mem.Allocator) !@This() {
                 var init_threaded = std.Io.Threaded.init(alloc, .{});
@@ -1660,7 +1662,7 @@ fn runWholeModelScaleBenchmarks(
                     .io = self.s.threaded.io(),
                 });
                 defer g.deinit();
-                var next_tok = try self.s.model.prefill(&g, &self.s.prompt16, &self.s.cache, 1.25);
+                var next_tok = try self.s.model.prefill(&g, &self.s.prompt16, &self.s.cache, &self.s.sampler);
                 std.mem.doNotOptimizeAway(&next_tok);
             }
         };
@@ -1674,7 +1676,7 @@ fn runWholeModelScaleBenchmarks(
                 .io = shared.threaded.io(),
             });
             defer g_init.deinit();
-            _ = try shared.model.prefill(&g_init, &shared.prompt8, &shared.cache, 1.25);
+            _ = try shared.model.prefill(&g_init, &shared.prompt8, &shared.cache, &shared.sampler);
         }
 
         const F32DecodeRunner = struct {
@@ -1687,7 +1689,7 @@ fn runWholeModelScaleBenchmarks(
                     .io = self.s.threaded.io(),
                 });
                 defer g.deinit();
-                var next_tok = try self.s.model.decodeStep(&g, 42, &self.s.cache, &self.s.prompt16, 1.25);
+                var next_tok = try self.s.model.decodeStep(&g, 42, &self.s.cache, &self.s.prompt16, &self.s.sampler);
                 std.mem.doNotOptimizeAway(&next_tok);
             }
         };
@@ -1709,7 +1711,7 @@ fn runWholeModelScaleBenchmarks(
                         .io = self.s.threaded.io(),
                     });
                     defer g_pre.deinit();
-                    const first_tok = try self.s.model.prefill(&g_pre, history_buf[0..history_len], &self.s.cache, 1.25);
+                    const first_tok = try self.s.model.prefill(&g_pre, history_buf[0..history_len], &self.s.cache, &self.s.sampler);
                     history_buf[history_len] = first_tok;
                     history_len += 1;
                 }
@@ -1722,7 +1724,7 @@ fn runWholeModelScaleBenchmarks(
                         .io = self.s.threaded.io(),
                     });
                     defer g_dec.deinit();
-                    cur_tok = try self.s.model.decodeStep(&g_dec, cur_tok, &self.s.cache, history_buf[0..history_len], 1.25);
+                    cur_tok = try self.s.model.decodeStep(&g_dec, cur_tok, &self.s.cache, history_buf[0..history_len], &self.s.sampler);
                     history_buf[history_len] = cur_tok;
                     history_len += 1;
                 }
@@ -1756,6 +1758,8 @@ fn runWholeModelScaleBenchmarks(
             allocator: std.mem.Allocator,
             prompt16: [16]usize,
             prompt8: [8]usize,
+            /// 带 1.25 重复惩罚的贪婪采样：基准测量确定性的解码路径
+            sampler: backend.sampling.Sampler = .init(.{ .temperature = 0.0, .repetition_penalty = 1.25 }),
 
             pub fn init(alloc: std.mem.Allocator, mmap_slice: []const u8) !@This() {
                 var model = try BenchQ4Model.loadFromMmap(alloc, mmap_slice);
@@ -1800,7 +1804,7 @@ fn runWholeModelScaleBenchmarks(
                     .io = self.s.threaded.io(),
                 });
                 defer g.deinit();
-                var next_tok = try self.s.model.prefill(&g, &self.s.prompt16, &self.s.cache, self.s.mmap_bytes, 1.25);
+                var next_tok = try self.s.model.prefill(&g, &self.s.prompt16, &self.s.cache, self.s.mmap_bytes, &self.s.sampler);
                 std.mem.doNotOptimizeAway(&next_tok);
             }
         };
@@ -1814,7 +1818,7 @@ fn runWholeModelScaleBenchmarks(
                 .io = shared_q4.threaded.io(),
             });
             defer g_init.deinit();
-            _ = try shared_q4.model.prefill(&g_init, &shared_q4.prompt8, &shared_q4.cache, shared_q4.mmap_bytes, 1.25);
+            _ = try shared_q4.model.prefill(&g_init, &shared_q4.prompt8, &shared_q4.cache, shared_q4.mmap_bytes, &shared_q4.sampler);
         }
 
         const Q4DecodeRunner = struct {
@@ -1827,7 +1831,7 @@ fn runWholeModelScaleBenchmarks(
                     .io = self.s.threaded.io(),
                 });
                 defer g.deinit();
-                var next_tok = try self.s.model.decodeStep(&g, 42, &self.s.cache, self.s.mmap_bytes, &self.s.prompt16, 1.25);
+                var next_tok = try self.s.model.decodeStep(&g, 42, &self.s.cache, self.s.mmap_bytes, &self.s.prompt16, &self.s.sampler);
                 std.mem.doNotOptimizeAway(&next_tok);
             }
         };
@@ -1849,7 +1853,7 @@ fn runWholeModelScaleBenchmarks(
                         .io = self.s.threaded.io(),
                     });
                     defer g_pre.deinit();
-                    const first_tok = try self.s.model.prefill(&g_pre, history_buf[0..history_len], &self.s.cache, self.s.mmap_bytes, 1.25);
+                    const first_tok = try self.s.model.prefill(&g_pre, history_buf[0..history_len], &self.s.cache, self.s.mmap_bytes, &self.s.sampler);
                     history_buf[history_len] = first_tok;
                     history_len += 1;
                 }
@@ -1862,7 +1866,7 @@ fn runWholeModelScaleBenchmarks(
                         .io = self.s.threaded.io(),
                     });
                     defer g_dec.deinit();
-                    cur_tok = try self.s.model.decodeStep(&g_dec, cur_tok, &self.s.cache, self.s.mmap_bytes, history_buf[0..history_len], 1.25);
+                    cur_tok = try self.s.model.decodeStep(&g_dec, cur_tok, &self.s.cache, self.s.mmap_bytes, history_buf[0..history_len], &self.s.sampler);
                     history_buf[history_len] = cur_tok;
                     history_len += 1;
                 }

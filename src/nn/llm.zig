@@ -468,7 +468,9 @@ fn sampleFromPrefix(prefix: []const SampleCandidate, mass: f32, random: std.Rand
 
 /// 核采样 / 累积概率阈值采样 (Nucleus Sampling, Top-P，带温度系数 Temperature)：
 /// 按概率降序取累积概率首次达到 `top_p` 的最小词元集合 (核)，在核内按重新归一化的概率采样；
-/// `top_p <= 0` 时退化为贪心解码 (Greedy Decoding)，`top_p >= 1` 时在全词表上采样
+/// `top_p <= 0` 时退化为贪心解码 (Greedy Decoding)，`top_p >= 1` 时在全词表上采样。
+/// 每次调用对完整词表排序 (O(V log V))，适合小词表训练示例；大词表推理 (如 Gemma 4) 使用
+/// `backend.sampling.Sampler` 的部分选择实现
 pub fn sampleTopP(
     logits: []const f32,
     vocab_size: usize,
@@ -494,7 +496,8 @@ pub fn sampleTopP(
     return sampleFromPrefix(candidates[0..nucleus_len], nucleus_mass, random);
 }
 
-/// Top-K 截断采样 (带温度系数 Temperature)：只在概率最大的 `k` 个词元内按重新归一化的概率采样，`k` 必须大于 0
+/// Top-K 截断采样 (带温度系数 Temperature)：只在概率最大的 `k` 个词元内按重新归一化的概率采样，`k` 必须大于 0。
+/// 与 `sampleTopP` 一样对完整词表排序，大词表推理使用 `backend.sampling.Sampler`
 pub fn sampleTopK(
     logits: []const f32,
     vocab_size: usize,

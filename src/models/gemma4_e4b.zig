@@ -16,6 +16,7 @@ pub const Q4Weights = backend.offload.Q4Weights;
 pub const Stream = backend.offload.Stream;
 pub const GpuKvCache = backend.offload.GpuKvCache;
 const TokenExclusionMask = backend.offload.TokenExclusionMask;
+const Sampler = backend.sampling.Sampler;
 pub const TensorMeta = nn.TensorMeta;
 pub const SafetensorsArchive = nn.SafetensorsArchive;
 
@@ -308,7 +309,7 @@ pub const Gemma4E4BModel = struct {
 
     config: Gemma4Config,
     stream: Stream,
-    /// 与 `config.sampling_excluded_tokens` 一致的 GPU 词表排除掩码 (贪婪 argmax 前叠加)
+    /// 与 `config.sampling_excluded_tokens` 一致的 GPU 词表排除掩码 (贪婪 argmax 与随机采样候选选择前叠加)
     exclusion_mask: TokenExclusionMask,
 
     // 全部独立 KV 层 (num_kv_layers 个) 的块式预分配显存键值缓存 (Pre-allocated Chunked GPU Key-Value Cache)
@@ -1130,7 +1131,8 @@ pub const Gemma4E4BModel = struct {
         }
     }
 
-    /// 异步预填充阶段 (Async Prefill)：构建预填充计算图并返回 GPU 上的首词元 ID 张量 (`shape = [1], dtype = uint32`)
+    /// 异步预填充阶段 (Async Prefill)：构建预填充计算图并返回 GPU 上的首词元 ID 张量 (`shape = [1], dtype = uint32`)。
+    /// 只做不带重复惩罚的贪婪采样 (排除掩码后 argmax)，供双阶段异步流水线使用；随机采样走同步的 `prefill`
     pub fn prefillAsync(
         self: *Gemma4E4BModel,
         prompt_tokens: []const usize,
@@ -1153,7 +1155,8 @@ pub const Gemma4E4BModel = struct {
         return best_tok_arr;
     }
 
-    /// 异步单步解码阶段 (Async Pipelined Decode Step)：直接消费上一步在 GPU 上的词元张量 (`shape = [1]`) 构建下一步计算图并异步派发至 Metal 流水线
+    /// 异步单步解码阶段 (Async Pipelined Decode Step)：直接消费上一步在 GPU 上的词元张量 (`shape = [1]`) 构建下一步计算图并异步派发至 Metal 流水线。
+    /// 与 `prefillAsync` 一样只做不带重复惩罚的贪婪采样；随机采样走同步的 `decodeStep`
     pub fn decodeStepAsync(
         self: *Gemma4E4BModel,
         tok_arr: mlx.Array,
@@ -1170,13 +1173,15 @@ pub const Gemma4E4BModel = struct {
         return best_tok_arr;
     }
 
-    /// 预填充阶段 (Prefill)：处理 Prompt 词元并初始化 GPU KVCache，返回首个预测词元
+    /// 预填充阶段 (Prefill)：处理 Prompt 词元并初始化 GPU KVCache，按 sampler 返回首个预测词元。
+    /// 不带重复惩罚的贪婪采样复用 `prefillAsync` 的设备端 argmax；其余情况 (带惩罚的贪婪采样、随机采样) 由
+    /// `gemma4_gpu.selectToken` 选取，重复惩罚作用于完整的 Prompt 词元
     pub fn prefill(
         self: *Gemma4E4BModel,
         prompt_tokens: []const usize,
-        repetition_penalty: f32,
+        sampler: *Sampler,
     ) !usize {
-        if (!backend.sampling.penaltyActive(repetition_penalty)) {
+        if (sampler.options.isPlainGreedy()) {
             var best_tok_arr = try self.prefillAsync(prompt_tokens);
             defer best_tok_arr.deinit();
             return @intCast(try best_tok_arr.itemUint32());
@@ -1193,17 +1198,17 @@ pub const Gemma4E4BModel = struct {
         var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, 0, T, s);
         defer logits_bf16.deinit();
 
-        const best_tok = try gemma4_gpu.selectToken(logits_bf16, self.config, &self.exclusion_mask, prompt_tokens, repetition_penalty, s);
+        const best_tok = try gemma4_gpu.selectToken(self.allocator, logits_bf16, self.config, &self.exclusion_mask, prompt_tokens, sampler, s);
         self.curr_len = T;
         return best_tok;
     }
 
-    /// 单步自回归解码 (Autoregressive Decode Step)
+    /// 单步自回归解码 (Autoregressive Decode Step)：按 sampler 选取下一个词元，重复惩罚作用于完整的 history_tokens
     pub fn decodeStep(
         self: *Gemma4E4BModel,
         tok: usize,
         history_tokens: []const usize,
-        repetition_penalty: f32,
+        sampler: *Sampler,
     ) !usize {
         const s = self.stream;
         const pos = self.curr_len;
@@ -1211,7 +1216,7 @@ pub const Gemma4E4BModel = struct {
         var indices_arr = try self.createTokenIndicesArray(&.{tok});
         defer indices_arr.deinit();
 
-        if (!backend.sampling.penaltyActive(repetition_penalty)) {
+        if (sampler.options.isPlainGreedy()) {
             var best_tok_arr = try self.decodeStepAsync(indices_arr);
             defer best_tok_arr.deinit();
             return @intCast(try best_tok_arr.itemUint32());
@@ -1220,7 +1225,7 @@ pub const Gemma4E4BModel = struct {
         var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, pos, 1, s);
         defer logits_bf16.deinit();
 
-        const best_tok = try gemma4_gpu.selectToken(logits_bf16, self.config, &self.exclusion_mask, history_tokens, repetition_penalty, s);
+        const best_tok = try gemma4_gpu.selectToken(self.allocator, logits_bf16, self.config, &self.exclusion_mask, history_tokens, sampler, s);
         self.curr_len = pos + 1;
         return best_tok;
     }

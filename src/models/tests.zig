@@ -218,7 +218,8 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         defer g_prefill.deinit();
 
         const prompt = [_]usize{ 2, 10, 25 };
-        const next_1 = try mmap_model.prefill(&g_prefill, &prompt, &cache, mock_mmap, 1.0);
+        var greedy = sampling.Sampler.init(.greedy);
+        const next_1 = try mmap_model.prefill(&g_prefill, &prompt, &cache, mock_mmap, &greedy);
         try std.testing.expectEqual(@as(usize, 3), cache.layers[0].curr_len);
         try std.testing.expect(next_1 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
 
@@ -231,7 +232,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         var g_decode = autodiff.Graph.initDefault(allocator);
         defer g_decode.deinit();
 
-        const next_2 = try mmap_model.decodeStep(&g_decode, next_1, &cache, mock_mmap, &prompt, 1.0);
+        const next_2 = try mmap_model.decodeStep(&g_decode, next_1, &cache, mock_mmap, &prompt, &greedy);
         try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
         try std.testing.expect(next_2 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
 
@@ -241,14 +242,14 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
             var g_gpu_prefill = autodiff.Graph.init(allocator, .{ .device = .gpu });
             defer g_gpu_prefill.deinit();
 
-            const next_gpu_1 = try mmap_model.prefill(&g_gpu_prefill, &prompt, &cache, mock_mmap, 1.0);
+            const next_gpu_1 = try mmap_model.prefill(&g_gpu_prefill, &prompt, &cache, mock_mmap, &greedy);
             try std.testing.expectEqual(@as(usize, 3), cache.layers[0].curr_len);
             try std.testing.expectEqual(next_1, next_gpu_1);
 
             var g_gpu_decode = autodiff.Graph.init(allocator, .{ .device = .gpu });
             defer g_gpu_decode.deinit();
 
-            const next_gpu_2 = try mmap_model.decodeStep(&g_gpu_decode, next_gpu_1, &cache, mock_mmap, &prompt, 1.0);
+            const next_gpu_2 = try mmap_model.decodeStep(&g_gpu_decode, next_gpu_1, &cache, mock_mmap, &prompt, &greedy);
             try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
             try std.testing.expectEqual(next_2, next_gpu_2);
 
@@ -258,7 +259,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
             defer g_gpu_spec.deinit();
 
             const input_spec = [_]usize{ next_gpu_2, 10, 25 };
-            const num_acc = try mmap_model.decodeSpeculative(&g_gpu_spec, &input_spec, &cache, mock_mmap, &prompt, 1.0, &accepted_buf);
+            const num_acc = try mmap_model.decodeSpeculative(&g_gpu_spec, &input_spec, &cache, mock_mmap, &prompt, &greedy, &accepted_buf);
             try std.testing.expect(num_acc >= 1);
         }
 
@@ -474,19 +475,20 @@ test "Gemma 4 inference entry points reject invalid prompts instead of reading o
 
     var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer g.deinit();
+    var greedy = sampling.Sampler.init(.greedy);
 
     // 提示词超出键值缓存容量
-    try std.testing.expectError(error.ContextWindowExceeded, model.prefill(&g, &.{ 2, 3, 4, 5, 6 }, &cache, 1.0));
+    try std.testing.expectError(error.ContextWindowExceeded, model.prefill(&g, &.{ 2, 3, 4, 5, 6 }, &cache, &greedy));
     // 词元 ID 越界与空提示词
-    try std.testing.expectError(error.InvalidTokenId, model.prefill(&g, &.{ 2, 128 }, &cache, 1.0));
-    try std.testing.expectError(error.EmptyPrompt, model.prefill(&g, &.{}, &cache, 1.0));
+    try std.testing.expectError(error.InvalidTokenId, model.prefill(&g, &.{ 2, 128 }, &cache, &greedy));
+    try std.testing.expectError(error.EmptyPrompt, model.prefill(&g, &.{}, &cache, &greedy));
 
     // 缓存写满后增量解码返回错误
-    _ = try model.prefill(&g, &.{ 2, 3, 4 }, &cache, 1.0);
-    _ = try model.decodeStep(&g, 5, &cache, &.{ 2, 3, 4 }, 1.0);
+    _ = try model.prefill(&g, &.{ 2, 3, 4 }, &cache, &greedy);
+    _ = try model.decodeStep(&g, 5, &cache, &.{ 2, 3, 4 }, &greedy);
     try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
-    try std.testing.expectError(error.ContextWindowExceeded, model.decodeStep(&g, 6, &cache, &.{ 2, 3, 4, 5 }, 1.0));
-    try std.testing.expectError(error.InvalidTokenId, model.decodeStep(&g, 1000, &cache, &.{2}, 1.0));
+    try std.testing.expectError(error.ContextWindowExceeded, model.decodeStep(&g, 6, &cache, &.{ 2, 3, 4, 5 }, &greedy));
+    try std.testing.expectError(error.InvalidTokenId, model.decodeStep(&g, 1000, &cache, &.{2}, &greedy));
 }
 
 /// 对构造函数的每一次内存分配依次注入失败，断言构造返回 OutOfMemory 且已分配内存全部释放。
@@ -592,8 +594,9 @@ test "Gemma4Q4 mmap loader reads per-layer norms and layer_scalar in storage ord
     defer cache.deinit(allocator);
     var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer g.deinit();
-    try std.testing.expectError(error.InvalidTokenId, model.prefill(&g, &.{ 2, cfg.vocab_size }, &cache, bytes, 1.0));
-    try std.testing.expectError(error.EmptyPrompt, model.prefill(&g, &.{}, &cache, bytes, 1.0));
+    var greedy = sampling.Sampler.init(.greedy);
+    try std.testing.expectError(error.InvalidTokenId, model.prefill(&g, &.{ 2, cfg.vocab_size }, &cache, bytes, &greedy));
+    try std.testing.expectError(error.EmptyPrompt, model.prefill(&g, &.{}, &cache, bytes, &greedy));
 }
 
 test "Gemma4Q4 direct layout keeps packed u32 weights 4-byte aligned" {
@@ -891,4 +894,266 @@ test "Gemma4Vocabulary encode falls back to <0xNN> byte tokens instead of droppi
     // 词表缺少字节词元 <0x64> ('d') 时返回错误而不是静默丢弃
     try std.testing.expectError(error.UnencodableByte, vocab.encode(allocator, "ad"));
     try std.testing.expectEqual(@as(usize, 3), try vocab.byteToken('c'));
+}
+
+// ============================================================================
+// 随机采样 (Stochastic Sampling)：官方生成配置、CPU LM Head 采样顺序、种子可复现性与 GPU 候选选择
+// ============================================================================
+
+test "Gemma 4 default generation options match the official generation_config.json" {
+    inline for (.{ gemma4.Gemma4Config.default, gemma4.Gemma4Config.e4b, gemma4.Gemma4Config.tiny_test }) |cfg| {
+        const gen = cfg.generation;
+        try std.testing.expectEqual(@as(f32, 1.0), gen.temperature);
+        try std.testing.expectEqual(@as(usize, 64), gen.top_k);
+        try std.testing.expectEqual(@as(f32, 0.95), gen.top_p);
+        try std.testing.expectEqual(@as(f32, 1.0), gen.repetition_penalty);
+        try std.testing.expect(!gen.isGreedy());
+        // 官方 suppress_tokens [258882, 258883] 落在采样排除集合内
+        try std.testing.expect(cfg.isSamplingExcluded(258882) and cfg.isSamplingExcluded(258883));
+    }
+}
+
+test "Gemma 4 CPU LM head sampling applies softcap, penalty and exclusion before the shared finisher" {
+    const allocator = std.testing.allocator;
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+
+    const raw = [_]f32{ 100.0, 1.5, 10.0, -1.0, 0.5, 50.0, 40.0, 1.0 };
+    var embed: [16]f32 = undefined;
+    for (raw, 0..) |r, v| {
+        embed[v * 2] = r;
+        embed[v * 2 + 1] = 0.0;
+    }
+    const h = [_]f32{ 1.0, 0.0 };
+    const cfg = tiny_sampling_config;
+    const recent = [_]usize{ 2, 2, 4 };
+
+    // 完整对数几率即截断后的点积
+    var logits: [8]f32 = undefined;
+    try gemma4.lmHeadLogitsCpu(cfg, f32, &g, &embed, &h, &logits);
+    for (raw, logits) |r, l| try std.testing.expectApproxEqAbs(gemma4.softcapLogit(r, cfg.final_logit_softcapping), l, 1e-6);
+
+    // 贪婪采样 (温度 <= 0 或 top_k == 1) 走融合快车道，与 greedyLmHeadCpu 一致
+    for ([_]sampling.SamplingOptions{
+        .{ .temperature = 0.0, .repetition_penalty = 2.0 },
+        .{ .temperature = 0.8, .top_k = 1, .repetition_penalty = 2.0 },
+    }) |opts| {
+        var sampler = sampling.Sampler.init(opts);
+        try std.testing.expectEqual(
+            try gemma4.greedyLmHeadCpu(cfg, f32, &g, &embed, &h, &recent, 2.0),
+            try gemma4.sampleLmHeadCpu(cfg, f32, &g, &embed, &h, &recent, &sampler),
+        );
+    }
+
+    // 随机采样与「截断 → 惩罚 → 排除 → Sampler.sampleLogits」的参考流程逐词元一致
+    var processed = logits;
+    try sampling.applyRepetitionPenaltyInPlace(allocator, &processed, &recent, 2.0);
+    sampling.maskExcludedInPlace(&processed, cfg.sampling_excluded_tokens);
+    const opts = sampling.SamplingOptions{ .temperature = 1.5, .top_k = 4, .top_p = 0.9, .repetition_penalty = 2.0, .seed = 31 };
+    var model_sampler = sampling.Sampler.init(opts);
+    var reference = sampling.Sampler.init(opts);
+    var seen: [8]bool = @splat(false);
+    for (0..400) |_| {
+        const tok = try gemma4.sampleLmHeadCpu(cfg, f32, &g, &embed, &h, &recent, &model_sampler);
+        try std.testing.expectEqual(try reference.sampleLogits(g.executor(), allocator, &processed), tok);
+        try std.testing.expect(!cfg.isSamplingExcluded(tok));
+        seen[tok] = true;
+    }
+    // 受罚后的词元 2 仍在前 K 候选之内，被抽中过
+    try std.testing.expect(seen[2] and seen[1]);
+}
+
+/// 只初始化词嵌入的 TinyGemma4 (投影权重为零，隐状态经残差直通)：对数几率完全由词嵌入决定
+fn initTinyGemma4ForSampling(allocator: std.mem.Allocator) !gemma4.TinyGemma4 {
+    const model = try gemma4.TinyGemma4.initInference(allocator);
+    var prng = std.Random.DefaultPrng.init(2026);
+    fillNormal(model.embed_tokens.weight.data, prng.random(), 0.3);
+    return model;
+}
+
+/// 预填充后连续增量解码，返回生成的 n 个词元
+fn generateTinyF32(
+    model: *const gemma4.TinyGemma4,
+    allocator: std.mem.Allocator,
+    cache: *gemma4.Gemma4KVCache,
+    prompt: []const usize,
+    sampler: *sampling.Sampler,
+    out: []usize,
+) !void {
+    var history: std.ArrayList(usize) = .empty;
+    defer history.deinit(allocator);
+    try history.appendSlice(allocator, prompt);
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+    for (out, 0..) |*tok, i| {
+        g.reset();
+        tok.* = if (i == 0)
+            try model.prefill(&g, prompt, cache, sampler)
+        else
+            try model.decodeStep(&g, out[i - 1], cache, history.items, sampler);
+        try history.append(allocator, tok.*);
+    }
+}
+
+test "Gemma 4 F32 tiny model keeps greedy decoding and reproduces sampled sequences per seed" {
+    const allocator = std.testing.allocator;
+    var model = try initTinyGemma4ForSampling(allocator);
+    defer nn.deinitModel(&model, allocator);
+    const cfg = gemma4.TinyGemma4.config;
+    var cache = try gemma4.Gemma4KVCache.init(allocator, cfg, .{ .max_seq_len = 32 });
+    defer cache.deinit(allocator);
+    const prompt = [_]usize{ 2, 10, 25, 7 };
+
+    // 贪婪采样与完整前向对数几率 (截断后) 的惩罚 argmax 一致
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+    const ids = try g.tensorNDWithData(&.{ 1, prompt.len }, &.{ 2.0, 10.0, 25.0, 7.0 }, false);
+    const logits = try model.forward(&g, ids);
+    const last = logits.data[(prompt.len - 1) * cfg.vocab_size ..][0..cfg.vocab_size];
+    var greedy = sampling.Sampler.init(.{ .temperature = 0.0, .repetition_penalty = 1.25 });
+    var g_prefill = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g_prefill.deinit();
+    try std.testing.expectEqual(
+        sampling.argmaxWithPenalty(last, cfg.vocab_size, cfg.sampling_excluded_tokens, &prompt, 1.25),
+        try model.prefill(&g_prefill, &prompt, &cache, &greedy),
+    );
+
+    // 随机采样：相同种子得到相同序列，不同种子得到不同序列
+    const opts = sampling.SamplingOptions{ .temperature = 4.0, .top_k = 64, .top_p = 0.95, .repetition_penalty = 1.3, .seed = 42 };
+    var first: [8]usize = undefined;
+    var second: [8]usize = undefined;
+    var s1 = sampling.Sampler.init(opts);
+    try generateTinyF32(&model, allocator, &cache, &prompt, &s1, &first);
+    var s2 = sampling.Sampler.init(opts);
+    try generateTinyF32(&model, allocator, &cache, &prompt, &s2, &second);
+    try std.testing.expectEqualSlices(usize, &first, &second);
+    for (first) |tok| try std.testing.expect(!cfg.isSamplingExcluded(tok));
+
+    var differs = false;
+    for (1..6) |seed| {
+        var other = opts;
+        other.seed = seed;
+        var s_other = sampling.Sampler.init(other);
+        var seq: [8]usize = undefined;
+        try generateTinyF32(&model, allocator, &cache, &prompt, &s_other, &seq);
+        if (!std.mem.eql(usize, &first, &seq)) differs = true;
+    }
+    try std.testing.expect(differs);
+
+    // 首个采样词元与对完整前向对数几率执行「惩罚 → 排除 → 抽样」的参考流程一致
+    const processed = try allocator.dupe(f32, last);
+    defer allocator.free(processed);
+    try sampling.applyRepetitionPenaltyInPlace(allocator, processed, &prompt, opts.repetition_penalty);
+    sampling.maskExcludedInPlace(processed, cfg.sampling_excluded_tokens);
+    var reference = sampling.Sampler.init(opts);
+    try std.testing.expectEqual(first[0], try reference.sampleLogits(backend.Executor.serial, allocator, processed));
+}
+
+test "Gemma 4 Q4 tiny model sampling is reproducible and breaks logit ties canonically" {
+    const allocator = std.testing.allocator;
+    const M = gemma4_q4.TinyQ4Gemma4;
+    const cfg = M.config;
+    // 全零权重：所有词元的对数几率均为 0，贪婪采样取 ID 最小的非排除词元，Top-K 取 ID 最小的 K 个非排除词元
+    const bytes = try allocator.alloc(u8, M.computeExpectedFileSize());
+    defer allocator.free(bytes);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..8], M.Q4_MAGIC);
+    var model = try M.loadFromMmapWithOptions(allocator, bytes, .{ .lm_head_mode = .bf16, .warmup = false });
+    defer model.deinit(allocator);
+    var cache = try gemma4.Gemma4KVCache.initDefault(allocator, cfg);
+    defer cache.deinit(allocator);
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+    const prompt = [_]usize{ 2, 10, 25 };
+
+    var greedy = sampling.Sampler.init(.greedy);
+    try std.testing.expectEqual(@as(usize, 1), try model.prefill(&g, &prompt, &cache, bytes, &greedy));
+    try std.testing.expectEqual(@as(usize, 1), try model.generateNextToken(&g, &prompt, bytes, &greedy));
+
+    var seen: [128]bool = @splat(false);
+    for (0..40) |seed| {
+        const opts = sampling.SamplingOptions{ .temperature = 1.0, .top_k = 16, .top_p = 1.0, .seed = seed };
+        var a = sampling.Sampler.init(opts);
+        var b = sampling.Sampler.init(opts);
+        g.reset();
+        const tok_a = try model.prefill(&g, &prompt, &cache, bytes, &a);
+        const step_a = try model.decodeStep(&g, tok_a, &cache, bytes, &prompt, &a);
+        g.reset();
+        const tok_b = try model.prefill(&g, &prompt, &cache, bytes, &b);
+        const step_b = try model.decodeStep(&g, tok_b, &cache, bytes, &prompt, &b);
+        try std.testing.expectEqual(tok_a, tok_b);
+        try std.testing.expectEqual(step_a, step_b);
+        for ([_]usize{ tok_a, step_a }) |tok| {
+            try std.testing.expect(tok >= 1 and tok <= 16);
+            seen[tok] = true;
+        }
+    }
+    var distinct: usize = 0;
+    for (seen) |hit| distinct += @intFromBool(hit);
+    try std.testing.expect(distinct > 8);
+}
+
+test "Gemma 4 GPU candidate selection matches the CPU sampler for identical logits" {
+    if (!backend.offload.isAvailable()) return;
+    const allocator = std.testing.allocator;
+    const cfg = blk: {
+        var c = gemma4.Gemma4Config.tiny_test;
+        c.final_logit_softcapping = 5.0;
+        c.sampling_excluded_tokens = &tiny_sampling_excluded;
+        break :blk c;
+    };
+    var prng = std.Random.DefaultPrng.init(17);
+    var raw: [128]f32 = undefined;
+    fillNormal(&raw, prng.random(), 2.0);
+    const recent = [_]usize{ 3, 9, 3, 40, 127 };
+
+    var stream = try backend.mlx.Stream.defaultGpu();
+    defer stream.deinit();
+    var logits_arr = try backend.mlx.Array.fromSlice(&raw, &.{ 1, cfg.vocab_size });
+    defer logits_arr.deinit();
+    var mask = try backend.offload.TokenExclusionMask.init(allocator, cfg.vocab_size, cfg.sampling_excluded_tokens);
+    defer mask.deinit();
+
+    // CPU 参考：截断 → 惩罚 → 排除
+    var processed: [128]f32 = undefined;
+    for (raw, &processed) |r, *p| p.* = gemma4.softcapLogit(r, cfg.final_logit_softcapping);
+    try sampling.applyRepetitionPenaltyInPlace(allocator, &processed, &recent, 1.4);
+    sampling.maskExcludedInPlace(&processed, cfg.sampling_excluded_tokens);
+
+    for ([_]sampling.SamplingOptions{
+        .{ .temperature = 0.9, .top_k = 16, .top_p = 0.95, .repetition_penalty = 1.4, .seed = 5 },
+        .{ .temperature = 1.2, .top_p = 0.8, .repetition_penalty = 1.4, .seed = 6 },
+    }) |opts| {
+        var pending = try gemma4_gpu.deviceCandidates(allocator, logits_arr, cfg, &mask, &recent, opts, stream);
+        defer pending.deinit();
+        var buf: [128]sampling.Candidate = undefined;
+        const host = try pending.read(&buf);
+
+        var cpu_buf: [128]sampling.Candidate = undefined;
+        const cpu_cands = try sampling.selectTopK(backend.Executor.serial, allocator, &processed, cpu_buf[0..opts.candidateCount(cfg.vocab_size)]);
+        _ = sampling.buildDistribution(host.candidates, .{ .temperature = 1.0 }, null);
+        _ = sampling.buildDistribution(cpu_cands, .{ .temperature = 1.0 }, null);
+        try std.testing.expectEqual(cpu_cands.len, host.candidates.len);
+        for (cpu_cands, host.candidates) |c_cand, g_cand| {
+            try std.testing.expectEqual(c_cand.id, g_cand.id);
+            try std.testing.expectApproxEqAbs(c_cand.logit, g_cand.logit, 1e-4);
+        }
+        if (opts.needsLogNormalizer()) {
+            const lse = try sampling.logSumExpScaled(backend.Executor.serial, &processed, 1.0 / opts.temperature);
+            try std.testing.expectApproxEqAbs(lse, host.log_normalizer.?, 1e-4);
+        }
+
+        // 相同候选集与种子：GPU 候选与 CPU 完整对数几率抽样得到相同词元
+        var gpu_sampler = sampling.Sampler.init(opts);
+        var cpu_sampler = sampling.Sampler.init(opts);
+        for (0..64) |_| {
+            var copy = buf;
+            const gpu_tok = gpu_sampler.sampleCandidates(copy[0..host.candidates.len], host.log_normalizer);
+            try std.testing.expectEqual(@as(usize, gpu_tok), try cpu_sampler.sampleLogits(backend.Executor.serial, allocator, &processed));
+        }
+
+        var sel_sampler = sampling.Sampler.init(opts);
+        const tok = try gemma4_gpu.selectToken(allocator, logits_arr, cfg, &mask, &recent, &sel_sampler, stream);
+        try std.testing.expect(!cfg.isSamplingExcluded(tok));
+    }
 }

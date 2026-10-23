@@ -76,5 +76,5 @@ zig build download-dataset -- tinyshakespeare  # also: wikitext2, tinystories, a
 | `zig build run-report` | [`export_model_report.zig`](examples/export_model_report.zig) | Model graph JSON export (`sample_model_graph.json`, `minimal_model_graph.json`) |
 | `zig build run-book-models` | [`export_book_models.zig`](examples/export_book_models.zig) | Export Schema 2.0 JSON graphs for all 18 canonical book models (`examples/models/*.json`) |
 | `zig build run-static` | [`comptime_static_tensor.zig`](examples/comptime_static_tensor.zig) | Compile-time shape-checked `StaticTensor` demonstration |
-| `zig build run-gemma4` | [`gemma4.zig`](examples/gemma4.zig) | Gemma 4 architecture and 4-bit (`Q4_0`) quantized inference demo (`zig build quantize-gemma4` converts Safetensors weights) |
+| `zig build run-gemma4` | [`gemma4.zig`](examples/gemma4.zig) | Gemma 4 architecture and 4-bit (`Q4_0`) quantized inference demo (`zig build quantize-gemma4` converts Safetensors weights); sampling defaults to the official generation config (temperature 1.0, top-k 64, top-p 0.95) and is tuned with `--temperature`, `--top-k`, `--top-p`, `--penalty`, `--seed` or `--greedy` |
 | `zig build run-bench` | [`benchmark.zig`](examples/benchmark.zig) | Benchmark CLI |

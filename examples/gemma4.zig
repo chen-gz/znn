@@ -5,6 +5,7 @@ const nn = zig_ml.nn;
 const autodiff = zig_ml.autodiff;
 const gemma4 = zig_ml.models.gemma4;
 const gemma4_q4 = zig_ml.models.gemma4_q4;
+const sampling = zig_ml.backend.sampling;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.page_allocator;
@@ -14,6 +15,8 @@ pub fn main(init: std.process.Init) !void {
     var enable_speculative: bool = true;
     var enable_warmup: bool = true;
     var custom_prompt: ?[]const u8 = null;
+    // 默认采样选项与 Gemma 4 官方 generation_config.json 一致 (temperature 1.0, top_k 64, top_p 0.95)
+    var sampling_options: sampling.SamplingOptions = gemma4_q4.DefaultGemma4Q4.config.generation;
     if (init.minimal.args.iterateAllocator(allocator)) |*iter| {
         var it = iter.*;
         defer it.deinit();
@@ -33,9 +36,22 @@ pub fn main(init: std.process.Init) !void {
                 if (it.next()) |p| {
                     custom_prompt = p;
                 }
+            } else if (std.mem.eql(u8, arg, "--temperature")) {
+                if (it.next()) |v| sampling_options.temperature = try parseFloatArg(arg, v);
+            } else if (std.mem.eql(u8, arg, "--top-k")) {
+                if (it.next()) |v| sampling_options.top_k = try parseIntArg(usize, arg, v);
+            } else if (std.mem.eql(u8, arg, "--top-p")) {
+                if (it.next()) |v| sampling_options.top_p = try parseFloatArg(arg, v);
+            } else if (std.mem.eql(u8, arg, "-r") or std.mem.eql(u8, arg, "--penalty")) {
+                if (it.next()) |v| sampling_options.repetition_penalty = try parseFloatArg(arg, v);
+            } else if (std.mem.eql(u8, arg, "--seed")) {
+                if (it.next()) |v| sampling_options.seed = try parseIntArg(u64, arg, v);
+            } else if (std.mem.eql(u8, arg, "--greedy")) {
+                sampling_options.temperature = 0.0;
             }
         }
     } else |_| {}
+    var sampler = sampling.Sampler.init(sampling_options);
 
     std.debug.print("================================================================================\n", .{});
     std.debug.print("🤖 Gemma 4 12B Instruct 模型加载与真实推理演示 (Q4 量化)\n", .{});
@@ -156,6 +172,7 @@ pub fn main(init: std.process.Init) !void {
     var cache = try gemma4.Gemma4KVCache.init(allocator, gemma4_q4.DefaultGemma4Q4.config, .{ .max_seq_len = 1024 });
     defer cache.deinit(allocator);
     std.debug.print("   - 键值缓存已初始化: 48 层异构连续 KVCache (最大序列长度: 1024)\n", .{});
+    printSamplingOptions(sampling_options);
     const use_gpu = zig_ml.backend.offload.isAvailable();
     if (use_gpu) {
         std.debug.print("   - 硬件加速: Apple Silicon MLX GPU 统一卸载已启用\n", .{});
@@ -194,7 +211,7 @@ pub fn main(init: std.process.Init) !void {
         _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
         const p_start = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
 
-        const first_tok = try model.prefill(&prefill_graph, prompt_tokens[0..], &cache, mmap_ptr, 1.25);
+        const first_tok = try model.prefill(&prefill_graph, prompt_tokens[0..], &cache, mmap_ptr, &sampler);
 
         _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
         const p_end = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
@@ -255,7 +272,7 @@ pub fn main(init: std.process.Init) !void {
                 &cache,
                 mmap_ptr,
                 current_tokens.items,
-                1.25,
+                &sampler,
                 accepted_buf[0..spec_total],
             );
 
@@ -282,7 +299,7 @@ pub fn main(init: std.process.Init) !void {
             }
             current_tok = current_tokens.items[current_tokens.items.len - 1];
         } else {
-            const next_tok = try model.decodeStep(&step_graph, current_tok, &cache, mmap_ptr, current_tokens.items, 1.25);
+            const next_tok = try model.decodeStep(&step_graph, current_tok, &cache, mmap_ptr, current_tokens.items, &sampler);
             draft_engine.recordTransition(current_tok, next_tok) catch {};
             current_tok = next_tok;
             gen_count += 1;
@@ -315,7 +332,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("   - 解码生成耗时: {d:.2} 秒 (生成 {} 个新词元)\n", .{ decode_total_s, decode_tokens });
     std.debug.print("   - 增量解码速度 (Decode Speed): {d:.2} tokens/s (基于 KVCache 的 O(1) 增量运算)\n", .{decode_tokens_per_sec});
     if (enable_speculative) {
-        std.debug.print("   - 投机采样加速: Prompt N-gram 投机采样已启用 (投机命中加速: {} 个词元)\n", .{speculative_hits});
+        const rule = if (sampler.isGreedy()) "贪婪精确匹配校验" else "按目标概率接受的无偏投机采样校验";
+        std.debug.print("   - 投机采样加速: Prompt N-gram 投机采样已启用 ({s}，投机命中加速: {} 个词元)\n", .{ rule, speculative_hits });
     }
     std.debug.print("   - 全局平均吞吐 (含 Prefill): {d:.2} tokens/s\n", .{global_tokens_per_sec});
     std.debug.print("   - 4-bit 量化结合键值缓存使 12B 大模型在本地设备上具备了实用的实时交互生成能力。\n\n", .{});
@@ -323,4 +341,29 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("================================================================================\n", .{});
     std.debug.print("✨ 运行完毕！\n", .{});
     std.debug.print("================================================================================\n", .{});
+}
+
+fn parseFloatArg(flag: []const u8, value: []const u8) !f32 {
+    return std.fmt.parseFloat(f32, value) catch {
+        std.debug.print("❌ 参数 {s} 需要浮点数，实际为: {s}\n", .{ flag, value });
+        return error.InvalidArgument;
+    };
+}
+
+fn parseIntArg(comptime T: type, flag: []const u8, value: []const u8) !T {
+    return std.fmt.parseInt(T, value, 10) catch {
+        std.debug.print("❌ 参数 {s} 需要非负整数，实际为: {s}\n", .{ flag, value });
+        return error.InvalidArgument;
+    };
+}
+
+/// 打印生效的采样设置 (命令行参数: --temperature / --top-k / --top-p / --penalty / --seed / --greedy)
+fn printSamplingOptions(opts: sampling.SamplingOptions) void {
+    if (opts.isGreedy()) {
+        std.debug.print("   - 采样策略: 贪婪采样 (Greedy)，重复惩罚 {d:.2}\n", .{opts.repetition_penalty});
+    } else {
+        std.debug.print("   - 采样策略: 随机采样 temperature={d:.2} top_k={} top_p={d:.2} 重复惩罚={d:.2} seed={}\n", .{
+            opts.temperature, opts.top_k, opts.top_p, opts.repetition_penalty, opts.seed,
+        });
+    }
 }
