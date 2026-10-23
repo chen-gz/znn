@@ -51,9 +51,10 @@ pub fn qr(self: Tensor, allocator: std.mem.Allocator) !QRResult {
     const N = self.shape.dims[1];
     if (M == 0 or N == 0) return error.EmptyInputs;
 
-    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
+    const contig_ptr: ?*Tensor = if (!self.isContiguous()) try self.contiguous(allocator) else null;
     defer if (contig_ptr) |cp| free(allocator, cp);
-    const a_data = if (contig_ptr) |cp| cp.data else self.data;
+    // 连续视图的 data 可能长于其可见元素：只取前 M * N 个
+    const a_data = (if (contig_ptr) |cp| cp.data else self.data)[0 .. M * N];
 
     const K = @min(M, N);
 
@@ -185,9 +186,10 @@ pub fn symeig(self: Tensor, allocator: std.mem.Allocator) !SymEigResult {
     if (N != self.shape.dims[1]) return error.ShapeMismatch;
     if (N == 0) return error.EmptyInputs;
 
-    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
+    const contig_ptr: ?*Tensor = if (!self.isContiguous()) try self.contiguous(allocator) else null;
     defer if (contig_ptr) |cp| free(allocator, cp);
-    const a_data = if (contig_ptr) |cp| cp.data else self.data;
+    // 连续视图的 data 可能长于其可见元素：只取前 N * N 个
+    const a_data = (if (contig_ptr) |cp| cp.data else self.data)[0 .. N * N];
 
     if (N == 1) {
         const eigenvalues = try zeros(allocator, &.{1});
@@ -329,9 +331,10 @@ fn svdTall(self: Tensor, allocator: std.mem.Allocator) !SVDResult {
     const N = self.shape.dims[1];
     std.debug.assert(M >= N);
 
-    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
+    const contig_ptr: ?*Tensor = if (!self.isContiguous()) try self.contiguous(allocator) else null;
     defer if (contig_ptr) |cp| free(allocator, cp);
-    const a_data = if (contig_ptr) |cp| cp.data else self.data;
+    // 连续视图的 data 可能长于其可见元素：只取前 M * N 个
+    const a_data = (if (contig_ptr) |cp| cp.data else self.data)[0 .. M * N];
 
     const B = try allocator.alloc(f32, M * N);
     defer allocator.free(B);

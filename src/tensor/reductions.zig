@@ -100,7 +100,7 @@ const ExtremumKind = enum { argmax, argmin, max, min };
 fn reduceExtremum(self: Tensor, dim: usize, comptime kind: ExtremumKind, allocator: std.mem.Allocator) !*Tensor {
     if (self.shape.len == 0) return error.UnsupportedDimension;
     if (dim >= self.shape.len) return error.DimensionOutOfBounds;
-    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
+    const contig_ptr: ?*Tensor = if (!self.isContiguous()) try self.contiguous(allocator) else null;
     defer if (contig_ptr) |cp| free(allocator, cp);
     const x_data = if (contig_ptr) |cp| cp.data else self.data;
 

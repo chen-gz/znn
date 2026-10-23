@@ -2311,3 +2311,113 @@ test "fix: sort, argsort and topK order NaN as the largest value consistently" {
     try std.testing.expect(std.math.isNan(m_sorted.data[4]) and std.math.isNan(m_sorted.data[5]));
 }
 
+test "fix: topKInto, batchMatMul and contiguous-only kernels read strided and offset views correctly" {
+    const allocator = std.testing.allocator;
+
+    // topKInto 读取转置视图 [3, 4]
+    const base = try zeros(allocator, &.{ 4, 3 });
+    defer free(allocator, base);
+    fillDeterministic(base, 71);
+    const tv = try base.transposeView(0, 1, allocator);
+    defer free(allocator, tv);
+    const tv_c = try tv.contiguous(allocator);
+    defer free(allocator, tv_c);
+    const want_top = try tv_c.topK(2, allocator);
+    defer free(allocator, want_top.values);
+    defer free(allocator, want_top.indices);
+    const got_top = try tv.topK(2, allocator);
+    defer free(allocator, got_top.values);
+    defer free(allocator, got_top.indices);
+    try std.testing.expectEqualSlices(f32, want_top.values.data, got_top.values.data);
+    try std.testing.expectEqualSlices(f32, want_top.indices.data, got_top.indices.data);
+
+    // 三维视图：沿中间维度步长切片 [2, 2, 5] 来自 [2, 4, 5]
+    const base3 = try zeros(allocator, &.{ 2, 4, 5 });
+    defer free(allocator, base3);
+    fillDeterministic(base3, 72);
+    const v3 = try base3.slice(&.{ .{}, .{ .start = 1, .end = 4, .step = 2 } }, allocator);
+    defer free(allocator, v3);
+    const v3_c = try v3.contiguous(allocator);
+    defer free(allocator, v3_c);
+    const want3 = try v3_c.topK(3, allocator);
+    defer free(allocator, want3.values);
+    defer free(allocator, want3.indices);
+    const got3 = try v3.topK(3, allocator);
+    defer free(allocator, got3.values);
+    defer free(allocator, got3.indices);
+    try std.testing.expectEqualSlices(f32, want3.values.data, got3.values.data);
+    try std.testing.expectEqualSlices(f32, want3.indices.data, got3.indices.data);
+
+    // batchMatMul：批次维偏移切片（连续视图）与沿 M 维步长切片
+    const A = try zeros(allocator, &.{ 3, 2, 6, 4 });
+    defer free(allocator, A);
+    fillDeterministic(A, 73);
+    const B = try zeros(allocator, &.{ 2, 2, 4, 3 });
+    defer free(allocator, B);
+    fillDeterministic(B, 74);
+    const A_off = try A.slice(&.{ .{ .start = 1 }, .{}, .{ .start = 0, .end = 6, .step = 2 } }, allocator); // [2, 2, 3, 4]
+    defer free(allocator, A_off);
+    const A_off_c = try A_off.contiguous(allocator);
+    defer free(allocator, A_off_c);
+    const want_bmm = try A_off_c.batchMatMul(B, allocator);
+    defer free(allocator, want_bmm);
+    const got_bmm = try A_off.batchMatMul(B, allocator);
+    defer free(allocator, got_bmm);
+    for (want_bmm.data, got_bmm.data) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-5);
+
+    // 连续但带偏移的行切片视图 (data 长于可见元素) 直接参与连续内核与线性代数分解
+    const P = try zeros(allocator, &.{ 6, 4 });
+    defer free(allocator, P);
+    fillDeterministic(P, 75);
+    const rows = try P.slice(&.{.{ .start = 1, .end = 5 }}, allocator); // [4, 4]
+    defer free(allocator, rows);
+    try std.testing.expect(rows.isContiguous() and rows.is_view and rows.data.len > rows.shape.numel());
+    const rows_c = try rows.contiguous(allocator);
+    defer free(allocator, rows_c);
+
+    const sm_want = try rows_c.softmax(allocator);
+    defer free(allocator, sm_want);
+    const sm_got = try rows.softmax(allocator);
+    defer free(allocator, sm_got);
+    try std.testing.expectEqualSlices(f32, sm_want.data, sm_got.data);
+
+    const l2_want = try rows_c.l2Loss(0.5, allocator);
+    defer free(allocator, l2_want);
+    const l2_got = try rows.l2Loss(0.5, allocator);
+    defer free(allocator, l2_got);
+    try std.testing.expectEqual(l2_want.data[0], l2_got.data[0]);
+
+    const qr_want = try rows_c.qr(allocator);
+    defer qr_want.deinit(allocator);
+    const qr_got = try rows.qr(allocator);
+    defer qr_got.deinit(allocator);
+    try std.testing.expectEqualSlices(f32, qr_want.R.data, qr_got.R.data);
+    try std.testing.expectEqualSlices(f32, qr_want.Q.data, qr_got.Q.data);
+
+    const svd_want = try rows_c.svd(allocator);
+    defer svd_want.deinit(allocator);
+    const svd_got = try rows.svd(allocator);
+    defer svd_got.deinit(allocator);
+    try std.testing.expectEqualSlices(f32, svd_want.S.data, svd_got.S.data);
+
+    const rows_t = try rows_c.transposeView(0, 1, allocator);
+    defer free(allocator, rows_t);
+    const sym = try rows_c.matmul(rows_t, allocator);
+    defer free(allocator, sym);
+    const big = try zeros(allocator, &.{ 6, 4 });
+    defer free(allocator, big);
+    @memcpy(big.data[4..20], sym.data);
+    const sym_view = try big.slice(&.{.{ .start = 1, .end = 5 }}, allocator);
+    defer free(allocator, sym_view);
+    const eig_want = try sym.symeig(allocator);
+    defer eig_want.deinit(allocator);
+    const eig_got = try sym_view.symeig(allocator);
+    defer eig_got.deinit(allocator);
+    try std.testing.expectEqualSlices(f32, eig_want.eigenvalues.data, eig_got.eigenvalues.data);
+
+    const max_want = try rows_c.max(1, allocator);
+    defer free(allocator, max_want);
+    const max_got = try rows.max(1, allocator);
+    defer free(allocator, max_got);
+    try std.testing.expectEqualSlices(f32, max_want.data, max_got.data);
+}
