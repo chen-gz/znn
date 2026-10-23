@@ -91,6 +91,18 @@ pub fn maskedCrossEntropyLoss(self: *Graph, logits: *Tensor, targets: anytype, m
     );
 }
 
+/// 校验直接偏好优化 (Direct Preference Optimization, DPO) 的温度系数 beta：必须是有限正数
+pub fn validateDpoBeta(beta: f32) error{InvalidArgument}!void {
+    if (!std.math.isFinite(beta) or beta <= 0.0) return error.InvalidArgument;
+}
+
+/// 校验群组相对策略优化 (Group Relative Policy Optimization, GRPO) 的超参数：
+/// 库尔贝克-莱布勒散度 (Kullback-Leibler Divergence, KL Divergence) 惩罚系数 beta 与裁剪半径 clip_eps 都必须是有限非负数 (负的 clip_eps 会使裁剪区间 [1 - eps, 1 + eps] 为空)
+pub fn validateGrpoHyperparams(beta: f32, clip_eps: f32) error{InvalidArgument}!void {
+    if (!std.math.isFinite(beta) or beta < 0.0) return error.InvalidArgument;
+    if (!std.math.isFinite(clip_eps) or clip_eps < 0.0) return error.InvalidArgument;
+}
+
 // 直接偏好优化 (Direct Preference Optimization, DPO) 损失函数：支持对策略模型对数概率 pi_chosen_logps / pi_rejected_logps 的计算图反向传播
 pub fn dpoLoss(
     self: *Graph,
@@ -106,6 +118,7 @@ pub fn dpoLoss(
     if (pi_rejected_logps.data.len != N or ref_chosen_logps.len != N or ref_rejected_logps.len != N) {
         return error.ShapeMismatch;
     }
+    try validateDpoBeta(beta);
 
     const allocator = self.arena.allocator();
     const ref_c_copy = try allocator.alloc(f32, N);
@@ -147,6 +160,7 @@ pub fn grpoLoss(
     if (ref_logps) |refs| {
         if (refs.len != N) return error.ShapeMismatch;
     }
+    try validateGrpoHyperparams(beta, clip_eps);
 
     const allocator = self.arena.allocator();
     const adv_copy = try allocator.alloc(f32, N);
