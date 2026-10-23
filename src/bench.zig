@@ -443,7 +443,8 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
             x_data: []f32,
 
             pub fn init(alloc: std.mem.Allocator) !@This() {
-                const ln = try nn.LayerNorm.init(alloc, 512, 1e-5);
+                var ln = try nn.LayerNorm.init(alloc, 512, 1e-5);
+                errdefer nn.deinitModel(&ln, alloc);
                 const x_data = try alloc.alloc(f32, 32 * 512);
                 @memset(x_data, 0.5);
                 return .{
@@ -488,7 +489,8 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
             x_data: []f32,
 
             pub fn init(alloc: std.mem.Allocator) !@This() {
-                const rms = try nn.RMSNorm.init(alloc, 512, 1e-5);
+                var rms = try nn.RMSNorm.init(alloc, 512, 1e-5);
+                errdefer nn.deinitModel(&rms, alloc);
                 const x_data = try alloc.alloc(f32, 32 * 512);
                 @memset(x_data, 0.5);
                 return .{

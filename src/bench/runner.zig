@@ -106,47 +106,15 @@ pub const BenchmarkRunner = struct {
         self.results.deinit(self.allocator);
     }
 
+    /// 大小写不敏感的子串匹配：`suite` 匹配类别名 (`all` 表示全部)，`filter` 匹配基准名称
     pub fn shouldRun(self: *const BenchmarkRunner, name: []const u8, category: []const u8) bool {
         if (self.config.suite) |s| {
-            if (!std.ascii.eqlIgnoreCase(s, "all")) {
-                var cat_buf: [64]u8 = undefined;
-                const c_len = @min(category.len, cat_buf.len);
-                for (category[0..c_len], 0..) |c, i| {
-                    cat_buf[i] = std.ascii.toLower(c);
-                }
-                const lower_cat = cat_buf[0..c_len];
-
-                var suite_buf: [64]u8 = undefined;
-                const s_len = @min(s.len, suite_buf.len);
-                for (s[0..s_len], 0..) |c, i| {
-                    suite_buf[i] = std.ascii.toLower(c);
-                }
-                const lower_suite = suite_buf[0..s_len];
-
-                if (std.mem.indexOf(u8, lower_cat, lower_suite) == null) {
-                    return false;
-                }
-            }
-        }
-
-        if (self.config.filter) |f| {
-            var lower_name_buf: [128]u8 = undefined;
-            const n_len = @min(name.len, lower_name_buf.len);
-            for (name[0..n_len], 0..) |c, i| {
-                lower_name_buf[i] = std.ascii.toLower(c);
-            }
-            const lower_name = lower_name_buf[0..n_len];
-
-            var lower_filt_buf: [128]u8 = undefined;
-            const f_len = @min(f.len, lower_filt_buf.len);
-            for (f[0..f_len], 0..) |c, i| {
-                lower_filt_buf[i] = std.ascii.toLower(c);
-            }
-            const lower_filt = lower_filt_buf[0..f_len];
-
-            if (std.mem.indexOf(u8, lower_name, lower_filt) == null) {
+            if (!std.ascii.eqlIgnoreCase(s, "all") and std.ascii.findIgnoreCase(category, s) == null) {
                 return false;
             }
+        }
+        if (self.config.filter) |f| {
+            if (std.ascii.findIgnoreCase(name, f) == null) return false;
         }
         return true;
     }
@@ -330,4 +298,22 @@ fn formatThroughput(st: BenchmarkStats, buf: *[32]u8) []const u8 {
         }
     }
     return "-";
+}
+
+test "BenchmarkRunner.shouldRun matches suite and filter case-insensitively without truncation" {
+    var runner = BenchmarkRunner.init(std.testing.allocator, .{ .suite = "OPTIM", .filter = "adamw" });
+    defer runner.deinit();
+    try std.testing.expect(runner.shouldRun("AdamW Step [1M params]", "Optimizers"));
+    try std.testing.expect(!runner.shouldRun("SGD Momentum Step", "Optimizers"));
+    try std.testing.expect(!runner.shouldRun("AdamW Step", "Tokenizer"));
+
+    // 超过 128 字节的名称：匹配位置在末尾时也必须命中
+    const long_name = comptime blk: {
+        const prefix: [200]u8 = @splat('x');
+        break :blk prefix ++ " AdamW";
+    };
+    try std.testing.expect(runner.shouldRun(long_name, "Optimizers"));
+
+    runner.config.suite = "all";
+    try std.testing.expect(runner.shouldRun("AdamW Step", "Tokenizer"));
 }

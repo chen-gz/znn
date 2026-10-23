@@ -1,9 +1,31 @@
 const std = @import("std");
 
+/// 把 `url` 的响应体写入 `path`；HTTP 状态非 200 时返回 `error.DownloadFailed`
+fn fetchToFile(client: *std.http.Client, io: std.Io, url: []const u8, path: []const u8) !void {
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+
+    var write_buf: [8192]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+
+    const fetch_res = try client.fetch(.{
+        .location = .{ .url = url },
+        .response_writer = &writer.interface,
+    });
+    try writer.interface.flush();
+
+    if (fetch_res.status != .ok) {
+        std.debug.print("  ❌ Download failed with HTTP status: {}\n", .{fetch_res.status});
+        return error.DownloadFailed;
+    }
+}
+
+/// 下载 (并按需解压 gzip) 到 `target_path`。
+/// 内容先写入 `<target_path>.tmp`，全部成功后才重命名为目标文件；任何失败都会删除临时文件，
+/// 避免残留的错误页面或半截文件在下次运行时被误判为“已存在”而跳过。
 fn downloadFile(
     client: *std.http.Client,
     io: std.Io,
-    allocator: std.mem.Allocator,
     url: []const u8,
     target_path: []const u8,
     is_gzip: bool,
@@ -23,33 +45,21 @@ fn downloadFile(
 
     std.debug.print("  📥 Downloading from {s} ...\n", .{url});
 
+    var tmp_path_buf: [256]u8 = undefined;
+    const tmp_path = try std.fmt.bufPrint(&tmp_path_buf, "{s}.tmp", .{target_path});
+    errdefer cwd.deleteFile(io, tmp_path) catch {};
+
     if (is_gzip) {
-        // 1. Download to temporary .gz buffer/file
+        // 1. Download to temporary .gz file
         var temp_gz_path_buf: [256]u8 = undefined;
         const temp_gz_path = try std.fmt.bufPrint(&temp_gz_path_buf, "{s}.gz.tmp", .{target_path});
-
-        var gz_file = try cwd.createFile(io, temp_gz_path, .{});
-        var gz_write_buf: [8192]u8 = undefined;
-        var gz_writer = gz_file.writer(io, &gz_write_buf);
-
-        const fetch_res = try client.fetch(.{
-            .location = .{ .url = url },
-            .response_writer = &gz_writer.interface,
-        });
-        try gz_writer.interface.flush();
-        gz_file.close(io);
-
-        if (fetch_res.status != .ok) {
-            _ = cwd.deleteFile(io, temp_gz_path) catch {};
-            std.debug.print("  ❌ Download failed with HTTP status: {}\n", .{fetch_res.status});
-            return error.DownloadFailed;
-        }
+        defer cwd.deleteFile(io, temp_gz_path) catch {};
+        try fetchToFile(client, io, url, temp_gz_path);
 
         // 2. Decompress .gz directly in pure Zig using std.compress.flate
         std.debug.print("  📦 Decompressing {s} -> {s} ...\n", .{ temp_gz_path, target_path });
         var read_gz = try cwd.openFile(io, temp_gz_path, .{});
         defer read_gz.close(io);
-        defer _ = cwd.deleteFile(io, temp_gz_path) catch {};
 
         var file_buf: [8192]u8 = undefined;
         var file_reader = read_gz.reader(io, &file_buf);
@@ -57,7 +67,7 @@ fn downloadFile(
         var window: [std.compress.flate.max_window_len]u8 = undefined;
         var decompressor = std.compress.flate.Decompress.init(&file_reader.interface, .gzip, &window);
 
-        var out_file = try cwd.createFile(io, target_path, .{});
+        var out_file = try cwd.createFile(io, tmp_path, .{});
         defer out_file.close(io);
 
         var write_buf: [8192]u8 = undefined;
@@ -65,31 +75,16 @@ fn downloadFile(
 
         _ = try decompressor.reader.streamRemaining(&out_writer.interface);
         try out_writer.interface.flush();
-
-        const final_len = try out_file.length(io);
-        std.debug.print("  🎉 Extracted {s} ({} bytes)\n", .{ target_path, final_len });
     } else {
-        var out_file = try cwd.createFile(io, target_path, .{});
-        defer out_file.close(io);
-
-        var write_buf: [8192]u8 = undefined;
-        var out_writer = out_file.writer(io, &write_buf);
-
-        const fetch_res = try client.fetch(.{
-            .location = .{ .url = url },
-            .response_writer = &out_writer.interface,
-        });
-        try out_writer.interface.flush();
-
-        if (fetch_res.status != .ok) {
-            std.debug.print("  ❌ Download failed with HTTP status: {}\n", .{fetch_res.status});
-            return error.DownloadFailed;
-        }
-
-        const final_len = try out_file.length(io);
-        std.debug.print("  🎉 Saved {s} ({} bytes)\n", .{ target_path, final_len });
+        try fetchToFile(client, io, url, tmp_path);
     }
-    _ = allocator;
+
+    try cwd.rename(tmp_path, cwd, target_path, io);
+
+    var final_file = try cwd.openFile(io, target_path, .{});
+    defer final_file.close(io);
+    const final_len = try final_file.length(io);
+    std.debug.print("  🎉 Saved {s} ({} bytes)\n", .{ target_path, final_len });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -131,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
             const url = try std.fmt.bufPrint(&url_buf, "{s}/{s}.gz", .{ base_url, file });
             var path_buf: [256]u8 = undefined;
             const path = try std.fmt.bufPrint(&path_buf, "data/{s}", .{file});
-            try downloadFile(&client, io, allocator, url, path, true);
+            try downloadFile(&client, io, url, path, true);
         }
         std.debug.print("✨ Fashion MNIST dataset is ready in data/!\n", .{});
 
@@ -149,14 +144,14 @@ pub fn main(init: std.process.Init) !void {
             const url = try std.fmt.bufPrint(&url_buf, "{s}/{s}.gz", .{ base_url, file });
             var path_buf: [256]u8 = undefined;
             const path = try std.fmt.bufPrint(&path_buf, "data/{s}", .{file});
-            try downloadFile(&client, io, allocator, url, path, true);
+            try downloadFile(&client, io, url, path, true);
         }
         std.debug.print("✨ MNIST dataset is ready in data/!\n", .{});
 
     } else if (std.mem.eql(u8, dataset_name, "tinyshakespeare") or std.mem.eql(u8, dataset_name, "shakespeare") or std.mem.eql(u8, dataset_name, "tiny_shakespeare")) {
         std.debug.print("⬇️  Downloading TinyShakespeare dataset (~1.1MB pure text)...\n", .{});
         const url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt";
-        try downloadFile(&client, io, allocator, url, "data/tinyshakespeare.txt", false);
+        try downloadFile(&client, io, url, "data/tinyshakespeare.txt", false);
         std.debug.print("✨ TinyShakespeare dataset is ready in data/tinyshakespeare.txt!\n", .{});
 
     } else if (std.mem.eql(u8, dataset_name, "wikitext2") or std.mem.eql(u8, dataset_name, "wikitext-2") or std.mem.eql(u8, dataset_name, "wikitext")) {
@@ -172,36 +167,36 @@ pub fn main(init: std.process.Init) !void {
             const url = try std.fmt.bufPrint(&url_buf, "{s}/{s}", .{ base_url, f });
             var path_buf: [256]u8 = undefined;
             const path = try std.fmt.bufPrint(&path_buf, "data/wikitext-2/{s}", .{f});
-            try downloadFile(&client, io, allocator, url, path, false);
+            try downloadFile(&client, io, url, path, false);
         }
         std.debug.print("✨ WikiText-2 dataset is ready in data/wikitext-2/!\n", .{});
 
     } else if (std.mem.eql(u8, dataset_name, "tinystories") or std.mem.eql(u8, dataset_name, "tiny_stories")) {
         std.debug.print("⬇️  Downloading TinyStories (~19MB validation sample)...\n", .{});
         const url = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt";
-        try downloadFile(&client, io, allocator, url, "data/tinystories_valid.txt", false);
+        try downloadFile(&client, io, url, "data/tinystories_valid.txt", false);
         std.debug.print("✨ TinyStories dataset is ready in data/tinystories_valid.txt!\n", .{});
 
     } else if (std.mem.eql(u8, dataset_name, "alpaca") or std.mem.eql(u8, dataset_name, "alpaca_data") or std.mem.eql(u8, dataset_name, "alpaca_cleaned")) {
         std.debug.print("⬇️  Downloading Stanford Alpaca SFT dataset (~22MB JSON)...\n", .{});
         const url = "https://raw.githubusercontent.com/tatsu-lab/stanford_alpaca/main/alpaca_data.json";
-        try downloadFile(&client, io, allocator, url, "data/alpaca_data.json", false);
+        try downloadFile(&client, io, url, "data/alpaca_data.json", false);
         std.debug.print("✨ Stanford Alpaca dataset is ready in data/alpaca_data.json!\n", .{});
 
     } else if (std.mem.eql(u8, dataset_name, "all_llm") or std.mem.eql(u8, dataset_name, "llm")) {
         std.debug.print("⬇️  Downloading all 4 LLM datasets (tinyshakespeare, wikitext2, tinystories, alpaca)...\n", .{});
-        try downloadFile(&client, io, allocator, "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt", "data/tinyshakespeare.txt", false);
+        try downloadFile(&client, io, "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt", "data/tinyshakespeare.txt", false);
 
         cwd.createDir(io, "data/wikitext-2", .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        try downloadFile(&client, io, allocator, "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/train.txt", "data/wikitext-2/train.txt", false);
-        try downloadFile(&client, io, allocator, "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/valid.txt", "data/wikitext-2/valid.txt", false);
-        try downloadFile(&client, io, allocator, "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/test.txt", "data/wikitext-2/test.txt", false);
+        try downloadFile(&client, io, "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/train.txt", "data/wikitext-2/train.txt", false);
+        try downloadFile(&client, io, "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/valid.txt", "data/wikitext-2/valid.txt", false);
+        try downloadFile(&client, io, "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/test.txt", "data/wikitext-2/test.txt", false);
 
-        try downloadFile(&client, io, allocator, "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt", "data/tinystories_valid.txt", false);
-        try downloadFile(&client, io, allocator, "https://raw.githubusercontent.com/tatsu-lab/stanford_alpaca/main/alpaca_data.json", "data/alpaca_data.json", false);
+        try downloadFile(&client, io, "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt", "data/tinystories_valid.txt", false);
+        try downloadFile(&client, io, "https://raw.githubusercontent.com/tatsu-lab/stanford_alpaca/main/alpaca_data.json", "data/alpaca_data.json", false);
         std.debug.print("✨ All LLM datasets downloaded and ready in data/!\n", .{});
 
     } else {
