@@ -252,8 +252,18 @@ pub fn GenericTensor(comptime T: type) type {
             return self.shape.numel();
         }
 
+        /// 以常量原地填充张量的全部可见元素（跨步视图只写入自身覆盖的元素，不改写父缓冲区的其余部分）
         pub fn fill(self: *Self, val: T) void {
-            @memset(self.data, val);
+            const count = self.shape.numel();
+            if (self.isContiguous() and self.data.len >= count) {
+                @memset(self.data[0..count], val);
+                return;
+            }
+            var it = shape_mod.RowIter(1).init(self.shape, .{self.strides});
+            const s = it.inner_strides[0];
+            while (it.next()) |offs| {
+                for (0..it.inner) |i| self.data[offs[0] + i * s] = val;
+            }
         }
 
         pub fn isContiguous(self: Self) bool {

@@ -35,8 +35,8 @@ pub fn clone(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
     return t;
 }
 
-/// 对张量的每个逻辑元素（视图只覆盖其可见元素，不触碰底层缓冲区的其余部分）原地执行 `f(elem, arg)`
-fn mapInPlace(self: *Tensor, arg: anytype, comptime f: fn (*f32, @TypeOf(arg)) void) void {
+/// 对张量的每个逻辑元素（视图只覆盖其可见元素，不触碰底层缓冲区的其余部分）按行优先顺序原地执行 `f(elem, arg)`
+pub fn mapInPlace(self: *Tensor, arg: anytype, comptime f: fn (*f32, @TypeOf(arg)) void) void {
     const count = self.shape.numel();
     if (self.isContiguous() and self.data.len >= count) {
         for (self.data[0..count]) |*item| f(item, arg);
