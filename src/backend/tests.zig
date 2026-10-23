@@ -831,3 +831,129 @@ test "Executor parallelFor and parallelReduce with grain near maxInt(usize) do n
         try std.testing.expectEqual(max, big_hits.load(.monotonic));
     }
 }
+
+/// 逐元素顺序扫描的贪婪采样参考实现：与 `argmaxWithPenalty` 的语义逐位对照
+fn referenceArgmaxWithPenalty(logits: []const f32, vocab_size: usize, recent: []const usize, penalty: f32) usize {
+    var best: f32 = -std.math.inf(f32);
+    var best_id: usize = 0;
+    for (0..vocab_size) |v| {
+        if (v == 0 or (v >= LmHeadWeights.excluded_token_range_lo and v <= LmHeadWeights.excluded_token_range_hi)) continue;
+        var val = logits[v];
+        if (penalty > 1.0 and std.mem.indexOfScalar(usize, recent, v) != null) {
+            val = if (val > 0.0) val / penalty else val * penalty;
+        }
+        if (val > best) {
+            best = val;
+            best_id = v;
+        }
+    }
+    return best_id;
+}
+
+test "LmHeadWeights argmaxWithPenalty handles vocabularies larger than one bitset window without heap allocation" {
+    const allocator = std.testing.allocator;
+    // 词表超过单个 262,144 词元位图窗口，旧实现在堆分配失败时会越界读取栈上位图
+    const vocab: usize = 300_000;
+    const logits = try allocator.alloc(f32, vocab);
+    defer allocator.free(logits);
+    @memset(logits, -1.0);
+    logits[290_000] = 8.0; // 第二个窗口内的最大值
+    logits[1234] = 5.0;
+
+    try std.testing.expectEqual(@as(usize, 290_000), LmHeadWeights.argmaxWithPenalty(logits, vocab, &.{}, 1.0));
+    // 第二个窗口内的最近词元同样必须被惩罚：8 / 2 = 4 < 5
+    try std.testing.expectEqual(@as(usize, 1234), LmHeadWeights.argmaxWithPenalty(logits, vocab, &.{ 290_000, 290_000, vocab + 7 }, 2.0));
+
+    // 排除词元即使取得最大值也不会被选中
+    logits[0] = 100.0;
+    logits[258_882] = 50.0;
+    try std.testing.expectEqual(@as(usize, 290_000), LmHeadWeights.argmaxWithPenalty(logits, vocab, &.{}, 1.0));
+}
+
+test "LmHeadWeights argmaxWithPenalty matches sequential scan with ties, NaN and penalties" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const rnd = prng.random();
+    for ([_]usize{ 1, 63, 64, 65, 1000, 4097, 262_200 }) |vocab| {
+        const logits = try allocator.alloc(f32, vocab);
+        defer allocator.free(logits);
+        for (0..5) |_| {
+            // 量化到少量离散值以制造大量并列最大值，并混入 NaN 与 -Inf
+            for (logits) |*l| {
+                const r = rnd.uintLessThan(u32, 40);
+                l.* = switch (r) {
+                    0 => std.math.nan(f32),
+                    1 => -std.math.inf(f32),
+                    else => @as(f32, @floatFromInt(@as(i32, @intCast(r)) - 20)) * 0.5,
+                };
+            }
+            var recent: [48]usize = undefined;
+            for (&recent) |*t| t.* = rnd.uintLessThan(usize, vocab + 10);
+            for ([_]f32{ 1.0, 1.3, 4.0 }) |penalty| {
+                try std.testing.expectEqual(
+                    referenceArgmaxWithPenalty(logits, vocab, &recent, penalty),
+                    LmHeadWeights.argmaxWithPenalty(logits, vocab, &recent, penalty),
+                );
+            }
+        }
+    }
+}
+
+test "QuantLayout validates quantization parameters and computes buffer sizes" {
+    const QuantLayout = offload.QuantLayout;
+    // 4-bit / 分组 64：每个 uint32 打包 8 个权重
+    const l4 = try QuantLayout.init(128, 3, 64, 4, .bfloat16);
+    try std.testing.expectEqual([2]usize{ 3, 16 }, l4.w_dims);
+    try std.testing.expectEqual([2]usize{ 3, 2 }, l4.sb_dims);
+    try std.testing.expectEqual(@as(usize, 3 * 16 * 4), l4.w_q_bytes);
+    try std.testing.expectEqual(@as(usize, 3 * 2 * 2), l4.sb_bytes);
+
+    const l8 = try QuantLayout.init(64, 2, 32, 8, .float32);
+    try std.testing.expectEqual([2]usize{ 2, 16 }, l8.w_dims);
+    try std.testing.expectEqual(@as(usize, 2 * 2 * 4), l8.sb_bytes);
+
+    // 位宽不整除 32（旧实现在 @divExact 处触发未定义行为）、分组长度非法或输入维度不整除分组长度时返回错误
+    try std.testing.expectError(error.InvalidShape, QuantLayout.init(96, 1, 32, 3, .float16));
+    try std.testing.expectError(error.InvalidShape, QuantLayout.init(64, 1, 0, 4, .float16));
+    try std.testing.expectError(error.InvalidShape, QuantLayout.init(96, 1, 64, 4, .float16));
+    try std.testing.expectError(error.InvalidShape, QuantLayout.init(64, 1, 32, 4, .int32));
+}
+
+test "MLX copyToSlice handles strided slice views and VectorArray keeps more than 64 arrays" {
+    if (!has_mlx) return;
+    var stream = try Stream.defaultGpu();
+    defer stream.deinit();
+
+    // [4, 8] 的列切片 [:, 2:4] 是非连续视图：元素总数为 8，但按步长寻址的跨度为 3 * 8 + 3 + 1 = 28
+    var base_data: [32]f32 = undefined;
+    for (&base_data, 0..) |*v, i| v.* = @floatFromInt(i);
+    var base = try Array.fromSlice(&base_data, &.{ 4, 8 });
+    defer base.deinit();
+    var view = try base.sliceAxis(1, 2, 4, stream);
+    defer view.deinit();
+    var out: [8]f32 = undefined;
+    try view.copyToSlice(&out);
+    try std.testing.expectEqualSlices(f32, &.{ 2, 3, 10, 11, 18, 19, 26, 27 }, &out);
+
+    // 转置视图（最内层维度非连续）
+    var t_view = try base.transpose(stream);
+    defer t_view.deinit();
+    var t_out: [32]f32 = undefined;
+    try t_view.copyToSlice(&t_out);
+    for (0..8) |r| {
+        for (0..4) |col| try std.testing.expectEqual(base_data[col * 8 + r], t_out[r * 4 + col]);
+    }
+
+    // 脑浮点 16 (Brain Floating Point 16, BF16) 数组先转换为单精度再复制
+    var bf = try base.astype(.bfloat16, stream);
+    defer bf.deinit();
+    var bf_out: [32]f32 = undefined;
+    try bf.copyToSlice(&bf_out);
+    try std.testing.expectEqualSlices(f32, &base_data, &bf_out);
+
+    var many: [70]Array = undefined;
+    for (&many) |*a| a.* = base;
+    var vec = VectorArray.fromArrays(&many);
+    defer vec.deinit();
+    try std.testing.expectEqual(@as(usize, 70), vec.size());
+}
