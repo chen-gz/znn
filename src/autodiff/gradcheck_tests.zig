@@ -388,6 +388,25 @@ test "gradcheck: convTranspose1d and convTranspose2d" {
     }, .{});
 }
 
+test "gradcheck: convTranspose without bias, unit stride and kernel wider than stride" {
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.convTranspose1d(t[0], t[1], null, .{});
+        }
+    }, &.{
+        .{ .shape = &.{ 1, 3, 3 } },
+        .{ .shape = &.{ 3, 2, 2 } },
+    }, .{});
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.convTranspose2d(t[0], t[1], null, .{ .stride = 2, .padding = 2 });
+        }
+    }, &.{
+        .{ .shape = &.{ 2, 1, 3, 3 } },
+        .{ .shape = &.{ 1, 2, 4, 4 } },
+    }, .{});
+}
+
 test "gradcheck: max/avg/adaptive pooling" {
     try expectGradientsMatch(struct {
         fn build(g: *Graph, t: []const *Tensor) !*Tensor {
