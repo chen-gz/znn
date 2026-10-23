@@ -122,7 +122,8 @@ pub fn main() !void {
         const start_idx = gen_buf.items.len - seq_len;
         const input_slice = gen_buf.items[start_idx..];
 
-        var graph = autodiff.Graph.initDefault(allocator);
+        // 生成只做前向推理：使用无梯度计算图，不记录反向传播算子，也不分配梯度缓冲区
+        var graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
         defer graph.deinit();
 
         const x_node = try graph.tensorND(&.{ 1, seq_len }, false);

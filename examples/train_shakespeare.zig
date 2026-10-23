@@ -162,7 +162,8 @@ pub fn main(init: std.process.Init) !void {
         const start_idx = gen_tokens.items.len - cur_len;
         const cur_slice = gen_tokens.items[start_idx..];
 
-        var g = autodiff.Graph.initDefault(allocator);
+        // 生成只做前向推理：使用无梯度计算图，不记录反向传播算子，也不分配梯度缓冲区
+        var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
         defer g.deinit();
 
         const x_eval = try g.tensorND(&.{ 1, cur_len }, false);
