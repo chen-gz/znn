@@ -4,6 +4,6 @@
   packages = [
     pkgs.git
     pkgs.nodejs
-    pkgs.zig
+    pkgs.zig_0_17
   ];
 }

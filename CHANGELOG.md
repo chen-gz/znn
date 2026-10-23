@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **开发环境与最低版本切换到 Zig 0.17 (`devenv.nix`, `devenv.lock`, `build.zig.zon`, `README.md`, `doc/README.md`)**:
+  - `devenv.nix` 显式固定 `pkgs.zig_0_17`，并更新 `devenv.lock` 中的 `devenv-nixpkgs` 版本；`build.zig.zon` 的 `minimum_zig_version` 改为 `0.17.0`，README 徽章与说明同步为 Zig 0.17.0。
+
 - **审计遗留问题全部修复：Gemma 4 GPU 代码归位、采样语义统一、检查点格式与 MoE 加速 (`src/backend/`, `src/models/`, `src/tensor/`, `src/autodiff/`, `src/nn/`, `src/optim.zig`, `src/dataset.zig`, `src/cross_validation.zig`, `examples/`, `web/`, `doc/`)**:
   - **后端与模型 (`backend`, `models`)**：Gemma 4 专属的 GPU 解码层与上下文 (`Gemma4GpuLayer` / `Gemma4GpuContext`)、比例旋转位置编码 (`GpuRope`) 与词元选取迁移至 `src/models/gemma4_gpu.zig`，`backend.offload` 只保留与模型无关的卸载原语，新增 `backend.sampling`（排除区间、重复惩罚、`argmaxWithPenalty`）与 `TokenExclusionMask`；排除词元统一由 `Gemma4Config.sampling_excluded_tokens` 定义，GPU argmax（12B 与 E4B）不再遗漏 258880–258884 控制词元；12B GPU 全局注意力层改用完整 head_dim 的比例旋转位置编码频率表；全部路径改为先最终对数几率截断 (Softcap) 再施加重复惩罚，与 Hugging Face 一致；Q4 模型从 GPU 切回 CPU 解码前把 GPU 键值缓存同步回 CPU；`Gemma4GpuContext` 独占持有 LM Head；`LmHeadWeights.initWithMode` 遇到不兼容的量化模式返回 `error.UnsupportedQuantMode`，不再静默退回 BF16；未传入命令流的 MLX 算子复用缓存的默认 GPU 命令流（`mlx.releaseDefaultStream` 释放）；`dataFloat32` / `dataUint32` / `itemUint32` 校验数据类型；`Gemma4Vocabulary.encode` 对未登录字符执行 `<0xNN>` 字节回退；直通布局加载器不再向 stderr 打印耗时（GPU 改动仅做 aarch64-macos 类型检查，需在 Apple Silicon 上实测）。
   - **张量 (`tensor`)**：`gatherMatMulInto` 新增 `allocator` 参数，按专家分组 (`nn_kernels.ExpertGroups`) 后每个专家只调用一次 SGEMM（混合专家 (Mixture of Experts, MoE) 前向约 1.4–4.9×）；`fillNormal` / `fillUniform` / `GenericTensor.fill` 在视图上只写可见元素；`StaticTensor.matmul` 不再跳过零元素；`sort` / `argsort` / `topK` 采用 NaN 视为最大值的全序比较，`topKInto` 不再因 Inf / NaN 污染其他槽位并支持跨步视图；`GenericTensor.sum` 对跨步视图逐行遍历；连续视图直接交给损失、Softmax、归一化、RoPE、concat / split、极值归约与 QR / SymEig / SVD 内核，不再额外复制。
