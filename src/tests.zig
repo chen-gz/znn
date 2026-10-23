@@ -22,7 +22,6 @@ const InitMethod = root.InitMethod;
 const InitOptions = root.InitOptions;
 const initWeights = root.initWeights;
 const GenericTensor = root.GenericTensor;
-const TensorOf = root.TensorOf;
 const FloatTensor = root.FloatTensor;
 const DoubleTensor = root.DoubleTensor;
 const IntTensor = root.IntTensor;

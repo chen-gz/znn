@@ -48,7 +48,6 @@ pub const GRUResult = nn.GRUResult;
 
 pub const StaticTensor = tensor.StaticTensor;
 pub const GenericTensor = tensor.GenericTensor;
-pub const TensorOf = tensor.TensorOf;
 pub const FloatTensor = tensor.FloatTensor;
 pub const DoubleTensor = tensor.DoubleTensor;
 pub const IntTensor = tensor.IntTensor;
@@ -61,7 +60,6 @@ pub const SliceRange = tensor.SliceRange;
 pub const ConvOptions = tensor.ConvOptions;
 pub const PoolOptions = tensor.PoolOptions;
 pub const RopeOptions = tensor.RopeOptions;
-pub const RoPEOptions = tensor.RoPEOptions;
 pub const QRResult = tensor.QRResult;
 pub const SymEigResult = tensor.SymEigResult;
 pub const SVDResult = tensor.SVDResult;

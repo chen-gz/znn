@@ -35,7 +35,6 @@ pub const SliceRange = types.SliceRange;
 pub const ConvOptions = types.ConvOptions;
 pub const PoolOptions = types.PoolOptions;
 pub const RopeOptions = types.RopeOptions;
-pub const RoPEOptions = types.RoPEOptions;
 pub const convertScalar = types.convertScalar;
 pub const isTruthyScalar = types.isTruthyScalar;
 pub const GenericTensor = types.GenericTensor;
@@ -46,7 +45,6 @@ pub const LongTensor = types.LongTensor;
 pub const BoolTensor = types.BoolTensor;
 pub const BFloat16Tensor = types.BFloat16Tensor;
 pub const UsizeTensor = types.UsizeTensor;
-pub const TensorOf = types.TensorOf;
 pub const StaticTensor = static.StaticTensor;
 
 // --- Re-export core Tensor ---
