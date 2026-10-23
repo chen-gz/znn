@@ -41,10 +41,10 @@ pub fn main() !void {
     // 2. Perform 5-Fold Grid Search using library's CrossValidationGridSearch
     const candidate_alphas = [_]f32{ 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0 };
 
-    var cv_search = cv.CrossValidationGridSearch.init(allocator, 5);
+    var cv_search = cv.CrossValidationGridSearch.init(allocator, .{ .k_splits = 5, .random_seed = 101 });
     defer cv_search.deinit();
 
-    try cv_search.searchLasso(X, y, N, P, &candidate_alphas, 101);
+    try cv_search.searchLasso(X, y, N, P, &candidate_alphas);
 
     // 3. Output Report
     std.debug.print("{s:<10} | {s:<18} | {s:<18} | {s}\n", .{ "Alpha", "Mean 5-Fold MSE", "Standard Error", "Status" });

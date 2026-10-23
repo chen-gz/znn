@@ -606,11 +606,11 @@ test "cross_validation module searchLasso" {
         y[i] = 2.0 * fi + 1.0;
     }
 
-    var cv_search = cv.CrossValidationGridSearch.init(allocator, 5);
+    var cv_search = cv.CrossValidationGridSearch.init(allocator, .{ .k_splits = 5, .random_seed = 42 });
     defer cv_search.deinit();
 
     const alphas = [_]f32{ 0.001, 0.01, 0.1, 1.0, 10.0 };
-    try cv_search.searchLasso(&X, &y, N, P, &alphas, 42);
+    try cv_search.searchLasso(&X, &y, N, P, &alphas);
 
     try std.testing.expectEqual(@as(usize, 5), cv_search.results.items.len);
     try std.testing.expect(cv_search.getBestMinAlpha() <= 0.1);
@@ -1463,7 +1463,7 @@ test "Config defaults and initDefault ergonomics across modules" {
 
     var cv_default = cv.CrossValidationGridSearch.initDefault(allocator);
     defer cv_default.deinit();
-    try std.testing.expectEqual(@as(usize, 5), cv_default.k_splits);
+    try std.testing.expectEqual(@as(usize, 5), cv_default.options.k_splits);
     try std.testing.expectEqual(@as(usize, 5), root.CrossValidationOptions.defaultOptions().k_splits);
 
     const drop = nn.Dropout.initDefault();

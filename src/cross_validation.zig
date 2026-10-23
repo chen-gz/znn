@@ -158,10 +158,18 @@ pub const CVResult = struct {
     }
 };
 
-/// Configuration options for K-Fold Cross-Validation (CV)
+/// Configuration options for K-Fold Cross-Validation (CV) grid search.
+/// The defaults reproduce a 5-fold split with seed 42 and a coordinate descent budget of
+/// 1000 sweeps with tolerance 1e-4 for each fitted model.
 pub const CrossValidationOptions = struct {
+    /// Number of folds; must be greater than 1 and no larger than the sample count
     k_splits: usize = 5,
+    /// Seed of the Fisher-Yates shuffle that assigns samples to folds
     random_seed: u64 = 42,
+    /// Maximum number of coordinate descent sweeps per fitted model
+    max_iter: usize = 1000,
+    /// Coordinate descent convergence tolerance (see `regression.solveElasticNet`)
+    tol: f32 = 1e-4,
 
     pub const default: CrossValidationOptions = .{};
 
@@ -170,28 +178,22 @@ pub const CrossValidationOptions = struct {
     }
 };
 
-/// 5-Fold Grid Search Engine for Least Absolute Shrinkage and Selection Operator (LASSO) and Elastic Net Hyperparameter Tuning
+/// K-Fold Grid Search Engine for Least Absolute Shrinkage and Selection Operator (LASSO) Hyperparameter Tuning
 pub const CrossValidationGridSearch = struct {
     allocator: std.mem.Allocator,
-    k_splits: usize = 5,
+    options: CrossValidationOptions = .{},
     results: std.ArrayList(CVResult),
     best_min_index: usize = 0,
     best_1se_index: usize = 0,
 
-    pub const default: CrossValidationOptions = CrossValidationOptions.default;
-
-    pub fn defaultOptions() CrossValidationOptions {
-        return CrossValidationOptions.default;
-    }
-
     pub fn initDefault(allocator: std.mem.Allocator) CrossValidationGridSearch {
-        return init(allocator, 5);
+        return init(allocator, .{});
     }
 
-    pub fn init(allocator: std.mem.Allocator, k_splits: usize) CrossValidationGridSearch {
+    pub fn init(allocator: std.mem.Allocator, options: CrossValidationOptions) CrossValidationGridSearch {
         return .{
             .allocator = allocator,
-            .k_splits = k_splits,
+            .options = options,
             .results = std.ArrayList(CVResult).empty,
         };
     }
@@ -203,7 +205,8 @@ pub const CrossValidationGridSearch = struct {
         self.results.deinit(self.allocator);
     }
 
-    /// Evaluates Least Absolute Shrinkage and Selection Operator (LASSO) across a list of candidate alpha values.
+    /// Evaluates Least Absolute Shrinkage and Selection Operator (LASSO) across a list of candidate alpha values,
+    /// using the fold count, shuffle seed and solver budget from `options`.
     /// Results of a previous search are discarded, so `results`, `best_min_index` and `best_1se_index`
     /// always describe the latest grid.
     pub fn searchLasso(
@@ -213,7 +216,6 @@ pub const CrossValidationGridSearch = struct {
         n_samples: usize,
         n_features: usize,
         alphas: []const f32,
-        random_seed: u64,
     ) !void {
         std.debug.assert(alphas.len > 0);
         for (self.results.items) |*res| res.deinit();
@@ -221,10 +223,11 @@ pub const CrossValidationGridSearch = struct {
         self.best_min_index = 0;
         self.best_1se_index = 0;
 
-        var prng = std.Random.DefaultPrng.init(random_seed);
+        const k_splits = self.options.k_splits;
+        var prng = std.Random.DefaultPrng.init(self.options.random_seed);
         const random = prng.random();
 
-        const folds = try kFoldSplit(self.allocator, n_samples, self.k_splits, random);
+        const folds = try kFoldSplit(self.allocator, n_samples, k_splits, random);
         defer {
             for (folds) |*f| f.deinit(self.allocator);
             self.allocator.free(folds);
@@ -237,13 +240,13 @@ pub const CrossValidationGridSearch = struct {
         var moved: usize = 0;
         errdefer for (all_fold_mses[moved..allocated]) |m| self.allocator.free(m);
         for (all_fold_mses) |*m| {
-            m.* = try self.allocator.alloc(f32, self.k_splits);
+            m.* = try self.allocator.alloc(f32, k_splits);
             allocated += 1;
         }
 
         // Per-fold buffers sized for the largest fold, reused across folds
-        const max_tr = n_samples - n_samples / self.k_splits;
-        const max_va = (n_samples + self.k_splits - 1) / self.k_splits;
+        const max_tr = n_samples - n_samples / k_splits;
+        const max_va = (n_samples + k_splits - 1) / k_splits;
         const X_tr = try self.allocator.alloc(f32, max_tr * n_features);
         defer self.allocator.free(X_tr);
         const y_tr = try self.allocator.alloc(f32, max_tr);
@@ -260,7 +263,7 @@ pub const CrossValidationGridSearch = struct {
         var scaler = try StandardScaler.init(self.allocator, n_features);
         defer scaler.deinit();
 
-        for (0..self.k_splits) |k| {
+        for (0..k_splits) |k| {
             const tr_indices = folds[k].train_indices;
             const va_indices = folds[k].val_indices;
             const N_tr = tr_indices.len;
@@ -275,7 +278,7 @@ pub const CrossValidationGridSearch = struct {
 
             for (alphas, 0..) |alpha, a_idx| {
                 // Fit Least Absolute Shrinkage and Selection Operator (LASSO)
-                var model = try regression.solveLasso(self.allocator, X_tr_scaled[0 .. N_tr * n_features], y_tr[0..N_tr], N_tr, n_features, alpha, 1000, 1e-4);
+                var model = try regression.solveLasso(self.allocator, X_tr_scaled[0 .. N_tr * n_features], y_tr[0..N_tr], N_tr, n_features, alpha, self.options.max_iter, self.options.tol);
                 defer model.deinit();
 
                 // Compute validation Mean Squared Error (MSE)
@@ -289,14 +292,14 @@ pub const CrossValidationGridSearch = struct {
             const fold_mses = all_fold_mses[a_idx];
             var sum_mse: f32 = 0.0;
             for (fold_mses) |m| sum_mse += m;
-            const mean_mse = sum_mse / @as(f32, @floatFromInt(self.k_splits));
+            const mean_mse = sum_mse / @as(f32, @floatFromInt(k_splits));
 
             var var_sum: f32 = 0.0;
             for (fold_mses) |m| {
                 const diff = m - mean_mse;
                 var_sum += diff * diff;
             }
-            const se_mse = @sqrt(var_sum / @as(f32, @floatFromInt(self.k_splits - 1))) / @sqrt(@as(f32, @floatFromInt(self.k_splits)));
+            const se_mse = @sqrt(var_sum / @as(f32, @floatFromInt(k_splits - 1))) / @sqrt(@as(f32, @floatFromInt(k_splits)));
 
             self.results.appendAssumeCapacity(.{
                 .alpha = alpha,
@@ -438,19 +441,19 @@ test "searchLasso replaces previous results and the 1-SE choice ignores grid ord
     var y: [N]f32 = undefined;
     makeLinearData(N, P, 3, &X, &y);
 
-    var search = CrossValidationGridSearch.init(allocator, 5);
+    var search = CrossValidationGridSearch.init(allocator, .{ .random_seed = 1 });
     defer search.deinit();
 
-    try search.searchLasso(&X, &y, N, P, &.{ 0.001, 0.01, 0.1 }, 1);
+    try search.searchLasso(&X, &y, N, P, &.{ 0.001, 0.01, 0.1 });
     const ascending_1se = search.getBest1SEAlpha();
 
     // 第二次搜索：结果只包含新网格，最优下标指向新网格
-    try search.searchLasso(&X, &y, N, P, &.{ 5.0, 10.0, 0.001 }, 1);
+    try search.searchLasso(&X, &y, N, P, &.{ 5.0, 10.0, 0.001 });
     try std.testing.expectEqual(@as(usize, 3), search.results.items.len);
     try std.testing.expectEqual(@as(f32, 0.001), search.getBestMinAlpha());
 
     // 同一网格倒序：1-SE 规则选择的 alpha 不随顺序改变
-    try search.searchLasso(&X, &y, N, P, &.{ 0.1, 0.01, 0.001 }, 1);
+    try search.searchLasso(&X, &y, N, P, &.{ 0.1, 0.01, 0.001 });
     try std.testing.expectEqual(ascending_1se, search.getBest1SEAlpha());
     try std.testing.expectEqual(@as(f32, 0.001), search.getBestMinAlpha());
 }
@@ -461,11 +464,60 @@ fn searchLassoForAllocationFailures(allocator: std.mem.Allocator) !void {
     var X: [N * P]f32 = undefined;
     var y: [N]f32 = undefined;
     makeLinearData(N, P, 9, &X, &y);
-    var search = CrossValidationGridSearch.init(allocator, 3);
+    var search = CrossValidationGridSearch.init(allocator, .{ .k_splits = 3, .random_seed = 2 });
     defer search.deinit();
-    try search.searchLasso(&X, &y, N, P, &.{ 0.01, 0.1 }, 2);
+    try search.searchLasso(&X, &y, N, P, &.{ 0.01, 0.1 });
 }
 
 test "kFoldSplit, StandardScaler and searchLasso do not leak on allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, searchLassoForAllocationFailures, .{});
+}
+
+test "searchLasso honours every CrossValidationOptions field" {
+    const allocator = std.testing.allocator;
+    const N = 40;
+    const P = 3;
+    var X: [N * P]f32 = undefined;
+    var y: [N]f32 = undefined;
+    makeLinearData(N, P, 5, &X, &y);
+    const alphas = [_]f32{ 0.001, 0.1 };
+
+    var baseline = CrossValidationGridSearch.initDefault(allocator);
+    defer baseline.deinit();
+    try baseline.searchLasso(&X, &y, N, P, &alphas);
+    try std.testing.expectEqual(CrossValidationOptions{}, baseline.options);
+
+    // 显式写出旧的硬编码取值 (5 折、种子 42、1000 轮、容差 1e-4)：结果与默认配置逐位一致
+    var explicit = CrossValidationGridSearch.init(allocator, .{ .k_splits = 5, .random_seed = 42, .max_iter = 1000, .tol = 1e-4 });
+    defer explicit.deinit();
+    try explicit.searchLasso(&X, &y, N, P, &alphas);
+    for (baseline.results.items, explicit.results.items) |a, b| {
+        try std.testing.expectEqualSlices(f32, a.fold_mses, b.fold_mses);
+    }
+
+    // k_splits 决定每个 alpha 的折数
+    var three_fold = CrossValidationGridSearch.init(allocator, .{ .k_splits = 3 });
+    defer three_fold.deinit();
+    try three_fold.searchLasso(&X, &y, N, P, &alphas);
+    try std.testing.expectEqual(@as(usize, 3), three_fold.results.items[0].fold_mses.len);
+
+    // random_seed 决定样本分折
+    var reseeded = CrossValidationGridSearch.init(allocator, .{ .random_seed = 7 });
+    defer reseeded.deinit();
+    try reseeded.searchLasso(&X, &y, N, P, &alphas);
+    try std.testing.expect(!std.mem.eql(f32, baseline.results.items[0].fold_mses, reseeded.results.items[0].fold_mses));
+
+    // max_iter = 1 只做一轮坐标下降：小 alpha 下尚未收敛，验证误差与默认配置不同
+    var one_sweep = CrossValidationGridSearch.init(allocator, .{ .max_iter = 1 });
+    defer one_sweep.deinit();
+    try one_sweep.searchLasso(&X, &y, N, P, &alphas);
+    try std.testing.expect(!std.mem.eql(f32, baseline.results.items[0].fold_mses, one_sweep.results.items[0].fold_mses));
+
+    // 极大的 tol 在第一轮后即判定收敛：与 max_iter = 1 逐位一致
+    var loose_tol = CrossValidationGridSearch.init(allocator, .{ .tol = 1e9 });
+    defer loose_tol.deinit();
+    try loose_tol.searchLasso(&X, &y, N, P, &alphas);
+    for (one_sweep.results.items, loose_tol.results.items) |a, b| {
+        try std.testing.expectEqualSlices(f32, a.fold_mses, b.fold_mses);
+    }
 }
