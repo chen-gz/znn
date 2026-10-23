@@ -284,9 +284,10 @@ pub const LmHeadWeights = struct {
 };
 
 /// 词表加性排除掩码 (Additive Token Exclusion Mask)：[vocab_size] 的 BF16 常驻数组，排除词元为 -inf，其余为 0。
-/// 与对数几率相加后再求 argmax，使 GPU 贪婪采样与 CPU `sampling.argmaxWithPenalty` 排除完全相同的词元集合。
+/// 与对数几率相加后再求 argmax 或选取随机采样候选，使 GPU 路径与 CPU `sampling.argmaxWithPenalty` /
+/// `sampling.maskExcludedInPlace` 排除完全相同的词元集合。
 pub const TokenExclusionMask = struct {
-    /// 排除集合与词表不相交时为 null，argmax 直接作用于原始对数几率
+    /// 排除集合与词表不相交时为 null，直接使用原始对数几率
     mask: ?mlx.Array = null,
     vocab_size: usize,
 
@@ -311,16 +312,20 @@ pub const TokenExclusionMask = struct {
         self.mask = null;
     }
 
-    /// 沿最后一轴对 logits [..., vocab_size] 求未被排除词元中的最大值下标 (uint32，形状去掉最后一轴)
-    pub fn argmax(self: *const TokenExclusionMask, logits: mlx.Array, stream: ?Stream) OffloadError!mlx.Array {
+    /// 对 logits [..., vocab_size] 叠加排除掩码，返回新数组 (排除词元为 -inf)；排除集合与词表不相交时返回共享同一数据的新句柄
+    pub fn apply(self: *const TokenExclusionMask, logits: mlx.Array, stream: ?Stream) OffloadError!mlx.Array {
         if (!isAvailable()) return error.OffloadNotSupported;
         const nd = logits.ndim();
         if (nd == 0 or logits.dimSize(@intCast(nd - 1)) != self.vocab_size) return error.ShapeMismatch;
-        const axis: i32 = @intCast(nd - 1);
-        const m = self.mask orelse return logits.argmax(axis, false, stream);
-        var masked = try mlx.Array.add(logits, m, stream);
+        const m = self.mask orelse return logits.share();
+        return mlx.Array.add(logits, m, stream);
+    }
+
+    /// 沿最后一轴对 logits [..., vocab_size] 求未被排除词元中的最大值下标 (uint32，形状去掉最后一轴)
+    pub fn argmax(self: *const TokenExclusionMask, logits: mlx.Array, stream: ?Stream) OffloadError!mlx.Array {
+        var masked = try self.apply(logits, stream);
         defer masked.deinit();
-        return masked.argmax(axis, false, stream);
+        return masked.argmax(@intCast(logits.ndim() - 1), false, stream);
     }
 };
 

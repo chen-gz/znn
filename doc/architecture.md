@@ -17,7 +17,7 @@ src/
 │   ├── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
 │   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定与 GPU 数组算子
 │   ├── offload.zig               # 与模型无关的硬件加速卸载原语 (GEMM, RMSNorm, RoPE, SDPA, 滑动窗口注意力, LmHeadWeights, TokenExclusionMask, Q4Weights, GpuKvCache)
-│   ├── sampling.zig              # 通用贪婪采样与重复惩罚 (TokenRange 排除区间, argmaxWithPenalty, BF16 排除掩码)
+│   ├── sampling.zig              # 通用采样基础设施 (TokenRange 排除区间, argmaxWithPenalty, BF16 排除掩码, SamplingOptions / Sampler 温度 + Top-K + Top-P 随机采样, selectTopK 部分选择, 投机采样校验)
 │   └── tests.zig                 # 硬件计算后端与 GPU 算子卸载单元测试集
 ├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, Q4Block, ops)
 ├── tensor/
