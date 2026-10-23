@@ -1553,3 +1553,27 @@ test "Graph.forward replays training-mode batch normalization with fresh batch s
     // 重演同样按动量更新运行均值
     try std.testing.expect(rm.data[0] > running_mean_before);
 }
+
+test "softmaxCrossEntropy uses log-sum-exp for confidently wrong predictions" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    // 目标类别的概率 exp(-100) 在单精度下溢为 0，旧实现会把损失截断为 -log(1e-15) ≈ 34.5
+    const logits = try graph.array(&.{ 2, 2 }, &.{ 100.0, 0.0, 0.0, 1.0 }, true);
+    const loss = try graph.softmaxCrossEntropy(logits, &[_]u8{ 1, 1 });
+    const masked = try graph.maskedCrossEntropyLoss(logits, &[_]u8{ 1, 1 }, &.{ 1.0, 1.0 });
+    const row1 = @log(1.0 + @exp(@as(f32, -1.0)));
+    const expected = (100.0 + row1) / 2.0;
+    try std.testing.expectApproxEqAbs(expected, loss.data[0], 1e-3);
+    try std.testing.expectApproxEqAbs(expected, masked.data[0], 1e-3);
+
+    try graph.backward(loss);
+    // d/dz = (softmax(z) - onehot) / B：第一行 ≈ [0.5, -0.5]
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), logits.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.5), logits.grad[1], 1e-5);
+
+    // 非二维 logits 必须先 reshape
+    const logits3 = try graph.zeros(&.{ 1, 2, 3 }, true);
+    try std.testing.expectError(error.IncompatibleDimensions, graph.softmaxCrossEntropy(logits3, &[_]u8{0}));
+}

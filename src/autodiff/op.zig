@@ -78,8 +78,8 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
                         row_probs[j] = e;
                         sum += e;
                     }
-                    for (0..D) |j| {
-                        row_probs[j] /= sum;
+                    for (row_probs) |*p| {
+                        p.* /= sum;
                     }
                 } else {
                     for (row) |val| {
@@ -87,15 +87,10 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
                     }
                 }
 
-                const target_idx = targets[i];
-                if (ctx.mask != null) {
-                    const log_sum_exp = max_val + @log(sum);
-                    loss_sum += (log_sum_exp - row[target_idx]) * w;
-                } else {
-                    const prob = if (probs.len == B_size * D) probs[i * D + target_idx] else (@exp(row[target_idx] - max_val) / sum);
-                    const clipped = @max(prob, 1e-15);
-                    loss_sum += -@log(clipped);
-                }
+                // 对数求和指数 (Log-Sum-Exp, LSE) 形式：-log softmax(z)_y = max + log(sum) - z_y，
+                // 目标类别概率下溢为 0 时依然给出精确损失，而不是被截断
+                const log_sum_exp = max_val + @log(sum);
+                loss_sum += (log_sum_exp - row[targets[i]]) * w;
                 total_w += w;
             }
 
