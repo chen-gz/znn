@@ -85,18 +85,28 @@ pub fn main(init: std.process.Init) !void {
     const init_sample = try tensor.ones(arena, &.{ 1, 784 });
     try model.initParametersWithSample(prng.random(), .{init_sample});
 
-    try runTraining(&model, io, arena, train_dataset, test_dataset);
-    try printPredictions(&model, arena, test_dataset, 5);
+    try runTraining(&model, io, allocator, arena, train_dataset, test_dataset);
+    try printPredictions(&model, allocator, test_dataset, 5);
 }
 
+/// 每 100 个批次打印一次训练进度
+fn printBatchProgress(batch_idx: usize, loss: f32, acc: f32) void {
+    if (batch_idx % 100 == 0) {
+        std.debug.print("  Batch {d:4} | Loss: {d:.4} | Acc: {d:.2}%\n", .{ batch_idx, loss, acc * 100.0 });
+    }
+}
+
+/// `allocator` 用于每个批次的计算图：计算图在批次结束时释放，内存会真正归还；
+/// `arena` 只承载生命周期贯穿整个训练过程的对象 (优化器状态、数据加载器)。
+/// 若把逐批次的计算图也挂在外层 arena 上，arena 无法回收中间释放的内存，训练期间内存会持续增长。
 fn runTraining(
     model: anytype,
     io: std.Io,
+    allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
     train_dataset: dataset.Dataset,
     test_dataset: dataset.Dataset,
 ) !void {
-    const input_dim = 784; // 28 * 28
     const batch_size = 64;
     const epochs = 3; // CNN is slower on CPU, so run for fewer epochs in example
 
@@ -113,11 +123,6 @@ fn runTraining(
     });
     defer train_loader.deinit(arena);
 
-    const x_batch = try arena.alloc(f32, batch_size * input_dim);
-    defer arena.free(x_batch);
-    const y_batch = try arena.alloc(u8, batch_size);
-    defer arena.free(y_batch);
-
     std.debug.print("Starting training (CNN with Conv2D + MaxPool2D + Linear)...\n", .{});
 
     for (0..epochs) |epoch| {
@@ -126,51 +131,16 @@ fn runTraining(
         const timer = zig_ml.ProfileBlock.start(epoch_label);
         defer timer.end();
 
-        train_loader.reset();
+        // 通用分类训练 Epoch (自动从 targets.len 推导 batch_size，从数据集推导 input_dim)
+        const train_res = try engine.trainClassificationEpoch(allocator, model, &optimizer, &train_loader, printBatchProgress);
 
-        var epoch_loss: f32 = 0.0;
-        var epoch_acc: f32 = 0.0;
-        var num_batches: usize = 0;
-
-        while (true) {
-            const actual_batch_size = train_loader.peekNextBatchSize();
-            if (actual_batch_size == 0) break;
-
-            _ = train_loader.nextInto(x_batch, y_batch);
-
-            // 使用通用分类训练单步 (自动从 targets.len 推导 batch_size，从 x_batch 长度推导 input_dim)
-            const step_res = try engine.trainClassificationStep(
-                arena,
-                model,
-                &optimizer,
-                x_batch[0 .. actual_batch_size * input_dim],
-                y_batch[0..actual_batch_size],
-            );
-
-            epoch_loss += step_res.loss;
-            epoch_acc += step_res.accuracy;
-            num_batches += 1;
-
-            // Print batch progress every 100 batches
-            if (num_batches % 100 == 0) {
-                std.debug.print("  Batch {d:4} | Loss: {d:.4} | Acc: {d:.2}%\n", .{
-                    num_batches,
-                    step_res.loss,
-                    step_res.accuracy * 100.0,
-                });
-            }
-        }
-
-        epoch_loss /= @as(f32, @floatFromInt(num_batches));
-        epoch_acc /= @as(f32, @floatFromInt(num_batches));
-
-        const eval_res = try evaluateModel(model, arena, test_dataset);
+        const eval_res = try evaluateModel(model, allocator, test_dataset);
 
         std.debug.print("Epoch {d:2}/{d:2} | Train Loss: {d:.4} | Train Acc: {d:.2}% | Test Loss: {d:.4} | Test Acc: {d:.2}%\n", .{
             epoch + 1,
             epochs,
-            epoch_loss,
-            epoch_acc * 100.0,
+            train_res.loss,
+            train_res.accuracy * 100.0,
             eval_res.loss,
             eval_res.accuracy * 100.0,
         });
@@ -186,23 +156,23 @@ fn runTraining(
 
 fn evaluateModel(
     model: anytype,
-    arena: std.mem.Allocator,
+    allocator: std.mem.Allocator,
     test_dataset: dataset.Dataset,
 ) !engine.ClassificationEpochResult {
     const test_batch_size = 100;
 
-    var test_loader = try dataset.DataLoader.init(arena, test_dataset, test_batch_size, .{
+    var test_loader = try dataset.DataLoader.init(allocator, test_dataset, test_batch_size, .{
         .shuffle = false,
         .drop_last = false,
     });
-    defer test_loader.deinit(arena);
+    defer test_loader.deinit(allocator);
 
-    return try engine.evaluateClassification(arena, model, &test_loader);
+    return try engine.evaluateClassification(allocator, model, &test_loader);
 }
 
 fn printPredictions(
     model: anytype,
-    arena: std.mem.Allocator,
+    allocator: std.mem.Allocator,
     test_dataset: dataset.Dataset,
     count: usize,
 ) !void {
@@ -213,18 +183,17 @@ fn printPredictions(
         const img_slice = test_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim];
         const actual_label = test_dataset.labels.data[idx];
 
-        var graph = autodiff.Graph.initDefault(arena);
+        // 推理只需前向计算：无梯度计算图，中间张量 (包括 argmax 结果) 都由计算图的 arena 统一释放
+        var graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
         defer graph.deinit();
 
-        const x_tensor = try graph.tensor(1, input_dim, false);
-        @memcpy(x_tensor.data, img_slice);
-
+        const x_tensor = try graph.array(&.{ 1, input_dim }, img_slice, false);
         const logits = try model.forward(&graph, x_tensor);
-        const loss = try graph.softmaxCrossEntropy(logits, &[1]u8{actual_label});
-        const preds = try logits.argmax(1, arena);
+
+        const preds = try logits.argmax(1, graph.arenaAllocator());
         const pred = @as(usize, @intFromFloat(preds.data[0]));
-        const probs = autodiff.Op.creatorOf(loss).?.context.SoftmaxCrossEntropy.probs;
-        const max_val = probs[pred];
+        const probs = try logits.softmax(graph.arenaAllocator());
+        const max_val = probs.data[pred];
 
         const is_correct = (pred == actual_label);
         const status = if (is_correct) "✅ CORRECT" else "❌ INCORRECT";
