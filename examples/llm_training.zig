@@ -119,7 +119,8 @@ pub fn main() !void {
     lora_layer.resetParameters(random, .{});
     defer nn.deinitModel(&lora_layer, allocator);
 
-    var lora_graph = autodiff.Graph.initDefault(allocator);
+    // 此处只演示前向计算，不做反向传播：使用无梯度计算图
+    var lora_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer lora_graph.deinit();
 
     const lora_in = try lora_graph.tensor(2, 16, false);
