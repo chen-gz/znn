@@ -360,8 +360,6 @@ pub fn convTranspose2d(
     }
 }
 
-pub const convTranspose2D = convTranspose2d;
-
 pub fn maxpool1d(self: *Graph, A: *Tensor, pool_size: usize, options: tensor_mod.PoolOptions) !*Tensor {
     const allocator = self.arena.allocator();
     const C = try A.maxpool1d(pool_size, options, allocator);
