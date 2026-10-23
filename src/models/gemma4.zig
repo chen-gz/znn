@@ -16,6 +16,8 @@ const deinitModel = core.deinitModel;
 const enterModuleScope = core.enterModuleScope;
 const sampling = backend.sampling;
 const TokenRange = sampling.TokenRange;
+const Sampler = sampling.Sampler;
+const SamplingOptions = sampling.SamplingOptions;
 
 // ============================================================================
 // Gemma 4 专用非通用算子 (Split-Half & Proportional RoPE)
@@ -234,7 +236,7 @@ pub fn validateTokenIds(tokens: []const usize, vocab_size: usize) !void {
 }
 
 // ============================================================================
-// 采样共享核心：最终对数几率截断与重复惩罚 (F32 / Q4 CPU 路径与 GPU 路径共用同一顺序)
+// 采样共享核心：最终对数几率截断、重复惩罚与随机采样 (F32 / Q4 CPU 路径与 GPU 路径共用同一顺序)
 // ============================================================================
 
 /// 最终对数几率截断 (Final Logit Softcapping)：cap * tanh(x / cap)；cap <= 0 时不截断
@@ -258,7 +260,8 @@ pub fn recentWindow(tokens: []const usize) []const usize {
     return if (tokens.len > repetition_window) tokens[tokens.len - repetition_window ..] else tokens;
 }
 
-/// 词表投影、最终对数几率截断、重复惩罚与贪婪采样融合的 CPU 多核并行实现 (Fused LM Head Projection & Greedy Sampling)
+/// 词表投影、最终对数几率截断、重复惩罚与贪婪采样融合的 CPU 多核并行实现 (Fused LM Head Projection & Greedy Sampling)，
+/// 是贪婪采样的快车道：不物化完整对数几率。
 /// embed 为 [vocab_size, hidden_size] 行主序词表嵌入矩阵，元素类型为单精度浮点 (f32) 或脑浮点 16 (Brain Floating Point 16, BF16) 原始位 (u16)。
 /// 每个词元的最终得分为 `samplingLogit(点积)` (截断后惩罚，recent_tokens 中的词元全部受罚，窗口由调用方决定)，
 /// 跳过 `cfg.sampling_excluded_tokens` 中的词元，返回取得最大最终得分的词元 ID (并列时取较小 ID，NaN 被忽略)。
@@ -346,6 +349,60 @@ pub fn greedyLmHeadCpu(
     return if (best.id == std.math.maxInt(usize)) 0 else best.id;
 }
 
+/// 词表投影与最终对数几率截断的 CPU 多核并行实现：把截断后的完整对数几率写入 out [vocab_size]。
+/// 每个词元的结果只取决于自身的点积，按固定粒度分块经 `graph.executor()` 并行，结果与线程数无关。
+pub fn lmHeadLogitsCpu(
+    comptime cfg: Gemma4Config,
+    comptime Elem: type,
+    graph: *autodiff.Graph,
+    embed: []const Elem,
+    h_last: []const f32,
+    out: []f32,
+) !void {
+    comptime std.debug.assert(Elem == f32 or Elem == u16);
+    if (h_last.len != cfg.hidden_size or embed.len < cfg.vocab_size * cfg.hidden_size or out.len != cfg.vocab_size) return error.ShapeMismatch;
+
+    const Context = struct {
+        embed: []const Elem,
+        h_last: []const f32,
+        out: []f32,
+
+        fn run(ctx: @This(), start_v: usize, end_v: usize) void {
+            const hidden = cfg.hidden_size;
+            for (start_v..end_v) |v| {
+                const row = ctx.embed[v * hidden ..][0..hidden];
+                const raw = if (Elem == f32) dotF32(ctx.h_last, row) else dotF32Bf16(ctx.h_last, row);
+                ctx.out[v] = softcapLogit(raw, cfg.final_logit_softcapping);
+            }
+        }
+    };
+    try graph.executor().parallelFor(cfg.vocab_size, 4096, Context{ .embed = embed, .h_last = h_last, .out = out }, Context.run);
+}
+
+/// CPU 词表投影并选取下一个词元：
+/// - 贪婪采样走融合快车道 `greedyLmHeadCpu`，结果与此前的贪婪实现逐位一致；
+/// - 随机采样先物化截断后的完整对数几率，再按 Hugging Face 顺序施加重复惩罚 (recent_tokens 中的词元全部受罚，窗口由调用方决定)、
+///   排除 `cfg.sampling_excluded_tokens`，最后交给 `Sampler.sampleLogits` 完成温度、前 K 截断 (Top-K)、核采样 (Nucleus Sampling, Top-P) 与抽样。
+pub fn sampleLmHeadCpu(
+    comptime cfg: Gemma4Config,
+    comptime Elem: type,
+    graph: *autodiff.Graph,
+    embed: []const Elem,
+    h_last: []const f32,
+    recent_tokens: []const usize,
+    sampler: *Sampler,
+) !usize {
+    const penalty = sampler.options.repetition_penalty;
+    if (sampler.isGreedy()) return greedyLmHeadCpu(cfg, Elem, graph, embed, h_last, recent_tokens, penalty);
+
+    const arena = graph.arenaAllocator();
+    const logits = try arena.alloc(f32, cfg.vocab_size);
+    try lmHeadLogitsCpu(cfg, Elem, graph, embed, h_last, logits);
+    try sampling.applyRepetitionPenaltyInPlace(arena, logits, recent_tokens, penalty);
+    sampling.maskExcludedInPlace(logits, cfg.sampling_excluded_tokens);
+    return sampler.sampleLogits(graph.executor(), arena, logits);
+}
+
 // ============================================================================
 // Gemma 4 架构定义与模型实现
 // ============================================================================
@@ -372,10 +429,21 @@ pub const Gemma4AttentionType = enum {
     }
 };
 
-/// Gemma 4 词表中贪婪采样时始终排除的词元：0 号填充词元 (Padding Token) 与 [258880, 258884] 区间内文本模型不可生成的控制词元
+/// Gemma 4 词表中采样时始终排除的词元：0 号填充词元 (Padding Token) 与 [258880, 258884] 区间内文本模型不可生成的控制词元
+/// (包含官方 `generation_config.json` 的 `suppress_tokens` [258882, 258883])
 pub const default_sampling_excluded_tokens = [_]TokenRange{
     .single(0),
     .{ .first = 258880, .last = 258884 },
+};
+
+/// Gemma 4 官方生成配置 (`generation_config.json`：do_sample = true, temperature = 1.0, top_k = 64, top_p = 0.95)，
+/// 不施加重复惩罚，随机种子为 0
+pub const default_generation = SamplingOptions{
+    .temperature = 1.0,
+    .top_k = 64,
+    .top_p = 0.95,
+    .repetition_penalty = 1.0,
+    .seed = 0,
 };
 
 /// Gemma 4 文本模型与主干配置结构体
@@ -401,15 +469,17 @@ pub const Gemma4Config = struct {
     eos_token_id: u32 = 1,
     pad_token_id: u32 = 0,
 
-    /// 贪婪采样时始终排除的词元闭区间：CPU 采样、GPU 掩码 argmax 与重复惩罚路径共用这唯一一份定义
+    /// 采样时始终排除的词元闭区间：CPU 贪婪 / 随机采样与 GPU 掩码路径共用这唯一一份定义
     sampling_excluded_tokens: []const TokenRange = &default_sampling_excluded_tokens,
+    /// 默认生成 (采样) 选项：与官方 `generation_config.json` 一致
+    generation: SamplingOptions = default_generation,
 
     pub const default: Gemma4Config = .{};
     pub fn defaultConfig() Gemma4Config {
         return .{};
     }
 
-    /// 词元 v 是否属于贪婪采样排除集合
+    /// 词元 v 是否属于采样排除集合
     pub fn isSamplingExcluded(self: Gemma4Config, v: usize) bool {
         return sampling.isExcluded(self.sampling_excluded_tokens, v);
     }
@@ -1187,14 +1257,15 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             return try graph.reshape(capped_logits_2d, &.{ B, T, config.vocab_size });
         }
 
+        /// 对最终隐状态 h_last 选取下一个词元 (仅最近 repetition_window 个词元受重复惩罚)
         fn sampleNextTokenF32(
             self: *const Self,
             h_last: []const f32,
             recent_tokens: []const usize,
-            repetition_penalty: f32,
+            sampler: *Sampler,
             graph: *autodiff.Graph,
         ) !usize {
-            return greedyLmHeadCpu(config, f32, graph, self.embed_tokens.weight.data, h_last, recentWindow(recent_tokens), repetition_penalty);
+            return sampleLmHeadCpu(config, f32, graph, self.embed_tokens.weight.data, h_last, recentWindow(recent_tokens), sampler);
         }
 
         /// 词元嵌入查表并施加 Gemma 嵌入缩放 sqrt(hidden_size)，返回 [1, T, hidden_size]
@@ -1210,13 +1281,13 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             return tok_emb;
         }
 
-        /// 全精度 (F32) 预填充阶段 (Prefill)：处理 Prompt 词元序列并写入 KVCache，返回首个预测词元
+        /// 全精度 (F32) 预填充阶段 (Prefill)：处理 Prompt 词元序列并写入 KVCache，按 sampler 选取并返回首个预测词元
         pub fn prefill(
             self: *const Self,
             graph: *autodiff.Graph,
             prompt_tokens: []const usize,
             cache: *Gemma4KVCache,
-            repetition_penalty: f32,
+            sampler: *Sampler,
         ) !usize {
             const T = prompt_tokens.len;
             if (T == 0) return error.EmptyPrompt;
@@ -1232,17 +1303,17 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             const h_norm = try self.norm.forward(graph, h);
             const last_row = h_norm.data[(T - 1) * config.hidden_size .. T * config.hidden_size];
-            return self.sampleNextTokenF32(last_row, prompt_tokens, repetition_penalty, graph);
+            return self.sampleNextTokenF32(last_row, prompt_tokens, sampler, graph);
         }
 
-        /// 全精度 (F32) 增量解码单步 (Decode Step)：基于 KVCache 处理单个增量词元并返回下一个预测词元
+        /// 全精度 (F32) 增量解码单步 (Decode Step)：基于 KVCache 处理单个增量词元，按 sampler 选取并返回下一个预测词元
         pub fn decodeStep(
             self: *const Self,
             graph: *autodiff.Graph,
             token: usize,
             cache: *Gemma4KVCache,
             recent_tokens: []const usize,
-            repetition_penalty: f32,
+            sampler: *Sampler,
         ) !usize {
             const tokens = [_]usize{token};
             try validateTokenIds(&tokens, config.vocab_size);
@@ -1255,7 +1326,7 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             const h_norm = try self.norm.forward(graph, h);
             const last_row = h_norm.data[0..config.hidden_size];
-            return self.sampleNextTokenF32(last_row, recent_tokens, repetition_penalty, graph);
+            return self.sampleNextTokenF32(last_row, recent_tokens, sampler, graph);
         }
     };
 }

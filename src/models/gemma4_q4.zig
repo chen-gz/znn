@@ -23,6 +23,7 @@ const ropeSplitHalf = gemma4.ropeSplitHalf;
 const dotF32Bf16 = gemma4.dotF32Bf16;
 const validateTokenIds = gemma4.validateTokenIds;
 const LmHeadWeights = backend.offload.LmHeadWeights;
+const Sampler = backend.sampling.Sampler;
 const Gemma4GpuLayer = gemma4_gpu.Gemma4GpuLayer;
 const Gemma4GpuContext = gemma4_gpu.Gemma4GpuContext;
 
@@ -1359,26 +1360,27 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             try self.initGpuContext(allocator);
         }
 
-        /// 对最终隐状态 h_last 执行词表投影并贪婪选取下一个词元：截断后惩罚 (仅最近 repetition_window 个词元受罚)，
-        /// 排除 `config.sampling_excluded_tokens`
+        /// 对最终隐状态 h_last 执行词表投影并按 sampler 选取下一个词元：截断后惩罚 (仅最近 repetition_window 个词元受罚)，
+        /// 排除 `config.sampling_excluded_tokens`，贪婪采样或温度 / 前 K 截断 (Top-K) / 核采样 (Nucleus Sampling, Top-P) 随机采样
         fn sampleNextToken(
             self: *const Self,
             h_last: []const f32,
             embed_u16: []const u16,
             recent_tokens: []const usize,
-            repetition_penalty: f32,
+            sampler: *Sampler,
             graph: *autodiff.Graph,
         ) !usize {
             const recent = gemma4.recentWindow(recent_tokens);
-            // 1. 优先通过 GPU 常驻 LM Head 执行巨型词表投影与采样 (消除 2.3 秒延迟至 5~10 ms)；GPU 执行失败时回退 CPU
+            // 1. 优先通过 GPU 常驻 LM Head 执行巨型词表投影与采样 (消除 2.3 秒延迟至 5~10 ms)；GPU 执行失败时回退 CPU。
+            //    GPU 路径只在成功读回结果之后才消耗随机数，回退不会打乱采样器的随机序列
             if (graph.options.device == .gpu and backend.offload.isAvailable()) {
-                if (self.sampleNextTokenGpu(h_last, embed_u16, recent, repetition_penalty, graph)) |tok| {
+                if (self.sampleNextTokenGpu(h_last, embed_u16, recent, sampler, graph)) |tok| {
                     return tok;
                 } else |_| {}
             }
 
             // 2. CPU 确定性多核并行回退路径
-            return gemma4.greedyLmHeadCpu(config, u16, graph, embed_u16, h_last, recent, repetition_penalty);
+            return gemma4.sampleLmHeadCpu(config, u16, graph, embed_u16, h_last, recent, sampler);
         }
 
         fn sampleNextTokenGpu(
@@ -1386,21 +1388,22 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             h_last: []const f32,
             embed_u16: []const u16,
             recent_tokens: []const usize,
-            repetition_penalty: f32,
+            sampler: *Sampler,
             graph: *autodiff.Graph,
         ) !usize {
             const stream = graph.options.mlx_stream;
-            if (self.gpu_context) |*ctx| return ctx.sampleHidden(h_last, recent_tokens, repetition_penalty, stream);
+            if (self.gpu_context) |*ctx| return ctx.sampleHidden(h_last, recent_tokens, sampler, stream);
 
-            var mask = try backend.offload.TokenExclusionMask.init(graph.arenaAllocator(), config.vocab_size, config.sampling_excluded_tokens);
+            const arena = graph.arenaAllocator();
+            var mask = try backend.offload.TokenExclusionMask.init(arena, config.vocab_size, config.sampling_excluded_tokens);
             defer mask.deinit();
             if (self.lm_head_weights) |*w| {
-                return gemma4_gpu.selectTokenFromHidden(w, &mask, config, h_last, recent_tokens, repetition_penalty, stream);
+                return gemma4_gpu.selectTokenFromHidden(arena, w, &mask, config, h_last, recent_tokens, sampler, stream);
             }
             // 未构建常驻 LM Head 时临时构建一次 BF16 词表矩阵
             var tmp = try LmHeadWeights.init(embed_u16, config.vocab_size, config.hidden_size, stream);
             defer tmp.deinit();
-            return gemma4_gpu.selectTokenFromHidden(&tmp, &mask, config, h_last, recent_tokens, repetition_penalty, stream);
+            return gemma4_gpu.selectTokenFromHidden(arena, &tmp, &mask, config, h_last, recent_tokens, sampler, stream);
         }
 
         /// 从模型映射字节中切出 BF16 词表嵌入矩阵 [vocab_size, hidden_size]
@@ -1424,24 +1427,14 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             return tok_emb;
         }
 
-        /// 自回归前向推理单步：输入历史 token_ids 序列与 mmap 字节，直接前向传播并返回下一个预测 token_id
+        /// 无键值缓存的自回归前向推理单步：输入完整历史 token_ids 序列与 mmap 字节，前向传播后按 sampler 选取下一个词元。
+        /// 词表投影通过 graph.executor() 并行，不派生临时 OS 线程
         pub fn generateNextToken(
             self: *const Self,
             graph: *autodiff.Graph,
             token_ids: []const usize,
             mmap_bytes: []const u8,
-        ) !usize {
-            return self.generateNextTokenWithPenalty(graph, token_ids, mmap_bytes, 1.25);
-        }
-
-        /// 带有重复惩罚的高效生成单步 (贪婪采样)
-        /// 通过 graph.executor().parallelReduce 并行，不派生临时 OS 线程
-        pub fn generateNextTokenWithPenalty(
-            self: *const Self,
-            graph: *autodiff.Graph,
-            token_ids: []const usize,
-            mmap_bytes: []const u8,
-            repetition_penalty: f32,
+            sampler: *Sampler,
         ) !usize {
             const T = token_ids.len;
             if (T == 0) return error.EmptyPrompt;
@@ -1464,18 +1457,18 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             // 4. 获取最后一个位置 T-1 的隐状态向量 [config.hidden_size]
             const last_row = h_norm.data[(T - 1) * config.hidden_size .. T * config.hidden_size];
 
-            // 5. 使用执行器执行确定性多核点积投影与贪婪采样 (零临时 OS 线程派生)
-            return self.sampleNextToken(last_row, embed_u16, token_ids, repetition_penalty, graph);
+            // 5. 词表投影与采样 (CPU 路径为确定性多核并行，零临时 OS 线程派生)
+            return self.sampleNextToken(last_row, embed_u16, token_ids, sampler, graph);
         }
 
-        /// 预填充阶段 (Prefill)：处理 Prompt 词元序列，写入键值缓存 (Key-Value Cache, KVCache)，并返回首个预测词元
+        /// 预填充阶段 (Prefill)：处理 Prompt 词元序列，写入键值缓存 (Key-Value Cache, KVCache)，并按 sampler 返回首个预测词元
         pub fn prefill(
             self: *Self,
             graph: *autodiff.Graph,
             prompt_tokens: []const usize,
             cache: *Gemma4KVCache,
             mmap_bytes: []const u8,
-            repetition_penalty: f32,
+            sampler: *Sampler,
         ) !usize {
             const T = prompt_tokens.len;
             if (T == 0) return error.EmptyPrompt;
@@ -1486,7 +1479,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const embed_u16 = try embedSliceFromMmap(mmap_bytes);
 
             if (graph.options.device == .gpu and self.gpu_context != null) {
-                const next_tok = try self.gpu_context.?.prefill(prompt_tokens, embed_u16, repetition_penalty, graph.options.mlx_stream);
+                const next_tok = try self.gpu_context.?.prefill(prompt_tokens, embed_u16, sampler, graph.options.mlx_stream);
                 // 键值内容只存在于 GPU：CPU 层缓存仅推进游标，切回 CPU 解码前由 syncCpuCache 写回内容
                 self.kv_owner = .gpu;
                 for (cache.layers) |*cl| {
@@ -1510,7 +1503,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const h_norm = try self.norm.forward(graph, h);
             const last_row = h_norm.data[(T - 1) * config.hidden_size .. T * config.hidden_size];
 
-            return self.sampleNextToken(last_row, embed_u16, prompt_tokens, repetition_penalty, graph);
+            return self.sampleNextToken(last_row, embed_u16, prompt_tokens, sampler, graph);
         }
 
         /// GPU 解码前确保 GPU 键值缓存持有最新内容：上一次推进发生在 CPU 时先从 CPU 层缓存同步过去
@@ -1538,7 +1531,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             cache: *Gemma4KVCache,
             mmap_bytes: []const u8,
             recent_tokens: []const usize,
-            repetition_penalty: f32,
+            sampler: *Sampler,
         ) !usize {
             const tokens = [_]usize{token};
             try validateTokenIds(&tokens, config.vocab_size);
@@ -1546,7 +1539,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             if (graph.options.device == .gpu and self.gpu_context != null) {
                 const gpu_ctx = try self.syncGpuCache(cache);
-                const next_tok = try gpu_ctx.decodeStep(token, embed_u16, recent_tokens, repetition_penalty, graph.options.mlx_stream);
+                const next_tok = try gpu_ctx.decodeStep(token, embed_u16, recent_tokens, sampler, graph.options.mlx_stream);
                 for (cache.layers) |*cl| {
                     cl.curr_len += 1;
                 }
@@ -1567,11 +1560,12 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const h_norm = try self.norm.forward(graph, h);
             const last_row = h_norm.data[0..config.hidden_size];
 
-            return self.sampleNextToken(last_row, embed_u16, recent_tokens, repetition_penalty, graph);
+            return self.sampleNextToken(last_row, embed_u16, recent_tokens, sampler, graph);
         }
 
         /// 投机采样批量验证解码 (Speculative Draft Verification Step)
-        /// 在 GPU 统一卸载加速下，一次前向传播批量验证候选词元序列，突破单字显存带宽高墙
+        /// 在 GPU 统一卸载加速下，一次前向传播批量验证候选词元序列，突破单字显存带宽高墙；
+        /// 贪婪采样按精确匹配接受草稿，随机采样按标准投机采样规则接受 (见 `Gemma4GpuContext.decodeSpeculative`)
         pub fn decodeSpeculative(
             self: *Self,
             graph: *autodiff.Graph,
@@ -1579,7 +1573,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             cache: *Gemma4KVCache,
             mmap_bytes: []const u8,
             recent_tokens: []const usize,
-            repetition_penalty: f32,
+            sampler: *Sampler,
             accepted_buf: []usize,
         ) !usize {
             if (input_tokens.len == 0) return 0;
@@ -1593,7 +1587,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     input_tokens,
                     embed_u16,
                     gemma4.recentWindow(recent_tokens),
-                    repetition_penalty,
+                    sampler,
                     graph.options.mlx_stream,
                     accepted_buf,
                 );
@@ -1604,7 +1598,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             }
 
             // CPU 单步回退保底：对第 1 个词元执行标准 decodeStep
-            const single_tok = try self.decodeStep(graph, input_tokens[0], cache, mmap_bytes, recent_tokens, repetition_penalty);
+            const single_tok = try self.decodeStep(graph, input_tokens[0], cache, mmap_bytes, recent_tokens, sampler);
             accepted_buf[0] = single_tok;
             return 1;
         }

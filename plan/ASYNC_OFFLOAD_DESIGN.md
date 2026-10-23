@@ -30,7 +30,7 @@
 | :--- | :--- | :--- |
 | 算子执行模型 | 计算与输出分配耦合：[`Graph.matmul`](../src/autodiff/graph.zig#L442-L452) → `A.matmul(B, allocator)` → 注册 Op；静态重演 [`op.forward`](../src/autodiff/op.zig#L15-L25) 依赖 `copyFromEager`（算到临时张量 → `memcpy` → 释放） | 需改造为目标传入式 (Destination-Passing Style, DPS) 内核，GPU 才能写入预分配输出 |
 | Op 记录 | `enable_grad == false` 时不记录 Op（[graph.zig L290-L305](../src/autodiff/graph.zig#L290-L305)、[L328-L341](../src/autodiff/graph.zig#L328-L341)） | 无梯度推理没有可规划、可重放的图 |
-| 宿主机读写 | `nn` / `models` 非测试代码在 forward 中直接读写 `.data`，如 [`MoELayer.forward`](../src/nn/transformer.zig#L344-L392) 的宿主机 Top-K、[`CausalSelfAttention.forwardInference`](../src/nn/attention.zig#L299-L359) 的 KV Cache 循环、[`generateNextTokenWithPenalty`](../src/models/gemma4.zig#L1428-L1500) 的采样 | 需要宿主访问协议，并把依赖数据的逻辑改为图算子 |
+| 宿主机读写 | `nn` / `models` 非测试代码在 forward 中直接读写 `.data`，如 [`MoELayer.forward`](../src/nn/transformer.zig#L344-L392) 的宿主机 Top-K、[`CausalSelfAttention.forwardInference`](../src/nn/attention.zig#L299-L359) 的 KV Cache 循环、[`generateNextToken`](../src/models/gemma4_q4.zig#L1432-L1462) 的采样 | 需要宿主访问协议，并把依赖数据的逻辑改为图算子 |
 | Q4 推理线程 | [`Q4Linear.forward`](../src/models/gemma4.zig#L768-L813) 对每一行输入、每次调用 spawn 8 个 OS 线程，LM head argmax 同样如此（[L1465-L1487](../src/models/gemma4.zig#L1465-L1487)） | 128 核 Linux 虚拟机实测：spawn + join 8 线程约 **1928 µs/次**，`std.Io.Group` 派发 8 任务约 **32 µs/次** |
 | Q4 内核 | 单线程 Q4 GEMV（3840×15360）约 19.7 ms（**1.7 GB/s**，受计算限制）；8 块并行 2.6 ms（12.8 GB/s）；块内低/高半字节存放相邻权重 `(2i, 2i+1)`，激活需跨步收集；多行输入逐行 GEMV，prefill 重复扫描权重 | 先优化内核与数据排布，再谈带宽上限 |
 | Q4 归属 | `Q4Linear` 不是 autodiff Op；代码位于 [`gemma4.zig`](../src/models/gemma4.zig) | 下沉为张量层 `Q4MatMul` 算子并按模块职责拆分文件 |

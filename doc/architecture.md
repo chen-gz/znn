@@ -67,7 +67,7 @@ src/
 ├── models/
 │   ├── gemma4.zig                # Gemma 4 架构全精度实现 (GemmaRMSNorm, Gemma4Attention, Gemma4ForCausalLM, TinyGemma4)
 │   ├── gemma4_q4.zig             # Gemma 4 架构 4-bit 量化实现 (Q4Linear, Gemma4Q4Attention, Gemma4Q4ForCausalLM, TinyQ4Gemma4)
-│   ├── gemma4_gpu.zig            # Gemma 4 GPU 推理共享组件与 12B 端到端解码上下文 (GpuRope, selectToken, Gemma4GpuLayer, Gemma4GpuContext)
+│   ├── gemma4_gpu.zig            # Gemma 4 GPU 推理共享组件与 12B 端到端解码上下文 (GpuRope, selectToken, deviceCandidates 设备端采样候选选择, Gemma4GpuLayer, Gemma4GpuContext 含无偏投机采样校验)
 │   ├── gemma4_e4b.zig            # Gemma 4 E4B (Effective 4B) 4-bit/8-bit 混合量化端侧推理引擎 (PleWeights, GpuLayerE4B, Gemma4E4BModel)
 │   └── tests.zig                 # Gemma 4 全精度、4-bit 量化与 E4B 推理引擎单元测试
 ├── optim.zig                     # SGD, Adam, AdamW 优化器、4 类学习率调度器、梯度裁剪与 ZNNO 检查点
@@ -353,6 +353,8 @@ flowchart LR
    - 矩阵 $B$ 初始置零，保证微调起点与原模型输出严格对齐。
 6. **后训练偏好对齐损失与采样 (`SFT` / `DPO` / `GRPO` & `sampleTopP` / `sampleTopK`, `nn/llm.zig`)**：
    - 掩码交叉熵 (`maskedCrossEntropyLoss`)、直接偏好优化 (`dpoLoss`) 与群体相对策略优化 (`grpoLoss`) 均完整接入动态计算图求导。
+   - `sampleTopP` / `sampleTopK` 每次对完整词表排序，面向小词表训练示例；大词表推理 (Gemma 4) 使用 `backend/sampling.zig` 的 `Sampler`：
+     温度、前 K 截断 (Top-K) 与核采样 (Nucleus Sampling, Top-P) 共用一个候选集终结步骤，CPU 以分块有界堆部分选择候选，GPU 以 `argpartition` 只传回候选，相同候选集与种子得到相同词元。
 
 ---
 
