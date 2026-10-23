@@ -157,14 +157,12 @@ pub fn maskedCrossEntropyLoss(
     logits: *Tensor,
     targets: []const u32,
     mask: []const f32,
-    allocator: std.mem.Allocator,
 ) !f32 {
     if (logits.shape.len != 2) return error.IncompatibleDimensions;
     const N = logits.shape.dims[0];
     const V = logits.shape.dims[1];
     if (targets.len != N or mask.len != N) return error.ShapeMismatch;
     if (V == 0 or logits.data.len < N * V) return error.ShapeMismatch;
-    _ = allocator;
 
     // 1. 先校验目标下标并累计总权重：梯度缩放 w_i / total_weight 需要在单遍前向中直接使用
     var total_weight: f32 = 0.0;
@@ -214,18 +212,19 @@ pub fn maskedCrossEntropyLossGraph(
 
 /// 直接偏好优化 (Direct Preference Optimization, DPO) 损失函数：
 /// L_DPO = - E [ log( sigmoid( beta * ( (log pi(y_w) - log ref(y_w)) - (log pi(y_l) - log ref(y_l)) ) ) ) ]
+/// 四个对数概率切片长度不一致时返回 `error.ShapeMismatch`；`beta` 必须是有限正数，否则返回 `error.InvalidArgument`。
 pub fn dpoLoss(
     pi_chosen_logps: []const f32,
     pi_rejected_logps: []const f32,
     ref_chosen_logps: []const f32,
     ref_rejected_logps: []const f32,
     beta: f32,
-) f32 {
-    std.debug.assert(pi_chosen_logps.len == pi_rejected_logps.len);
-    std.debug.assert(pi_chosen_logps.len == ref_chosen_logps.len);
-    std.debug.assert(pi_chosen_logps.len == ref_rejected_logps.len);
-
+) !f32 {
     const N = pi_chosen_logps.len;
+    if (pi_rejected_logps.len != N or ref_chosen_logps.len != N or ref_rejected_logps.len != N) {
+        return error.ShapeMismatch;
+    }
+    try autodiff.graph_nn.validateDpoBeta(beta);
     if (N == 0) return 0.0;
 
     var total_loss: f32 = 0.0;
@@ -299,6 +298,7 @@ pub fn computeGroupAdvantages(
 /// 对应 DeepSeek-R1 强化学习论文与博客第 8.5 节公式 (2) & (3)：
 /// L_GRPO = - 1/N \sum [ min(r_t * A_i, clip(r_t, 1-eps, 1+eps) * A_i) - \beta * D_KL ]
 /// 其中库尔贝克-莱布勒散度 (Kullback-Leibler Divergence, KL Divergence) D_KL(\pi_\theta || \pi_ref) = exp(ref_logp - new_logp) - (ref_logp - new_logp) - 1
+/// 输入长度不一致时返回 `error.ShapeMismatch`；`beta` 或 `clip_eps` 为负数或非有限值时返回 `error.InvalidArgument`。
 pub fn computeGRPOLoss(
     old_logps: []const f32,
     new_logps: []const f32,
@@ -306,12 +306,9 @@ pub fn computeGRPOLoss(
     ref_logps: ?[]const f32,
     beta: f32,
     clip_eps: f32,
-) f32 {
-    std.debug.assert(old_logps.len == new_logps.len);
-    std.debug.assert(old_logps.len == advantages.len);
-    if (ref_logps) |refs| std.debug.assert(refs.len == old_logps.len);
-
+) !f32 {
     const N = old_logps.len;
+    try validateGrpoInputs(N, new_logps.len, advantages.len, ref_logps, beta, clip_eps);
     if (N == 0) return 0.0;
 
     var total_obj: f32 = 0.0;
@@ -337,6 +334,7 @@ pub fn computeGRPOLoss(
 }
 
 /// 组相对策略优化 (Group Relative Policy Optimization, GRPO) 损失函数，支持对 new_logps 的自动微分 (Automatic Differentiation, Autograd) 梯度回传 (若 new_logps.requires_grad 为 true)
+/// 输入校验与 `computeGRPOLoss` 相同：长度不一致返回 `error.ShapeMismatch`，`beta` / `clip_eps` 非法返回 `error.InvalidArgument`。
 pub fn grpoLoss(
     old_logps: *Tensor,
     new_logps: *Tensor,
@@ -344,11 +342,9 @@ pub fn grpoLoss(
     ref_logps: ?[]const f32,
     beta: f32,
     clip_eps: f32,
-) f32 {
+) !f32 {
     const N = old_logps.data.len;
-    std.debug.assert(new_logps.data.len == N);
-    std.debug.assert(advantages.len == N);
-    if (ref_logps) |refs| std.debug.assert(refs.len == N);
+    try validateGrpoInputs(N, new_logps.data.len, advantages.len, ref_logps, beta, clip_eps);
 
     if (N == 0) return 0.0;
 
@@ -398,6 +394,15 @@ pub fn grpoLoss(
     }
 
     return -(total_obj * inv_n);
+}
+
+/// 校验组相对策略优化 (Group Relative Policy Optimization, GRPO) 损失的输入长度与超参数
+fn validateGrpoInputs(n: usize, new_len: usize, adv_len: usize, ref_logps: ?[]const f32, beta: f32, clip_eps: f32) !void {
+    if (new_len != n or adv_len != n) return error.ShapeMismatch;
+    if (ref_logps) |refs| {
+        if (refs.len != n) return error.ShapeMismatch;
+    }
+    try autodiff.graph_nn.validateGrpoHyperparams(beta, clip_eps);
 }
 
 /// 组相对策略优化 (Group Relative Policy Optimization, GRPO) 损失函数 (自动微分 (Automatic Differentiation, Autograd) 计算图节点版本)

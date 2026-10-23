@@ -106,7 +106,7 @@ pub fn main() !void {
     const targets = [_]u32{ 2, 3, 5, 8 };
     const mask = [_]f32{ 0.0, 1.0, 1.0, 1.0 }; // Only assistant response has mask=1.0
 
-    const sft_loss = try nn.maskedCrossEntropyLoss(logits, &targets, &mask, allocator);
+    const sft_loss = try nn.maskedCrossEntropyLoss(logits, &targets, &mask);
     std.debug.print("  SFT Prompt-Masked Cross-Entropy Loss: {d:.4}\n", .{sft_loss});
     std.debug.print(">> Instruction Tuning Verified.\n\n", .{});
 
@@ -140,7 +140,7 @@ pub fn main() !void {
     const pi_rejected = [_]f32{ -2.4, -3.0 };
     const ref_chosen = [_]f32{ -1.0, -1.5 };
     const ref_rejected = [_]f32{ -1.8, -2.1 };
-    const dpo_val = nn.dpoLoss(&pi_chosen, &pi_rejected, &ref_chosen, &ref_rejected, 0.1);
+    const dpo_val = try nn.dpoLoss(&pi_chosen, &pi_rejected, &ref_chosen, &ref_rejected, 0.1);
     std.debug.print("  DPO Alignment Loss: {d:.4}\n", .{dpo_val});
     std.debug.print(">> DPO Loss Verified.\n\n", .{});
 

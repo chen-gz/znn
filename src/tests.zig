@@ -914,7 +914,7 @@ test "GRPO group advantages and loss" {
     const sample_advs = [_]f32{ 1.0, 0.5, -0.5, -1.0 };
     const ref_logps = [_]f32{ -1.0, -1.5, -2.0, -0.5 };
 
-    const loss_eval = nn.computeGRPOLoss(&old_logps, &new_logps, &sample_advs, &ref_logps, 0.05, 0.2);
+    const loss_eval = try nn.computeGRPOLoss(&old_logps, &new_logps, &sample_advs, &ref_logps, 0.05, 0.2);
     try std.testing.expect(!std.math.isNan(loss_eval));
 
     // 3. Test grpoLoss with autograd and verify gradient direction
@@ -928,7 +928,7 @@ test "GRPO group advantages and loss" {
     @memcpy(new_t.data, &new_logps);
     @memset(new_t.grad, 0.0);
 
-    const loss_val = nn.grpoLoss(old_t, new_t, &sample_advs, &ref_logps, 0.05, 0.2);
+    const loss_val = try nn.grpoLoss(old_t, new_t, &sample_advs, &ref_logps, 0.05, 0.2);
     try std.testing.expectApproxEqAbs(loss_eval, loss_val, 1e-5);
 
     // Verify finite difference gradient check on new_logps
@@ -936,11 +936,11 @@ test "GRPO group advantages and loss" {
     for (0..4) |i| {
         var perturbed_plus = new_logps;
         perturbed_plus[i] += eps;
-        const loss_plus = nn.computeGRPOLoss(&old_logps, &perturbed_plus, &sample_advs, &ref_logps, 0.05, 0.2);
+        const loss_plus = try nn.computeGRPOLoss(&old_logps, &perturbed_plus, &sample_advs, &ref_logps, 0.05, 0.2);
 
         var perturbed_minus = new_logps;
         perturbed_minus[i] -= eps;
-        const loss_minus = nn.computeGRPOLoss(&old_logps, &perturbed_minus, &sample_advs, &ref_logps, 0.05, 0.2);
+        const loss_minus = try nn.computeGRPOLoss(&old_logps, &perturbed_minus, &sample_advs, &ref_logps, 0.05, 0.2);
 
         const numerical_grad = (loss_plus - loss_minus) / (2.0 * eps);
         try std.testing.expectApproxEqAbs(numerical_grad, new_t.grad[i], 1e-3);

@@ -528,7 +528,7 @@ test "maskedCrossEntropyLoss and dpoLoss" {
     const targets = [_]u32{ 0, 1, 2 };
     const mask = [_]f32{ 0.0, 1.0, 1.0 };
 
-    const loss = try maskedCrossEntropyLoss(logits, &targets, &mask, allocator);
+    const loss = try maskedCrossEntropyLoss(logits, &targets, &mask);
     try std.testing.expect(loss > 0.0 and loss < 1.0);
 
     // Graph-integrated maskedCrossEntropyLoss
@@ -563,7 +563,7 @@ test "maskedCrossEntropyLoss and dpoLoss" {
     const pi_l = [_]f32{-2.8};
     const ref_w = [_]f32{-1.5};
     const ref_l = [_]f32{-2.0};
-    const d_loss = dpoLoss(&pi_w, &pi_l, &ref_w, &ref_l, 0.1);
+    const d_loss = try dpoLoss(&pi_w, &pi_l, &ref_w, &ref_l, 0.1);
     try std.testing.expect(d_loss > 0.0);
 
     const g_pi_w = try graph.tensorNDWithData(&.{1}, &pi_w, true);
@@ -1035,16 +1035,59 @@ test "computeGroupAdvantages zero-variance and grpoLoss clipping" {
     const pi_r = [_]f32{-1.0};
     const ref_c = [_]f32{-1.0};
     const ref_r = [_]f32{-1.0};
-    const sym_dpo = dpoLoss(&pi_c, &pi_r, &ref_c, &ref_r, 0.1);
+    const sym_dpo = try dpoLoss(&pi_c, &pi_r, &ref_c, &ref_r, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, @log(2.0)), sym_dpo, 1e-5);
 
     // 3. computeGRPOLoss with clipping
     const old_logps = [_]f32{-1.0};
     const new_logps = [_]f32{-0.5}; // ratio = exp(0.5) ~ 1.6487 > 1 + 0.2 (clip_eps = 0.2)
     const advantages = [_]f32{1.0};
-    const grpo_val = computeGRPOLoss(&old_logps, &new_logps, &advantages, null, 0.0, 0.2);
+    const grpo_val = try computeGRPOLoss(&old_logps, &new_logps, &advantages, null, 0.0, 0.2);
     // Surrogate clamped to (1 + 0.2) * 1.0 = 1.2 -> loss = -1.2
     try std.testing.expectApproxEqAbs(@as(f32, -1.2), grpo_val, 1e-4);
+}
+
+test "dpoLoss and GRPO losses reject mismatched lengths and invalid hyperparameters" {
+    const allocator = std.testing.allocator;
+    const two = [_]f32{ -1.0, -2.0 };
+    const one = [_]f32{-1.0};
+
+    // 1. 直接偏好优化 (Direct Preference Optimization, DPO)：长度不一致与非法 beta
+    try std.testing.expectError(error.ShapeMismatch, dpoLoss(&two, &one, &two, &two, 0.1));
+    try std.testing.expectError(error.ShapeMismatch, dpoLoss(&two, &two, &one, &two, 0.1));
+    try std.testing.expectError(error.ShapeMismatch, dpoLoss(&two, &two, &two, &one, 0.1));
+    try std.testing.expectError(error.InvalidArgument, dpoLoss(&two, &two, &two, &two, 0.0));
+    try std.testing.expectError(error.InvalidArgument, dpoLoss(&two, &two, &two, &two, -0.1));
+    try std.testing.expectError(error.InvalidArgument, dpoLoss(&two, &two, &two, &two, std.math.nan(f32)));
+    try std.testing.expectError(error.InvalidArgument, dpoLoss(&two, &two, &two, &two, std.math.inf(f32)));
+    // 空批次仍然合法，损失为 0
+    try std.testing.expectEqual(@as(f32, 0.0), try dpoLoss(&.{}, &.{}, &.{}, &.{}, 0.1));
+
+    // 2. 群组相对策略优化 (Group Relative Policy Optimization, GRPO) 纯数值版本
+    try std.testing.expectError(error.ShapeMismatch, computeGRPOLoss(&two, &one, &two, null, 0.0, 0.2));
+    try std.testing.expectError(error.ShapeMismatch, computeGRPOLoss(&two, &two, &one, null, 0.0, 0.2));
+    try std.testing.expectError(error.ShapeMismatch, computeGRPOLoss(&two, &two, &two, &one, 0.0, 0.2));
+    try std.testing.expectError(error.InvalidArgument, computeGRPOLoss(&two, &two, &two, null, -0.5, 0.2));
+    try std.testing.expectError(error.InvalidArgument, computeGRPOLoss(&two, &two, &two, null, 0.0, -0.2));
+    try std.testing.expectError(error.InvalidArgument, computeGRPOLoss(&two, &two, &two, null, 0.0, std.math.nan(f32)));
+    try std.testing.expectError(error.InvalidArgument, computeGRPOLoss(&two, &two, &two, null, std.math.inf(f32), 0.2));
+
+    // 3. GRPO 张量版本与计算图版本共用同一套校验
+    var graph = autodiff.Graph.initDefault(allocator);
+    defer graph.deinit();
+    const old_t = try graph.tensorNDWithData(&.{2}, &two, false);
+    const new_t = try graph.tensorNDWithData(&.{2}, &two, true);
+    const short_t = try graph.tensorNDWithData(&.{1}, &one, true);
+    try std.testing.expectError(error.ShapeMismatch, grpoLoss(old_t, short_t, &two, null, 0.0, 0.2));
+    try std.testing.expectError(error.ShapeMismatch, grpoLoss(old_t, new_t, &one, null, 0.0, 0.2));
+    try std.testing.expectError(error.ShapeMismatch, grpoLoss(old_t, new_t, &two, &one, 0.0, 0.2));
+    try std.testing.expectError(error.InvalidArgument, grpoLoss(old_t, new_t, &two, null, 0.0, -1.0));
+    try std.testing.expectError(error.InvalidArgument, grpoLossGraph(&graph, old_t, new_t, &two, null, -1.0, 0.2));
+    try std.testing.expectError(error.InvalidArgument, grpoLossGraph(&graph, old_t, new_t, &two, null, 0.0, std.math.nan(f32)));
+    try std.testing.expectError(error.InvalidArgument, dpoLossGraph(&graph, new_t, new_t, &two, &two, 0.0));
+    try std.testing.expectError(error.ShapeMismatch, dpoLossGraph(&graph, new_t, short_t, &two, &two, 0.1));
+    // 校验失败时不能写入任何梯度
+    for (new_t.grad) |g| try std.testing.expectEqual(@as(f32, 0.0), g);
 }
 
 test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
@@ -1768,7 +1811,7 @@ test "maskedCrossEntropyLoss eager gradient matches the graph version" {
     const logits = try createPersistentTensor(allocator, 3, 4, true);
     defer freePersistentTensor(allocator, logits);
     @memcpy(logits.data, &values);
-    const loss = try maskedCrossEntropyLoss(logits, &targets, &mask, allocator);
+    const loss = try maskedCrossEntropyLoss(logits, &targets, &mask);
 
     var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
@@ -1784,7 +1827,7 @@ test "maskedCrossEntropyLoss eager gradient matches the graph version" {
     // 越界目标下标在写入任何梯度之前报错
     @memset(logits.grad, 0.0);
     const bad_targets = [_]u32{ 0, 1, 4 };
-    try std.testing.expectError(error.IndexOutOfBounds, maskedCrossEntropyLoss(logits, &bad_targets, &mask, allocator));
+    try std.testing.expectError(error.IndexOutOfBounds, maskedCrossEntropyLoss(logits, &bad_targets, &mask));
     for (logits.grad) |g| try std.testing.expectEqual(@as(f32, 0.0), g);
 }
 
