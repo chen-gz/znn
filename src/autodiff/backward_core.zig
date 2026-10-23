@@ -58,6 +58,99 @@ fn gemmAccumulate(
     }
 }
 
+/// 按输出张量最内层维度逐行遍历 (行优先)，同时维护两个操作数 (广播或转置跨步) 的行起始偏移：
+/// 每个元素的多维坐标换算从 O(rank) 降为每行一次，内层循环只剩固定跨步访问
+const RowWalker = struct {
+    shape: tensor.Shape,
+    a_strides: tensor.Shape,
+    b_strides: tensor.Shape,
+    coord: [8]usize = @as([8]usize, @splat(0)),
+    a_off: usize = 0,
+    b_off: usize = 0,
+
+    /// 最内层维度长度 (标量形状视为长度 1)
+    fn inner(self: RowWalker) usize {
+        return if (self.shape.len == 0) 1 else self.shape.dims[self.shape.len - 1];
+    }
+
+    fn aInnerStride(self: RowWalker) usize {
+        return if (self.shape.len == 0) 0 else self.a_strides.dims[self.shape.len - 1];
+    }
+
+    fn bInnerStride(self: RowWalker) usize {
+        return if (self.shape.len == 0) 0 else self.b_strides.dims[self.shape.len - 1];
+    }
+
+    /// 行数 = 元素总数 / 最内层维度长度
+    fn rows(self: RowWalker, numel: usize) usize {
+        const n = self.inner();
+        return if (n == 0) 0 else numel / n;
+    }
+
+    /// 前进到下一行：递增除最内层外的坐标并增量更新两个操作数的行偏移
+    fn next(self: *RowWalker) void {
+        if (self.shape.len < 2) return;
+        var d = self.shape.len - 1;
+        while (d > 0) {
+            d -= 1;
+            self.coord[d] += 1;
+            self.a_off += self.a_strides.dims[d];
+            self.b_off += self.b_strides.dims[d];
+            if (self.coord[d] < self.shape.dims[d]) return;
+            self.a_off -= self.coord[d] * self.a_strides.dims[d];
+            self.b_off -= self.coord[d] * self.b_strides.dims[d];
+            self.coord[d] = 0;
+        }
+    }
+};
+
+const vec_len = 8;
+const Vec = @Vector(vec_len, f32);
+
+fn sumSlice(xs: []const f32) f32 {
+    var acc: Vec = @splat(0.0);
+    var i: usize = 0;
+    while (i + vec_len <= xs.len) : (i += vec_len) {
+        acc += @as(Vec, xs[i..][0..vec_len].*);
+    }
+    var total: f32 = @reduce(.Add, acc);
+    while (i < xs.len) : (i += 1) total += xs[i];
+    return total;
+}
+
+/// 把一行上游梯度 `g` 乘以 `scale` 后累加到 `dst[off + j * stride]`：跨步为 0 (广播轴) 时先求和再写一次
+fn accumulateRow(dst: []f32, off: usize, stride: usize, g: []const f32, comptime scale: f32) void {
+    switch (stride) {
+        0 => dst[off] += scale * sumSlice(g),
+        1 => for (dst[off..][0..g.len], g) |*d, gv| {
+            d.* += scale * gv;
+        },
+        else => for (g, 0..) |gv, j| {
+            dst[off + j * stride] += scale * gv;
+        },
+    }
+}
+
+/// 逐元素乘法梯度的一行：`dst[off + j * stride] += g[j] * other[o_off + j * o_stride]`
+fn mulAccumulateRow(dst: []f32, off: usize, stride: usize, g: []const f32, other: []const f32, o_off: usize, o_stride: usize) void {
+    if (stride == 0) {
+        var acc: f32 = 0.0;
+        if (o_stride == 1) {
+            for (g, other[o_off..][0..g.len]) |gv, ov| acc += gv * ov;
+        } else {
+            for (g, 0..) |gv, j| acc += gv * other[o_off + j * o_stride];
+        }
+        dst[off] += acc;
+    } else if (stride == 1 and o_stride == 1) {
+        for (dst[off..][0..g.len], g, other[o_off..][0..g.len]) |*d, gv, ov| d.* += gv * ov;
+    } else if (stride == 1 and o_stride == 0) {
+        const ov = other[o_off];
+        for (dst[off..][0..g.len], g) |*d, gv| d.* += gv * ov;
+    } else {
+        for (g, 0..) |gv, j| dst[off + j * stride] += gv * other[o_off + j * o_stride];
+    }
+}
+
 pub fn backwardCore(self: *Op) !void {
     switch (self.op_type) {
         // ====================================================================
@@ -354,19 +447,18 @@ pub fn backwardCore(self: *Op) !void {
             const C = self.outputs[0];
             if (A.requires_grad) {
                 const ctx = self.context.Transpose;
-                const strides_trans = transposeShape(A.strides, ctx.dim0, ctx.dim1);
-
-                var indices: [8]usize = @splat(0);
-                const len = C.shape.len;
-                const total_size = C.data.len;
-                for (0..total_size) |dest_flat_idx| {
-                    var src_flat_idx: usize = 0;
-                    for (0..len) |d| {
-                        src_flat_idx += indices[d] * strides_trans.dims[d];
-                    }
-                    A.grad[src_flat_idx] += C.grad[dest_flat_idx];
-
-                    C.shape.incrementCoord(&indices);
+                var walker = RowWalker{
+                    .shape = C.shape,
+                    .a_strides = transposeShape(A.strides, ctx.dim0, ctx.dim1),
+                    .b_strides = C.strides,
+                };
+                const inner = walker.inner();
+                const a_inner = walker.aInnerStride();
+                var c_off: usize = 0;
+                for (0..walker.rows(C.grad.len)) |_| {
+                    accumulateRow(A.grad, walker.a_off, a_inner, C.grad[c_off..][0..inner], 1.0);
+                    c_off += inner;
+                    walker.next();
                 }
             }
         },
@@ -536,27 +628,21 @@ pub fn backwardCore(self: *Op) !void {
                     }
                 }
             } else {
-                const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
-                const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
-                const len = C.shape.len;
-                var coord: [8]usize = @splat(0);
-
-                for (C.grad) |c_g| {
-                    var a_idx: usize = 0;
-                    var b_idx: usize = 0;
-                    for (0..len) |d| {
-                        a_idx += coord[d] * a_strides.dims[d];
-                        b_idx += coord[d] * b_strides.dims[d];
-                    }
-
-                    if (A.requires_grad) {
-                        A.grad[a_idx] += c_g;
-                    }
-                    if (B.requires_grad) {
-                        B.grad[b_idx] += c_g;
-                    }
-
-                    C.shape.incrementCoord(&coord);
+                var walker = RowWalker{
+                    .shape = C.shape,
+                    .a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape),
+                    .b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape),
+                };
+                const inner = walker.inner();
+                const a_inner = walker.aInnerStride();
+                const b_inner = walker.bInnerStride();
+                var c_off: usize = 0;
+                for (0..walker.rows(C.grad.len)) |_| {
+                    const g_row = C.grad[c_off..][0..inner];
+                    if (A.requires_grad) accumulateRow(A.grad, walker.a_off, a_inner, g_row, 1.0);
+                    if (B.requires_grad) accumulateRow(B.grad, walker.b_off, b_inner, g_row, 1.0);
+                    c_off += inner;
+                    walker.next();
                 }
             }
         },
@@ -580,27 +666,21 @@ pub fn backwardCore(self: *Op) !void {
                     }
                 }
             } else {
-                const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
-                const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
-                const len = C.shape.len;
-                var coord: [8]usize = @splat(0);
-
-                for (C.grad) |c_g| {
-                    var a_idx: usize = 0;
-                    var b_idx: usize = 0;
-                    for (0..len) |d| {
-                        a_idx += coord[d] * a_strides.dims[d];
-                        b_idx += coord[d] * b_strides.dims[d];
-                    }
-
-                    if (A.requires_grad) {
-                        A.grad[a_idx] += c_g;
-                    }
-                    if (B.requires_grad) {
-                        B.grad[b_idx] -= c_g;
-                    }
-
-                    C.shape.incrementCoord(&coord);
+                var walker = RowWalker{
+                    .shape = C.shape,
+                    .a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape),
+                    .b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape),
+                };
+                const inner = walker.inner();
+                const a_inner = walker.aInnerStride();
+                const b_inner = walker.bInnerStride();
+                var c_off: usize = 0;
+                for (0..walker.rows(C.grad.len)) |_| {
+                    const g_row = C.grad[c_off..][0..inner];
+                    if (A.requires_grad) accumulateRow(A.grad, walker.a_off, a_inner, g_row, 1.0);
+                    if (B.requires_grad) accumulateRow(B.grad, walker.b_off, b_inner, g_row, -1.0);
+                    c_off += inner;
+                    walker.next();
                 }
             }
         },
@@ -625,27 +705,21 @@ pub fn backwardCore(self: *Op) !void {
                     }
                 }
             } else {
-                const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
-                const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
-                const len = C.shape.len;
-                var coord: [8]usize = @splat(0);
-
-                for (C.grad) |c_g| {
-                    var a_idx: usize = 0;
-                    var b_idx: usize = 0;
-                    for (0..len) |d| {
-                        a_idx += coord[d] * a_strides.dims[d];
-                        b_idx += coord[d] * b_strides.dims[d];
-                    }
-
-                    if (A.requires_grad) {
-                        A.grad[a_idx] += c_g * B.data[b_idx];
-                    }
-                    if (B.requires_grad) {
-                        B.grad[b_idx] += c_g * A.data[a_idx];
-                    }
-
-                    C.shape.incrementCoord(&coord);
+                var walker = RowWalker{
+                    .shape = C.shape,
+                    .a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape),
+                    .b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape),
+                };
+                const inner = walker.inner();
+                const a_inner = walker.aInnerStride();
+                const b_inner = walker.bInnerStride();
+                var c_off: usize = 0;
+                for (0..walker.rows(C.grad.len)) |_| {
+                    const g_row = C.grad[c_off..][0..inner];
+                    if (A.requires_grad) mulAccumulateRow(A.grad, walker.a_off, a_inner, g_row, B.data, walker.b_off, b_inner);
+                    if (B.requires_grad) mulAccumulateRow(B.grad, walker.b_off, b_inner, g_row, A.data, walker.a_off, a_inner);
+                    c_off += inner;
+                    walker.next();
                 }
             }
         },
@@ -670,29 +744,26 @@ pub fn backwardCore(self: *Op) !void {
                     }
                 }
             } else {
-                const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
-                const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
-                const len = C.shape.len;
-                var coord: [8]usize = @splat(0);
-
-                for (C.grad) |c_g| {
-                    var a_idx: usize = 0;
-                    var b_idx: usize = 0;
-                    for (0..len) |d| {
-                        a_idx += coord[d] * a_strides.dims[d];
-                        b_idx += coord[d] * b_strides.dims[d];
+                var walker = RowWalker{
+                    .shape = C.shape,
+                    .a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape),
+                    .b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape),
+                };
+                const inner = walker.inner();
+                const a_inner = walker.aInnerStride();
+                const b_inner = walker.bInnerStride();
+                var c_off: usize = 0;
+                for (0..walker.rows(C.grad.len)) |_| {
+                    const g_row = C.grad[c_off..][0..inner];
+                    for (g_row, 0..) |c_g, j| {
+                        const a_idx = walker.a_off + j * a_inner;
+                        const b_idx = walker.b_off + j * b_inner;
+                        const b_val = B.data[b_idx];
+                        if (A.requires_grad) A.grad[a_idx] += c_g / b_val;
+                        if (B.requires_grad) B.grad[b_idx] -= c_g * A.data[a_idx] / (b_val * b_val);
                     }
-
-                    const b_val = B.data[b_idx];
-                    if (A.requires_grad) {
-                        A.grad[a_idx] += c_g / b_val;
-                    }
-                    if (B.requires_grad) {
-                        const a_val = A.data[a_idx];
-                        B.grad[b_idx] -= c_g * a_val / (b_val * b_val);
-                    }
-
-                    C.shape.incrementCoord(&coord);
+                    c_off += inner;
+                    walker.next();
                 }
             }
         },
