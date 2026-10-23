@@ -2154,3 +2154,48 @@ test "fix: gatherMatMul groups rows by expert and matches the per-row reference"
     }.run, .{ X2, sel, @as([]const *Tensor, &ws), @as([]const *Tensor, &bs) });
 }
 
+test "fix: GenericTensor.sum reduces strided views along every axis" {
+    const allocator = std.testing.allocator;
+    const base = try IntTensor.init(allocator, &.{ 4, 3, 5 }, null);
+    defer base.deinit(allocator);
+    for (base.data, 0..) |*v, i| v.* = @as(i32, @intCast(i * 7 % 23)) - 11;
+
+    // [5, 3, 4] 的转置视图，再沿第 0 维以步长 2 切片得到 [3, 3, 4]
+    const tv = try base.transposeView(0, 2, allocator);
+    defer tv.deinit(allocator);
+    const view = try tv.slice(&.{.{ .start = 0, .end = 5, .step = 2 }}, allocator);
+    defer view.deinit(allocator);
+    try std.testing.expect(!view.isContiguous());
+
+    for (0..3) |ax| {
+        for ([_]bool{ false, true }) |keepdims| {
+            const got = try view.sum(ax, keepdims, allocator);
+            defer got.deinit(allocator);
+            try std.testing.expectEqual(if (keepdims) @as(usize, 3) else @as(usize, 2), got.shape.len);
+            var out_i: usize = 0;
+            var coord: [3]usize = @splat(0);
+            for (0..3) |a| for (0..3) |b| for (0..4) |c_| {
+                coord = .{ a, b, c_ };
+                if (coord[ax] != 0) continue;
+                var want: i32 = 0;
+                for (0..view.shape.dims[ax]) |r| {
+                    var cc = coord;
+                    cc[ax] = r;
+                    want += view.get(&cc);
+                }
+                try std.testing.expectEqual(want, got.data[out_i]);
+                out_i += 1;
+            };
+            try std.testing.expectEqual(got.data.len, out_i);
+        }
+    }
+
+    var total: i32 = 0;
+    for (0..3) |a| for (0..3) |b| for (0..4) |c_| {
+        total += view.get(&.{ a, b, c_ });
+    };
+    const g = try view.sum(null, false, allocator);
+    defer g.deinit(allocator);
+    try std.testing.expectEqual(total, g.data[0]);
+}
+

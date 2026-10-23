@@ -572,10 +572,12 @@ pub fn GenericTensor(comptime T: type) type {
             return true;
         }
 
+        /// 沿指定轴或全局求和：以 64 位浮点数 (f64) 累加后转换回元素类型。
+        /// 任意跨步输入都按折叠维度后的逐行跨步遍历器 (`shape.RowIter`) 顺序读取，不做逐元素多维下标换算；
+        /// 每个输出元素的加数顺序与沿轴下标递增顺序一致
         pub fn sum(self: *const Self, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Self {
             if (axis) |ax| {
                 if (ax >= self.shape.len) return error.DimensionOutOfBounds;
-                const reduce_size = self.shape.dims[ax];
 
                 var out_shape_dims: [8]usize = @splat(0);
                 var out_rank: usize = 0;
@@ -598,39 +600,28 @@ pub fn GenericTensor(comptime T: type) type {
                     }
                 }
 
-                const out = try Self.zeros(allocator, out_shape_dims[0..out_rank]);
+                const out = try Self.init(allocator, out_shape_dims[0..out_rank], null);
                 errdefer out.deinit(allocator);
 
-                var out_indices: [8]usize = @splat(0);
-                for (0..out.data.len) |out_idx| {
-                    var tmp = out_idx;
-                    var d: usize = out_rank;
-                    while (d > 0) {
-                        d -= 1;
-                        out_indices[d] = tmp % out.shape.dims[d];
-                        tmp /= out.shape.dims[d];
-                    }
+                const acc = try allocator.alloc(f64, out.data.len);
+                defer allocator.free(acc);
+                @memset(acc, 0.0);
 
-                    var src_indices: [8]usize = @splat(0);
-                    if (keepdims) {
-                        for (0..self.shape.len) |idx_d| src_indices[idx_d] = out_indices[idx_d];
-                    } else {
-                        var src_d: usize = 0;
-                        for (0..self.shape.len) |idx_d| {
-                            if (idx_d == ax) continue;
-                            src_indices[idx_d] = out_indices[src_d];
-                            src_d += 1;
-                        }
-                    }
+                // 累加器在输入形状下的跨度：保留维度的输出布局为行优先连续，被归约轴跨度为 0
+                var kept = self.shape;
+                kept.dims[ax] = 1;
+                var acc_strides = computeContiguousStrides(kept);
+                acc_strides.dims[ax] = 0;
 
-                    var acc: f64 = 0.0;
-                    for (0..reduce_size) |k| {
-                        src_indices[ax] = k;
-                        const v = self.data[self.getFlatIndex(src_indices[0..self.shape.len])];
-                        acc += convertScalar(f64, T, v);
+                var it = shape_mod.RowIter(2).init(self.shape, .{ self.strides, acc_strides });
+                const s_src = it.inner_strides[0];
+                const s_acc = it.inner_strides[1];
+                while (it.next()) |offs| {
+                    for (0..it.inner) |i| {
+                        acc[offs[1] + i * s_acc] += convertScalar(f64, T, self.data[offs[0] + i * s_src]);
                     }
-                    out.data[out_idx] = convertScalar(T, f64, acc);
                 }
+                for (out.data, acc) |*o, a| o.* = convertScalar(T, f64, a);
                 return out;
             } else {
                 var acc: f64 = 0.0;
@@ -638,13 +629,10 @@ pub fn GenericTensor(comptime T: type) type {
                 if (self.isContiguous() and self.data.len >= elem_count) {
                     for (self.data[0..elem_count]) |v| acc += convertScalar(f64, T, v);
                 } else {
-                    var coord: [8]usize = @splat(0);
-                    const len = self.shape.len;
-                    for (0..elem_count) |_| {
-                        var src_idx: usize = 0;
-                        for (0..len) |d| src_idx += coord[d] * self.strides.dims[d];
-                        acc += convertScalar(f64, T, self.data[src_idx]);
-                        self.shape.incrementCoord(&coord);
+                    var it = shape_mod.RowIter(1).init(self.shape, .{self.strides});
+                    const s_src = it.inner_strides[0];
+                    while (it.next()) |offs| {
+                        for (0..it.inner) |i| acc += convertScalar(f64, T, self.data[offs[0] + i * s_src]);
                     }
                 }
                 if (keepdims) {
