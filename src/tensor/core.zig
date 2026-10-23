@@ -431,10 +431,10 @@ pub const Tensor = struct {
     pub fn bceWithLogitsLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const N = self.shape.numel();
         if (N != targets.shape.numel()) return error.ShapeMismatch;
-        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
-        const y_c = if (targets.isContiguous() and !targets.is_view) targets else try targets.contiguous(allocator);
-        defer if (!targets.isContiguous() or targets.is_view) y_c.deinit(allocator);
+        const x_c = if (self.isContiguous()) self else try self.contiguous(allocator);
+        defer if (x_c != self) x_c.deinit(allocator);
+        const y_c = if (targets.isContiguous()) targets else try targets.contiguous(allocator);
+        defer if (y_c != targets) y_c.deinit(allocator);
 
         const loss = try zeros(allocator, &.{ 1, 1 });
         var total_loss: f32 = 0.0;
@@ -452,10 +452,10 @@ pub const Tensor = struct {
     pub fn bceLoss(self: *Tensor, targets: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
         const N = self.shape.numel();
         if (N != targets.shape.numel()) return error.ShapeMismatch;
-        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
-        const y_c = if (targets.isContiguous() and !targets.is_view) targets else try targets.contiguous(allocator);
-        defer if (!targets.isContiguous() or targets.is_view) y_c.deinit(allocator);
+        const x_c = if (self.isContiguous()) self else try self.contiguous(allocator);
+        defer if (x_c != self) x_c.deinit(allocator);
+        const y_c = if (targets.isContiguous()) targets else try targets.contiguous(allocator);
+        defer if (y_c != targets) y_c.deinit(allocator);
 
         const loss = try zeros(allocator, &.{ 1, 1 });
         var total_loss: f32 = 0.0;
@@ -527,8 +527,8 @@ pub const Tensor = struct {
             if (label >= N) return error.IndexOutOfBounds;
         }
 
-        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
+        const x_c = if (self.isContiguous()) self else try self.contiguous(allocator);
+        defer if (x_c != self) x_c.deinit(allocator);
 
         var loss_sum: f32 = 0.0;
         for (0..B) |i| {
@@ -553,10 +553,10 @@ pub const Tensor = struct {
     pub fn mseLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const N = self.shape.numel();
         if (N != targets.shape.numel()) return error.ShapeMismatch;
-        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
-        const y_c = if (targets.isContiguous() and !targets.is_view) targets else try targets.contiguous(allocator);
-        defer if (!targets.isContiguous() or targets.is_view) y_c.deinit(allocator);
+        const x_c = if (self.isContiguous()) self else try self.contiguous(allocator);
+        defer if (x_c != self) x_c.deinit(allocator);
+        const y_c = if (targets.isContiguous()) targets else try targets.contiguous(allocator);
+        defer if (y_c != targets) y_c.deinit(allocator);
 
         const loss = try zeros(allocator, &.{ 1, 1 });
         var loss_sum: f32 = 0.0;
@@ -569,8 +569,8 @@ pub const Tensor = struct {
     }
 
     pub fn l2Loss(self: *Tensor, lambda: f32, allocator: std.mem.Allocator) !*Tensor {
-        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
+        const x_c = if (self.isContiguous()) self else try self.contiguous(allocator);
+        defer if (x_c != self) x_c.deinit(allocator);
 
         var sum_sq: f32 = 0.0;
         for (x_c.data[0..self.shape.numel()]) |v| {
@@ -582,8 +582,8 @@ pub const Tensor = struct {
     }
 
     pub fn l1Loss(self: *Tensor, lambda: f32, allocator: std.mem.Allocator) !*Tensor {
-        const x_c = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-        defer if (!self.isContiguous() or self.is_view) x_c.deinit(allocator);
+        const x_c = if (self.isContiguous()) self else try self.contiguous(allocator);
+        defer if (x_c != self) x_c.deinit(allocator);
 
         var sum_abs: f32 = 0.0;
         for (x_c.data[0..self.shape.numel()]) |v| {

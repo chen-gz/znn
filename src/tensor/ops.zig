@@ -200,7 +200,7 @@ pub fn concat(allocator: std.mem.Allocator, inputs: []const *Tensor, dim: usize)
         inner_size *= out_shape.dims[d];
     }
 
-    // 确保所有输入张量为连续内存，非连续或视图张量先物化为连续副本
+    // 确保所有输入张量为连续内存，非连续张量先物化为连续副本（连续视图直接按偏移读取）
     const contig_inputs = try allocator.alloc(*Tensor, inputs.len);
     defer allocator.free(contig_inputs);
     const needs_free = try allocator.alloc(bool, inputs.len);
@@ -214,7 +214,7 @@ pub fn concat(allocator: std.mem.Allocator, inputs: []const *Tensor, dim: usize)
     }
 
     for (inputs, 0..) |t, i| {
-        if (t.isContiguous() and !t.is_view) {
+        if (t.isContiguous()) {
             contig_inputs[i] = t;
         } else {
             contig_inputs[i] = try t.contiguous(allocator);
@@ -325,8 +325,8 @@ pub fn split(allocator: std.mem.Allocator, input: *Tensor, num_splits: usize, di
         inner_size *= input.shape.dims[d];
     }
 
-    const in_contig = if (input.isContiguous() and !input.is_view) input else try input.contiguous(allocator);
-    defer if (!input.isContiguous() or input.is_view) free(allocator, in_contig);
+    const in_contig = if (input.isContiguous()) input else try input.contiguous(allocator);
+    defer if (in_contig != input) free(allocator, in_contig);
 
     for (0..outer_size) |outer| {
         const src_base = outer * dim_size * inner_size;

@@ -28,8 +28,8 @@ pub const adaptiveAvgPool2d = conv_pool.adaptiveAvgPool2d;
 /// 沿最后一维的数值稳定 Softmax：每行先减去行最大值再求指数，避免上溢
 pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
     if (self.shape.len == 0) return error.IncompatibleDimensions;
-    const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-    defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
+    const x = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (x != self) x.deinit(allocator);
 
     const D = x.shape.dims[x.shape.len - 1];
     if (D == 0) return error.DivisionByZero;
@@ -55,11 +55,11 @@ pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
 /// 均方根层归一化前向核函数 (Root Mean Square Layer Normalization, RMSNorm)
 pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
     if (self.shape.len == 0) return error.IncompatibleDimensions;
-    const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-    defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
+    const x = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (x != self) x.deinit(allocator);
 
-    const g_c = if (G.isContiguous() and !G.is_view) G else try G.contiguous(allocator);
-    defer if (!G.isContiguous() or G.is_view) g_c.deinit(allocator);
+    const g_c = if (G.isContiguous()) G else try G.contiguous(allocator);
+    defer if (g_c != G) g_c.deinit(allocator);
 
     const D = x.shape.dims[x.shape.len - 1];
     if (D == 0) return error.DivisionByZero;
@@ -84,14 +84,14 @@ pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator
 /// 标准层归一化前向核函数 (Layer Normalization, LayerNorm)
 pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
     if (self.shape.len == 0) return error.IncompatibleDimensions;
-    const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-    defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
+    const x = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (x != self) x.deinit(allocator);
 
-    const g_c = if (G.isContiguous() and !G.is_view) G else try G.contiguous(allocator);
-    defer if (!G.isContiguous() or G.is_view) g_c.deinit(allocator);
+    const g_c = if (G.isContiguous()) G else try G.contiguous(allocator);
+    defer if (g_c != G) g_c.deinit(allocator);
 
-    const b_c = if (B.isContiguous() and !B.is_view) B else try B.contiguous(allocator);
-    defer if (!B.isContiguous() or B.is_view) b_c.deinit(allocator);
+    const b_c = if (B.isContiguous()) B else try B.contiguous(allocator);
+    defer if (b_c != B) b_c.deinit(allocator);
 
     const D = x.shape.dims[x.shape.len - 1];
     if (D == 0) return error.DivisionByZero;
@@ -306,8 +306,8 @@ pub fn groupNorm(
 pub fn applyDropoutMask(self: *Tensor, mask: []const f32, allocator: std.mem.Allocator) !*Tensor {
     const total = self.shape.numel();
     if (mask.len != total) return error.ShapeMismatch;
-    const x_contig = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-    defer if (!self.isContiguous() or self.is_view) x_contig.deinit(allocator);
+    const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (x_contig != self) x_contig.deinit(allocator);
 
     const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
     for (x_contig.data[0..total], Y.data, mask) |x_val, *y_val, m_val| {
@@ -320,8 +320,8 @@ pub fn applyDropoutMask(self: *Tensor, mask: []const f32, allocator: std.mem.All
 /// 支持经典相邻配对 (Interleaved) 与主流半切分配对 (Split-Half) 两种拓扑，
 /// 以及任意频率基数 (base)、旋转子空间偏移 (rotary_offset) 与部分旋转因子 (partial_rotary_factor)。
 pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: std.mem.Allocator) !*Tensor {
-    const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
-    defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
+    const x = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (x != self) x.deinit(allocator);
 
     if (self.shape.len == 0) return error.IncompatibleDimensions;
     const rotary_offset = options.rotary_offset;
