@@ -127,7 +127,7 @@ pub const BatchNorm1d = struct {
         };
     }
 
-    pub fn forward(self: *BatchNorm1d, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const BatchNorm1d, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
         return try graph.batchNorm1d(
@@ -174,7 +174,7 @@ pub const BatchNorm2d = struct {
     /// 模块标准数学变换公式
     pub const formula = "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta";
 
-    pub fn forward(self: *BatchNorm2d, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    pub fn forward(self: *const BatchNorm2d, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
         return try graph.batchNorm2d(
