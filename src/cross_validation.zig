@@ -373,7 +373,7 @@ test "kFoldSplit uneven sample distribution and disjoint partitions" {
 
     try std.testing.expectEqual(k, folds.len);
 
-    var val_seen = [_]bool{false} ** n_samples;
+    var val_seen: [n_samples]bool = @splat(false);
     var total_val_items: usize = 0;
 
     for (folds) |f| {

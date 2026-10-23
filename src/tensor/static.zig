@@ -22,10 +22,10 @@ fn normalizeDims(comptime dims: anytype) []const usize {
                     return &final;
                 }
                 if (child_info == .@"struct" and child_info.@"struct".is_tuple) {
-                    const fields = child_info.@"struct".fields;
-                    var result: [fields.len]usize = undefined;
-                    inline for (fields, 0..) |f, i| {
-                        result[i] = @intCast(@field(dims.*, f.name));
+                    const field_names = child_info.@"struct".field_names;
+                    var result: [field_names.len]usize = undefined;
+                    inline for (field_names, 0..) |fname, i| {
+                        result[i] = @intCast(@field(dims.*, fname));
                     }
                     const final = result;
                     return &final;
@@ -45,10 +45,10 @@ fn normalizeDims(comptime dims: anytype) []const usize {
             if (!st.is_tuple) {
                 @compileError("StaticTensor dims struct must be a tuple of integers");
             }
-            const fields = st.fields;
-            var result: [fields.len]usize = undefined;
-            inline for (fields, 0..) |f, i| {
-                result[i] = @intCast(@field(dims, f.name));
+            const field_names = st.field_names;
+            var result: [field_names.len]usize = undefined;
+            inline for (field_names, 0..) |fname, i| {
+                result[i] = @intCast(@field(dims, fname));
             }
             const final = result;
             return &final;

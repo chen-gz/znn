@@ -683,7 +683,12 @@ test "BPETokenizer multi-byte UTF-8 chunk boundary handling" {
 
     // 构造一个长度远超 256 字节且无空格的连续多字节中文串，强制在 256 字节处分割
     const chinese_segment = "人工智能与神经网络系统深度学习框架矩阵计算"; // 21 个汉字 * 3 = 63 字节
-    const long_chinese = chinese_segment ** 6; // 63 * 6 = 378 字节 (跨过 256 字节边界)
+    const long_chinese_arr = comptime blk: {
+        var buf: [chinese_segment.len * 6]u8 = undefined;
+        for (0..6) |i| @memcpy(buf[i * chinese_segment.len .. (i + 1) * chinese_segment.len], chinese_segment);
+        break :blk buf;
+    };
+    const long_chinese = &long_chinese_arr;
 
     const encoded = try tokenizer.encode(allocator, long_chinese);
     defer allocator.free(encoded);
@@ -694,7 +699,13 @@ test "BPETokenizer multi-byte UTF-8 chunk boundary handling" {
     try std.testing.expectEqualStrings(long_chinese, decoded);
 
     // 构造带有自然单词与空格的长文本，测试空白字符后向探测与无损还原
-    const mixed_corpus = "ZNN framework tokenization across multi-byte UTF-8 boundaries. " ** 8;
+    const mixed_str = "ZNN framework tokenization across multi-byte UTF-8 boundaries. ";
+    const mixed_corpus_arr = comptime blk: {
+        var buf: [mixed_str.len * 8]u8 = undefined;
+        for (0..8) |i| @memcpy(buf[i * mixed_str.len .. (i + 1) * mixed_str.len], mixed_str);
+        break :blk buf;
+    };
+    const mixed_corpus = &mixed_corpus_arr;
     const mixed_encoded = try tokenizer.encode(allocator, mixed_corpus);
     defer allocator.free(mixed_encoded);
 
@@ -824,7 +835,7 @@ test "loadImages" {
         std.mem.writeInt(u32, &temp, 2, .big);
         try writer.writeAll(&temp);
 
-        const pixels = [_]u8{0} ** 8;
+        const pixels: [8]u8 = @splat(0);
         try writer.writeAll(&pixels);
 
         try writer.flush();

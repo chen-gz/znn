@@ -14,7 +14,7 @@ pub const Shape = struct {
     pub fn fromSlice(shape_slice: []const usize) !Shape {
         if (shape_slice.len > 8) return error.MaxDimensionsExceeded;
         var self = Shape{
-            .dims = [_]usize{0} ** 8,
+            .dims = @splat(0),
             .len = shape_slice.len,
         };
         for (shape_slice, 0..) |dim, i| {
@@ -72,7 +72,7 @@ pub const Shape = struct {
 ///     S_k     = S_{k+1} * D_{k+1}  (0 <= k < n-1)
 pub fn computeContiguousStrides(shape: Shape) Shape {
     var strides = Shape{
-        .dims = [_]usize{0} ** 8,
+        .dims = @splat(0),
         .len = shape.len,
     };
     if (shape.len == 0) return strides;
@@ -126,7 +126,7 @@ pub fn broadcastShapes(shape1: Shape, shape2: Shape) !Shape {
     if (out_len > 8) return error.MaxDimensionsExceeded;
 
     var out_shape = Shape{
-        .dims = [_]usize{0} ** 8,
+        .dims = @splat(0),
         .len = out_len,
     };
 
@@ -153,7 +153,7 @@ pub fn broadcastShapes(shape1: Shape, shape2: Shape) !Shape {
 /// 这使得多维索引计算可以通过统一的跨度点积直接映射到输入张量的真实物理偏移，无需物理复制内存。
 pub fn computeBroadcastStrides(src_shape: Shape, src_strides: Shape, target_shape: Shape) Shape {
     var b_strides = Shape{
-        .dims = [_]usize{0} ** 8,
+        .dims = @splat(0),
         .len = target_shape.len,
     };
     const target_len = target_shape.len;
@@ -203,7 +203,7 @@ pub fn broadcastBinaryOpRaw(
     const a_strides = computeBroadcastStrides(A_shape, A_strides, C_shape);
     const b_strides = computeBroadcastStrides(B_shape, B_strides, C_shape);
     const len = C_shape.len;
-    var coord = [_]usize{0} ** 8;
+    var coord: [8]usize = @splat(0);
 
     for (C_data) |*c_val| {
         var a_idx: usize = 0;

@@ -1674,7 +1674,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             // 2. CPU 确定性多核并行回退路径
             const bitset_words = (config.vocab_size + 63) / 64;
-            var recent_bitset = [_]u64{0} ** bitset_words;
+            var recent_bitset: [bitset_words]u64 = @splat(0);
             if (repetition_penalty > 1.0) {
                 for (recent_window) |rec| {
                     if (rec < config.vocab_size) {

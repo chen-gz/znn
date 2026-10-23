@@ -284,7 +284,7 @@ pub const LmHeadWeights = struct {
         recent_tokens: []const usize,
         repetition_penalty: f32,
     ) usize {
-        var stack_bitset = [_]u64{0} ** 4096;
+        var stack_bitset: [4096]u64 = @splat(0);
         const num_words = (vocab_size + 63) / 64;
         const recent_bitset: []u64 = if (num_words <= stack_bitset.len)
             stack_bitset[0..num_words]

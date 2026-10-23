@@ -87,7 +87,7 @@ pub const Linear = struct {
             const z_flat = try graph.matmul(x_flat, self.weight);
             const out_flat = try graph.addBias(z_flat, self.bias);
 
-            var out_dims = [_]usize{0} ** 8;
+            var out_dims: [8]usize = @splat(0);
             for (0..x.shape.len - 1) |i| {
                 out_dims[i] = x.shape.dims[i];
             }
@@ -422,7 +422,7 @@ fn isVectorShaped(t: *const Tensor) bool {
 /// 调试构建 (Debug) 下检查参数是否已初始化：所有可训练权重矩阵都全为 0 时输出警告。
 /// 优化器在构造时调用 (训练开始前)；非 Debug 构建下为空操作，不产生任何开销。
 pub fn warnIfParametersUninitialized(params: []const *Tensor) void {
-    if (@import("builtin").mode != .Debug) return;
+    if (@import("builtin").mode != .debug) return;
     const report = inspectParameterInit(params);
     if (report.looksUninitialized()) {
         std.log.warn(
@@ -447,7 +447,7 @@ pub fn initModel(model: anytype, graph: *autodiff.Graph, random: std.Random) !vo
     if (!graph.enable_grad) return error.GraphNotRecordingOps;
     applyCustomInit(model, random);
     graph.initWeights(random);
-    if (@import("builtin").mode == .Debug) try warnParametersOutsideGraph(model, graph);
+    if (@import("builtin").mode == .debug) try warnParametersOutsideGraph(model, graph);
 }
 
 /// 便捷入口：用样本输入建立一次前向计算图，再调用 `initModel` 完成依据计算图的参数初始化。
@@ -474,7 +474,7 @@ pub fn callForward(model: anytype, graph: *autodiff.Graph, args: anytype) Forwar
 }
 
 fn ForwardSelf(comptime T: type) type {
-    return @typeInfo(@TypeOf(T.forward)).@"fn".params[0].type.?;
+    return @typeInfo(@TypeOf(T.forward)).@"fn".param_types[0].?;
 }
 
 fn forwardSelf(model: anytype) ForwardSelf(@TypeOf(model.*)) {
@@ -487,7 +487,7 @@ fn isTuple(comptime A: type) bool {
 }
 
 fn ForwardArgs(comptime A: type) type {
-    return if (isTuple(A)) A else std.meta.Tuple(&.{A});
+    return if (isTuple(A)) A else @Tuple(&.{A});
 }
 
 fn forwardArgs(args: anytype) ForwardArgs(@TypeOf(args)) {
@@ -637,8 +637,8 @@ pub fn Sequential(comptime LayersTuple: type) type {
 
         pub fn forward(self: *const Self, graph: *autodiff.Graph, input: *Tensor) !*Tensor {
             var current = input;
-            inline for (@typeInfo(LayersTuple).@"struct".fields) |field| {
-                const layer = @field(self.layers, field.name);
+            inline for (@typeInfo(LayersTuple).@"struct".field_names) |name| {
+                const layer = @field(self.layers, name);
                 current = try layer.forward(graph, current);
             }
             return current;

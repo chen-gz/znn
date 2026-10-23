@@ -66,7 +66,7 @@ test "MLX GPU backend matmul and fast kernels" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.7302967), norm_4d_out[0], 1e-4);
 
     // 3. 验证快速缩放点积注意力 (Scaled Dot-Product Attention, SDPA)
-    const q_data = [_]f32{0.1} ** 64;
+    const q_data: [64]f32 = @splat(0.1);
     var q = try Array.fromSlice(&q_data, &.{ 1, 2, 4, 8 });
     defer q.deinit();
     var sdpa_res = try Array.fastScaledDotProductAttention(q, q, q, 1.0 / @sqrt(8.0), false, stream);
@@ -75,11 +75,11 @@ test "MLX GPU backend matmul and fast kernels" {
     const sdpa_out = sdpa_res.dataFloat32();
     try std.testing.expectEqual(@as(usize, 64), sdpa_out.len);
     // 3.1 验证单步增量解码 (Decode Step) 与分组查询注意力 (Grouped-Query Attention, GQA)
-    const q_step = [_]f32{0.2} ** 16; // [1, 2 heads, 1, 8 dim]
+    const q_step: [16]f32 = @splat(0.2); // [1, 2 heads, 1, 8 dim]
     var q_dec = try Array.fromSlice(&q_step, &.{ 1, 2, 1, 8 });
     defer q_dec.deinit();
 
-    const kv_cached = [_]f32{0.1} ** 32; // [1, 1 kv head, 4 seq_len, 8 dim]
+    const kv_cached: [32]f32 = @splat(0.1); // [1, 1 kv head, 4 seq_len, 8 dim]
     var k_dec = try Array.fromSlice(&kv_cached, &.{ 1, 1, 4, 8 });
     defer k_dec.deinit();
     var v_dec = try Array.fromSlice(&kv_cached, &.{ 1, 1, 4, 8 });
@@ -93,10 +93,10 @@ test "MLX GPU backend matmul and fast kernels" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), gqa_out[0], 1e-4);
 
     // 3.1.1 验证带前缀因果注意力 (Causal SDPA with M > 1 and K > M)
-    const q_prefix = [_]f32{0.2} ** 16; // [1, 1 head, 2 seq, 8 dim]
+    const q_prefix: [16]f32 = @splat(0.2); // [1, 1 head, 2 seq, 8 dim]
     var q_pref_arr = try Array.fromSlice(&q_prefix, &.{ 1, 1, 2, 8 });
     defer q_pref_arr.deinit();
-    const kv_prefix = [_]f32{0.1} ** 40; // [1, 1 head, 5 seq, 8 dim]
+    const kv_prefix: [40]f32 = @splat(0.1); // [1, 1 head, 5 seq, 8 dim]
     var k_pref_arr = try Array.fromSlice(&kv_prefix, &.{ 1, 1, 5, 8 });
     defer k_pref_arr.deinit();
     var v_pref_arr = try Array.fromSlice(&kv_prefix, &.{ 1, 1, 5, 8 });
@@ -196,7 +196,7 @@ test "MLX GPU backend matmul and fast kernels" {
     try std.testing.expectEqual(@as(usize, 2), dims[0]);
     try std.testing.expectEqual(@as(usize, 3), dims[1]);
 
-    var copy_dest = [_]f32{0.0} ** 6;
+    var copy_dest: [6]f32 = @splat(0.0);
     try zc_arr.copyToSlice(&copy_dest);
     try std.testing.expectEqualSlices(f32, &host_buf, &copy_dest);
 

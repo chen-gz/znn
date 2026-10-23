@@ -257,7 +257,7 @@ pub const Tensor = struct {
                 c_val.* = op(s_val, val);
             }
         } else {
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = self.shape.len;
             for (0..C.data.len) |dest_i| {
                 var src_idx: usize = 0;
@@ -377,7 +377,7 @@ pub const Tensor = struct {
                 c_val.* = if (a_val > 0.0) a_val else alpha * a_val;
             }
         } else {
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = self.shape.len;
             for (0..C.data.len) |dest_i| {
                 var src_idx: usize = 0;
@@ -397,7 +397,7 @@ pub const Tensor = struct {
                 c_val.* = math_fn(a_val);
             }
         } else {
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = self.shape.len;
             for (0..C.data.len) |dest_i| {
                 var src_idx: usize = 0;
@@ -615,7 +615,7 @@ pub const Tensor = struct {
         if (self.isContiguous() and self.data.len >= new_total) {
             @memcpy(C.data, self.data[0..new_total]);
         } else {
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = self.shape.len;
             for (0..new_total) |dest_i| {
                 var src_idx: usize = 0;
@@ -678,7 +678,7 @@ pub const Tensor = struct {
             .creator = null,
         };
 
-        var indices = [_]usize{0} ** 8;
+        var indices: [8]usize = @splat(0);
         const len = C_shape.len;
         for (0..total_size) |dest_flat_idx| {
             var src_flat_idx: usize = 0;
@@ -747,9 +747,9 @@ pub const Tensor = struct {
         const rank = @max(self.shape.len, reps.len);
         if (rank > 8) return error.MaxDimensionsExceeded;
 
-        var full_self_shape = [_]usize{1} ** 8;
-        var full_reps = [_]usize{1} ** 8;
-        var out_shape_dims = [_]usize{1} ** 8;
+        var full_self_shape: [8]usize = @splat(1);
+        var full_reps: [8]usize = @splat(1);
+        var out_shape_dims: [8]usize = @splat(1);
 
         const self_offset = rank - self.shape.len;
         for (0..self.shape.len) |i| {
@@ -772,7 +772,7 @@ pub const Tensor = struct {
         const src_full_shape = try Shape.fromSlice(full_self_shape[0..rank]);
         const src_strides = computeContiguousStrides(src_full_shape);
 
-        var coord = [_]usize{0} ** 8;
+        var coord: [8]usize = @splat(0);
         for (0..out.data.len) |dest_i| {
             var src_flat: usize = 0;
             for (0..rank) |d| {
@@ -861,7 +861,7 @@ pub const Tensor = struct {
                 out.data[i] = convertScalar(DestT, f32, val);
             }
         } else {
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = self.shape.len;
             for (0..out.data.len) |dest_i| {
                 var src_idx: usize = 0;

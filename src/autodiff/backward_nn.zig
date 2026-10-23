@@ -1254,7 +1254,7 @@ pub fn backwardNN(self: *Op) !void {
                         }
                     }
                 } else {
-                    var coord = [_]usize{0} ** 8;
+                    var coord: [8]usize = @splat(0);
                     const rank = X.shape.len;
                     for (0..num_indices) |i| {
                         var x_flat: usize = 0;

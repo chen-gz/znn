@@ -183,7 +183,7 @@ test "Hierarchical module naming and interactive HTML report export" {
     const tmp_json_path = "tmp_test_model_graph.json";
     try nn.exportJson(&graph, tmp_json_path, allocator);
 
-    const json_z = try allocator.dupeZ(u8, tmp_json_path);
+    const json_z = try allocator.dupeSentinel(u8, tmp_json_path, 0);
     defer allocator.free(json_z);
     const c_api = struct { extern "c" fn remove(filename: [*:0]const u8) c_int; };
     defer _ = c_api.remove(json_z.ptr);
@@ -1239,10 +1239,10 @@ test "Visualization enums match the enum lists of the published JSON Schema" {
 
         /// schema 的 enum 列表与 Zig 枚举的标签逐一对应 (顺序一致)
         fn same(comptime E: type, values: []const std.json.Value) !void {
-            const fields = @typeInfo(E).@"enum".fields;
-            try std.testing.expectEqual(fields.len, values.len);
-            inline for (fields, 0..) |f, i| {
-                try std.testing.expectEqualStrings(f.name, values[i].string);
+            const field_names = @typeInfo(E).@"enum".field_names;
+            try std.testing.expectEqual(field_names.len, values.len);
+            inline for (field_names, 0..) |fname, i| {
+                try std.testing.expectEqualStrings(fname, values[i].string);
             }
         }
     };

@@ -66,7 +66,7 @@ pub fn argmax(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
     defer if (contig_ptr) |cp| free(allocator, cp);
     const x_data = if (contig_ptr) |cp| cp.data else self.data;
 
-    var out_dims = [_]usize{0} ** 8;
+    var out_dims: [8]usize = @splat(0);
     for (0..self.shape.len) |d| {
         out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
     }
@@ -110,7 +110,7 @@ pub fn argmin(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
     defer if (contig_ptr) |cp| free(allocator, cp);
     const x_data = if (contig_ptr) |cp| cp.data else self.data;
 
-    var out_dims = [_]usize{0} ** 8;
+    var out_dims: [8]usize = @splat(0);
     for (0..self.shape.len) |d| {
         out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
     }
@@ -154,7 +154,7 @@ pub fn max(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
     defer if (contig_ptr) |cp| free(allocator, cp);
     const x_data = if (contig_ptr) |cp| cp.data else self.data;
 
-    var out_dims = [_]usize{0} ** 8;
+    var out_dims: [8]usize = @splat(0);
     for (0..self.shape.len) |d| {
         out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
     }
@@ -194,7 +194,7 @@ pub fn min(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
     defer if (contig_ptr) |cp| free(allocator, cp);
     const x_data = if (contig_ptr) |cp| cp.data else self.data;
 
-    var out_dims = [_]usize{0} ** 8;
+    var out_dims: [8]usize = @splat(0);
     for (0..self.shape.len) |d| {
         out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
     }
@@ -241,7 +241,7 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
         if (ax >= self.shape.len) return error.DimensionOutOfBounds;
         const reduce_size = self.shape.dims[ax];
 
-        var out_shape_dims = [_]usize{0} ** 8;
+        var out_shape_dims: [8]usize = @splat(0);
         var out_rank: usize = 0;
 
         if (keepdims) {
@@ -290,7 +290,7 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
                 }
             }
         } else {
-            var out_indices = [_]usize{0} ** 8;
+            var out_indices: [8]usize = @splat(0);
             for (0..C.data.len) |out_idx| {
                 var tmp = out_idx;
                 var d: usize = out_rank;
@@ -300,7 +300,7 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
                     tmp /= out_shape.dims[d];
                 }
 
-                var src_indices = [_]usize{0} ** 8;
+                var src_indices: [8]usize = @splat(0);
                 if (keepdims) {
                     for (0..self.shape.len) |idx_d| {
                         src_indices[idx_d] = out_indices[idx_d];
@@ -332,7 +332,7 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
                 total += v;
             }
         } else {
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = self.shape.len;
             for (0..elem_count) |_| {
                 var src_idx: usize = 0;
@@ -345,7 +345,7 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
         }
 
         if (keepdims) {
-            const out_shape_dims = [_]usize{1} ** 8;
+            const out_shape_dims: [8]usize = @splat(1);
             const out_shape = try Shape.fromSlice(out_shape_dims[0..self.shape.len]);
             const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
             C.data[0] = total;
@@ -421,7 +421,7 @@ pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator
     const y_strides = computeBroadcastStrides(y.shape, y.strides, target_shape);
 
     const rank = target_shape.len;
-    var indices = [_]usize{0} ** 8;
+    var indices: [8]usize = @splat(0);
     for (0..C.data.len) |c_flat| {
         var cond_flat: usize = 0;
         var x_flat: usize = 0;
@@ -451,7 +451,7 @@ pub fn maskedFill(self: *Tensor, mask: anytype, value: f32, allocator: std.mem.A
             }
         }
     } else {
-        var coord = [_]usize{0} ** 8;
+        var coord: [8]usize = @splat(0);
         const len = mask.shape.len;
         for (C.data) |*out_v| {
             var m_idx: usize = 0;
@@ -479,7 +479,7 @@ pub fn maskedFill_(self: *Tensor, mask: anytype, value: f32) !*Tensor {
             }
         }
     } else {
-        var coord = [_]usize{0} ** 8;
+        var coord: [8]usize = @splat(0);
         const len = self.shape.len;
         const count = self.shape.numel();
         for (0..count) |_| {
@@ -506,7 +506,7 @@ pub fn compareScalarOp(self: *const Tensor, val: f32, allocator: std.mem.Allocat
             b.* = cmp_fn(a, val);
         }
     } else {
-        var coord = [_]usize{0} ** 8;
+        var coord: [8]usize = @splat(0);
         const len = self.shape.len;
         for (0..out.data.len) |dest_i| {
             var src_idx: usize = 0;
@@ -568,7 +568,7 @@ pub fn neScalar(self: *const Tensor, val: f32, allocator: std.mem.Allocator) !*G
 
 /// 计算 Squeeze 之后的目标形状: 移除所有为 1 的维度，或移除指定为 1 的维度
 pub fn squeezedShape(self: *const Tensor, axis: ?usize) !Shape {
-    var out = Shape{ .dims = [_]usize{0} ** 8, .len = 0 };
+    var out = Shape{ .dims = @splat(0), .len = 0 };
     if (axis) |ax| {
         if (ax >= self.shape.len) return error.DimensionOutOfBounds;
         if (self.shape.dims[ax] != 1) return error.CannotSqueezeDimension;
@@ -597,7 +597,7 @@ pub fn squeezedShape(self: *const Tensor, axis: ?usize) !Shape {
 pub fn unsqueezedShape(self: *const Tensor, dim: usize) !Shape {
     if (dim > self.shape.len) return error.DimensionOutOfBounds;
     if (self.shape.len >= 8) return error.MaxDimensionsExceeded;
-    var out = Shape{ .dims = [_]usize{0} ** 8, .len = self.shape.len + 1 };
+    var out = Shape{ .dims = @splat(0), .len = self.shape.len + 1 };
     var src_d: usize = 0;
     for (0..out.len) |d| {
         if (d == dim) {
@@ -628,8 +628,8 @@ pub fn unsqueeze(self: *Tensor, dim: usize, allocator: std.mem.Allocator) !*Tens
 pub fn slice(self: *Tensor, ranges: []const SliceRange, allocator: std.mem.Allocator) !*Tensor {
     if (ranges.len > self.shape.len) return error.DimensionOutOfBounds;
 
-    var new_dims = [_]usize{0} ** 8;
-    var new_strides = [_]usize{0} ** 8;
+    var new_dims: [8]usize = @splat(0);
+    var new_strides: [8]usize = @splat(0);
     var offset: usize = 0;
 
     for (0..self.shape.len) |d| {
@@ -671,7 +671,7 @@ pub fn contiguous(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
     const out = try zeros(allocator, self.shape.dims[0..self.shape.len]);
     errdefer free(allocator, out);
 
-    var coord = [_]usize{0} ** 8;
+    var coord: [8]usize = @splat(0);
     const len = self.shape.len;
     for (0..out.data.len) |dest_i| {
         var src_idx: usize = 0;
@@ -694,7 +694,7 @@ pub fn clip(self: *Tensor, min_val: f32, max_val: f32, allocator: std.mem.Alloca
             y.* = std.math.clamp(x, min_val, max_val);
         }
     } else {
-        var coord = [_]usize{0} ** 8;
+        var coord: [8]usize = @splat(0);
         const len = self.shape.len;
         for (0..out.data.len) |dest_i| {
             var src_idx: usize = 0;
@@ -859,7 +859,7 @@ pub fn argsort(self: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.
 /// 返回形状为 [nonzeros_count, rank] 的 GenericTensor(usize)
 pub fn nonzero(self: Tensor, allocator: std.mem.Allocator) !*GenericTensor(usize) {
     var count: usize = 0;
-    var coord = [_]usize{0} ** 8;
+    var coord: [8]usize = @splat(0);
     const len = self.shape.len;
     const elem_count = self.shape.numel();
 

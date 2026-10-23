@@ -286,7 +286,7 @@ pub const Graph = struct {
             .is_view = can_alias,
         };
         if (!can_alias) {
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = A.shape.len;
             for (0..new_total) |dest_i| {
                 var src_idx: usize = 0;
@@ -826,7 +826,7 @@ pub const Graph = struct {
         const mask_buf = try allocator.alloc(bool, C.data.len);
         const cond_strides = tensor_mod.computeBroadcastStrides(cond.shape, cond.strides, C.shape);
         const rank = C.shape.len;
-        var indices = [_]usize{0} ** 8;
+        var indices: [8]usize = @splat(0);
         for (0..C.data.len) |c_flat| {
             var cond_flat: usize = 0;
             for (0..rank) |d| cond_flat += indices[d] * cond_strides.dims[d];
@@ -851,7 +851,7 @@ pub const Graph = struct {
                 mb.* = tensor_mod.isTruthyScalar(mv);
             }
         } else {
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = mask.shape.len;
             for (mask_buf) |*mb| {
                 var m_idx: usize = 0;
@@ -882,8 +882,8 @@ pub const Graph = struct {
     pub fn slice(self: *Graph, A: *Tensor, ranges: []const tensor_mod.SliceRange) !*Tensor {
         if (ranges.len > A.shape.len) return error.DimensionOutOfBounds;
 
-        var new_dims = [_]usize{0} ** 8;
-        var new_strides = [_]usize{0} ** 8;
+        var new_dims: [8]usize = @splat(0);
+        var new_strides: [8]usize = @splat(0);
         var offset: usize = 0;
 
         for (0..A.shape.len) |d| {

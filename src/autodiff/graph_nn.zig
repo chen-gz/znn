@@ -765,7 +765,7 @@ pub fn embedding(self: *Graph, W: *Tensor, X: anytype) !*Tensor {
                     t.data[i] = tensor_mod.convertScalar(f32, @TypeOf(X.data[0]), X.data[i]);
                 }
             } else {
-                var coord = [_]usize{0} ** 8;
+                var coord: [8]usize = @splat(0);
                 const rank = X.shape.len;
                 for (0..num_elem) |i| {
                     var flat: usize = 0;

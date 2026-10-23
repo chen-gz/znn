@@ -150,7 +150,7 @@ test "cblas_sgemm_fallback matrix multiplication" {
         0.3, 0.4,
         0.5, 0.6,
     };
-    var C = [_]f32{ 0.0 } ** 4;
+    var C: [4]f32 = @splat(0.0);
 
     cblas_sgemm_fallback(
         CblasRowMajor,
@@ -177,7 +177,7 @@ test "cblas_sgemm_fallback matrix multiplication" {
         A10[idx] = @as(f32, @floatFromInt(idx + 1)) * 0.1;
         B10[idx] = @as(f32, @floatFromInt(idx + 1)) * 0.2;
     }
-    var C_nt = [_]f32{0.0} ** 4;
+    var C_nt: [4]f32 = @splat(0.0);
     cblas_sgemm_fallback(
         CblasRowMajor,
         CblasNoTrans,

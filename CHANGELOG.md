@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **全面适配 Zig 0.17 编译器标准与语言重大语法升级 (`src/`)**:
+  - **移除废弃重复算子 `**` 并迁移至 `@splat` 与编译期内存复制**：针对 Zig 0.17 废弃的数组重复操作符 `**`，将全库张量维度、形状元数据、静态掩码及测试数据初始化统一重构为原生 `@splat(...)`；字符串与语料复用改用编译期静态块内 `@memcpy` 复制。
+  - **适配 `@typeInfo` 类型反射并行数组化与属性重构 (`src/nn/module.zig`, `src/tensor/static.zig`, `src/nn/tests_vis.zig`, `src/nn/graph_ir.zig`, `src/nn/core.zig`)**：
+    - 将结构体字段反射 `info.@"struct".fields` 迁移至 Zig 0.17 并行数组 `field_names`、`field_types` 与 `field_attrs`，字段属性访问同步更新为 `attrs.@"comptime"` 与 `attrs.@"align"`；
+    - 将枚举类型字段反射迁移至 `field_names` 与 `field_values`，算子公式注册采用标准 `std.enums.values`；
+    - 将函数形参类型反射 `info.@"fn".params` 迁移至 `info.@"fn".param_types`；
+    - 指针只读属性由 `info.pointer.is_const` 迁移至 `info.pointer.attrs.@"const"`；
+    - 运行时构建模式由大写 `.Debug` 迁移至 Zig 0.17 的枚举成员 `.debug`。
+  - **剥离 `@cImport` 依赖并内置 MLX C 矢量化抽象 (`src/backend/mlx.zig`, `src/backend/mlx_c.zig`)**：适配 Zig 0.17 彻底废除 `@cImport` 语言内置宏的规范，通过翻译模块生成静态自包含的 `src/backend/mlx_c.zig` 绑定，使 `zig test` 与无头 CI 具备即时毫秒级加载能力，彻底消除对系统 Clang AST 在线翻译的开销。
+  - **标准库 API 迁移 (`src/nn/core.zig`, `src/nn/graph_ir.zig`, `src/nn/tests_vis.zig`)**：
+    - 内存分配器哨兵复制由 `allocator.dupeZ` 迁移至 `allocator.dupeSentinel(u8, ..., 0)`；
+    - 元组类型构造由已废弃的 `std.meta.Tuple` 迁移至编译器原生内置函数 `@Tuple(&.{...})`。
+
+
 - **重构 `MoELayer` 为无分支 `TopK` + `GatherMatMul` 索引专家算子架构：零 `if` 分支实现 $O(N \cdot K)$ 稀疏激活与静态图重演 (`src/tensor/nn_kernels.zig`, `src/tensor/core.zig`, `src/autodiff/types.zig`, `src/autodiff/op.zig`, `src/autodiff/graph_nn.zig`, `src/autodiff/backward_nn.zig`, `src/autodiff/graph_init.zig`, `src/nn/transformer.zig`, `src/nn/visualization.zig`, `examples/models/deepseek_moe.json`)**:
   - **新增无分支前 K 项选择算子 (`OpType.TopK`, `Tensor.topKInto` / `Graph.topK`)**：通过纯算术比较排名累加（`@intFromBool(v_m > v_j) | @intFromBool((v_m == v_j) and (m < j))` 与 `@floatFromInt(@intFromBool(rank == r))`）从 `[N, E]` 门控概率中直接输出 `(values: [N, K], indices: [N, K])`，全程零数据依赖 `if` 跳转，反向传播将 `values.grad` 按 `indices` 路由回原专家列。
   - **新增索引收集专家矩阵乘法算子 (`OpType.GatherMatMul`, `Tensor.gatherMatMulInto` / `Graph.gatherMatMul`)**：对标 Apple MLX 的 `mlx_gather_mm` (`SwitchMLP`)，仅在固定 `[N, K]` 循环内通过 `e = @intFromFloat(indices[n, k])` 直接偏移寻址被选中专家的权重 `weights[e]` 与偏置 `biases[e]` 并调用 BLAS `cblas_sgemm`，前向与反向计算量严格为 $O(N \cdot K)$（未选中专家零计算且梯度严格为 0），同时在 `graph_init.zig` 的 `computeParamFans` 与 `detectConsumerActivation` 中完整支持全体 $E$ 个路由专家的参数扇入/扇出与激活函数推导。

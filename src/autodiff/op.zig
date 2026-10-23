@@ -377,7 +377,7 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             const x_strides = tensor_mod.computeBroadcastStrides(X.shape, X.strides, C.shape);
             const y_strides = tensor_mod.computeBroadcastStrides(Y.shape, Y.strides, C.shape);
             const rank = C.shape.len;
-            var indices = [_]usize{0} ** 8;
+            var indices: [8]usize = @splat(0);
             for (0..C.data.len) |c_flat| {
                 var x_flat: usize = 0;
                 var y_flat: usize = 0;
@@ -393,7 +393,7 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             const X = self.inputs[0];
             const C = self.outputs[0];
             const ctx = self.context.MaskedFill;
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = X.shape.len;
             for (0..C.data.len) |i| {
                 if (ctx.mask[i]) {
@@ -410,7 +410,7 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             const X = self.inputs[0];
             const C = self.outputs[0];
             const ctx = self.context.Slice;
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             for (0..C.data.len) |dest_i| {
                 var src_idx: usize = ctx.offset;
                 for (0..ctx.rank) |d| src_idx += coord[d] * ctx.strides[d];

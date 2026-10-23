@@ -284,7 +284,7 @@ pub fn backwardCore(self: *Op) !void {
                         A.grad[i] += g;
                     }
                 } else {
-                    var coord = [_]usize{0} ** 8;
+                    var coord: [8]usize = @splat(0);
                     const len = A.shape.len;
                     for (C.grad) |g| {
                         var src_idx: usize = 0;
@@ -308,7 +308,7 @@ pub fn backwardCore(self: *Op) !void {
                 const ctx = self.context.Transpose;
                 const strides_trans = transposeShape(A.strides, ctx.dim0, ctx.dim1);
 
-                var indices = [_]usize{0} ** 8;
+                var indices: [8]usize = @splat(0);
                 const len = C.shape.len;
                 const total_size = C.data.len;
                 for (0..total_size) |dest_flat_idx| {
@@ -491,7 +491,7 @@ pub fn backwardCore(self: *Op) !void {
                 const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
                 const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
                 const len = C.shape.len;
-                var coord = [_]usize{0} ** 8;
+                var coord: [8]usize = @splat(0);
 
                 for (C.grad) |c_g| {
                     var a_idx: usize = 0;
@@ -535,7 +535,7 @@ pub fn backwardCore(self: *Op) !void {
                 const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
                 const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
                 const len = C.shape.len;
-                var coord = [_]usize{0} ** 8;
+                var coord: [8]usize = @splat(0);
 
                 for (C.grad) |c_g| {
                     var a_idx: usize = 0;
@@ -580,7 +580,7 @@ pub fn backwardCore(self: *Op) !void {
                 const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
                 const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
                 const len = C.shape.len;
-                var coord = [_]usize{0} ** 8;
+                var coord: [8]usize = @splat(0);
 
                 for (C.grad) |c_g| {
                     var a_idx: usize = 0;
@@ -625,7 +625,7 @@ pub fn backwardCore(self: *Op) !void {
                 const a_strides = tensor.computeBroadcastStrides(A.shape, A.strides, C.shape);
                 const b_strides = tensor.computeBroadcastStrides(B.shape, B.strides, C.shape);
                 const len = C.shape.len;
-                var coord = [_]usize{0} ** 8;
+                var coord: [8]usize = @splat(0);
 
                 for (C.grad) |c_g| {
                     var a_idx: usize = 0;

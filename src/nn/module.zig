@@ -110,11 +110,11 @@ fn walkStruct(model: anytype, visitor: anytype, path: *Path) !void {
     if (@hasDecl(V, "enterModule")) {
         if (!try visitor.enterModule(path.slice(), model)) return;
     }
-    inline for (info.@"struct".fields) |field| {
-        if (field.is_comptime or @sizeOf(field.type) == 0) continue;
-        const mark = try pushPath(V, path, "{s}", .{field.name});
+    inline for (info.@"struct".field_names, info.@"struct".field_types, info.@"struct".field_attrs) |name, FieldType, attrs| {
+        if (attrs.@"comptime" or @sizeOf(FieldType) == 0) continue;
+        const mark = try pushPath(V, path, "{s}", .{name});
         defer popPath(V, path, mark);
-        try walkField(&@field(model, field.name), visitor, path);
+        try walkField(&@field(model, name), visitor, path);
     }
 }
 
@@ -128,7 +128,7 @@ fn walkField(field_ptr: anytype, visitor: anytype, path: *Path) !void {
         if (field_ptr.*) |t| try visitor.visitTensor(path.slice(), t);
     } else if (info == .optional and @typeInfo(info.optional.child) == .@"struct") {
         if (field_ptr.*) |*s| try walkStruct(s, visitor, path);
-    } else if (info == .pointer and info.pointer.size == .slice and !info.pointer.is_const) {
+    } else if (info == .pointer and info.pointer.size == .slice and !info.pointer.attrs.@"const") {
         const E = info.pointer.child;
         if (E == f32) {
             if (@hasDecl(V, "visitOwnedSlice")) try visitor.visitOwnedSlice(field_ptr.*);
@@ -321,8 +321,8 @@ pub fn applyCustomInit(model: anytype, random: std.Random) void {
         pub fn enterModule(self: *@This(), _: []const u8, module: anytype) !bool {
             const M = @TypeOf(module.*);
             if (!@hasDecl(M, "customInit")) return true;
-            const params = @typeInfo(@TypeOf(M.customInit)).@"fn".params;
-            switch (params.len) {
+            const param_types = @typeInfo(@TypeOf(M.customInit)).@"fn".param_types;
+            switch (param_types.len) {
                 1 => module.customInit(),
                 2 => module.customInit(self.random),
                 else => @compileError(@typeName(M) ++ ".customInit must be fn(self: *Self) void or fn(self: *Self, random: std.Random) void"),
