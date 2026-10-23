@@ -743,6 +743,38 @@ test "Embedding forward and backward" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), W.grad[8], 1e-5);
 }
 
+test "sum and mean backward through strided views match the materialized transpose" {
+    const allocator = std.testing.allocator;
+    const axes = [_]?usize{ null, 0, 1, 2 };
+    for (axes) |axis| {
+        for ([_]bool{ false, true }) |keepdims| {
+            for ([_]bool{ false, true }) |use_mean| {
+                var graph = Graph.initDefault(allocator);
+                defer graph.deinit();
+                const x = try graph.tensorND(&.{ 2, 3, 4 }, true);
+                for (x.data, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i)) * 0.1 - 1.0;
+
+                // 1. 零拷贝转置视图 [4, 3, 2] (非连续) 直接归约
+                const view = try x.transposeView(0, 2, graph.arenaAllocator());
+                const r_view = if (use_mean) try graph.mean(view, axis, keepdims) else try graph.sum(view, axis, keepdims);
+                const w = try graph.tensorND(r_view.shape.dims[0..r_view.shape.len], false);
+                for (w.data, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i % 5)) - 1.5;
+                try graph.backward(try graph.sum(try graph.mul(r_view, w), null, false));
+                var view_grad: [24]f32 = undefined;
+                @memcpy(&view_grad, x.grad);
+
+                // 2. 参考：先物化为连续转置张量再归约
+                graph.zeroGrad();
+                const mat = try graph.transposeND(x, 0, 2);
+                try std.testing.expect(mat.isContiguous());
+                const r_mat = if (use_mean) try graph.mean(mat, axis, keepdims) else try graph.sum(mat, axis, keepdims);
+                try graph.backward(try graph.sum(try graph.mul(r_mat, w), null, false));
+                try std.testing.expectEqualSlices(f32, x.grad, &view_grad);
+            }
+        }
+    }
+}
+
 test "Graph.matmul broadcasts a 2-D right operand over leading batch dimensions" {
     const allocator = std.testing.allocator;
     var graph = Graph.initDefault(allocator);

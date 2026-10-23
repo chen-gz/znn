@@ -1,6 +1,7 @@
 const std = @import("std");
 const c = @import("../backend/cblas.zig");
 const tensor_mod = @import("../tensor.zig");
+const Tensor = tensor_mod.Tensor;
 const Op = @import("types.zig").Op;
 
 /// 4-bit 量化矩阵乘法 (4-bit Quantized Matrix Multiplication) 反向时每次反量化的权重行数
@@ -115,6 +116,158 @@ fn convTransposeBackward(self: *Op, stride: usize, padding: usize) !void {
     }
 }
 
+/// 卷积反向传播中图像转列 (Image to Column, im2col) 列缓冲区的元素上限 (4M 个 f32，即 16 MiB)：
+/// 按样本分块时每块的列矩阵不超过该大小 (至少容纳一个样本)
+const conv_col_budget: usize = 1 << 22;
+
+/// 卷积反向传播的几何参数 (一维卷积取 H = KH = H_out = 1、stride_h = 1、pad_h = 0)
+const ConvGeometry = struct {
+    N: usize,
+    C_in: usize,
+    H: usize,
+    W: usize,
+    C_out: usize,
+    KH: usize,
+    KW: usize,
+    H_out: usize,
+    W_out: usize,
+    stride_h: usize,
+    stride_w: usize,
+    pad_h: usize,
+    pad_w: usize,
+};
+
+/// 卷积核位置 (kh, kw) 与输出坐标对应的输入坐标；落在填充区域时返回 null
+inline fn convInputIndex(out_idx: usize, stride: usize, k: usize, pad: usize, size: usize) ?usize {
+    const raw = out_idx * stride + k;
+    if (raw < pad or raw - pad >= size) return null;
+    return raw - pad;
+}
+
+/// 把单个样本 x[C_in, H, W] 展开到列矩阵 col 的第 [col_off, col_off + L_out) 列 (列矩阵行跨度为 ld)
+fn im2colSample(col: []f32, ld: usize, col_off: usize, x: []const f32, g: ConvGeometry) void {
+    const in_plane = g.H * g.W;
+    for (0..g.C_in) |ci| {
+        for (0..g.KH) |kh| {
+            for (0..g.KW) |kw| {
+                const k_row = (ci * g.KH + kh) * g.KW + kw;
+                const dst_row = col[k_row * ld + col_off ..][0 .. g.H_out * g.W_out];
+                for (0..g.H_out) |h_out| {
+                    const dst = dst_row[h_out * g.W_out ..][0..g.W_out];
+                    const ih = convInputIndex(h_out, g.stride_h, kh, g.pad_h, g.H) orelse {
+                        @memset(dst, 0.0);
+                        continue;
+                    };
+                    const src_row = x[ci * in_plane + ih * g.W ..][0..g.W];
+                    for (dst, 0..) |*d, w_out| {
+                        d.* = if (convInputIndex(w_out, g.stride_w, kw, g.pad_w, g.W)) |iw| src_row[iw] else 0.0;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 把列矩阵 col 的第 [col_off, col_off + L_out) 列按图像位置累加回单个样本的梯度 dx[C_in, H, W] (列转图像 (Column to Image, col2im))
+fn col2imSample(dx: []f32, col: []const f32, ld: usize, col_off: usize, g: ConvGeometry) void {
+    const in_plane = g.H * g.W;
+    for (0..g.C_in) |ci| {
+        for (0..g.KH) |kh| {
+            for (0..g.KW) |kw| {
+                const k_row = (ci * g.KH + kh) * g.KW + kw;
+                const src_row = col[k_row * ld + col_off ..][0 .. g.H_out * g.W_out];
+                for (0..g.H_out) |h_out| {
+                    const ih = convInputIndex(h_out, g.stride_h, kh, g.pad_h, g.H) orelse continue;
+                    const dst_row = dx[ci * in_plane + ih * g.W ..][0..g.W];
+                    for (src_row[h_out * g.W_out ..][0..g.W_out], 0..) |v, w_out| {
+                        if (convInputIndex(w_out, g.stride_w, kw, g.pad_w, g.W)) |iw| dst_row[iw] += v;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 卷积 (Convolution) 反向传播的批量图像转列 (Image to Column, im2col) 加单精度通用矩阵乘法
+/// (Single-precision General Matrix Multiply, SGEMM) 路径；输入、权重与输出梯度必须连续。
+/// 样本按块处理，每块 nb 个样本 (列缓冲区不超过 `conv_col_budget`)：
+///   col[K_col, nb * L_out]    = 块内各样本 im2col 列矩阵按列拼接 (K_col = C_in * KH * KW，L_out = H_out * W_out)
+///   dC_blk[C_out, nb * L_out] = 输出梯度 [nb, C_out, L_out] 重排为按输出通道的行
+///   dW[C_out, K_col]         += dC_blk * col^T   (每块一次 SGEMM，beta = 1 跨块累加)
+///   col                       = W^T * dC_blk     (每块一次 SGEMM)，再按样本列转图像 (col2im) 累加到 dX
+/// 相比逐样本调用 SGEMM，内积维度从 L_out 增大为 nb * L_out，权重梯度块只在每块 (而非每个样本) 读写一次。
+/// `col_budget` 为列缓冲区元素上限 (调用方传入 `conv_col_budget`)。任一维度为 0 或缓冲区分配失败时返回 false，由调用方改走逐元素路径。
+fn convIm2colBackward(A: *Tensor, Wt: *Tensor, C: *Tensor, g: ConvGeometry, col_budget: usize) bool {
+    const K_col = g.C_in * g.KH * g.KW;
+    const L_out = g.H_out * g.W_out;
+    if (g.N == 0 or K_col == 0 or L_out == 0 or g.C_out == 0) return false;
+
+    const nb = std.math.clamp(col_budget / (K_col * L_out), 1, g.N);
+    const allocator = std.heap.c_allocator;
+    const col = allocator.alloc(f32, K_col * nb * L_out) catch return false;
+    defer allocator.free(col);
+    // 单样本块直接使用该样本连续的输出梯度 [C_out, L_out]，不需要重排缓冲区
+    const dC_buf: []f32 = if (nb > 1) (allocator.alloc(f32, g.C_out * nb * L_out) catch return false) else &.{};
+    defer if (nb > 1) allocator.free(dC_buf);
+
+    const in_sample = g.C_in * g.H * g.W;
+    const out_sample = g.C_out * L_out;
+    var n0: usize = 0;
+    while (n0 < g.N) : (n0 += nb) {
+        const cnt = @min(nb, g.N - n0);
+        const ld = cnt * L_out;
+        const dC_blk: []const f32 = if (cnt == 1) C.grad[n0 * out_sample ..][0..out_sample] else blk: {
+            for (0..g.C_out) |co| {
+                for (0..cnt) |j| {
+                    @memcpy(dC_buf[co * ld + j * L_out ..][0..L_out], C.grad[(n0 + j) * out_sample + co * L_out ..][0..L_out]);
+                }
+            }
+            break :blk dC_buf[0 .. g.C_out * ld];
+        };
+
+        if (Wt.requires_grad) {
+            for (0..cnt) |j| im2colSample(col, ld, j * L_out, A.data[(n0 + j) * in_sample ..][0..in_sample], g);
+            c.cblas_sgemm(
+                c.CblasRowMajor,
+                c.CblasNoTrans,
+                c.CblasTrans,
+                @intCast(g.C_out),
+                @intCast(K_col),
+                @intCast(ld),
+                1.0,
+                dC_blk.ptr,
+                @intCast(ld),
+                col.ptr,
+                @intCast(ld),
+                1.0,
+                Wt.grad.ptr,
+                @intCast(K_col),
+            );
+        }
+
+        if (A.requires_grad) {
+            c.cblas_sgemm(
+                c.CblasRowMajor,
+                c.CblasTrans,
+                c.CblasNoTrans,
+                @intCast(K_col),
+                @intCast(ld),
+                @intCast(g.C_out),
+                1.0,
+                Wt.data.ptr,
+                @intCast(K_col),
+                dC_blk.ptr,
+                @intCast(ld),
+                0.0,
+                col.ptr,
+                @intCast(ld),
+            );
+            for (0..cnt) |j| col2imSample(A.grad[(n0 + j) * in_sample ..][0..in_sample], col, ld, j * L_out, g);
+        }
+    }
+    return true;
+}
+
 pub fn backwardNN(self: *Op) !void {
     switch (self.op_type) {
         .Conv1D => {
@@ -159,98 +312,22 @@ pub fn backwardNN(self: *Op) !void {
                 }
             }
 
-            const K_col = C_in * K;
-            var used_sgemm = false;
-
-            if ((A.requires_grad or W.requires_grad) and A.isContiguous() and W.isContiguous() and C.isContiguous() and K_col > 0 and L_out > 0 and C_out > 0) {
-                var stack_buf: [4096]f32 = undefined;
-                const need_len = K_col * L_out;
-                const heap_buf: ?[]f32 = if (need_len > stack_buf.len)
-                    (std.heap.c_allocator.alloc(f32, need_len) catch null)
-                else
-                    null;
-                defer if (heap_buf) |hb| std.heap.c_allocator.free(hb);
-
-                const col_opt: ?[]f32 = if (need_len <= stack_buf.len) stack_buf[0..need_len] else heap_buf;
-                if (col_opt) |col_buf| {
-                    used_sgemm = true;
-                    for (0..N) |n| {
-                        const dC_n = C.grad[n * C_out * L_out .. (n + 1) * C_out * L_out];
-
-                        if (W.requires_grad) {
-                            // 图像转列 (Image to Column, im2col) 展开 A_n -> col_buf [K_col, L_out]
-                            for (0..C_in) |ci| {
-                                for (0..K) |k| {
-                                    const k_row = ci * K + k;
-                                    const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
-                                    for (0..L_out) |l_out| {
-                                        const il_signed: isize = @as(isize, @intCast(l_out * stride + k)) - @as(isize, @intCast(padding));
-                                        if (il_signed >= 0 and il_signed < @as(isize, @intCast(L))) {
-                                            const il: usize = @intCast(il_signed);
-                                            col_row[l_out] = A.data[n * s_n + ci * s_c + il * s_l];
-                                        } else {
-                                            col_row[l_out] = 0.0;
-                                        }
-                                    }
-                                }
-                            }
-
-                            // dW += dC_n * col_buf^T
-                            c.cblas_sgemm(
-                                c.CblasRowMajor,
-                                c.CblasNoTrans,
-                                c.CblasTrans,
-                                @intCast(C_out),
-                                @intCast(K_col),
-                                @intCast(L_out),
-                                1.0,
-                                dC_n.ptr,
-                                @intCast(L_out),
-                                col_buf.ptr,
-                                @intCast(L_out),
-                                1.0,
-                                W.grad.ptr,
-                                @intCast(K_col),
-                            );
-                        }
-
-                        if (A.requires_grad) {
-                            // col_buf = W^T * dC_n -> [K_col, L_out]
-                            c.cblas_sgemm(
-                                c.CblasRowMajor,
-                                c.CblasTrans,
-                                c.CblasNoTrans,
-                                @intCast(K_col),
-                                @intCast(L_out),
-                                @intCast(C_out),
-                                1.0,
-                                W.data.ptr,
-                                @intCast(K_col),
-                                dC_n.ptr,
-                                @intCast(L_out),
-                                0.0,
-                                col_buf.ptr,
-                                @intCast(L_out),
-                            );
-
-                            // 列转图像 (Column to Image, col2im) 累加 col_buf -> A.grad[n]
-                            for (0..C_in) |ci| {
-                                for (0..K) |k| {
-                                    const k_row = ci * K + k;
-                                    const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
-                                    for (0..L_out) |l_out| {
-                                        const il_signed: isize = @as(isize, @intCast(l_out * stride + k)) - @as(isize, @intCast(padding));
-                                        if (il_signed >= 0 and il_signed < @as(isize, @intCast(L))) {
-                                            const il: usize = @intCast(il_signed);
-                                            A.grad[n * s_n + ci * s_c + il * s_l] += col_row[l_out];
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            const used_sgemm = (A.requires_grad or W.requires_grad) and A.isContiguous() and W.isContiguous() and C.isContiguous() and
+                convIm2colBackward(A, W, C, .{
+                    .N = N,
+                    .C_in = C_in,
+                    .H = 1,
+                    .W = L,
+                    .C_out = C_out,
+                    .KH = 1,
+                    .KW = K,
+                    .H_out = 1,
+                    .W_out = L_out,
+                    .stride_h = 1,
+                    .stride_w = stride,
+                    .pad_h = 0,
+                    .pad_w = padding,
+                }, conv_col_budget);
 
             if (!used_sgemm and (A.requires_grad or W.requires_grad)) {
                 for (0..N) |n| {
@@ -332,116 +409,22 @@ pub fn backwardNN(self: *Op) !void {
                 }
             }
 
-            const K_col = C_in * KH * KW;
-            const L_out = H_out * W_out;
-            var used_sgemm = false;
-
-            if ((A.requires_grad or W.requires_grad) and A.isContiguous() and W.isContiguous() and C.isContiguous() and K_col > 0 and L_out > 0 and C_out > 0) {
-                var stack_buf: [4096]f32 = undefined;
-                const need_len = K_col * L_out;
-                const heap_buf: ?[]f32 = if (need_len > stack_buf.len)
-                    (std.heap.c_allocator.alloc(f32, need_len) catch null)
-                else
-                    null;
-                defer if (heap_buf) |hb| std.heap.c_allocator.free(hb);
-
-                const col_opt: ?[]f32 = if (need_len <= stack_buf.len) stack_buf[0..need_len] else heap_buf;
-                if (col_opt) |col_buf| {
-                    used_sgemm = true;
-                    for (0..N) |n| {
-                        const dC_n = C.grad[n * C_out * L_out .. (n + 1) * C_out * L_out];
-
-                        if (W.requires_grad) {
-                            // 图像转列 (Image to Column, im2col) 展开 A_n -> col_buf [K_col, L_out]
-                            for (0..C_in) |ci| {
-                                for (0..KH) |kh| {
-                                    for (0..KW) |kw| {
-                                        const k_row = (ci * KH + kh) * KW + kw;
-                                        const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
-                                        for (0..H_out) |h_out| {
-                                            const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
-                                            if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) {
-                                                @memset(col_row[h_out * W_out .. (h_out + 1) * W_out], 0.0);
-                                                continue;
-                                            }
-                                            const ih: usize = @intCast(ih_signed);
-                                            for (0..W_out) |w_out| {
-                                                const iw_s: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
-                                                if (iw_s >= 0 and iw_s < @as(isize, @intCast(W_in))) {
-                                                    const iw: usize = @intCast(iw_s);
-                                                    col_row[h_out * W_out + w_out] = A.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
-                                                } else {
-                                                    col_row[h_out * W_out + w_out] = 0.0;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // dW += dC_n * col_buf^T
-                            c.cblas_sgemm(
-                                c.CblasRowMajor,
-                                c.CblasNoTrans,
-                                c.CblasTrans,
-                                @intCast(C_out),
-                                @intCast(K_col),
-                                @intCast(L_out),
-                                1.0,
-                                dC_n.ptr,
-                                @intCast(L_out),
-                                col_buf.ptr,
-                                @intCast(L_out),
-                                1.0,
-                                W.grad.ptr,
-                                @intCast(K_col),
-                            );
-                        }
-
-                        if (A.requires_grad) {
-                            // col_buf = W^T * dC_n -> [K_col, L_out]
-                            c.cblas_sgemm(
-                                c.CblasRowMajor,
-                                c.CblasTrans,
-                                c.CblasNoTrans,
-                                @intCast(K_col),
-                                @intCast(L_out),
-                                @intCast(C_out),
-                                1.0,
-                                W.data.ptr,
-                                @intCast(K_col),
-                                dC_n.ptr,
-                                @intCast(L_out),
-                                0.0,
-                                col_buf.ptr,
-                                @intCast(L_out),
-                            );
-
-                            // 列转图像 (Column to Image, col2im) 累加 col_buf -> A.grad[n]
-                            for (0..C_in) |ci| {
-                                for (0..KH) |kh| {
-                                    for (0..KW) |kw| {
-                                        const k_row = (ci * KH + kh) * KW + kw;
-                                        const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
-                                        for (0..H_out) |h_out| {
-                                            const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
-                                            if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
-                                            const ih: usize = @intCast(ih_signed);
-                                            for (0..W_out) |w_out| {
-                                                const iw_s: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
-                                                if (iw_s >= 0 and iw_s < @as(isize, @intCast(W_in))) {
-                                                    const iw: usize = @intCast(iw_s);
-                                                    A.grad[n * s_n + ci * s_c + ih * s_h + iw * s_w] += col_row[h_out * W_out + w_out];
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            const used_sgemm = (A.requires_grad or W.requires_grad) and A.isContiguous() and W.isContiguous() and C.isContiguous() and
+                convIm2colBackward(A, W, C, .{
+                    .N = N,
+                    .C_in = C_in,
+                    .H = H,
+                    .W = W_in,
+                    .C_out = C_out,
+                    .KH = KH,
+                    .KW = KW,
+                    .H_out = H_out,
+                    .W_out = W_out,
+                    .stride_h = stride,
+                    .stride_w = stride,
+                    .pad_h = padding,
+                    .pad_w = padding,
+                }, conv_col_budget);
 
             if (!used_sgemm and (A.requires_grad or W.requires_grad)) {
                 for (0..N) |n| {
@@ -1394,5 +1377,79 @@ pub fn backwardNN(self: *Op) !void {
             }
         },
         else => unreachable,
+    }
+}
+
+test "convIm2colBackward gives the same gradients for any sample block size" {
+    const allocator = std.testing.allocator;
+    const g: ConvGeometry = .{ .N = 5, .C_in = 2, .H = 6, .W = 5, .C_out = 3, .KH = 3, .KW = 2, .H_out = 3, .W_out = 3, .stride_h = 2, .stride_w = 2, .pad_h = 1, .pad_w = 1 };
+    const K_col = g.C_in * g.KH * g.KW;
+    const L_out = g.H_out * g.W_out;
+
+    const A = try tensor_mod.zeros(allocator, &.{ g.N, g.C_in, g.H, g.W });
+    defer tensor_mod.free(allocator, A);
+    const Wt = try tensor_mod.zeros(allocator, &.{ g.C_out, g.C_in, g.KH, g.KW });
+    defer tensor_mod.free(allocator, Wt);
+    const C = try tensor_mod.zeros(allocator, &.{ g.N, g.C_out, g.H_out, g.W_out });
+    defer tensor_mod.free(allocator, C);
+    for (A.data, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.37);
+    for (Wt.data, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)) * 0.53);
+    const dC = try allocator.alloc(f32, C.data.len);
+    defer allocator.free(dC);
+    for (dC, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.71 + 0.3);
+
+    // 逐元素参考：dW[co, ci, kh, kw] = sum dC * x，dX[n, ci, ih, iw] = sum dC * W
+    const ref_dW = try allocator.alloc(f32, Wt.data.len);
+    defer allocator.free(ref_dW);
+    const ref_dX = try allocator.alloc(f32, A.data.len);
+    defer allocator.free(ref_dX);
+    @memset(ref_dW, 0.0);
+    @memset(ref_dX, 0.0);
+    for (0..g.N) |n| {
+        for (0..g.C_out) |co| {
+            for (0..g.H_out) |ho| {
+                for (0..g.W_out) |wo| {
+                    const gv = dC[((n * g.C_out + co) * g.H_out + ho) * g.W_out + wo];
+                    for (0..g.C_in) |ci| {
+                        for (0..g.KH) |kh| {
+                            const ih = convInputIndex(ho, g.stride_h, kh, g.pad_h, g.H) orelse continue;
+                            for (0..g.KW) |kw| {
+                                const iw = convInputIndex(wo, g.stride_w, kw, g.pad_w, g.W) orelse continue;
+                                const x_idx = ((n * g.C_in + ci) * g.H + ih) * g.W + iw;
+                                const w_idx = ((co * g.C_in + ci) * g.KH + kh) * g.KW + kw;
+                                ref_dW[w_idx] += gv * A.data[x_idx];
+                                ref_dX[x_idx] += gv * Wt.data[w_idx];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 每块 1、2 个样本 (最后一块不满) 与整批一次处理
+    const dX = try allocator.alloc(f32, A.data.len);
+    defer allocator.free(dX);
+    const dW = try allocator.alloc(f32, Wt.data.len);
+    defer allocator.free(dW);
+    const saved = .{ A.grad, Wt.grad, C.grad, A.requires_grad, Wt.requires_grad };
+    defer {
+        A.grad = saved[0];
+        Wt.grad = saved[1];
+        C.grad = saved[2];
+        A.requires_grad = saved[3];
+        Wt.requires_grad = saved[4];
+    }
+    A.grad = dX;
+    Wt.grad = dW;
+    C.grad = dC;
+    A.requires_grad = true;
+    Wt.requires_grad = true;
+    for ([_]usize{ K_col * L_out, 2 * K_col * L_out, g.N * K_col * L_out }) |budget| {
+        @memset(dX, 0.0);
+        @memset(dW, 0.0);
+        try std.testing.expect(convIm2colBackward(A, Wt, C, g, budget));
+        for (ref_dW, dW) |e, a| try std.testing.expectApproxEqAbs(e, a, 1e-4);
+        for (ref_dX, dX) |e, a| try std.testing.expectApproxEqAbs(e, a, 1e-4);
     }
 }
