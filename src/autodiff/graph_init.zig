@@ -87,9 +87,8 @@ pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u
 
 /// 在图建立完毕后，智能探查参数节点的下游消费者算子并自动初始化权重
 pub fn initWeights(self: *Graph, random: std.Random) void {
-    // 搜集图内所有 Ops 的输入参数节点与 registered tensors
-    const allocator = self.arena.allocator();
-    var visited = std.AutoHashMap(*Tensor, void).init(allocator);
+    // 搜集图内所有 Ops 的输入参数节点与 registered tensors (临时集合使用底层分配器，避免在 Arena 中累积)
+    var visited = std.AutoHashMap(*Tensor, void).init(self.backing_allocator);
     defer visited.deinit();
 
     // 1. 扫描图中的 Ops 所有输入
@@ -334,8 +333,7 @@ pub fn formatInitReport(self: *Graph, allocator: std.mem.Allocator) ![]const u8 
         "", "", "", "", "", "",
     });
 
-    const arena_alloc = self.arena.allocator();
-    var visited = std.AutoHashMap(*Tensor, void).init(arena_alloc);
+    var visited = std.AutoHashMap(*Tensor, void).init(self.backing_allocator);
     defer visited.deinit();
 
     var param_idx: usize = 0;
