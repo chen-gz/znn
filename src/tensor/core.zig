@@ -470,32 +470,49 @@ pub const Tensor = struct {
         return loss;
     }
 
+    /// 以正态分布 N(mean_val, stddev^2) 随机数原地填充：使用博克斯-穆勒变换 (Box-Muller Transform) 成对生成，
+    /// 按行优先顺序只写入张量的可见元素（跨步视图不会改写父缓冲区中不属于视图的元素）
     pub fn fillNormal(self: *Tensor, random: std.Random, mean_val: f32, stddev: f32) void {
-        var i: usize = 0;
-        const len = self.shape.numel();
-        while (i < len) {
-            var u_1: f32 = random.float(f32);
-            while (u_1 == 0.0) {
-                u_1 = random.float(f32);
+        const NormalFill = struct {
+            random: std.Random,
+            mean: f32,
+            stddev: f32,
+            spare: ?f32 = null,
+
+            fn next(item: *f32, state: *@This()) void {
+                if (state.spare) |z1| {
+                    item.* = state.mean + z1 * state.stddev;
+                    state.spare = null;
+                    return;
+                }
+                var u_1: f32 = state.random.float(f32);
+                while (u_1 == 0.0) {
+                    u_1 = state.random.float(f32);
+                }
+                const u_2 = state.random.float(f32);
+                const radius = @sqrt(-2.0 * @log(u_1));
+                const theta = 2.0 * std.math.pi * u_2;
+                state.spare = radius * @sin(theta);
+                item.* = state.mean + radius * @cos(theta) * state.stddev;
             }
-            const u_2 = random.float(f32);
-            const z0 = @sqrt(-2.0 * @log(u_1)) * @cos(2.0 * std.math.pi * u_2);
-            self.data[i] = mean_val + z0 * stddev;
-            i += 1;
-            if (i < len) {
-                const z1 = @sqrt(-2.0 * @log(u_1)) * @sin(2.0 * std.math.pi * u_2);
-                self.data[i] = mean_val + z1 * stddev;
-                i += 1;
-            }
-        }
+        };
+        var state = NormalFill{ .random = random, .mean = mean_val, .stddev = stddev };
+        reductions.mapInPlace(self, &state, NormalFill.next);
     }
 
+    /// 以均匀分布 U[min_val, max_val) 随机数原地填充，按行优先顺序只写入张量的可见元素
     pub fn fillUniform(self: *Tensor, random: std.Random, min_val: f32, max_val: f32) void {
-        const range = max_val - min_val;
-        const len = self.shape.numel();
-        for (self.data[0..len]) |*val| {
-            val.* = min_val + random.float(f32) * range;
-        }
+        const UniformFill = struct {
+            random: std.Random,
+            min: f32,
+            range: f32,
+
+            fn next(item: *f32, state: *const @This()) void {
+                item.* = state.min + state.random.float(f32) * state.range;
+            }
+        };
+        const state = UniformFill{ .random = random, .min = min_val, .range = max_val - min_val };
+        reductions.mapInPlace(self, &state, UniformFill.next);
     }
 
     /// Softmax 交叉熵损失：按对数和指数 (Log-Sum-Exp, LSE) 形式计算

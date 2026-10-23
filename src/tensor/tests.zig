@@ -2199,3 +2199,48 @@ test "fix: GenericTensor.sum reduces strided views along every axis" {
     try std.testing.expectEqual(total, g.data[0]);
 }
 
+test "fix: fillNormal, fillUniform and GenericTensor.fill only write the visible elements of a view" {
+    const allocator = std.testing.allocator;
+    const sentinel: f32 = 123.0;
+    const parent = try full(allocator, &.{ 4, 6 }, sentinel);
+    defer free(allocator, parent);
+    // 列 1, 3, 5 的转置视图 [3, 4]
+    const cols = try parent.slice(&.{ .{}, .{ .start = 1, .end = 6, .step = 2 } }, allocator);
+    defer free(allocator, cols);
+    const view = try cols.transposeView(0, 1, allocator);
+    defer free(allocator, view);
+
+    // 视图按行优先顺序得到的随机序列与同样种子填充的连续张量逐元素一致
+    const ref = try zeros(allocator, &.{ 3, 4 });
+    defer free(allocator, ref);
+    var prng_ref = std.Random.DefaultPrng.init(5);
+    ref.fillNormal(prng_ref.random(), 1.0, 2.0);
+    var prng = std.Random.DefaultPrng.init(5);
+    view.fillNormal(prng.random(), 1.0, 2.0);
+    for (0..3) |i| for (0..4) |j| {
+        try std.testing.expectEqual(ref.data[i * 4 + j], view.get(&.{ i, j }));
+    };
+    for (0..4) |r| for (0..6) |c_| {
+        if (c_ % 2 == 0) try std.testing.expectEqual(sentinel, parent.data[r * 6 + c_]);
+    };
+
+    @memset(parent.data, sentinel);
+    var prng_u = std.Random.DefaultPrng.init(6);
+    view.fillUniform(prng_u.random(), -0.5, 0.5);
+    for (0..4) |r| for (0..6) |c_| {
+        const v = parent.data[r * 6 + c_];
+        if (c_ % 2 == 0) {
+            try std.testing.expectEqual(sentinel, v);
+        } else {
+            try std.testing.expect(v >= -0.5 and v < 0.5);
+        }
+    };
+
+    const gparent = try IntTensor.init(allocator, &.{ 3, 4 }, 7);
+    defer gparent.deinit(allocator);
+    const gview = try gparent.slice(&.{ .{ .start = 1 }, .{ .start = 0, .end = 4, .step = 3 } }, allocator);
+    defer gview.deinit(allocator);
+    gview.fill(-1);
+    try std.testing.expectEqualSlices(i32, &.{ 7, 7, 7, 7, -1, 7, 7, -1, -1, 7, 7, -1 }, gparent.data);
+}
+
