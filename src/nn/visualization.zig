@@ -226,6 +226,9 @@ const NodeCounters = struct {
     op: usize = 0,
 };
 
+/// 采集单个张量的节点元数据并追加到 nodes。
+/// 先分配全部字符串 (每一步都带 errdefer 回收)，再预留列表容量；
+/// 写回自动名称与递增计数器放在最后，任一分配失败时不泄漏内存，也不改变计数器与张量名称。
 fn appendNodeData(
     graph: *Graph,
     t: *Tensor,
@@ -233,105 +236,87 @@ fn appendNodeData(
     nodes: *std.ArrayList(NodeData),
     allocator: std.mem.Allocator,
 ) !void {
-    const shape_str = try formatShapeAlloc(allocator, t.shape);
     const elements = t.data.len;
     const bytes = elements * @sizeOf(f32);
     const scope = tensorScope(t);
-    const module = try allocator.dupe(u8, scope);
 
-    // 1. 算子输出激活值
+    // 1. 不分配内存地确定节点类别、自动命名规则与初始化描述
+    var strat_buf: [64]u8 = undefined;
+    var kind: NodeKind = undefined;
+    var status: NodeStatus = undefined;
+    var inferred_act: []const u8 = "N/A";
+    var strategy: []const u8 = undefined;
+    var counter: *usize = undefined;
+    var root_prefix: []const u8 = undefined; // 根作用域张量的自动名称前缀
+    var label_head: []const u8 = ""; // 自动名称标签前缀 (算子输出为 "act_")
+    var label: []const u8 = undefined;
     if (Op.creatorOf(t)) |creator_op| {
+        // 算子输出激活值
         const op_name = @tagName(creator_op.op_type);
-        const name = if (t.name) |n|
-            try allocator.dupe(u8, n)
-        else if (scope.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}.act_{s}_{d}", .{ scope, op_name, counters.op })
-        else
-            try std.fmt.allocPrint(allocator, "graph.act_{s}_{d}", .{ op_name, counters.op });
-        if (t.name == null) t.name = try graph.arena.allocator().dupe(u8, name);
-        counters.op += 1;
-
-        var strat_buf: [64]u8 = undefined;
-        const strat = try allocator.dupe(u8, std.fmt.bufPrint(&strat_buf, "produced by {s}", .{op_name}) catch "op output");
-
-        try nodes.append(allocator, .{
-            .name = name,
-            .kind = .Activation,
-            .module = module,
-            .shape_str = shape_str,
-            .elements = elements,
-            .bytes = bytes,
-            .status = .OP_OUTPUT,
-            .inferred_act = try allocator.dupe(u8, op_name),
-            .strategy = strat,
-        });
-        return;
+        kind = .Activation;
+        status = .OP_OUTPUT;
+        inferred_act = op_name;
+        strategy = std.fmt.bufPrint(&strat_buf, "produced by {s}", .{op_name}) catch "op output";
+        counter = &counters.op;
+        root_prefix = "graph";
+        label_head = "act_";
+        label = op_name;
+    } else if (!t.requires_grad) {
+        // 图输入与常量缓冲区
+        kind = if (t.is_buffer) .Buffer else .Input;
+        status = if (t.is_buffer) .BUFFER else .INPUT;
+        strategy = if (t.is_buffer) "constant buffer" else "user input";
+        counter = &counters.input;
+        root_prefix = "inputs";
+        label = if (t.is_buffer) "buffer" else "input";
+    } else {
+        // 模型可学习参数
+        kind = .Param;
+        counter = &counters.param;
+        root_prefix = "parameters";
+        label = "param";
+        if (t.is_custom_initialized) {
+            status = .CUSTOM_INIT;
+            strategy = "user-defined customInit";
+        } else {
+            status = .AUTO_GRAPH;
+            const info = graph.describeAutoGraphParam(t, &strat_buf);
+            inferred_act = info.act_name;
+            strategy = info.strategy;
+        }
     }
 
-    // 2. 图输入与常量缓冲区
-    if (!t.requires_grad) {
-        const prefix = if (t.is_buffer) "buffer" else "input";
-        const name = if (t.name) |n|
-            try allocator.dupe(u8, n)
-        else if (scope.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}.{s}_{d}", .{ scope, prefix, counters.input })
-        else
-            try std.fmt.allocPrint(allocator, "inputs.{s}_{d}", .{ prefix, counters.input });
-        if (t.name == null) t.name = try graph.arena.allocator().dupe(u8, name);
-        counters.input += 1;
-
-        try nodes.append(allocator, .{
-            .name = name,
-            .kind = if (t.is_buffer) .Buffer else .Input,
-            .module = module,
-            .shape_str = shape_str,
-            .elements = elements,
-            .bytes = bytes,
-            .status = if (t.is_buffer) .BUFFER else .INPUT,
-            .inferred_act = try allocator.dupe(u8, "N/A"),
-            .strategy = try allocator.dupe(u8, if (t.is_buffer) "constant buffer" else "user input"),
-        });
-        return;
-    }
-
-    // 3. 模型可学习参数
+    // 2. 分配节点持有的全部字符串
+    const shape_str = try formatShapeAlloc(allocator, t.shape);
+    errdefer allocator.free(shape_str);
+    const module = try allocator.dupe(u8, scope);
+    errdefer allocator.free(module);
     const name = if (t.name) |n|
         try allocator.dupe(u8, n)
-    else if (scope.len > 0)
-        try std.fmt.allocPrint(allocator, "{s}.param_{d}", .{ scope, counters.param })
     else
-        try std.fmt.allocPrint(allocator, "parameters.param_{d}", .{counters.param});
-    if (t.name == null) t.name = try graph.arena.allocator().dupe(u8, name);
-    counters.param += 1;
-
-    if (t.is_custom_initialized) {
-        try nodes.append(allocator, .{
-            .name = name,
-            .kind = .Param,
-            .module = module,
-            .shape_str = shape_str,
-            .elements = elements,
-            .bytes = bytes,
-            .status = .CUSTOM_INIT,
-            .inferred_act = try allocator.dupe(u8, "N/A"),
-            .strategy = try allocator.dupe(u8, "user-defined customInit"),
+        try std.fmt.allocPrint(allocator, "{s}.{s}{s}_{d}", .{
+            if (scope.len > 0) scope else root_prefix, label_head, label, counter.*,
         });
-        return;
-    }
+    errdefer allocator.free(name);
+    const act_owned = try allocator.dupe(u8, inferred_act);
+    errdefer allocator.free(act_owned);
+    const strategy_owned = try allocator.dupe(u8, strategy);
+    errdefer allocator.free(strategy_owned);
+    try nodes.ensureUnusedCapacity(allocator, 1);
 
-    var strat_buf: [64]u8 = undefined;
-    const info = graph.describeAutoGraphParam(t, &strat_buf);
-
-    try nodes.append(allocator, .{
+    // 3. 全部分配成功后再写回自动名称、递增计数器并追加节点
+    if (t.name == null) t.name = try graph.arena.allocator().dupe(u8, name);
+    counter.* += 1;
+    nodes.appendAssumeCapacity(.{
         .name = name,
-        .kind = .Param,
+        .kind = kind,
         .module = module,
         .shape_str = shape_str,
         .elements = elements,
         .bytes = bytes,
-        .status = .AUTO_GRAPH,
-        .inferred_act = try allocator.dupe(u8, info.act_name),
-        .strategy = try allocator.dupe(u8, info.strategy),
+        .status = status,
+        .inferred_act = act_owned,
+        .strategy = strategy_owned,
     });
 }
 

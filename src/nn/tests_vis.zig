@@ -5,6 +5,7 @@ const tensor = @import("../tensor.zig");
 const nn = @import("../nn.zig");
 
 const Tensor = tensor.Tensor;
+const Op = autodiff.Op;
 const core = nn.core;
 const transformer = nn.transformer;
 const visualization = nn.visualization;
@@ -1259,4 +1260,44 @@ test "Visualization enums match the enum lists of the published JSON Schema" {
     try std.testing.expectEqualStrings(NodeStatus.AUTO_GRAPH.asString(), param_status[1].string);
 
     try std.testing.expectEqualStrings("module", Check.prop(defs, "ModuleNode", "kind").get("const").?.string);
+}
+
+/// 每次调用前清空自动命名的张量名称，使每轮分配失败注入都走相同的自动命名分配路径
+fn collectNodesWithAutoNames(allocator: std.mem.Allocator, graph: *autodiff.Graph, unnamed: []const *Tensor) !void {
+    for (unnamed) |t| t.name = null;
+    var nodes = try visualization.collectGraphNodes(graph, allocator);
+    defer visualization.freeGraphNodes(&nodes, allocator);
+    try std.testing.expectEqual(@as(usize, 7), nodes.items.len);
+}
+
+test "collectGraphNodes frees partial node strings on every allocation failure" {
+    const allocator = std.testing.allocator;
+    var graph = autodiff.Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    // 覆盖 appendNodeData 的全部分支：未命名输入、常量缓冲区、自动初始化参数、自定义初始化参数，
+    // 以及根作用域与模块作用域内的算子输出
+    const x = try graph.tensorNDWithData(&.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 }, false);
+    const buf = try graph.tensorNDWithData(&.{ 2, 3 }, &.{ 0, 1, 0, 1, 0, 1 }, false);
+    buf.is_buffer = true;
+    const w = try graph.tensorNDWithData(&.{ 3, 2 }, &.{ 1, 0, 0, 1, 1, 1 }, true);
+    const c = try graph.tensorNDWithData(&.{ 1, 2 }, &.{ 0.5, -0.5 }, true);
+    c.is_custom_initialized = true;
+    const masked = try graph.mul(x, buf);
+    const y = blk: {
+        const scope = try graph.enterModule("proj", "Linear");
+        defer scope.exit();
+        break :blk try graph.add(try graph.matmul(masked, w), c);
+    };
+    const unnamed = [_]*Tensor{ x, buf, w, c, masked, y, Op.creatorOf(y).?.inputs[0] };
+
+    try std.testing.checkAllAllocationFailures(allocator, collectNodesWithAutoNames, .{ &graph, @as([]const *Tensor, &unnamed) });
+
+    // 成功路径的命名与分类保持不变
+    try collectNodesWithAutoNames(allocator, &graph, &unnamed);
+    try std.testing.expectEqualStrings("proj.act_Add_2", y.name.?);
+    try std.testing.expectEqualStrings("graph.act_Mul_0", masked.name.?);
+    try std.testing.expectEqualStrings("inputs.input_0", x.name.?);
+    try std.testing.expectEqualStrings("inputs.buffer_1", buf.name.?);
+    try std.testing.expectEqualStrings("parameters.param_0", w.name.?);
 }
