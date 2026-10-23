@@ -707,7 +707,6 @@ pub const Graph = struct {
     pub const conv2d = graph_nn.conv2d;
     pub const convTranspose1d = graph_nn.convTranspose1d;
     pub const convTranspose2d = graph_nn.convTranspose2d;
-    pub const convTranspose2D = graph_nn.convTranspose2d;
     pub const maxpool1d = graph_nn.maxpool1d;
     pub const maxpool2d = graph_nn.maxpool2d;
     pub const avgpool1d = graph_nn.avgpool1d;
