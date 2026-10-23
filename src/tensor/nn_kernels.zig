@@ -693,36 +693,19 @@ pub fn gatherMatMulInto(
 
     const x_n_stride: usize = self.strides.dims[0];
     const x_k_stride: usize = if (self.shape.len == 3) self.strides.dims[1] else 0;
-    const e_max: f32 = @floatFromInt(E - 1);
 
-    // 1. 稳定计数排序：`order` 按专家升序存放行号 `r = n * K + k`（同一专家内保持词元顺序）。
-    //    填充时把 `bounds[e]` 当作写游标，填充完毕后 `bounds[e]` 恰为专家 `e` 的结束位置（即专家 `e + 1` 的起始位置）
-    const meta = try allocator.alloc(usize, E + 1 + rows);
-    defer allocator.free(meta);
-    const bounds = meta[0 .. E + 1];
-    const order = meta[E + 1 ..];
-    @memset(bounds, 0);
-    for (indices.data[0..rows]) |raw| bounds[expertOf(raw, e_max) + 1] += 1;
-    var max_group: usize = 0;
-    for (1..E + 1) |e| {
-        max_group = @max(max_group, bounds[e]);
-        bounds[e] += bounds[e - 1];
-    }
-    for (indices.data[0..rows], 0..) |raw, r| {
-        const e = expertOf(raw, e_max);
-        order[bounds[e]] = r;
-        bounds[e] += 1;
-    }
+    // 1. 按专家分组行号 `r = n * K + k`
+    var groups = try ExpertGroups.init(allocator, indices.data[0..rows], E);
+    defer groups.deinit(allocator);
 
     // 2. 每个专家：收集输入行 -> 一次 SGEMM -> 散射结果行并加偏置
-    const scratch = try allocator.alloc(f32, max_group * (in_dim + out_dim));
+    const scratch = try allocator.alloc(f32, groups.max_group * (in_dim + out_dim));
     defer allocator.free(scratch);
-    const x_buf = scratch[0 .. max_group * in_dim];
-    const y_buf = scratch[max_group * in_dim ..];
+    const x_buf = scratch[0 .. groups.max_group * in_dim];
+    const y_buf = scratch[groups.max_group * in_dim ..];
 
     for (0..E) |e| {
-        const begin = if (e == 0) 0 else bounds[e - 1];
-        const group = order[begin..bounds[e]];
+        const group = groups.rowsOf(e);
         if (group.len == 0) continue;
 
         for (group, 0..) |r, g| {
@@ -764,6 +747,57 @@ pub fn gatherMatMulInto(
 inline fn expertOf(raw: f32, e_max: f32) usize {
     return @intFromFloat(@min(raw, e_max));
 }
+
+/// 按专家分组的行号表 (GatherMatMul 前向与反向共用)：对 `[N * K]` 个已校验为有限非负的专家下标做稳定计数排序，
+/// `order` 按专家升序存放行号 `r = n * K + k`（同一专家内保持原顺序），越界下标截断到最后一个专家
+pub const ExpertGroups = struct {
+    /// `meta[0 .. E + 1]` 为各专家在 `order` 中的边界，其后为 `order`
+    meta: []usize,
+    num_experts: usize,
+    /// 单个专家的最大行数，用于确定收集缓冲区大小
+    max_group: usize,
+
+    pub fn init(allocator: std.mem.Allocator, expert_indices: []const f32, num_experts: usize) !ExpertGroups {
+        std.debug.assert(num_experts > 0);
+        const rows = expert_indices.len;
+        const meta = try allocator.alloc(usize, num_experts + 1 + rows);
+        const bounds = meta[0 .. num_experts + 1];
+        const order = meta[num_experts + 1 ..];
+        const e_max: f32 = @floatFromInt(num_experts - 1);
+
+        // 填充时把 `bounds[e]` 当作写游标，填充完毕后 `bounds[e]` 恰为专家 `e` 的结束位置；
+        // 最后整体右移一位，使 `bounds[e] .. bounds[e + 1]` 为专家 `e` 的区间
+        @memset(bounds, 0);
+        for (expert_indices) |raw| bounds[expertOf(raw, e_max) + 1] += 1;
+        var max_group: usize = 0;
+        for (1..num_experts + 1) |e| {
+            max_group = @max(max_group, bounds[e]);
+            bounds[e] += bounds[e - 1];
+        }
+        for (expert_indices, 0..) |raw, r| {
+            const e = expertOf(raw, e_max);
+            order[bounds[e]] = r;
+            bounds[e] += 1;
+        }
+        var e = num_experts;
+        while (e > 0) : (e -= 1) bounds[e] = bounds[e - 1];
+        bounds[0] = 0;
+
+        return .{ .meta = meta, .num_experts = num_experts, .max_group = max_group };
+    }
+
+    pub fn deinit(self: *ExpertGroups, allocator: std.mem.Allocator) void {
+        allocator.free(self.meta);
+        self.* = undefined;
+    }
+
+    /// 专家 `e` 负责的行号 (升序)
+    pub fn rowsOf(self: *const ExpertGroups, e: usize) []const usize {
+        const bounds = self.meta[0 .. self.num_experts + 1];
+        const order = self.meta[self.num_experts + 1 ..];
+        return order[bounds[e]..bounds[e + 1]];
+    }
+};
 
 /// 索引收集矩阵乘法 (Indexed Gather Matrix Multiplication, GatherMatMul)：
 /// 输入 `self` 为 `[N, in_dim]` 或 `[N, K, in_dim]`，`indices` 为 `[N, K]`，返回 `[N, K, out_dim]`。

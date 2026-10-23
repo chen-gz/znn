@@ -1271,66 +1271,54 @@ pub fn backwardNN(self: *Op) !void {
             const K = indices.shape.dims[1];
             const in_dim = weights[0].shape.dims[0];
             const out_dim = weights[0].shape.dims[1];
+            const rows = N * K;
+            if (rows == 0 or in_dim == 0 or out_dim == 0) return;
             const x_n_stride: usize = X.strides.dims[0];
-            const x_k_stride: usize = (X.shape.len - 2) * in_dim;
+            const x_k_stride: usize = if (X.shape.len == 3) X.strides.dims[1] else 0;
 
-            for (0..N) |n| {
-                for (0..K) |k| {
-                    const e_raw: usize = @intFromFloat(indices.data[n * K + k]);
-                    const e: usize = @min(e_raw, E - 1);
-                    const x_offset = n * x_n_stride + k * x_k_stride;
-                    const y_offset = (n * K + k) * out_dim;
-                    const x_ptr = X.data.ptr + x_offset;
-                    const dy_ptr = Y.grad.ptr + y_offset;
-                    const w_e = weights[e];
+            // 与前向一致按专家分组：每个专家把所属行的 X / dY 收集成稠密块，
+            // 用一次 SGEMM 求 dW_e += X_gᵀ dY_g、一次 SGEMM 求 dX_g = dY_g W_eᵀ，代替逐行 M = 1 的矩阵乘法
+            const allocator = std.heap.c_allocator;
+            var groups = try tensor_mod.nn_kernels.ExpertGroups.init(allocator, indices.data[0..rows], E);
+            defer groups.deinit(allocator);
+            const G = groups.max_group;
+            const scratch = try allocator.alloc(f32, G * (2 * in_dim + out_dim));
+            defer allocator.free(scratch);
+            const x_buf = scratch[0 .. G * in_dim];
+            const dx_buf = scratch[G * in_dim .. 2 * G * in_dim];
+            const dy_buf = scratch[2 * G * in_dim ..];
 
-                    if (X.requires_grad) {
-                        const dx_ptr = X.grad.ptr + x_offset;
-                        c.cblas_sgemm(
-                            c.CblasRowMajor,
-                            c.CblasNoTrans,
-                            c.CblasTrans,
-                            1,
-                            @intCast(in_dim),
-                            @intCast(out_dim),
-                            1.0,
-                            dy_ptr,
-                            @intCast(out_dim),
-                            w_e.data.ptr,
-                            @intCast(out_dim),
-                            1.0,
-                            dx_ptr,
-                            @intCast(in_dim),
-                        );
-                    }
+            for (0..E) |e| {
+                const group = groups.rowsOf(e);
+                if (group.len == 0) continue;
+                const w_e = weights[e];
+                const bias_grad: ?[]f32 = if (biases) |bs| (if (bs[e].requires_grad) bs[e].grad[0..out_dim] else null) else null;
+                if (!X.requires_grad and !w_e.requires_grad and bias_grad == null) continue;
+                const m: c_int = @intCast(group.len);
 
+                for (group, 0..) |r, g| {
+                    @memcpy(dy_buf[g * out_dim ..][0..out_dim], Y.grad[r * out_dim ..][0..out_dim]);
                     if (w_e.requires_grad) {
-                        c.cblas_sgemm(
-                            c.CblasRowMajor,
-                            c.CblasTrans,
-                            c.CblasNoTrans,
-                            @intCast(in_dim),
-                            @intCast(out_dim),
-                            1,
-                            1.0,
-                            x_ptr,
-                            @intCast(in_dim),
-                            dy_ptr,
-                            @intCast(out_dim),
-                            1.0,
-                            w_e.grad.ptr,
-                            @intCast(out_dim),
-                        );
+                        const x_off = (r / K) * x_n_stride + (r % K) * x_k_stride;
+                        @memcpy(x_buf[g * in_dim ..][0..in_dim], X.data[x_off..][0..in_dim]);
                     }
+                }
 
-                    if (biases) |bs| {
-                        const b_e = bs[e];
-                        if (b_e.requires_grad) {
-                            const dy_slice = Y.grad[y_offset .. y_offset + out_dim];
-                            for (b_e.grad[0..out_dim], dy_slice) |*bg, dy_val| {
-                                bg.* += dy_val;
-                            }
-                        }
+                if (w_e.requires_grad) {
+                    c.cblas_sgemm(c.CblasRowMajor, c.CblasTrans, c.CblasNoTrans, @intCast(in_dim), @intCast(out_dim), m, 1.0, x_buf.ptr, @intCast(in_dim), dy_buf.ptr, @intCast(out_dim), 1.0, w_e.grad.ptr, @intCast(out_dim));
+                }
+
+                if (X.requires_grad) {
+                    c.cblas_sgemm(c.CblasRowMajor, c.CblasNoTrans, c.CblasTrans, m, @intCast(in_dim), @intCast(out_dim), 1.0, dy_buf.ptr, @intCast(out_dim), w_e.data.ptr, @intCast(out_dim), 0.0, dx_buf.ptr, @intCast(in_dim));
+                    for (group, 0..) |r, g| {
+                        const x_off = (r / K) * x_n_stride + (r % K) * x_k_stride;
+                        for (X.grad[x_off..][0..in_dim], dx_buf[g * in_dim ..][0..in_dim]) |*dst, src| dst.* += src;
+                    }
+                }
+
+                if (bias_grad) |bg| {
+                    for (0..group.len) |g| {
+                        for (bg, dy_buf[g * out_dim ..][0..out_dim]) |*dst, dy_val| dst.* += dy_val;
                     }
                 }
             }

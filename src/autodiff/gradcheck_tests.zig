@@ -589,6 +589,21 @@ test "gradcheck: gatherMatMul with shared and per-slot inputs" {
         .{ .shape = &.{ 3, 2 } },
         .{ .shape = &.{ 3, 2 } },
     }, .{});
+    // 未被选中的专家 (1) 与越界截断到最后一个专家的下标 (7 -> 2)，同一专家聚集多行
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            const idx = try g.array(&.{ 3, 2 }, &.{ 2, 0, 7, 2, 0, 2 }, false);
+            return g.gatherMatMul(t[0], idx, &.{ t[1], t[2], t[3] }, &.{ t[4], t[5], t[6] });
+        }
+    }, &.{
+        .{ .shape = &.{ 3, 2, 3 } },
+        .{ .shape = &.{ 3, 2 } },
+        .{ .shape = &.{ 3, 2 } },
+        .{ .shape = &.{ 3, 2 } },
+        .{ .shape = &.{2} },
+        .{ .shape = &.{2} },
+        .{ .shape = &.{2} },
+    }, .{});
 }
 
 test "gradcheck: scaled dot-product attention with causal mask" {
