@@ -2070,3 +2070,35 @@ test "normalization constructors release partial allocations on failure" {
     try std.testing.expectEqual(@as(usize, 1), bn.running_mean.shape.len);
     try std.testing.expect(!bn.running_mean.requires_grad);
 }
+
+test "LoRALinear accepts 3D inputs like Linear" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(13);
+    const random = prng.random();
+    var lora = try LoRALinear.initWithBias(allocator, 4, 3, 2, 8.0, true);
+    defer nn.deinitModel(&lora, allocator);
+    const params = try nn.parameters(&lora, allocator);
+    defer allocator.free(params);
+    for (params) |p| {
+        for (p.data) |*v| v.* = random.floatNorm(f32);
+    }
+    for (lora.weight.data) |*v| v.* = random.floatNorm(f32);
+
+    var graph = autodiff.Graph.initDefault(allocator);
+    defer graph.deinit();
+    const x3 = try graph.tensorND(&.{ 2, 3, 4 }, true);
+    for (x3.data) |*v| v.* = random.floatNorm(f32);
+    const x2 = try graph.tensorNDWithData(&.{ 6, 4 }, x3.data, false);
+
+    const y3 = try lora.forward(&graph, x3);
+    const y2 = try lora.forward(&graph, x2);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 3 }, y3.shape.dims[0..y3.shape.len]);
+    for (y3.data, y2.data) |a, b| try std.testing.expectApproxEqAbs(b, a, 1e-5);
+
+    const loss = try graph.sum(y3, null, false);
+    try graph.backward(loss);
+    var grad_norm: f32 = 0;
+    for (lora.lora_a.grad) |g| grad_norm += @abs(g);
+    try std.testing.expect(grad_norm > 0);
+    try std.testing.expectError(error.ShapeMismatch, lora.forward(&graph, try graph.tensorND(&.{ 2, 3, 5 }, false)));
+}
