@@ -38,6 +38,16 @@ pub const Executor = struct {
         return @max(1, self.max_tasks orelse cpuCount());
     }
 
+    /// 块数 ceil(n / grain)：不使用 `n + grain - 1`，避免粒度接近 `maxInt(usize)` 时整数溢出
+    fn chunkCount(n: usize, grain: usize) usize {
+        return n / grain + @intFromBool(n % grain != 0);
+    }
+
+    /// 起点为 start 的块的结束位置：`start + @min(grain, n - start)` 不会像 `start + grain` 那样溢出
+    fn chunkEnd(n: usize, grain: usize, start: usize) usize {
+        return start + @min(grain, n - start);
+    }
+
     /// 将区间 [0, n) 按固定粒度 `grain` 切块并行调用 `body(ctx, begin, end)`。
     /// 块边界只取决于 n 与 grain（与线程数无关），因此结果跨线程数逐位可复现。
     pub fn parallelFor(
@@ -49,13 +59,13 @@ pub const Executor = struct {
     ) std.Io.Cancelable!void {
         if (n == 0) return;
         const effective_grain = if (grain == 0) n else grain;
-        const chunks = (n + effective_grain - 1) / effective_grain;
+        const chunks = chunkCount(n, effective_grain);
         const tasks = @min(chunks, self.taskLimit());
 
         if (tasks <= 1) {
             for (0..chunks) |c| {
                 const start = c * effective_grain;
-                body(ctx, start, @min(start + effective_grain, n));
+                body(ctx, start, chunkEnd(n, effective_grain, start));
             }
             return;
         }
@@ -73,7 +83,7 @@ pub const Executor = struct {
                     const c = next_ptr.fetchAdd(1, .monotonic);
                     if (c >= total_chunks) break;
                     const start = c * g_size;
-                    body(worker_ctx, start, @min(start + g_size, total_n));
+                    body(worker_ctx, start, chunkEnd(total_n, g_size, start));
                 }
             }
         };
@@ -101,13 +111,13 @@ pub const Executor = struct {
     ) std.Io.Cancelable!T {
         if (n == 0) return identity;
         const effective_grain = if (grain == 0) n else grain;
-        const chunks = (n + effective_grain - 1) / effective_grain;
+        const chunks = chunkCount(n, effective_grain);
 
         var acc = identity;
         if (chunks <= 1 or self.taskLimit() <= 1) {
             for (0..chunks) |c| {
                 const start = c * effective_grain;
-                acc = reduce_fn(acc, map_fn(ctx, start, @min(start + effective_grain, n)));
+                acc = reduce_fn(acc, map_fn(ctx, start, chunkEnd(n, effective_grain, start)));
             }
             return acc;
         }
@@ -122,7 +132,7 @@ pub const Executor = struct {
             fn run(batch: @This(), begin: usize, end: usize) void {
                 for (begin..end) |i| {
                     const start = (batch.first_chunk + i) * batch.g_size;
-                    batch.out_partials[i] = map_fn(batch.map_ctx, start, @min(start + batch.g_size, batch.total_n));
+                    batch.out_partials[i] = map_fn(batch.map_ctx, start, chunkEnd(batch.total_n, batch.g_size, start));
                 }
             }
         };
