@@ -46,7 +46,8 @@ pub fn loadImages(allocator: std.mem.Allocator, io: std.Io, file_path: []const u
     try reader.readSliceAll(&temp_4);
     const cols = std.mem.readInt(u32, &temp_4, .big);
 
-    const num_pixels = @as(usize, num_images) * rows * cols;
+    // 头部尺寸来自文件，使用带溢出检查的乘法，防止损坏文件导致分配尺寸回绕
+    const num_pixels = try std.math.mul(usize, try std.math.mul(usize, num_images, rows), cols);
     const data = try allocator.alloc(f32, num_pixels);
     errdefer allocator.free(data);
 
@@ -149,10 +150,13 @@ pub const DataLoader = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, ds: Dataset, batch_size: usize, options: DataLoaderOptions) !DataLoader {
+        if (batch_size == 0) return error.InvalidBatchSize;
         const num_samples = ds.images.num_images;
+        // 图像与标签条数不一致时，按图像下标取标签会越界
+        if (ds.labels.num_items != num_samples) return error.DatasetSizeMismatch;
         const indices = try allocator.alloc(usize, num_samples);
-        for (0..num_samples) |i| {
-            indices[i] = i;
+        for (indices, 0..) |*idx, i| {
+            idx.* = i;
         }
         var self = DataLoader{
             .dataset = ds,
@@ -174,6 +178,8 @@ pub const DataLoader = struct {
     }
 
     pub fn shuffleIndices(self: *DataLoader) void {
+        // 空数据集或单样本无需打乱 (同时避免 len - 1 下溢)
+        if (self.indices.len < 2) return;
         const random = self.prng.random();
         var i: usize = self.indices.len - 1;
         while (i > 0) : (i -= 1) {
@@ -316,33 +322,31 @@ test "DataLoader basic functionality" {
 pub const TokenId = u32;
 pub const MergePair = struct { a: TokenId, b: TokenId };
 
+/// 一条合并规则：优先级 (rank 越小越先合并) 与合并结果的 Token ID
+pub const MergeRule = struct { rank: u32, id: TokenId };
+
 /// 字节级字节对编码分词器 (Byte Pair Encoding Tokenizer, BPETokenizer)
 pub const BPETokenizer = struct {
     allocator: std.mem.Allocator,
     vocab: std.StringHashMap(TokenId),
     inv_vocab: std.ArrayList([]const u8),
-    merges: std.AutoHashMap(MergePair, u32),
+    merges: std.AutoHashMap(MergePair, MergeRule),
 
     pub fn init(allocator: std.mem.Allocator) !BPETokenizer {
-        var vocab = std.StringHashMap(TokenId).init(allocator);
-        errdefer vocab.deinit();
-        var inv_vocab: std.ArrayList([]const u8) = .empty;
-        errdefer inv_vocab.deinit(allocator);
+        var self = BPETokenizer{
+            .allocator = allocator,
+            .vocab = std.StringHashMap(TokenId).init(allocator),
+            .inv_vocab = .empty,
+            .merges = std.AutoHashMap(MergePair, MergeRule).init(allocator),
+        };
+        errdefer self.deinit();
 
         // 初始化 256 个基本单字节 Token (0x00 ~ 0xFF)
         for (0..256) |b| {
-            const slice = try allocator.alloc(u8, 1);
-            slice[0] = @as(u8, @intCast(b));
-            try inv_vocab.append(allocator, slice);
-            try vocab.put(slice, @as(TokenId, @intCast(b)));
+            const byte = [1]u8{@as(u8, @intCast(b))};
+            _ = try self.addToken(&byte);
         }
-
-        return BPETokenizer{
-            .allocator = allocator,
-            .vocab = vocab,
-            .inv_vocab = inv_vocab,
-            .merges = std.AutoHashMap(MergePair, u32).init(allocator),
-        };
+        return self;
     }
 
     pub fn deinit(self: *BPETokenizer) void {
@@ -354,82 +358,63 @@ pub const BPETokenizer = struct {
         self.merges.deinit();
     }
 
-    /// 注册一个自定义/特殊 Token (如 <|bos|>, <|eos|>)
+    /// 注册一个自定义/特殊 Token (如 <|bos|>, <|eos|>)；已存在时直接返回原 ID
     pub fn addToken(self: *BPETokenizer, token_str: []const u8) !TokenId {
         if (self.vocab.get(token_str)) |id| return id;
 
         const owned_str = try self.allocator.dupe(u8, token_str);
+        errdefer self.allocator.free(owned_str);
         const new_id = @as(TokenId, @intCast(self.inv_vocab.items.len));
         try self.inv_vocab.append(self.allocator, owned_str);
+        errdefer _ = self.inv_vocab.pop();
         try self.vocab.put(owned_str, new_id);
         return new_id;
     }
 
-    /// 添加一条合并规则: (str_a, str_b) -> 优先级 rank
-    pub fn addMerge(self: *BPETokenizer, str_a: []const u8, str_b: []const u8, rank: u32) !void {
-        const id_a = self.vocab.get(str_a) orelse try self.addToken(str_a);
-        const id_b = self.vocab.get(str_b) orelse try self.addToken(str_b);
+    /// 添加一条合并规则: (str_a, str_b) -> 优先级 rank，返回合并结果的 Token ID
+    /// (合并结果已在词表中时复用原 ID，例如 "a"+"bc" 与 "ab"+"c" 都得到 "abc")
+    pub fn addMerge(self: *BPETokenizer, str_a: []const u8, str_b: []const u8, rank: u32) !TokenId {
+        const id_a = try self.addToken(str_a);
+        const id_b = try self.addToken(str_b);
 
-        var merged_str = try self.allocator.alloc(u8, str_a.len + str_b.len);
+        const merged_str = try self.allocator.alloc(u8, str_a.len + str_b.len);
         defer self.allocator.free(merged_str);
         @memcpy(merged_str[0..str_a.len], str_a);
         @memcpy(merged_str[str_a.len..], str_b);
 
-        _ = try self.addToken(merged_str);
-        try self.merges.put(.{ .a = id_a, .b = id_b }, rank);
+        const merged_id = try self.addToken(merged_str);
+        try self.merges.put(.{ .a = id_a, .b = id_b }, .{ .rank = rank, .id = merged_id });
+        return merged_id;
     }
 
-    fn encodeChunk(self: *const BPETokenizer, allocator: std.mem.Allocator, chunk: []const u8, out_tokens: *std.ArrayList(TokenId)) !void {
-        var tokens: std.ArrayList(TokenId) = .empty;
-        defer tokens.deinit(allocator);
-
-        for (chunk) |byte| {
-            try tokens.append(allocator, @as(TokenId, byte));
-        }
-
-        while (tokens.items.len >= 2) {
-            var min_rank: u32 = std.math.maxInt(u32);
-            var best_idx: ?usize = null;
-            var best_pair: ?MergePair = null;
-
-            for (0..tokens.items.len - 1) |i| {
-                const pair = MergePair{ .a = tokens.items[i], .b = tokens.items[i + 1] };
-                if (self.merges.get(pair)) |rank| {
-                    if (rank < min_rank) {
-                        min_rank = rank;
+    /// 在 `tokens` 上原地反复应用优先级最高 (rank 最小) 的合并规则，返回合并后的长度
+    fn mergeInPlace(self: *const BPETokenizer, tokens: []TokenId) usize {
+        var len = tokens.len;
+        while (len >= 2) {
+            var best: ?MergeRule = null;
+            var best_idx: usize = 0;
+            for (0..len - 1) |i| {
+                if (self.merges.get(.{ .a = tokens[i], .b = tokens[i + 1] })) |rule| {
+                    if (best == null or rule.rank < best.?.rank) {
+                        best = rule;
                         best_idx = i;
-                        best_pair = pair;
                     }
                 }
             }
-
-            if (best_idx) |idx| {
-                const pair = best_pair.?;
-                const str_a = self.inv_vocab.items[pair.a];
-                const str_b = self.inv_vocab.items[pair.b];
-                var merged_str = try allocator.alloc(u8, str_a.len + str_b.len);
-                defer allocator.free(merged_str);
-                @memcpy(merged_str[0..str_a.len], str_a);
-                @memcpy(merged_str[str_a.len..], str_b);
-
-                if (self.vocab.get(merged_str)) |new_id| {
-                    tokens.items[idx] = new_id;
-                    _ = tokens.orderedRemove(idx + 1);
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
+            const rule = best orelse break;
+            tokens[best_idx] = rule.id;
+            std.mem.copyForwards(TokenId, tokens[best_idx + 1 .. len - 1], tokens[best_idx + 2 .. len]);
+            len -= 1;
         }
-
-        try out_tokens.appendSlice(allocator, tokens.items);
+        return len;
     }
 
     /// 将 UTF-8 文本编码为 Token ID 序列
     pub fn encode(self: *const BPETokenizer, allocator: std.mem.Allocator, text: []const u8) ![]TokenId {
         var result: std.ArrayList(TokenId) = .empty;
         defer result.deinit(allocator);
+        // 字节级编码的 Token 数不超过字节数，一次性预留容量
+        try result.ensureTotalCapacityPrecise(allocator, text.len);
 
         const chunk_size: usize = 256;
         var start: usize = 0;
@@ -464,7 +449,13 @@ pub const BPETokenizer = struct {
                 }
             }
 
-            try self.encodeChunk(allocator, text[start..end], &result);
+            // 先把本块的字节 Token 追加到结果尾部，再在尾部原地合并，无需逐块分配临时缓冲
+            const chunk_start = result.items.len;
+            for (text[start..end]) |byte| {
+                result.appendAssumeCapacity(@as(TokenId, byte));
+            }
+            const merged_len = self.mergeInPlace(result.items[chunk_start..]);
+            result.shrinkRetainingCapacity(chunk_start + merged_len);
             start = end;
         }
 
@@ -489,17 +480,19 @@ pub const BPETokenizer = struct {
     pub fn train(self: *BPETokenizer, allocator: std.mem.Allocator, corpus: []const u8, target_vocab_size: usize) !void {
         if (target_vocab_size <= self.inv_vocab.items.len) return;
 
-        var tokens = try self.encode(allocator, corpus);
-        defer allocator.free(tokens);
+        const tokens_buf = try self.encode(allocator, corpus);
+        defer allocator.free(tokens_buf);
+        var tokens = tokens_buf;
 
         var rank: u32 = @as(u32, @intCast(self.merges.count()));
+
+        var pair_counts = std.AutoHashMap(MergePair, usize).init(allocator);
+        defer pair_counts.deinit();
 
         while (self.inv_vocab.items.len < target_vocab_size) {
             if (tokens.len < 2) break;
 
-            var pair_counts = std.AutoHashMap(MergePair, usize).init(allocator);
-            defer pair_counts.deinit();
-
+            pair_counts.clearRetainingCapacity();
             for (0..tokens.len - 1) |i| {
                 const pair = MergePair{ .a = tokens[i], .b = tokens[i + 1] };
                 const entry = try pair_counts.getOrPut(pair);
@@ -525,31 +518,29 @@ pub const BPETokenizer = struct {
             const pair = best_pair.?;
             const str_a = self.inv_vocab.items[pair.a];
             const str_b = self.inv_vocab.items[pair.b];
-            try self.addMerge(str_a, str_b, rank);
+            // 合并结果可能已在词表中 (特殊 Token 或其他拆分方式得到的同一字符串)，必须使用 addMerge 返回的 ID
+            const new_id = try self.addMerge(str_a, str_b, rank);
             rank += 1;
 
-            const new_id = @as(TokenId, @intCast(self.inv_vocab.items.len - 1));
-            var new_tokens: std.ArrayList(TokenId) = .empty;
-            defer new_tokens.deinit(allocator);
-
-            var i: usize = 0;
-            while (i < tokens.len) {
-                if (i + 1 < tokens.len and tokens[i] == pair.a and tokens[i + 1] == pair.b) {
-                    try new_tokens.append(allocator, new_id);
-                    i += 2;
+            // 原地压缩：写指针始终不超过读指针
+            var write: usize = 0;
+            var read: usize = 0;
+            while (read < tokens.len) {
+                if (read + 1 < tokens.len and tokens[read] == pair.a and tokens[read + 1] == pair.b) {
+                    tokens[write] = new_id;
+                    read += 2;
                 } else {
-                    try new_tokens.append(allocator, tokens[i]);
-                    i += 1;
+                    tokens[write] = tokens[read];
+                    read += 1;
                 }
+                write += 1;
             }
-
-            allocator.free(tokens);
-            tokens = try new_tokens.toOwnedSlice(allocator);
+            tokens = tokens[0..write];
         }
     }
 };
 
-/// 零拷贝内存映射二进制数据集 (Memory-Mapped, MMap Binary DataLoader)
+/// 零拷贝二进制 Token 数据集 (Binary Token Dataset)：只借用外部 Token 缓冲 (例如内存映射 (Memory-Mapped, MMap) 文件)，不持有内存
 pub const BinaryMmapDataset = struct {
     tokens: []const u32,
     seq_len: usize,
@@ -561,17 +552,14 @@ pub const BinaryMmapDataset = struct {
         };
     }
 
-    pub fn loadFromBytes(bytes: []align(std.mem.page_size) const u8, seq_len: usize) BinaryMmapDataset {
+    /// 把按 u32 对齐的原始字节 (例如内存映射文件的页对齐映射区) 解释为 Token 序列；末尾不足 4 字节的部分被忽略
+    pub fn loadFromBytes(bytes: []align(@alignOf(u32)) const u8, seq_len: usize) BinaryMmapDataset {
         const token_count = bytes.len / @sizeOf(u32);
-        const tokens: [*]const u32 = @ptrCast(@alignCast(bytes.ptr));
+        const tokens: [*]const u32 = @ptrCast(bytes.ptr);
         return .{
             .tokens = tokens[0..token_count],
             .seq_len = seq_len,
         };
-    }
-
-    pub fn close(self: *BinaryMmapDataset) void {
-        _ = self;
     }
 
     /// 获取训练批次 (输入 X 与移位预测标签 Y)
@@ -596,10 +584,10 @@ test "BPETokenizer encode, decode and merge" {
     defer tokenizer.deinit();
 
     // Add merge: "h" + "e" -> "he" (rank 0), "l" + "l" -> "ll" (rank 1), "he" + "ll" -> "hell" (rank 2), "hell" + "o" -> "hello" (rank 3)
-    try tokenizer.addMerge("h", "e", 0);
-    try tokenizer.addMerge("l", "l", 1);
-    try tokenizer.addMerge("he", "ll", 2);
-    try tokenizer.addMerge("hell", "o", 3);
+    _ = try tokenizer.addMerge("h", "e", 0);
+    _ = try tokenizer.addMerge("l", "l", 1);
+    _ = try tokenizer.addMerge("he", "ll", 2);
+    _ = try tokenizer.addMerge("hell", "o", 3);
 
     const encoded = try tokenizer.encode(allocator, "hello world hello");
     defer allocator.free(encoded);
@@ -616,8 +604,7 @@ test "BPETokenizer encode, decode and merge" {
 
 test "BinaryMmapDataset batch slicing" {
     const tokens = [_]u32{ 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
-    var dataset = BinaryMmapDataset.fromSlice(&tokens, 3);
-    defer dataset.close();
+    const dataset = BinaryMmapDataset.fromSlice(&tokens, 3);
 
     const batch = dataset.getBatch(0, 2); // batch_size=2, seq_len=3 -> total 6 tokens
     try std.testing.expectEqualSlices(u32, &.{ 10, 20, 30, 40, 50, 60 }, batch.x);
@@ -845,4 +832,75 @@ test "loadImages" {
     }
 }
 
+test "DataLoader rejects mismatched datasets and shuffles empty datasets safely" {
+    const allocator = std.testing.allocator;
 
+    var img_data = [_]f32{ 1, 2, 3, 4 };
+    var lbl_data = [_]u8{ 0, 1 };
+    const mismatched = Dataset{
+        .images = .{ .num_images = 2, .rows = 1, .cols = 2, .data = &img_data },
+        .labels = .{ .num_items = 1, .data = lbl_data[0..1] },
+    };
+    try std.testing.expectError(error.DatasetSizeMismatch, DataLoader.init(allocator, mismatched, 1, .{}));
+
+    const ok = Dataset{
+        .images = .{ .num_images = 2, .rows = 1, .cols = 2, .data = &img_data },
+        .labels = .{ .num_items = 2, .data = &lbl_data },
+    };
+    try std.testing.expectError(error.InvalidBatchSize, DataLoader.init(allocator, ok, 0, .{}));
+
+    var empty_img = [_]f32{};
+    var empty_lbl = [_]u8{};
+    const empty = Dataset{
+        .images = .{ .num_images = 0, .rows = 1, .cols = 2, .data = &empty_img },
+        .labels = .{ .num_items = 0, .data = &empty_lbl },
+    };
+    var loader = try DataLoader.init(allocator, empty, 4, .{ .shuffle = true });
+    defer loader.deinit(allocator);
+    loader.reset();
+    var x: [8]f32 = undefined;
+    var y: [4]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, null), loader.nextInto(&x, &y));
+}
+
+test "BPETokenizer train uses the merged id when the merged string already exists" {
+    const allocator = std.testing.allocator;
+    var tokenizer = try BPETokenizer.init(allocator);
+    defer tokenizer.deinit();
+
+    // "ab" 预先作为特殊 Token 注册，之后再注册一个 ID 更大的 Token；
+    // 训练合并 ("a","b") 时必须沿用已有的 "ab" ID，而不是词表中最后一个 Token
+    const ab_id = try tokenizer.addToken("ab");
+    _ = try tokenizer.addToken("<|eos|>");
+    try tokenizer.train(allocator, "abababababab abababab", 262);
+
+    try std.testing.expectEqual(ab_id, tokenizer.merges.get(.{ .a = 'a', .b = 'b' }).?.id);
+    try std.testing.expect(tokenizer.vocab.contains("abab"));
+    try std.testing.expect(!tokenizer.vocab.contains("<|eos|><|eos|>"));
+
+    const encoded = try tokenizer.encode(allocator, "abababab");
+    defer allocator.free(encoded);
+    try std.testing.expectEqual(@as(usize, 1), encoded.len);
+}
+
+fn initTokenizerWithMerges(allocator: std.mem.Allocator) !void {
+    var tokenizer = try BPETokenizer.init(allocator);
+    defer tokenizer.deinit();
+    _ = try tokenizer.addMerge("a", "b", 0);
+    _ = try tokenizer.addToken("<|eos|>");
+}
+
+test "BPETokenizer init, addToken and addMerge do not leak on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, initTokenizerWithMerges, .{});
+}
+
+test "BinaryMmapDataset loadFromBytes reinterprets aligned bytes" {
+    const tokens = [_]u32{ 7, 8, 9, 10 };
+    const bytes: []align(@alignOf(u32)) const u8 = std.mem.sliceAsBytes(&tokens);
+    const ds = BinaryMmapDataset.loadFromBytes(bytes, 2);
+    try std.testing.expectEqualSlices(u32, &tokens, ds.tokens);
+    try std.testing.expectEqual(@as(usize, 1), ds.numBatches(1));
+    const batch = ds.getBatch(1, 1);
+    try std.testing.expectEqualSlices(u32, &.{ 8, 9 }, batch.x);
+    try std.testing.expectEqualSlices(u32, &.{ 9, 10 }, batch.y);
+}
