@@ -24,10 +24,10 @@ pub fn main() !void {
     var tokenizer = try dataset.BPETokenizer.init(allocator);
     defer tokenizer.deinit();
 
-    try tokenizer.addMerge("Z", "i", 0);
-    try tokenizer.addMerge("Zi", "g", 1);
-    try tokenizer.addMerge("m", "l", 2);
-    try tokenizer.addMerge(" ", "Z", 3);
+    _ = try tokenizer.addMerge("Z", "i", 0);
+    _ = try tokenizer.addMerge("Zi", "g", 1);
+    _ = try tokenizer.addMerge("m", "l", 2);
+    _ = try tokenizer.addMerge(" ", "Z", 3);
 
     const raw_text = "Zig ml is awesome! Zig ml";
     const tokens = try tokenizer.encode(allocator, raw_text);

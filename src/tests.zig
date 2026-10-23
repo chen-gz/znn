@@ -680,8 +680,8 @@ test "End-to-End LLM Pipeline integration demo" {
     // 1. BPETokenizer test
     var tokenizer = try dataset.BPETokenizer.init(allocator);
     defer tokenizer.deinit();
-    try tokenizer.addMerge("Z", "i", 0);
-    try tokenizer.addMerge("Zi", "g", 1);
+    _ = try tokenizer.addMerge("Z", "i", 0);
+    _ = try tokenizer.addMerge("Zi", "g", 1);
 
     const encoded = try tokenizer.encode(allocator, "Zig");
     defer allocator.free(encoded);

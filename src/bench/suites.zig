@@ -966,7 +966,7 @@ pub fn runTokenizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
         .{ "Citiz", "e" }, .{ "Citize", "n" },
     };
     for (common_merges, 0..) |m, rank| {
-        try tok.addMerge(m[0], m[1], @as(u32, @intCast(rank)));
+        _ = try tok.addMerge(m[0], m[1], @as(u32, @intCast(rank)));
     }
 
     // 1. Encode Benchmark

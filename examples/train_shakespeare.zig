@@ -88,15 +88,18 @@ pub fn main(init: std.process.Init) !void {
     defer optimizer.deinit();
 
     const max_steps: usize = 500;
+    // 随机偏移的取值范围是 tokens.len - batch_size * block_size - 2，语料过短时提前退出，避免无符号下溢
+    if (tokens.len < batch_size * block_size + 3) {
+        std.debug.print("⚠️  Corpus too short: need at least {} tokens, got {}.\n", .{ batch_size * block_size + 3, tokens.len });
+        return;
+    }
     const scheduler = optim.CosineScheduler.init(3e-3, 3e-4, 25, max_steps);
 
-    var train_dataset = dataset.BinaryMmapDataset.fromSlice(tokens, block_size);
-    defer train_dataset.close();
+    const train_dataset = dataset.BinaryMmapDataset.fromSlice(tokens, block_size);
 
     std.debug.print("🚀 Starting training for {} steps (Batch Size={}, Context Length={})...\n\n", .{ max_steps, batch_size, block_size });
 
-    var start_ts: std.posix.system.timespec = undefined;
-    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &start_ts);
+    const start_ns = zig_ml.bench.getTimeNs();
 
     const x_input = try allocator.alloc(f32, batch_size * block_size);
     defer allocator.free(x_input);
@@ -141,9 +144,7 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    var end_ts: std.posix.system.timespec = undefined;
-    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &end_ts);
-    const elapsed_s = @as(f64, @floatFromInt(end_ts.sec - start_ts.sec)) + @as(f64, @floatFromInt(end_ts.nsec - start_ts.nsec)) / 1e9;
+    const elapsed_s = @as(f64, @floatFromInt(zig_ml.bench.getTimeNs() - start_ns)) / 1e9;
     std.debug.print("\n✅ Training finished in {d:.2}s!\n\n", .{elapsed_s});
 
     // 5. 实时文本生成 (Autoregressive Generation with Top-P Sampling)
