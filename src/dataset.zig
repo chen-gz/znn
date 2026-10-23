@@ -20,6 +20,11 @@ pub const LabelDataset = struct {
     }
 };
 
+/// 读取 IDX3 格式 (MNIST / Fashion-MNIST) 图像文件 (大端序头部：magic 0x00000803、图像数、行数、列数)。
+/// 每个像素字节按固定常数缩放到 [0, 1]：`x = pixel / 255`。这是与数据无关的全局线性缩放，
+/// 所有像素、所有样本以及训练集与测试集共用同一映射；不统计任何逐像素或全局的均值与方差，
+/// 因此训练集与测试集之间不存在统计量泄漏。需要零均值、单位方差标准化的调用方应只在训练集上
+/// 计算统计量，并把同一组统计量同时作用于训练集与测试集。
 pub fn loadImages(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8) !ImageDataset {
     const cwd = std.Io.Dir.cwd();
     var file = try cwd.openFile(io, file_path, .{});
