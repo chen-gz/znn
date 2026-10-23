@@ -21,9 +21,6 @@ pub const Nonlinearity = union(enum) {
 
     /// 默认激活函数为线性整流单元 (Rectified Linear Unit, ReLU)
     pub const default: Nonlinearity = .relu;
-    pub fn defaultNonlinearity() Nonlinearity {
-        return .relu;
-    }
     pub fn defaultOptions() Nonlinearity {
         return .relu;
     }
@@ -69,9 +66,6 @@ pub const InitMethod = union(enum) {
 
     pub const default: InitMethod = .{ .he_normal = .{} };
     pub fn defaultOptions() InitMethod {
-        return default;
-    }
-    pub fn defaultConfig() InitMethod {
         return default;
     }
 };

@@ -1985,3 +1985,90 @@ test "audit: softmax rows sum to one, are shift invariant and give exact zeros f
     try std.testing.expectEqual(@as(f32, 0.0), P.data[13 + 5]);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), P.data[26], 1e-6);
 }
+
+test "audit: topKInto and gatherMatMulInto validate shapes and indices" {
+    const allocator = std.testing.allocator;
+    const X = try array(allocator, &.{ 2, 4 }, &.{ 0.1, 0.9, 0.5, 0.9, 3.0, 1.0, 2.0, 0.0 });
+    defer free(allocator, X);
+    const vals_bad = try zeros(allocator, &.{ 2, 1 });
+    defer free(allocator, vals_bad);
+    const idx_ok = try zeros(allocator, &.{ 2, 2 });
+    defer free(allocator, idx_ok);
+    try std.testing.expectError(error.ShapeMismatch, X.topKInto(2, vals_bad, idx_ok));
+
+    const top = try X.topK(2, allocator);
+    defer free(allocator, top.values);
+    defer free(allocator, top.indices);
+    try std.testing.expectEqualSlices(f32, &.{ 0.9, 0.9, 3.0, 2.0 }, top.values.data);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 3, 0, 2 }, top.indices.data);
+
+    // 两个专家：权重 [4, 3]
+    var ws: [2]*Tensor = undefined;
+    for (&ws, 0..) |*w, e| {
+        w.* = try zeros(allocator, &.{ 4, 3 });
+        fillDeterministic(w.*, 50 + e);
+    }
+    defer for (ws) |w| free(allocator, w);
+    const sel = try array(allocator, &.{ 2, 2 }, &.{ 0, 1, 1, 7 }); // 7 截断为最后一个专家
+    defer free(allocator, sel);
+    const Y = try X.gatherMatMul(sel, &ws, null, allocator);
+    defer free(allocator, Y);
+    for (0..2) |n| for (0..2) |k| {
+        const e: usize = @min(@as(usize, @intFromFloat(sel.data[n * 2 + k])), 1);
+        for (0..3) |j| {
+            var acc: f32 = 0.0;
+            for (0..4) |i| acc += X.data[n * 4 + i] * ws[e].data[i * 3 + j];
+            try std.testing.expectApproxEqAbs(acc, Y.data[(n * 2 + k) * 3 + j], 1e-5);
+        }
+    };
+
+    const sel_neg = try array(allocator, &.{ 2, 2 }, &.{ 0, -1, 1, 0 });
+    defer free(allocator, sel_neg);
+    try std.testing.expectError(error.IndexOutOfBounds, X.gatherMatMul(sel_neg, &ws, null, allocator));
+    const sel_nan = try array(allocator, &.{ 2, 2 }, &.{ 0, std.math.nan(f32), 1, 0 });
+    defer free(allocator, sel_nan);
+    try std.testing.expectError(error.IndexOutOfBounds, X.gatherMatMul(sel_nan, &ws, null, allocator));
+    const w_bad = try zeros(allocator, &.{ 5, 3 });
+    defer free(allocator, w_bad);
+    try std.testing.expectError(error.ShapeMismatch, X.gatherMatMul(sel, &.{ ws[0], w_bad }, null, allocator));
+}
+
+test "audit: where broadcasts condition, x and y across strided layouts" {
+    const allocator = std.testing.allocator;
+    const cond = try array(allocator, &.{ 3, 1 }, &.{ 1, 0, 1 });
+    defer free(allocator, cond);
+    const x_base = try zeros(allocator, &.{ 4, 3 });
+    defer free(allocator, x_base);
+    fillDeterministic(x_base, 61);
+    const x = try x_base.transposeView(0, 1, allocator); // [3, 4]
+    defer free(allocator, x);
+    const y = try array(allocator, &.{4}, &.{ -1, -2, -3, -4 });
+    defer free(allocator, y);
+    const out = try tensor.where(cond, x, y, allocator);
+    defer free(allocator, out);
+    for (0..3) |i| for (0..4) |j| {
+        const want = if (cond.data[i] != 0) x_base.data[j * 3 + i] else y.data[j];
+        try std.testing.expectEqual(want, out.data[i * 4 + j]);
+    };
+}
+
+test "audit: arange computes start + i * step without accumulated drift" {
+    const allocator = std.testing.allocator;
+    const t = try arange(allocator, 0.0, 1000.0, 0.1);
+    defer free(allocator, t);
+    try std.testing.expectEqual(@as(usize, 10000), t.data.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 999.9), t.data[9999], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 500.0), t.data[5000], 1e-3);
+}
+
+test "audit: embedding gathers rows from a transposed (non-contiguous) table" {
+    const allocator = std.testing.allocator;
+    const base = try array(allocator, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer free(allocator, base);
+    const table = try base.transposeView(0, 1, allocator); // [3, 2]: 行为 [1,4], [2,5], [3,6]
+    defer free(allocator, table);
+    const idx = [_]usize{ 2, 0 };
+    const out = try table.embedding(@as([]const usize, &idx), allocator);
+    defer free(allocator, out);
+    try std.testing.expectEqualSlices(f32, &.{ 3, 6, 1, 4 }, out.data);
+}

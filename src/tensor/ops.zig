@@ -99,10 +99,9 @@ pub fn arange(allocator: std.mem.Allocator, start: f32, stop: ?f32, step: ?f32) 
     const count: usize = @intFromFloat(@max(0.0, count_f));
 
     const t = try zeros(allocator, &.{count});
-    var cur = actual_start;
-    for (0..count) |i| {
-        t.data[i] = cur;
-        cur += actual_step;
+    // 按 start + i * step 直接计算每个元素，避免逐步累加带来的舍入误差漂移
+    for (t.data, 0..) |*v, i| {
+        v.* = actual_start + @as(f32, @floatFromInt(i)) * actual_step;
     }
     return t;
 }

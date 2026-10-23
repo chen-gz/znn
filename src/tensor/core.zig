@@ -533,10 +533,6 @@ pub const Tensor = struct {
         return loss;
     }
 
-    pub fn sigmoidCrossEntropy(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        return self.bceWithLogitsLoss(targets, allocator);
-    }
-
     pub fn mseLoss(self: *Tensor, targets: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const N = self.shape.numel();
         if (N != targets.shape.numel()) return error.ShapeMismatch;

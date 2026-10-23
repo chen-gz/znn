@@ -400,25 +400,20 @@ pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator
         return C;
     }
 
-    const cond_strides = computeBroadcastStrides(cond.shape, cond.strides, target_shape);
-    const x_strides = computeBroadcastStrides(x.shape, x.strides, target_shape);
-    const y_strides = computeBroadcastStrides(y.shape, y.strides, target_shape);
-
-    const rank = target_shape.len;
-    var indices: [8]usize = @splat(0);
-    for (0..C.data.len) |c_flat| {
-        var cond_flat: usize = 0;
-        var x_flat: usize = 0;
-        var y_flat: usize = 0;
-        for (0..rank) |d| {
-            cond_flat += indices[d] * cond_strides.dims[d];
-            x_flat += indices[d] * x_strides.dims[d];
-            y_flat += indices[d] * y_strides.dims[d];
+    // 广播或非连续路径：折叠维度后逐行遍历，行内按各操作数的最内层跨度寻址
+    var it = shape_mod.RowIter(4).init(target_shape, .{
+        C.strides,
+        computeBroadcastStrides(cond.shape, cond.strides, target_shape),
+        computeBroadcastStrides(x.shape, x.strides, target_shape),
+        computeBroadcastStrides(y.shape, y.strides, target_shape),
+    });
+    const s_cond = it.inner_strides[1];
+    const s_x = it.inner_strides[2];
+    const s_y = it.inner_strides[3];
+    while (it.next()) |offs| {
+        for (C.data[offs[0]..][0..it.inner], 0..) |*out_v, i| {
+            out_v.* = if (isTruthyScalar(cond.data[offs[1] + i * s_cond])) x.data[offs[2] + i * s_x] else y.data[offs[3] + i * s_y];
         }
-
-        C.data[c_flat] = if (isTruthyScalar(cond.data[cond_flat])) x.data[x_flat] else y.data[y_flat];
-
-        target_shape.incrementCoord(&indices);
     }
 
     return C;
