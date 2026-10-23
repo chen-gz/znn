@@ -262,17 +262,18 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             copyFromEager(self.outputs[0], try self.inputs[0].layerNorm(self.inputs[1], self.inputs[2], self.context.LayerNorm.eps, allocator), allocator);
         },
         .BatchNorm1d => {
+            // 训练模式重演必须重新计算当前批次的统计量 (并更新运行统计量)，否则反向传播会使用过期的批统计量
             const ctx = self.context.BatchNorm1d;
             copyFromEager(
                 self.outputs[0],
                 try self.inputs[0].batchNorm1d(
                     self.inputs[1],
                     self.inputs[2],
-                    null,
-                    null,
-                    false,
+                    ctx.running_mean,
+                    ctx.running_var,
+                    ctx.training,
                     ctx.eps,
-                    0.0,
+                    ctx.momentum,
                     ctx.save_mean,
                     ctx.save_inv_std,
                     allocator,
@@ -281,17 +282,18 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             );
         },
         .BatchNorm2d => {
+            // 训练模式重演必须重新计算当前批次的统计量 (并更新运行统计量)，否则反向传播会使用过期的批统计量
             const ctx = self.context.BatchNorm2d;
             copyFromEager(
                 self.outputs[0],
                 try self.inputs[0].batchNorm2d(
                     self.inputs[1],
                     self.inputs[2],
-                    null,
-                    null,
-                    false,
+                    ctx.running_mean,
+                    ctx.running_var,
+                    ctx.training,
                     ctx.eps,
-                    0.0,
+                    ctx.momentum,
                     ctx.save_mean,
                     ctx.save_inv_std,
                     allocator,
