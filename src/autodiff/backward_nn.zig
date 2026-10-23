@@ -1,6 +1,10 @@
 const std = @import("std");
 const c = @import("../backend/cblas.zig");
+const tensor_mod = @import("../tensor.zig");
 const Op = @import("types.zig").Op;
+
+/// 4-bit 量化矩阵乘法 (4-bit Quantized Matrix Multiplication) 反向时每次反量化的权重行数
+const q4_backward_row_tile: usize = 64;
 
 pub fn backwardNN(self: *Op) !void {
     switch (self.op_type) {
@@ -1363,6 +1367,47 @@ pub fn backwardNN(self: *Op) !void {
                         }
                     }
                 }
+            }
+        },
+        .Q4MatMul => {
+            // 量化权重冻结，只对输入求梯度: dX[rows x in] += dY[rows x out] * W[out x in]
+            const X = self.inputs[0];
+            const Y = self.outputs[0];
+            if (!X.requires_grad) return;
+            if (!X.isContiguous()) return error.NonContiguousTensor;
+            const ctx = self.context.Q4MatMul;
+            const QK = tensor_mod.quant.Q4Block.QK;
+            const in_f = ctx.in_features;
+            const out_f = ctx.out_features;
+            const rows = X.shape.numel() / in_f;
+            if (rows == 0 or out_f == 0) return;
+            const blocks_per_row = in_f / QK;
+
+            // 按输出特征分块反量化权重行，再交给单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM)
+            const tile = @min(out_f, q4_backward_row_tile);
+            const w_buf = try std.heap.c_allocator.alloc(f32, tile * in_f);
+            defer std.heap.c_allocator.free(w_buf);
+            var j0: usize = 0;
+            while (j0 < out_f) : (j0 += tile) {
+                const j1 = @min(j0 + tile, out_f);
+                const n_rows = j1 - j0;
+                tensor_mod.quant.dequantizeSlice(w_buf[0 .. n_rows * in_f], ctx.blocks[j0 * blocks_per_row .. j1 * blocks_per_row]);
+                c.cblas_sgemm(
+                    c.CblasRowMajor,
+                    c.CblasNoTrans,
+                    c.CblasNoTrans,
+                    @intCast(rows),
+                    @intCast(in_f),
+                    @intCast(n_rows),
+                    1.0,
+                    Y.grad.ptr + j0,
+                    @intCast(out_f),
+                    w_buf.ptr,
+                    @intCast(in_f),
+                    1.0,
+                    X.grad.ptr,
+                    @intCast(in_f),
+                );
             }
         },
         else => unreachable,

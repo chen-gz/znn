@@ -809,8 +809,8 @@ pub fn embedding(self: *Graph, W: *Tensor, X: anytype) !*Tensor {
     );
 }
 
-/// 4-bit 量化矩阵乘法 (4-bit Quantized Matrix Multiplication) 前向：经计算图注入的执行器 (`GraphOptions.io`) 多核并行，
-/// 仅用于推理（反向传播返回 `error.UnsupportedBackward`）
+/// 4-bit 量化矩阵乘法 (4-bit Quantized Matrix Multiplication) 前向：经计算图注入的执行器 (`GraphOptions.io`) 多核并行；
+/// 量化权重冻结，反向传播只对输入 `x` 求梯度 (可在量化骨干网络之上训练低秩自适应 (Low-Rank Adaptation, LoRA) 等可训练模块)
 pub fn q4MatMul(
     self: *Graph,
     x: *Tensor,
@@ -832,7 +832,7 @@ pub fn q4MatMul(
         &.{x},
         .Q4MatMul,
         ctx,
-        false,
+        self.enable_grad and x.requires_grad,
     );
 }
 
