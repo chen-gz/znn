@@ -23,20 +23,22 @@ const Shape = tensor.Shape;
 /// 分配一个由调用方分配器持有、生命周期独立于计算图的二维参数张量（数据与梯度均清零）
 pub fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: usize, requires_grad: bool) !*Tensor {
     const t = try allocator.create(Tensor);
+    errdefer allocator.destroy(t);
+    const data = try allocator.alloc(f32, rows * cols);
+    errdefer allocator.free(data);
+    const grad: []f32 = if (requires_grad) try allocator.alloc(f32, rows * cols) else &.{};
+    @memset(data, 0.0);
+    @memset(grad, 0.0);
+
     const shape = Shape.init(&.{ rows, cols });
-    const strides = tensor.computeContiguousStrides(shape);
     t.* = Tensor{
-        .data = try allocator.alloc(f32, rows * cols),
-        .grad = if (requires_grad) try allocator.alloc(f32, rows * cols) else &.{},
+        .data = data,
+        .grad = grad,
         .shape = shape,
-        .strides = strides,
+        .strides = tensor.computeContiguousStrides(shape),
         .requires_grad = requires_grad,
         .creator = null,
     };
-    @memset(t.data, 0.0);
-    if (requires_grad) {
-        @memset(t.grad, 0.0);
-    }
     return t;
 }
 

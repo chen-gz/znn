@@ -15,6 +15,61 @@ const freePersistentTensor = core.freePersistentTensor;
 // 1. 键值缓存 (Key-Value Cache, KVCache)
 // ============================================================================
 
+/// 分配全零、无梯度的多维缓存张量 (由调用方分配器持有，`freePersistentTensor` 释放)
+fn createCacheTensor(allocator: std.mem.Allocator, dims: []const usize) !*Tensor {
+    var numel: usize = 1;
+    for (dims) |d| numel *= d;
+    const t = try createPersistentTensor(allocator, 1, numel, false);
+    t.shape = Shape.init(dims);
+    t.strides = tensor.computeContiguousStrides(t.shape);
+    return t;
+}
+
+/// 单步增量推理内层循环使用的单指令多数据 (Single Instruction Multiple Data, SIMD) 向量宽度
+const simd_width = 8;
+const F32xN = @Vector(simd_width, f32);
+
+/// 向量点积 sum(a[i] * b[i])：按 SIMD 宽度分块累加，尾部逐元素处理
+fn dot(a: []const f32, b: []const f32) f32 {
+    std.debug.assert(a.len == b.len);
+    var acc: F32xN = @splat(0.0);
+    var i: usize = 0;
+    while (i + simd_width <= a.len) : (i += simd_width) {
+        const va: F32xN = a[i..][0..simd_width].*;
+        const vb: F32xN = b[i..][0..simd_width].*;
+        acc += va * vb;
+    }
+    var sum = @reduce(.Add, acc);
+    while (i < a.len) : (i += 1) sum += a[i] * b[i];
+    return sum;
+}
+
+/// 缩放累加 y += alpha * x
+fn axpy(y: []f32, alpha: f32, x: []const f32) void {
+    std.debug.assert(y.len == x.len);
+    const va: F32xN = @splat(alpha);
+    var i: usize = 0;
+    while (i + simd_width <= y.len) : (i += simd_width) {
+        const vx: F32xN = x[i..][0..simd_width].*;
+        const vy: F32xN = y[i..][0..simd_width].*;
+        y[i..][0..simd_width].* = vy + va * vx;
+    }
+    while (i < y.len) : (i += 1) y[i] += alpha * x[i];
+}
+
+/// 原地数值稳定的归一化指数函数 (Softmax)：先减去最大值再求指数，避免上溢
+fn softmaxInPlace(scores: []f32) void {
+    var max_score: f32 = -std.math.inf(f32);
+    for (scores) |s| max_score = @max(max_score, s);
+    var exp_sum: f32 = 0.0;
+    for (scores) |*s| {
+        s.* = @exp(s.* - max_score);
+        exp_sum += s.*;
+    }
+    const inv_sum = 1.0 / exp_sum;
+    for (scores) |*s| s.* *= inv_sum;
+}
+
 /// 键值缓存 (Key-Value Cache, KVCache)，用于大语言模型 (Large Language Model, LLM) 自回归增量推理 (O(T) 生成复杂度)
 pub const KVCache = struct {
     k: *Tensor, // 缓存的键 (Key, K) 张量 [batch_size, n_head, max_seq_len, head_dim]
@@ -23,15 +78,10 @@ pub const KVCache = struct {
     max_len: usize, // 最大支持上下文序列长度
 
     pub fn init(allocator: std.mem.Allocator, batch_size: usize, n_head: usize, max_len: usize, head_dim: usize) !KVCache {
-        const k = try createPersistentTensor(allocator, 1, batch_size * n_head * max_len * head_dim, false);
-        k.shape = Shape.init(&.{ batch_size, n_head, max_len, head_dim });
-        k.strides = tensor.computeContiguousStrides(k.shape);
-        @memset(k.data, 0.0);
-
-        const v = try createPersistentTensor(allocator, 1, batch_size * n_head * max_len * head_dim, false);
-        v.shape = Shape.init(&.{ batch_size, n_head, max_len, head_dim });
-        v.strides = tensor.computeContiguousStrides(v.shape);
-        @memset(v.data, 0.0);
+        const dims = [_]usize{ batch_size, n_head, max_len, head_dim };
+        const k = try createCacheTensor(allocator, &dims);
+        errdefer freePersistentTensor(allocator, k);
+        const v = try createCacheTensor(allocator, &dims);
 
         return KVCache{
             .k = k,
@@ -276,7 +326,7 @@ pub const CausalSelfAttention = struct {
     }
 
     /// 基于键值缓存 (Key-Value Cache, KVCache) 的单步增量自回归推理 (O(1) 增量键值计算，O(T) 点积注意力)
-    /// 输入 x 的形状为 [B, 1, C] 或 [B, C]
+    /// 输入 x 的形状为 [B, 1, C] 或 [B, C]；缓存已满时返回 `error.ContextWindowExceeded`
     pub fn forwardInference(self: *const CausalSelfAttention, allocator: std.mem.Allocator, x: *Tensor, cache: *KVCache) !*Tensor {
         const B = x.shape.dims[0];
         const C = self.n_embd;
@@ -285,6 +335,10 @@ pub const CausalSelfAttention = struct {
         const hs = C / nh;
         const groups = nh / n_kv;
         const kv_dim = n_kv * hs;
+
+        if (cache.curr_len >= cache.max_len) return error.ContextWindowExceeded;
+        const cache_dims = cache.k.shape.dims;
+        if (B > cache_dims[0] or cache_dims[1] != n_kv or cache_dims[3] != hs) return error.ShapeMismatch;
 
         // 单步推理使用局部无梯度计算图承载中间张量，函数返回时整体释放
         var step_g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
@@ -300,7 +354,6 @@ pub const CausalSelfAttention = struct {
 
         // 3. 写入键值缓存 (Key-Value Cache, KVCache)
         const t = cache.curr_len;
-        std.debug.assert(t < cache.max_len);
         for (0..B) |b| {
             for (0..n_kv) |kv_h| {
                 const src_k = k_step.data[(b * kv_dim + kv_h * hs) .. (b * kv_dim + (kv_h + 1) * hs)];
@@ -325,37 +378,18 @@ pub const CausalSelfAttention = struct {
                 const kv_h = h / groups;
                 const q_head = q_2d.data[(b * C + h * hs) .. (b * C + (h + 1) * hs)];
 
-                var max_score: f32 = -1e9;
+                const head_base = (b * n_kv + kv_h) * cache.max_len;
                 for (0..curr_len) |pos| {
-                    const k_cached = cache.k.data[((b * n_kv + kv_h) * cache.max_len + pos) * hs .. ((b * n_kv + kv_h) * cache.max_len + pos + 1) * hs];
-                    var dot: f32 = 0.0;
-                    for (q_head, k_cached) |q_val, k_val| {
-                        dot += q_val * k_val;
-                    }
-                    const s = dot * scale;
-                    scores[pos] = s;
-                    if (s > max_score) max_score = s;
+                    const k_cached = cache.k.data[(head_base + pos) * hs .. (head_base + pos + 1) * hs];
+                    scores[pos] = dot(q_head, k_cached) * scale;
                 }
-
-                var exp_sum: f32 = 0.0;
-                for (scores) |*s| {
-                    const e = @exp(s.* - max_score);
-                    s.* = e;
-                    exp_sum += e;
-                }
-                const inv_exp_sum = 1.0 / exp_sum;
-                for (scores) |*s| {
-                    s.* *= inv_exp_sum;
-                }
+                softmaxInPlace(scores);
 
                 const y_head = y_2d.data[(b * C + h * hs) .. (b * C + (h + 1) * hs)];
                 @memset(y_head, 0.0);
                 for (0..curr_len) |pos| {
-                    const v_cached = cache.v.data[((b * n_kv + kv_h) * cache.max_len + pos) * hs .. ((b * n_kv + kv_h) * cache.max_len + pos + 1) * hs];
-                    const weight = scores[pos];
-                    for (y_head, v_cached) |*y_val, v_val| {
-                        y_val.* += weight * v_val;
-                    }
+                    const v_cached = cache.v.data[(head_base + pos) * hs .. (head_base + pos + 1) * hs];
+                    axpy(y_head, scores[pos], v_cached);
                 }
             }
         }
@@ -396,15 +430,9 @@ pub const MLACache = struct {
     d_r: usize,
 
     pub fn init(allocator: std.mem.Allocator, batch_size: usize, max_len: usize, d_c: usize, d_r: usize) !MLACache {
-        const c_kv = try createPersistentTensor(allocator, 1, batch_size * max_len * d_c, false);
-        c_kv.shape = Shape.init(&.{ batch_size, max_len, d_c });
-        c_kv.strides = tensor.computeContiguousStrides(c_kv.shape);
-        @memset(c_kv.data, 0.0);
-
-        const k_r = try createPersistentTensor(allocator, 1, batch_size * max_len * d_r, false);
-        k_r.shape = Shape.init(&.{ batch_size, max_len, d_r });
-        k_r.strides = tensor.computeContiguousStrides(k_r.shape);
-        @memset(k_r.data, 0.0);
+        const c_kv = try createCacheTensor(allocator, &.{ batch_size, max_len, d_c });
+        errdefer freePersistentTensor(allocator, c_kv);
+        const k_r = try createCacheTensor(allocator, &.{ batch_size, max_len, d_r });
 
         return MLACache{
             .c_kv = c_kv,
@@ -558,14 +586,18 @@ pub const MLALayer = struct {
     }
 
     /// 多头潜在注意力 (Multi-Head Latent Attention, MLA) 推理期权重矩阵吸收 (Weight Matrix Absorption) 单步自回归生成
-    /// 完全在低维潜在空间进行注意力计算与累加，绝不展开高维键值 (Key-Value, KV) 张量
+    /// 完全在低维潜在空间进行注意力计算与累加，绝不展开高维键值 (Key-Value, KV) 张量。
+    /// 输入 x 的形状为 [B, 1, C] 或 [B, C]；缓存已满时返回 `error.ContextWindowExceeded`
     pub fn forwardInference(self: *const MLALayer, allocator: std.mem.Allocator, x: *Tensor, cache: *MLACache) !*Tensor {
-        const B = if (x.shape.len == 3) x.shape.dims[0] else 1;
+        const B = x.shape.dims[0];
         const C = self.dim;
         const nh = self.n_head;
         const hd = self.head_dim;
         const dc = self.d_c;
         const dr = self.d_r;
+
+        if (cache.curr_len >= cache.max_len) return error.ContextWindowExceeded;
+        if (B > cache.c_kv.shape.dims[0] or cache.d_c != dc or cache.d_r != dr) return error.ShapeMismatch;
 
         // 单步推理使用局部无梯度计算图承载中间张量，函数返回时整体释放
         var step_g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
@@ -581,7 +613,6 @@ pub const MLALayer = struct {
 
         // 2. 施加旋转位置编码 (Rotary Position Embedding, RoPE) 并写入多头潜在注意力缓存 (Multi-Head Latent Attention Cache, MLACache)
         const t = cache.curr_len;
-        std.debug.assert(t < cache.max_len);
 
         for (0..B) |b| {
             const k_r_vec = k_r_step.data[b * dr .. (b + 1) * dr];
@@ -604,6 +635,7 @@ pub const MLALayer = struct {
         const u_latent = try step_alloc.alloc(f32, dc);
 
         const q_stride = hd + dr;
+        const kv_cols = nh * hd;
 
         for (0..B) |b| {
             for (0..nh) |h| {
@@ -613,63 +645,33 @@ pub const MLALayer = struct {
                 applyRope1D(q_r_head, t);
 
                 // 公式 (7) 矩阵吸收: \tilde{q}_{t,i} = (W_i^{UK})^T q_{t,i}^C \in R^{dc}
-                @memset(q_absorbed, 0.0);
-                for (0..dc) |c_idx| {
-                    var sum: f32 = 0.0;
-                    const w_row = self.w_uk.weight.data[c_idx * (nh * hd) + h * hd .. c_idx * (nh * hd) + (h + 1) * hd];
-                    for (w_row, q_c_head) |w_val, q_val| {
-                        sum += w_val * q_val;
-                    }
-                    q_absorbed[c_idx] = sum;
+                // 内容键偏置 b^{UK} 对所有位置贡献同一常数 q^C \cdot b^{UK}，归一化指数函数 (Softmax) 对其不变，故可省略
+                for (q_absorbed, 0..) |*qa, c_idx| {
+                    const w_row = self.w_uk.weight.data[c_idx * kv_cols + h * hd .. c_idx * kv_cols + (h + 1) * hd];
+                    qa.* = dot(w_row, q_c_head);
                 }
 
                 // 在低维潜在空间直接与缓存中的 c_j^{KV} 计算点积打分
-                var max_score: f32 = -1e9;
                 for (0..curr_len) |pos| {
                     const c_cached = cache.c_kv.data[(b * cache.max_len + pos) * dc .. (b * cache.max_len + pos + 1) * dc];
                     const k_r_cached = cache.k_r.data[(b * cache.max_len + pos) * dr .. (b * cache.max_len + pos + 1) * dr];
-
-                    var dot_c: f32 = 0.0;
-                    for (q_absorbed, c_cached) |qa, cc| dot_c += qa * cc;
-
-                    var dot_r: f32 = 0.0;
-                    for (q_r_head, k_r_cached) |qr, kr| dot_r += qr * kr;
-
-                    const s = (dot_c + dot_r) * scale;
-                    scores[pos] = s;
-                    if (s > max_score) max_score = s;
+                    scores[pos] = (dot(q_absorbed, c_cached) + dot(q_r_head, k_r_cached)) * scale;
                 }
-
-                // 归一化指数函数 (Softmax)
-                var exp_sum: f32 = 0.0;
-                for (scores) |*s| {
-                    const e = @exp(s.* - max_score);
-                    s.* = e;
-                    exp_sum += e;
-                }
-                const inv_sum = 1.0 / exp_sum;
-                for (scores) |*s| s.* *= inv_sum;
+                softmaxInPlace(scores);
 
                 // 公式 (8) 潜在空间加权求和: u_h = \sum \alpha_{i,j} c_j^{KV} \in R^{dc}
                 @memset(u_latent, 0.0);
                 for (0..curr_len) |pos| {
-                    const w = scores[pos];
                     const c_cached = cache.c_kv.data[(b * cache.max_len + pos) * dc .. (b * cache.max_len + pos + 1) * dc];
-                    for (0..dc) |c_idx| {
-                        u_latent[c_idx] += w * c_cached[c_idx];
-                    }
+                    axpy(u_latent, scores[pos], c_cached);
                 }
 
-                // 还原头输出: y_h = W_i^{UV} u_h \in R^{hd}
+                // 还原头输出: y_h = (W_i^{UV})^T u_h + b_i^{UV} \in R^{hd}
+                // 注意力权重之和为 1，因此值偏置 b^{UV} 原样出现在输出中；按 c -> k 顺序连续读取 W^{UV} 的行
                 const y_head_dest = y_concat[(b * nh + h) * hd .. (b * nh + h + 1) * hd];
-                @memset(y_head_dest, 0.0);
-                for (0..hd) |k| {
-                    var sum: f32 = 0.0;
-                    for (0..dc) |c_idx| {
-                        const w_val = self.w_uv.weight.data[c_idx * (nh * hd) + h * hd + k];
-                        sum += w_val * u_latent[c_idx];
-                    }
-                    y_head_dest[k] = sum;
+                @memcpy(y_head_dest, self.w_uv.bias.data[h * hd .. (h + 1) * hd]);
+                for (u_latent, 0..) |u, c_idx| {
+                    axpy(y_head_dest, u, self.w_uv.weight.data[c_idx * kv_cols + h * hd .. c_idx * kv_cols + (h + 1) * hd]);
                 }
             }
         }
