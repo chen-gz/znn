@@ -146,7 +146,7 @@ pub fn disableCompile() void {
 /// 设置机器学习拓展 (Machine Learning Explore, MLX) 计算图编译模式
 pub fn setCompileMode(mode: CompileMode) void {
     if (has_mlx) {
-        _ = c.mlx_set_compile_mode(@intFromEnum(mode));
+        _ = c.mlx_set_compile_mode(@backingInt(mode));
     }
 }
 
@@ -404,7 +404,7 @@ pub const Array = struct {
             data,
             &c_shape,
             @intCast(shape_dims.len),
-            @intFromEnum(dt),
+            @backingInt(dt),
         );
         if (arr.ctx == null) return error.MlxOperationFailed;
         return .{ .handle = arr };
@@ -427,7 +427,7 @@ pub const Array = struct {
             &res.handle,
             &c_shape,
             shape_dims.len,
-            @intFromEnum(dt),
+            @backingInt(dt),
             s,
         );
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -519,7 +519,7 @@ pub const Array = struct {
     /// 获取数组元素数据类型 (Element Data Type)
     pub fn dtype(self: Array) DType {
         if (!has_mlx or self.handle.ctx == null) return .float32;
-        return @enumFromInt(c.mlx_array_dtype(self.handle));
+        return @fromBackingInt(@intCast(c.mlx_array_dtype(self.handle)));
     }
 
     /// 获取数组元素总数
@@ -999,7 +999,7 @@ pub const Array = struct {
         var res = Array.init();
         const s = try resolveStream(stream);
 
-        const rc = c.mlx_astype(&res.handle, self.handle, @intFromEnum(dt), s);
+        const rc = c.mlx_astype(&res.handle, self.handle, @backingInt(dt), s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
         return res;
     }
@@ -1473,6 +1473,3 @@ pub const Array = struct {
         };
     }
 };
-
-
-

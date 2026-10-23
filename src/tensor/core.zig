@@ -44,12 +44,12 @@ pub const OpHandle = opaque {};
 
 /// 张量（Tensor）结构体：承载机器学习网络中所有物理数据与流转拓扑信息
 pub const Tensor = struct {
-    data: []f32,          // 前向传播的数据缓冲区（行优先存储的一维切片）
-    grad: []f32,          // 反向传播的梯度缓冲区（与 data 形状一致，不需梯度的节点可为空）
-    shape: Shape,         // 逻辑形状
-    strides: Shape,       // 各维度的跨度步长（用于非连续张量及快速视图映射）
-    requires_grad: bool,  // 是否需要求梯度（如模型参数为 true，输入数据为 false）
-    creator: ?*OpHandle,  // 产生此张量的算子节点句柄（前向图中的父节点，由 `autodiff.Op.creatorOf` 还原为 `*Op`）
+    data: []f32, // 前向传播的数据缓冲区（行优先存储的一维切片）
+    grad: []f32, // 反向传播的梯度缓冲区（与 data 形状一致，不需梯度的节点可为空）
+    shape: Shape, // 逻辑形状
+    strides: Shape, // 各维度的跨度步长（用于非连续张量及快速视图映射）
+    requires_grad: bool, // 是否需要求梯度（如模型参数为 true，输入数据为 false）
+    creator: ?*OpHandle, // 产生此张量的算子节点句柄（前向图中的父节点，由 `autodiff.Op.creatorOf` 还原为 `*Op`）
     is_view: bool = false, // 是否为零拷贝视图切片（若为 true，deinit 时不释放 data/grad）
     is_custom_initialized: bool = false, // 是否已被层专属自定义初始化 (避免被 Graph 自动初始化重写)
     init_constant: ?f32 = null, // 结构性常量初始值 (如 LSTM 遗忘门偏置 1.0)，Graph 自动初始化时以该常量填充，不依赖命名
@@ -276,25 +276,49 @@ pub const Tensor = struct {
     }
 
     pub fn mulScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
-        return self.scalarOpEager(val, allocator, struct { fn op(a: f32, b: f32) f32 { return a * b; } }.op);
+        return self.scalarOpEager(val, allocator, struct {
+            fn op(a: f32, b: f32) f32 {
+                return a * b;
+            }
+        }.op);
     }
 
     pub fn addScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
-        return self.scalarOpEager(val, allocator, struct { fn op(a: f32, b: f32) f32 { return a + b; } }.op);
+        return self.scalarOpEager(val, allocator, struct {
+            fn op(a: f32, b: f32) f32 {
+                return a + b;
+            }
+        }.op);
     }
 
     pub fn subScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
-        return self.scalarOpEager(val, allocator, struct { fn op(a: f32, b: f32) f32 { return a - b; } }.op);
+        return self.scalarOpEager(val, allocator, struct {
+            fn op(a: f32, b: f32) f32 {
+                return a - b;
+            }
+        }.op);
     }
 
     pub fn divScalar(self: *Tensor, val: f32, allocator: std.mem.Allocator) !*Tensor {
-        return self.scalarOpEager(val, allocator, struct { fn op(a: f32, b: f32) f32 { return a / b; } }.op);
+        return self.scalarOpEager(val, allocator, struct {
+            fn op(a: f32, b: f32) f32 {
+                return a / b;
+            }
+        }.op);
     }
 
-    fn addOp(a: f32, b: f32) f32 { return a + b; }
-    fn subOp(a: f32, b: f32) f32 { return a - b; }
-    fn mulOp(a: f32, b: f32) f32 { return a * b; }
-    fn divOp(a: f32, b: f32) f32 { return a / b; }
+    fn addOp(a: f32, b: f32) f32 {
+        return a + b;
+    }
+    fn subOp(a: f32, b: f32) f32 {
+        return a - b;
+    }
+    fn mulOp(a: f32, b: f32) f32 {
+        return a * b;
+    }
+    fn divOp(a: f32, b: f32) f32 {
+        return a / b;
+    }
 
     /// 通用多维广播加法：C = self + other
     pub fn add(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) !*Tensor {

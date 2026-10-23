@@ -357,8 +357,8 @@ pub const CausalSelfAttention = struct {
         const t = cache.curr_len;
         for (0..B) |b| {
             for (0..n_kv) |kv_h| {
-                const src_k = k_step.data[(b * kv_dim + kv_h * hs) .. (b * kv_dim + (kv_h + 1) * hs)];
-                const src_v = v_step.data[(b * kv_dim + kv_h * hs) .. (b * kv_dim + (kv_h + 1) * hs)];
+                const src_k = k_step.data[(b * kv_dim + kv_h * hs)..(b * kv_dim + (kv_h + 1) * hs)];
+                const src_v = v_step.data[(b * kv_dim + kv_h * hs)..(b * kv_dim + (kv_h + 1) * hs)];
                 const dest_k = cache.k.data[((b * n_kv + kv_h) * cache.max_len + t) * hs .. ((b * n_kv + kv_h) * cache.max_len + t + 1) * hs];
                 const dest_v = cache.v.data[((b * n_kv + kv_h) * cache.max_len + t) * hs .. ((b * n_kv + kv_h) * cache.max_len + t + 1) * hs];
                 @memcpy(dest_k, src_k);
@@ -377,7 +377,7 @@ pub const CausalSelfAttention = struct {
         for (0..B) |b| {
             for (0..nh) |h| {
                 const kv_h = h / groups;
-                const q_head = q_2d.data[(b * C + h * hs) .. (b * C + (h + 1) * hs)];
+                const q_head = q_2d.data[(b * C + h * hs)..(b * C + (h + 1) * hs)];
 
                 const head_base = (b * n_kv + kv_h) * cache.max_len;
                 for (0..curr_len) |pos| {
@@ -386,7 +386,7 @@ pub const CausalSelfAttention = struct {
                 }
                 softmaxInPlace(scores);
 
-                const y_head = y_2d.data[(b * C + h * hs) .. (b * C + (h + 1) * hs)];
+                const y_head = y_2d.data[(b * C + h * hs)..(b * C + (h + 1) * hs)];
                 @memset(y_head, 0.0);
                 for (0..curr_len) |pos| {
                     const v_cached = cache.v.data[(head_base + pos) * hs .. (head_base + pos + 1) * hs];

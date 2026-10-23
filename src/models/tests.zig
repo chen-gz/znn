@@ -65,10 +65,10 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
             allocator,
             .sliding_attention,
             16, // hidden_size
-            4,  // num_heads
-            2,  // num_kv_heads
-            4,  // head_dim
-            2,  // sliding_window
+            4, // num_heads
+            2, // num_kv_heads
+            4, // head_dim
+            2, // sliding_window
             1e-6,
         );
         attn.q_proj.resetParameters(random, .{});
@@ -199,73 +199,73 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
 
     // 8. 验证 Gemma4KVCache 键值缓存初始化、预填充与增量解码
     {
-            var cache = try gemma4.Gemma4KVCache.initDefault(allocator, gemma4_q4.TinyQ4Gemma4.config);
-            defer cache.deinit(allocator);
-            try std.testing.expectEqual(@as(usize, 2), cache.layers.len);
-            try std.testing.expectEqual(@as(usize, 0), cache.layers[0].curr_len);
+        var cache = try gemma4.Gemma4KVCache.initDefault(allocator, gemma4_q4.TinyQ4Gemma4.config);
+        defer cache.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 2), cache.layers.len);
+        try std.testing.expectEqual(@as(usize, 0), cache.layers[0].curr_len);
 
-            // 构造合法的 TinyQ4Gemma4 二进制内存切片
-            const expected_bytes = gemma4_q4.TinyQ4Gemma4.computeExpectedFileSize();
-            const mock_mmap = try allocator.alloc(u8, expected_bytes);
-            defer allocator.free(mock_mmap);
-            @memset(mock_mmap, 0);
-            @memcpy(mock_mmap[0..8], "ZNNQ4G02");
+        // 构造合法的 TinyQ4Gemma4 二进制内存切片
+        const expected_bytes = gemma4_q4.TinyQ4Gemma4.computeExpectedFileSize();
+        const mock_mmap = try allocator.alloc(u8, expected_bytes);
+        defer allocator.free(mock_mmap);
+        @memset(mock_mmap, 0);
+        @memcpy(mock_mmap[0..8], "ZNNQ4G02");
 
-            var mmap_model = try gemma4_q4.TinyQ4Gemma4.loadFromMmapWithOptions(allocator, mock_mmap, .{ .lm_head_mode = .bf16 });
-            defer mmap_model.deinit(allocator);
+        var mmap_model = try gemma4_q4.TinyQ4Gemma4.loadFromMmapWithOptions(allocator, mock_mmap, .{ .lm_head_mode = .bf16 });
+        defer mmap_model.deinit(allocator);
 
-            var g_prefill = autodiff.Graph.initDefault(allocator);
-            defer g_prefill.deinit();
+        var g_prefill = autodiff.Graph.initDefault(allocator);
+        defer g_prefill.deinit();
 
-            const prompt = [_]usize{ 2, 10, 25 };
-            const next_1 = try mmap_model.prefill(&g_prefill, &prompt, &cache, mock_mmap, 1.0);
-            try std.testing.expectEqual(@as(usize, 3), cache.layers[0].curr_len);
-            try std.testing.expect(next_1 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
+        const prompt = [_]usize{ 2, 10, 25 };
+        const next_1 = try mmap_model.prefill(&g_prefill, &prompt, &cache, mock_mmap, 1.0);
+        try std.testing.expectEqual(@as(usize, 3), cache.layers[0].curr_len);
+        try std.testing.expect(next_1 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
 
-            // 验证 mmap 加载后的模型同样可安全调用 forward() 接口
-            const tok_tensor = try g_prefill.tensorNDWithData(&.{ 1, 3 }, &.{ 2.0, 10.0, 25.0 }, false);
-            const mmap_logits = try mmap_model.forward(&g_prefill, tok_tensor);
-            try std.testing.expectEqual(@as(usize, 3), mmap_logits.shape.len);
-            try std.testing.expectEqual(@as(usize, 128), mmap_logits.shape.dims[2]);
+        // 验证 mmap 加载后的模型同样可安全调用 forward() 接口
+        const tok_tensor = try g_prefill.tensorNDWithData(&.{ 1, 3 }, &.{ 2.0, 10.0, 25.0 }, false);
+        const mmap_logits = try mmap_model.forward(&g_prefill, tok_tensor);
+        try std.testing.expectEqual(@as(usize, 3), mmap_logits.shape.len);
+        try std.testing.expectEqual(@as(usize, 128), mmap_logits.shape.dims[2]);
 
-            var g_decode = autodiff.Graph.initDefault(allocator);
-            defer g_decode.deinit();
+        var g_decode = autodiff.Graph.initDefault(allocator);
+        defer g_decode.deinit();
 
-            const next_2 = try mmap_model.decodeStep(&g_decode, next_1, &cache, mock_mmap, &prompt, 1.0);
-            try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
-            try std.testing.expect(next_2 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
+        const next_2 = try mmap_model.decodeStep(&g_decode, next_1, &cache, mock_mmap, &prompt, 1.0);
+        try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
+        try std.testing.expect(next_2 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
 
-            // 验证在 Apple MLX GPU 硬件加速模式下的预填充与增量解码等价性
-            if (backend.offload.isAvailable()) {
-                cache.reset();
-                var g_gpu_prefill = autodiff.Graph.init(allocator, .{ .device = .gpu });
-                defer g_gpu_prefill.deinit();
-
-                const next_gpu_1 = try mmap_model.prefill(&g_gpu_prefill, &prompt, &cache, mock_mmap, 1.0);
-                try std.testing.expectEqual(@as(usize, 3), cache.layers[0].curr_len);
-                try std.testing.expectEqual(next_1, next_gpu_1);
-
-                var g_gpu_decode = autodiff.Graph.init(allocator, .{ .device = .gpu });
-                defer g_gpu_decode.deinit();
-
-                const next_gpu_2 = try mmap_model.decodeStep(&g_gpu_decode, next_gpu_1, &cache, mock_mmap, &prompt, 1.0);
-                try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
-                try std.testing.expectEqual(next_2, next_gpu_2);
-
-                // 验证在 GPU 模式下的投机采样多词元校验
-                var accepted_buf: [3]usize = undefined;
-                var g_gpu_spec = autodiff.Graph.init(allocator, .{ .device = .gpu });
-                defer g_gpu_spec.deinit();
-
-                const input_spec = [_]usize{ next_gpu_2, 10, 25 };
-                const num_acc = try mmap_model.decodeSpeculative(&g_gpu_spec, &input_spec, &cache, mock_mmap, &prompt, 1.0, &accepted_buf);
-                try std.testing.expect(num_acc >= 1);
-            }
-
+        // 验证在 Apple MLX GPU 硬件加速模式下的预填充与增量解码等价性
+        if (backend.offload.isAvailable()) {
             cache.reset();
-            try std.testing.expectEqual(@as(usize, 0), cache.layers[0].curr_len);
+            var g_gpu_prefill = autodiff.Graph.init(allocator, .{ .device = .gpu });
+            defer g_gpu_prefill.deinit();
+
+            const next_gpu_1 = try mmap_model.prefill(&g_gpu_prefill, &prompt, &cache, mock_mmap, 1.0);
+            try std.testing.expectEqual(@as(usize, 3), cache.layers[0].curr_len);
+            try std.testing.expectEqual(next_1, next_gpu_1);
+
+            var g_gpu_decode = autodiff.Graph.init(allocator, .{ .device = .gpu });
+            defer g_gpu_decode.deinit();
+
+            const next_gpu_2 = try mmap_model.decodeStep(&g_gpu_decode, next_gpu_1, &cache, mock_mmap, &prompt, 1.0);
+            try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
+            try std.testing.expectEqual(next_2, next_gpu_2);
+
+            // 验证在 GPU 模式下的投机采样多词元校验
+            var accepted_buf: [3]usize = undefined;
+            var g_gpu_spec = autodiff.Graph.init(allocator, .{ .device = .gpu });
+            defer g_gpu_spec.deinit();
+
+            const input_spec = [_]usize{ next_gpu_2, 10, 25 };
+            const num_acc = try mmap_model.decodeSpeculative(&g_gpu_spec, &input_spec, &cache, mock_mmap, &prompt, 1.0, &accepted_buf);
+            try std.testing.expect(num_acc >= 1);
         }
+
+        cache.reset();
+        try std.testing.expectEqual(@as(usize, 0), cache.layers[0].curr_len);
     }
+}
 
 test "Gemma 4 promptLookup N-gram speculative sampling" {
     // 1. 短序列测试：无法构成 N-gram 返回 null
@@ -336,7 +336,6 @@ test "Gemma4E4BModel direct binary weight cache layout and reader verification" 
     try std.testing.expectEqual(@as(u8, 0xAB), payload[0]);
     try std.testing.expectError(error.InvalidDirectCache, reader.readBytes(1));
 }
-
 
 // ============================================================================
 // 回归测试：Gemma 4 推理路径正确性、资源回收与权重布局

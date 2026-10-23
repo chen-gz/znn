@@ -186,7 +186,9 @@ test "Hierarchical module naming and interactive HTML report export" {
 
     const json_z = try allocator.dupeSentinel(u8, tmp_json_path, 0);
     defer allocator.free(json_z);
-    const c_api = struct { extern "c" fn remove(filename: [*:0]const u8) c_int; };
+    const c_api = struct {
+        extern "c" fn remove(filename: [*:0]const u8) c_int;
+    };
     defer _ = c_api.remove(json_z.ptr);
     const fj = std.c.fopen(json_z.ptr, "rb") orelse return error.CannotOpenFile;
     defer _ = std.c.fclose(fj);

@@ -96,7 +96,6 @@ const sampleTopK = nn.sampleTopK;
 const saveModel = nn.saveModel;
 const loadModel = nn.loadModel;
 
-
 // 单元测试套件 (Unit Tests)
 // ============================================================================
 
@@ -117,13 +116,17 @@ test "Embedding Module" {
 
     var x = try createPersistentTensor(arena, 2, 3, false);
     defer freePersistentTensor(arena, x);
-    x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
-    x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
+    x.data[0] = 0;
+    x.data[1] = 1;
+    x.data[2] = 2;
+    x.data[3] = 3;
+    x.data[4] = 4;
+    x.data[5] = 5;
 
     var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try emb.forward(&y_eager_graph, x);
-    try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 4 }, y_eager.shape.dims[0..y_eager.shape.len]);
 }
 
 test "Embedding Module Graph Mode" {
@@ -138,12 +141,16 @@ test "Embedding Module Graph Mode" {
     var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
-    const x = try graph.tensorND(&.{2, 3}, false);
-    x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
-    x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
+    const x = try graph.tensorND(&.{ 2, 3 }, false);
+    x.data[0] = 0;
+    x.data[1] = 1;
+    x.data[2] = 2;
+    x.data[3] = 3;
+    x.data[4] = 4;
+    x.data[5] = 5;
 
     const y = try emb.forward(&graph, x);
-    try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y.shape.dims[0..y.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 4 }, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
     try graph.backward(y);
@@ -167,22 +174,28 @@ test "RMSNorm Module" {
 
     var x = try createPersistentTensor(arena, 2, 4, false);
     defer freePersistentTensor(arena, x);
-    x.data[0] = 1.0; x.data[1] = 2.0; x.data[2] = 3.0; x.data[3] = 4.0;
-    x.data[4] = 5.0; x.data[5] = 6.0; x.data[6] = 7.0; x.data[7] = 8.0;
+    x.data[0] = 1.0;
+    x.data[1] = 2.0;
+    x.data[2] = 3.0;
+    x.data[3] = 4.0;
+    x.data[4] = 5.0;
+    x.data[5] = 6.0;
+    x.data[6] = 7.0;
+    x.data[7] = 8.0;
 
     var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try norm.forward(&y_eager_graph, x);
-    try std.testing.expectEqualSlices(usize, &.{2, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 4 }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
-    const x_node = try graph.tensorND(&.{2, 4}, true);
+    const x_node = try graph.tensorND(&.{ 2, 4 }, true);
     @memcpy(x_node.data, x.data);
 
     const y = try norm.forward(&graph, x_node);
-    try std.testing.expectEqualSlices(usize, &.{2, 4}, y.shape.dims[0..y.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 4 }, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
     try graph.backward(y);
@@ -206,7 +219,7 @@ test "MLP Module" {
     defer nn.deinitModel(&mlp, arena);
 
     const x_3d = try arena.create(Tensor);
-    const shape = Shape.init(&.{2, 3, 4});
+    const shape = Shape.init(&.{ 2, 3, 4 });
     x_3d.* = Tensor{
         .data = try arena.alloc(f32, 24),
         .grad = &.{},
@@ -226,16 +239,16 @@ test "MLP Module" {
     var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try mlp.forward(&y_eager_graph, x_3d);
-    try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y_eager.shape.dims[0..y_eager.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 4 }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
-    const x_node = try graph.tensorND(&.{2, 3, 4}, true);
+    const x_node = try graph.tensorND(&.{ 2, 3, 4 }, true);
     @memcpy(x_node.data, x_3d.data);
 
     const y = try mlp.forward(&graph, x_node);
-    try std.testing.expectEqualSlices(usize, &.{2, 3, 4}, y.shape.dims[0..y.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 4 }, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
     try graph.backward(y);
@@ -255,7 +268,7 @@ test "CausalSelfAttention Module" {
     defer nn.deinitModel(&attn, arena);
 
     const x_3d = try arena.create(Tensor);
-    const shape = Shape.init(&.{2, 3, 8});
+    const shape = Shape.init(&.{ 2, 3, 8 });
     x_3d.* = Tensor{
         .data = try arena.alloc(f32, 48),
         .grad = &.{},
@@ -275,14 +288,14 @@ test "CausalSelfAttention Module" {
     var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try attn.forward(&y_eager_graph, x_3d);
-    try std.testing.expectEqualSlices(usize, &.{2, 3, 8}, y_eager.shape.dims[0..y_eager.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 8 }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     const backend = @import("../backend.zig");
     if (backend.mlx.has_mlx) {
         var y_gpu_graph = autodiff.Graph.init(arena, .{ .enable_grad = false, .device = .gpu });
         defer y_gpu_graph.deinit();
         const y_gpu = try attn.forward(&y_gpu_graph, x_3d);
-        try std.testing.expectEqualSlices(usize, &.{2, 3, 8}, y_gpu.shape.dims[0..y_gpu.shape.len]);
+        try std.testing.expectEqualSlices(usize, &.{ 2, 3, 8 }, y_gpu.shape.dims[0..y_gpu.shape.len]);
         for (y_eager.data, y_gpu.data) |e_val, g_val| {
             try std.testing.expectApproxEqAbs(e_val, g_val, 1e-3);
         }
@@ -291,11 +304,11 @@ test "CausalSelfAttention Module" {
     var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
-    const x_node = try graph.tensorND(&.{2, 3, 8}, true);
+    const x_node = try graph.tensorND(&.{ 2, 3, 8 }, true);
     @memcpy(x_node.data, x_3d.data);
 
     const y = try attn.forward(&graph, x_node);
-    try std.testing.expectEqualSlices(usize, &.{2, 3, 8}, y.shape.dims[0..y.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 8 }, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
     try graph.backward(y);
@@ -323,7 +336,7 @@ test "GPT Module" {
     defer deinitModel(&gpt, arena);
 
     const x = try arena.create(Tensor);
-    const shape = Shape.init(&.{2, 3});
+    const shape = Shape.init(&.{ 2, 3 });
     x.* = Tensor{
         .data = try arena.alloc(f32, 6),
         .grad = &.{},
@@ -336,22 +349,26 @@ test "GPT Module" {
         arena.free(x.data);
         arena.destroy(x);
     }
-    x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
-    x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
+    x.data[0] = 0;
+    x.data[1] = 1;
+    x.data[2] = 2;
+    x.data[3] = 3;
+    x.data[4] = 4;
+    x.data[5] = 5;
 
     var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
     defer y_eager_graph.deinit();
     const y_eager = try gpt.forward(&y_eager_graph, x);
-    try std.testing.expectEqualSlices(usize, &.{2, 3, 10}, y_eager.shape.dims[0..y_eager.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 10 }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     var graph = autodiff.Graph.initDefault(arena);
     defer graph.deinit();
 
-    const x_node = try graph.tensorND(&.{2, 3}, false);
+    const x_node = try graph.tensorND(&.{ 2, 3 }, false);
     @memcpy(x_node.data, x.data);
 
     const y = try gpt.forward(&graph, x_node);
-    try std.testing.expectEqualSlices(usize, &.{2, 3, 10}, y.shape.dims[0..y.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 10 }, y.shape.dims[0..y.shape.len]);
 
     @memset(y.grad, 1.0);
     try graph.backward(y);

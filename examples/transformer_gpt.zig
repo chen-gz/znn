@@ -132,7 +132,7 @@ pub fn main() !void {
         }
 
         const logits = try model.forward(&graph, x_node); // Shape [1, T, V]
-        
+
         const start = (@as(usize, seq_len) - 1) * @as(usize, vocab_size);
         const end = @as(usize, seq_len) * @as(usize, vocab_size);
         const last_token_logits = logits.data[start..end];

@@ -371,12 +371,12 @@ test "t-SNE fitTransform on synthetic cluster points" {
 
     // 6 points in 3 distinct clusters: (0,0), (10,10), (-10,-10)
     const X = [_]f32{
-        0.0, 0.1,
-        0.1, 0.0,
-        10.0, 10.1,
-        10.1, 10.0,
+        0.0,   0.1,
+        0.1,   0.0,
+        10.0,  10.1,
+        10.1,  10.0,
         -10.0, -9.9,
-        -9.9, -10.0,
+        -9.9,  -10.0,
     };
 
     const options = TSNEOptions{

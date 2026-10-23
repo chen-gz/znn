@@ -22,9 +22,6 @@ pub const QRResult = linalg_mod.QRResult;
 pub const SymEigResult = linalg_mod.SymEigResult;
 pub const SVDResult = linalg_mod.SVDResult;
 
-
-
-
 // ============================================================================
 // NumPy-like raw tensor creation APIs (independent of Graph)
 // ============================================================================
@@ -147,7 +144,6 @@ pub fn eye(allocator: std.mem.Allocator, N: usize, M: ?usize, k: ?i32) !*Tensor 
 pub fn identity(allocator: std.mem.Allocator, n: usize) !*Tensor {
     return eye(allocator, n, n, 0);
 }
-
 
 var default_prng = std.Random.DefaultPrng.init(12345);
 
@@ -341,7 +337,6 @@ pub fn split(allocator: std.mem.Allocator, input: *Tensor, num_splits: usize, di
     return outputs;
 }
 
-
 pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator) !*Tensor {
     return Tensor.where(cond, x, y, allocator);
 }
@@ -421,8 +416,6 @@ pub fn symeig(t: Tensor, allocator: std.mem.Allocator) !SymEigResult {
 pub fn svd(t: Tensor, allocator: std.mem.Allocator) !SVDResult {
     return t.svd(allocator);
 }
-
-
 
 /// Solves linear system A * x = b using Gauss-Jordan elimination with partial pivoting.
 /// A is an n x n row-major matrix slice, b is an n-element vector, out_x is an n-element output slice.

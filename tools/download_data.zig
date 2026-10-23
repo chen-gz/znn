@@ -129,7 +129,6 @@ pub fn main(init: std.process.Init) !void {
             try downloadFile(&client, io, url, path, true);
         }
         std.debug.print("✨ Fashion MNIST dataset is ready in data/!\n", .{});
-
     } else if (std.mem.eql(u8, dataset_name, "mnist")) {
         std.debug.print("⬇️  Downloading classic MNIST dataset...\n", .{});
         const base_url = "https://storage.googleapis.com/cvdf-datasets/mnist";
@@ -147,13 +146,11 @@ pub fn main(init: std.process.Init) !void {
             try downloadFile(&client, io, url, path, true);
         }
         std.debug.print("✨ MNIST dataset is ready in data/!\n", .{});
-
     } else if (std.mem.eql(u8, dataset_name, "tinyshakespeare") or std.mem.eql(u8, dataset_name, "shakespeare") or std.mem.eql(u8, dataset_name, "tiny_shakespeare")) {
         std.debug.print("⬇️  Downloading TinyShakespeare dataset (~1.1MB pure text)...\n", .{});
         const url = "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt";
         try downloadFile(&client, io, url, "data/tinyshakespeare.txt", false);
         std.debug.print("✨ TinyShakespeare dataset is ready in data/tinyshakespeare.txt!\n", .{});
-
     } else if (std.mem.eql(u8, dataset_name, "wikitext2") or std.mem.eql(u8, dataset_name, "wikitext-2") or std.mem.eql(u8, dataset_name, "wikitext")) {
         std.debug.print("⬇️  Downloading WikiText-2 dataset (train/valid/test)...\n", .{});
         cwd.createDir(io, "data/wikitext-2", .default_dir) catch |err| switch (err) {
@@ -170,19 +167,16 @@ pub fn main(init: std.process.Init) !void {
             try downloadFile(&client, io, url, path, false);
         }
         std.debug.print("✨ WikiText-2 dataset is ready in data/wikitext-2/!\n", .{});
-
     } else if (std.mem.eql(u8, dataset_name, "tinystories") or std.mem.eql(u8, dataset_name, "tiny_stories")) {
         std.debug.print("⬇️  Downloading TinyStories (~19MB validation sample)...\n", .{});
         const url = "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt";
         try downloadFile(&client, io, url, "data/tinystories_valid.txt", false);
         std.debug.print("✨ TinyStories dataset is ready in data/tinystories_valid.txt!\n", .{});
-
     } else if (std.mem.eql(u8, dataset_name, "alpaca") or std.mem.eql(u8, dataset_name, "alpaca_data") or std.mem.eql(u8, dataset_name, "alpaca_cleaned")) {
         std.debug.print("⬇️  Downloading Stanford Alpaca SFT dataset (~22MB JSON)...\n", .{});
         const url = "https://raw.githubusercontent.com/tatsu-lab/stanford_alpaca/main/alpaca_data.json";
         try downloadFile(&client, io, url, "data/alpaca_data.json", false);
         std.debug.print("✨ Stanford Alpaca dataset is ready in data/alpaca_data.json!\n", .{});
-
     } else if (std.mem.eql(u8, dataset_name, "all_llm") or std.mem.eql(u8, dataset_name, "llm")) {
         std.debug.print("⬇️  Downloading all 4 LLM datasets (tinyshakespeare, wikitext2, tinystories, alpaca)...\n", .{});
         try downloadFile(&client, io, "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt", "data/tinyshakespeare.txt", false);
@@ -198,7 +192,6 @@ pub fn main(init: std.process.Init) !void {
         try downloadFile(&client, io, "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt", "data/tinystories_valid.txt", false);
         try downloadFile(&client, io, "https://raw.githubusercontent.com/tatsu-lab/stanford_alpaca/main/alpaca_data.json", "data/alpaca_data.json", false);
         std.debug.print("✨ All LLM datasets downloaded and ready in data/!\n", .{});
-
     } else {
         std.debug.print("❌ Unknown dataset: '{s}'\n", .{dataset_name});
         std.debug.print("Supported datasets:\n", .{});

@@ -54,7 +54,7 @@ test "basic imports and struct definitions" {
     try std.testing.expect(@TypeOf(nn.Linear) == type);
     try std.testing.expect(@TypeOf(nn.SwiGLU) == type);
     try std.testing.expect(@TypeOf(nn.LoRALinear) == type);
-    try std.testing.expect(@TypeOf(nn.TransformerDecoder) == fn(comptime usize) type);
+    try std.testing.expect(@TypeOf(nn.TransformerDecoder) == fn (comptime usize) type);
     try std.testing.expect(@TypeOf(autodiff.Graph) == type);
     try std.testing.expect(@TypeOf(tensor.Tensor) == type);
     try std.testing.expect(@TypeOf(optim.SGDOptimizer) == type);
@@ -99,7 +99,6 @@ test "measureTime utility" {
     try std.testing.expect(timed.elapsed_ns > 0);
 }
 
-
 test "ProfileBlock utility" {
     const p = ProfileBlock.start("test_block");
     defer p.end();
@@ -127,21 +126,25 @@ test "Tensor ND reshape and transpose autograd" {
     defer graph.deinit();
 
     // Create a 2x3 tensor
-    const A = try graph.tensorND(&.{2, 3}, true);
-    A.data[0] = 1.0; A.data[1] = 2.0; A.data[2] = 3.0;
-    A.data[3] = 4.0; A.data[4] = 5.0; A.data[5] = 6.0;
+    const A = try graph.tensorND(&.{ 2, 3 }, true);
+    A.data[0] = 1.0;
+    A.data[1] = 2.0;
+    A.data[2] = 3.0;
+    A.data[3] = 4.0;
+    A.data[4] = 5.0;
+    A.data[5] = 6.0;
 
     // Transpose it to 3x2
     const B = try graph.transposeND(A, 0, 1);
-    try std.testing.expectEqualSlices(usize, &.{3, 2}, B.shape.dims[0..B.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 3, 2 }, B.shape.dims[0..B.shape.len]);
     try std.testing.expectEqual(@as(f32, 1.0), B.data[0]); // A[0,0]
     try std.testing.expectEqual(@as(f32, 4.0), B.data[1]); // A[1,0]
     try std.testing.expectEqual(@as(f32, 2.0), B.data[2]); // A[0,1]
     try std.testing.expectEqual(@as(f32, 5.0), B.data[3]); // A[1,1]
 
     // Reshape it to 1x6
-    const C = try graph.reshape(B, &.{1, 6});
-    try std.testing.expectEqualSlices(usize, &.{1, 6}, C.shape.dims[0..C.shape.len]);
+    const C = try graph.reshape(B, &.{ 1, 6 });
+    try std.testing.expectEqualSlices(usize, &.{ 1, 6 }, C.shape.dims[0..C.shape.len]);
 
     // Let's set some gradients in C.grad and backward
     C.grad[0] = 10.0;
@@ -178,14 +181,14 @@ test "Tensor matrix multiplication and bias addition autograd example" {
 
     // 2. Create input tensor A (2x3) and weight B (3x2)
     // A represents a batch of 2 samples with 3 features each
-    const A = try graph.array(&.{2, 3}, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 }, true);
+    const A = try graph.array(&.{ 2, 3 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 }, true);
 
     // B represents weights mapping 3 features to 2 outputs
-    const B = try graph.array(&.{3, 2}, &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 }, true);
+    const B = try graph.array(&.{ 3, 2 }, &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 }, true);
 
     // 3. Matrix Multiplication: C = A * B (resulting in 2x2)
     const C = try graph.matmul(A, B);
-    try std.testing.expectEqualSlices(usize, &.{2, 2}, C.shape.dims[0..C.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, C.shape.dims[0..C.shape.len]);
 
     // Verify C values:
     // C[0, 0] = 1.0*0.1 + 2.0*0.3 + 3.0*0.5 = 2.2
@@ -198,10 +201,10 @@ test "Tensor matrix multiplication and bias addition autograd example" {
     try std.testing.expectApproxEqAbs(@as(f32, 6.4), C.data[3], 1e-5);
 
     // 4. Bias Addition: D = C + bias (1x2 bias broadcasted to 2x2 C)
-    const bias = try graph.array(&.{1, 2}, &[_]f32{ 0.5, 1.0 }, true);
+    const bias = try graph.array(&.{ 1, 2 }, &[_]f32{ 0.5, 1.0 }, true);
 
     const D = try graph.addBias(C, bias);
-    try std.testing.expectEqualSlices(usize, &.{2, 2}, D.shape.dims[0..D.shape.len]);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, D.shape.dims[0..D.shape.len]);
 
     // D[0, 0] = C[0, 0] + bias[0] = 2.2 + 0.5 = 2.7
     // D[0, 1] = C[0, 1] + bias[1] = 2.8 + 1.0 = 3.8
@@ -305,7 +308,7 @@ test "MaxPool2D autograd" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[2], 1e-5); // A[0,2] (5.0)
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[8], 1e-5); // A[2,0] (8.0)
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), A.grad[15], 1e-5); // A[3,3] (4.0)
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), A.grad[0], 1e-5);  // A[0,0]
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), A.grad[0], 1e-5); // A[0,0]
 }
 
 test "MaxPool1D and AvgPool1D autograd" {
@@ -359,9 +362,9 @@ test "AdaptiveAvgPool1D and AdaptiveAvgPool2D autograd" {
     }
 
     const B = try graph.array(&.{ 1, 1, 4, 4 }, &[_]f32{
-        1.0, 2.0, 3.0, 4.0,
-        5.0, 6.0, 7.0, 8.0,
-        9.0, 10.0, 11.0, 12.0,
+        1.0,  2.0,  3.0,  4.0,
+        5.0,  6.0,  7.0,  8.0,
+        9.0,  10.0, 11.0, 12.0,
         13.0, 14.0, 15.0, 16.0,
     }, true);
     const aap2 = try graph.adaptiveAvgPool2d(B, .{ 1, 1 });
@@ -553,11 +556,11 @@ test "regression module Ridge, Lasso, and ElasticNet models" {
     const allocator = std.testing.allocator;
 
     const x = [_]f32{
-        -2.0,  1.0,
+        -2.0, 1.0,
         -1.0, -1.0,
-         0.0,  0.0,
-         1.0, -1.0,
-         2.0,  1.0,
+        0.0,  0.0,
+        1.0,  -1.0,
+        2.0,  1.0,
     };
     // y = 2.0 * x0 + 0.0 * x1 + 1.0
     const y = [_]f32{ -3.0, -1.0, 1.0, 3.0, 5.0 };
@@ -587,7 +590,6 @@ test "regression module solveAnalytical" {
     try std.testing.expectApproxEqAbs(@as(f32, 2.0), res.w, 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), res.b, 1e-5);
 }
-
 
 test "cross_validation module searchLasso" {
     const std = @import("std");

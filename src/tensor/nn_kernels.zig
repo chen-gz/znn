@@ -404,10 +404,10 @@ pub fn repeatKV(self: *Tensor, groups: usize, allocator: std.mem.Allocator) !*Te
     const head_bytes = T * hs;
     for (0..B) |b| {
         for (0..n_kv) |kv_h| {
-            const src = x.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
+            const src = x.data[((b * n_kv + kv_h) * head_bytes)..((b * n_kv + kv_h + 1) * head_bytes)];
             for (0..groups) |g| {
                 const h = kv_h * groups + g;
-                const dest = Y.data[((b * nh + h) * head_bytes) .. ((b * nh + h + 1) * head_bytes)];
+                const dest = Y.data[((b * nh + h) * head_bytes)..((b * nh + h + 1) * head_bytes)];
                 @memcpy(dest, src);
             }
         }
@@ -818,4 +818,3 @@ pub fn gatherMatMul(
     try gatherMatMulInto(self, indices, weights, biases, Y, allocator);
     return Y;
 }
-

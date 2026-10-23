@@ -280,16 +280,16 @@ test "Autograd reductions, elementary math, where/maskedFill, and squeeze/unsque
 
 test "Shape and strides helpers" {
     // Test Shape init & eq
-    const s1 = Shape.init(&.{2, 3, 4});
+    const s1 = Shape.init(&.{ 2, 3, 4 });
     try std.testing.expectEqual(@as(usize, 3), s1.len);
     try std.testing.expectEqual(@as(usize, 2), s1.dims[0]);
     try std.testing.expectEqual(@as(usize, 3), s1.dims[1]);
     try std.testing.expectEqual(@as(usize, 4), s1.dims[2]);
 
-    const s2 = Shape.init(&.{2, 3, 4});
+    const s2 = Shape.init(&.{ 2, 3, 4 });
     try std.testing.expect(s1.eq(s2));
 
-    const s3 = Shape.init(&.{2, 3, 5});
+    const s3 = Shape.init(&.{ 2, 3, 5 });
     try std.testing.expect(!s1.eq(s3));
 
     // Test computeContiguousStrides
@@ -307,7 +307,7 @@ test "Shape and strides helpers" {
 
 test "Tensor indexing and gradient operations" {
     const allocator = std.testing.allocator;
-    const shape = Shape.init(&.{2, 3});
+    const shape = Shape.init(&.{ 2, 3 });
     const strides = computeContiguousStrides(shape);
 
     const data = try allocator.alloc(f32, 6);
@@ -325,45 +325,45 @@ test "Tensor indexing and gradient operations" {
     };
 
     // Test indexing
-    t.set(&.{0, 0}, 1.0);
-    t.set(&.{0, 1}, 2.0);
-    t.set(&.{0, 2}, 3.0);
-    t.set(&.{1, 0}, 4.0);
-    t.set(&.{1, 1}, 5.0);
-    t.set(&.{1, 2}, 6.0);
+    t.set(&.{ 0, 0 }, 1.0);
+    t.set(&.{ 0, 1 }, 2.0);
+    t.set(&.{ 0, 2 }, 3.0);
+    t.set(&.{ 1, 0 }, 4.0);
+    t.set(&.{ 1, 1 }, 5.0);
+    t.set(&.{ 1, 2 }, 6.0);
 
-    try std.testing.expectEqual(@as(f32, 1.0), t.get(&.{0, 0}));
-    try std.testing.expectEqual(@as(f32, 6.0), t.get(&.{1, 2}));
-    try std.testing.expectEqual(@as(usize, 5), t.getFlatIndex(&.{1, 2}));
+    try std.testing.expectEqual(@as(f32, 1.0), t.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 6.0), t.get(&.{ 1, 2 }));
+    try std.testing.expectEqual(@as(usize, 5), t.getFlatIndex(&.{ 1, 2 }));
 
     // Test grad operations
-    t.setGrad(&.{0, 1}, 10.0);
-    try std.testing.expectEqual(@as(f32, 10.0), t.getGrad(&.{0, 1}));
+    t.setGrad(&.{ 0, 1 }, 10.0);
+    try std.testing.expectEqual(@as(f32, 10.0), t.getGrad(&.{ 0, 1 }));
 
     t.zeroGrad();
-    try std.testing.expectEqual(@as(f32, 0.0), t.getGrad(&.{0, 1}));
+    try std.testing.expectEqual(@as(f32, 0.0), t.getGrad(&.{ 0, 1 }));
 }
 
 test "NumPy-like raw tensor creation" {
     const allocator = std.testing.allocator;
 
     // Test array creation
-    const t_arr = try array(allocator, &.{2, 3}, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    const t_arr = try array(allocator, &.{ 2, 3 }, &[_]f32{ 1, 2, 3, 4, 5, 6 });
     defer free(allocator, t_arr);
-    try std.testing.expectEqual(@as(f32, 1.0), t_arr.get(&.{0, 0}));
-    try std.testing.expectEqual(@as(f32, 6.0), t_arr.get(&.{1, 2}));
+    try std.testing.expectEqual(@as(f32, 1.0), t_arr.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 6.0), t_arr.get(&.{ 1, 2 }));
 
     // Test zeros creation
-    const t_zeros = try zeros(allocator, &.{2, 2});
+    const t_zeros = try zeros(allocator, &.{ 2, 2 });
     defer free(allocator, t_zeros);
-    try std.testing.expectEqual(@as(f32, 0.0), t_zeros.get(&.{0, 0}));
-    try std.testing.expectEqual(@as(f32, 0.0), t_zeros.get(&.{1, 1}));
+    try std.testing.expectEqual(@as(f32, 0.0), t_zeros.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 0.0), t_zeros.get(&.{ 1, 1 }));
 
     // Test ones creation
-    const t_ones = try ones(allocator, &.{3, 1});
+    const t_ones = try ones(allocator, &.{ 3, 1 });
     defer free(allocator, t_ones);
-    try std.testing.expectEqual(@as(f32, 1.0), t_ones.get(&.{0, 0}));
-    try std.testing.expectEqual(@as(f32, 1.0), t_ones.get(&.{2, 0}));
+    try std.testing.expectEqual(@as(f32, 1.0), t_ones.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 1.0), t_ones.get(&.{ 2, 0 }));
 }
 
 test "Direct tensor operations (eager and graph)" {
@@ -371,44 +371,44 @@ test "Direct tensor operations (eager and graph)" {
 
     // Eager Mode Test
     {
-        const A = try array(allocator, &.{2, 3}, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+        const A = try array(allocator, &.{ 2, 3 }, &[_]f32{ 1, 2, 3, 4, 5, 6 });
         defer free(allocator, A);
-        const B = try array(allocator, &.{3, 2}, &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 });
+        const B = try array(allocator, &.{ 3, 2 }, &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 });
         defer free(allocator, B);
 
         // Matmul
         const C = try A.matmul(B, allocator);
         defer free(allocator, C);
-        try std.testing.expectApproxEqAbs(@as(f32, 2.2), C.get(&.{0, 0}), 1e-5);
-        try std.testing.expectApproxEqAbs(@as(f32, 6.4), C.get(&.{1, 1}), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.2), C.get(&.{ 0, 0 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 6.4), C.get(&.{ 1, 1 }), 1e-5);
 
         // AddBias
-        const bias = try array(allocator, &.{1, 2}, &[_]f32{ 0.5, 1.0 });
+        const bias = try array(allocator, &.{ 1, 2 }, &[_]f32{ 0.5, 1.0 });
         defer free(allocator, bias);
         const D = try C.addBias(bias, allocator);
         defer free(allocator, D);
-        try std.testing.expectApproxEqAbs(@as(f32, 2.7), D.get(&.{0, 0}), 1e-5);
-        try std.testing.expectApproxEqAbs(@as(f32, 7.4), D.get(&.{1, 1}), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.7), D.get(&.{ 0, 0 }), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 7.4), D.get(&.{ 1, 1 }), 1e-5);
 
         // Relu
         const E = try D.relu(allocator);
         defer free(allocator, E);
-        try std.testing.expectApproxEqAbs(@as(f32, 2.7), E.get(&.{0, 0}), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.7), E.get(&.{ 0, 0 }), 1e-5);
 
         // SoftmaxCrossEntropy
         const loss = try E.softmaxCrossEntropy(&[2]u8{ 0, 1 }, allocator);
         defer free(allocator, loss);
-        try std.testing.expect(loss.get(&.{0, 0}) > 0.0);
+        try std.testing.expect(loss.get(&.{ 0, 0 }) > 0.0);
 
         // Reshape
-        const F = try E.reshape(&.{1, 4}, allocator);
+        const F = try E.reshape(&.{ 1, 4 }, allocator);
         defer free(allocator, F);
-        try std.testing.expectEqualSlices(usize, &.{1, 4}, F.shape.dims[0..F.shape.len]);
+        try std.testing.expectEqualSlices(usize, &.{ 1, 4 }, F.shape.dims[0..F.shape.len]);
 
         // Transpose
         const G = try F.transpose(0, 1, allocator);
         defer free(allocator, G);
-        try std.testing.expectEqualSlices(usize, &.{4, 1}, G.shape.dims[0..G.shape.len]);
+        try std.testing.expectEqualSlices(usize, &.{ 4, 1 }, G.shape.dims[0..G.shape.len]);
     }
 
     // Graph Mode Test
@@ -416,65 +416,65 @@ test "Direct tensor operations (eager and graph)" {
         var graph = autodiff.Graph.initDefault(allocator);
         defer graph.deinit();
 
-        const A = try graph.array(&.{2, 3}, &[_]f32{ 1, 2, 3, 4, 5, 6 }, true);
-        const B = try graph.array(&.{3, 2}, &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 }, true);
+        const A = try graph.array(&.{ 2, 3 }, &[_]f32{ 1, 2, 3, 4, 5, 6 }, true);
+        const B = try graph.array(&.{ 3, 2 }, &[_]f32{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 }, true);
 
         // Matmul
         const C = try graph.matmul(A, B);
-        try std.testing.expectApproxEqAbs(@as(f32, 2.2), C.get(&.{0, 0}), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.2), C.get(&.{ 0, 0 }), 1e-5);
 
         // AddBias
-        const bias = try graph.array(&.{1, 2}, &[_]f32{ 0.5, 1.0 }, true);
+        const bias = try graph.array(&.{ 1, 2 }, &[_]f32{ 0.5, 1.0 }, true);
         const D = try graph.addBias(C, bias);
-        try std.testing.expectApproxEqAbs(@as(f32, 2.7), D.get(&.{0, 0}), 1e-5);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.7), D.get(&.{ 0, 0 }), 1e-5);
 
         // Relu
         const E = try graph.relu(D);
 
         // SoftmaxCrossEntropy
         const loss = try graph.softmaxCrossEntropy(E, &[2]u8{ 0, 1 });
-        try std.testing.expect(loss.get(&.{0, 0}) > 0.0);
+        try std.testing.expect(loss.get(&.{ 0, 0 }) > 0.0);
 
         // Reshape
-        const F = try graph.reshape(E, &.{1, 4});
+        const F = try graph.reshape(E, &.{ 1, 4 });
 
         // Transpose
         const G = try graph.transpose(F, 0, 1);
-        try std.testing.expectEqualSlices(usize, &.{4, 1}, G.shape.dims[0..G.shape.len]);
+        try std.testing.expectEqualSlices(usize, &.{ 4, 1 }, G.shape.dims[0..G.shape.len]);
     }
 }
 
 test "Tensor argmax and max reductions" {
     const allocator = std.testing.allocator;
 
-    const A = try array(allocator, &.{2, 3}, &[_]f32{ 1.0, 5.0, 3.0, 9.0, 2.0, 6.0 });
+    const A = try array(allocator, &.{ 2, 3 }, &[_]f32{ 1.0, 5.0, 3.0, 9.0, 2.0, 6.0 });
     defer free(allocator, A);
 
     // Test argmax along dim 1
     const idx1 = try A.argmax(1, allocator);
     defer free(allocator, idx1);
-    try std.testing.expectEqual(@as(f32, 1.0), idx1.get(&.{0, 0}));
-    try std.testing.expectEqual(@as(f32, 0.0), idx1.get(&.{1, 0}));
+    try std.testing.expectEqual(@as(f32, 1.0), idx1.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 0.0), idx1.get(&.{ 1, 0 }));
 
     // Test max along dim 1
     const val1 = try A.max(1, allocator);
     defer free(allocator, val1);
-    try std.testing.expectEqual(@as(f32, 5.0), val1.get(&.{0, 0}));
-    try std.testing.expectEqual(@as(f32, 9.0), val1.get(&.{1, 0}));
+    try std.testing.expectEqual(@as(f32, 5.0), val1.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 9.0), val1.get(&.{ 1, 0 }));
 
     // Test argmax along dim 0
     const idx0 = try A.argmax(0, allocator);
     defer free(allocator, idx0);
-    try std.testing.expectEqual(@as(f32, 1.0), idx0.get(&.{0, 0}));
-    try std.testing.expectEqual(@as(f32, 0.0), idx0.get(&.{0, 1}));
-    try std.testing.expectEqual(@as(f32, 1.0), idx0.get(&.{0, 2}));
+    try std.testing.expectEqual(@as(f32, 1.0), idx0.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 0.0), idx0.get(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 1.0), idx0.get(&.{ 0, 2 }));
 
     // Test max along dim 0
     const val0 = try A.max(0, allocator);
     defer free(allocator, val0);
-    try std.testing.expectEqual(@as(f32, 9.0), val0.get(&.{0, 0}));
-    try std.testing.expectEqual(@as(f32, 5.0), val0.get(&.{0, 1}));
-    try std.testing.expectEqual(@as(f32, 6.0), val0.get(&.{0, 2}));
+    try std.testing.expectEqual(@as(f32, 9.0), val0.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 5.0), val0.get(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 6.0), val0.get(&.{ 0, 2 }));
 }
 
 test "Tensor MSE loss forward and backward" {
@@ -487,8 +487,8 @@ test "Tensor MSE loss forward and backward" {
     var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
-    const y_pred = try graph.array(&.{2, 1}, &[_]f32{ 1.5, 2.5 }, true);
-    const y_true = try graph.array(&.{2, 1}, &[_]f32{ 1.0, 3.0 }, false);
+    const y_pred = try graph.array(&.{ 2, 1 }, &[_]f32{ 1.5, 2.5 }, true);
+    const y_true = try graph.array(&.{ 2, 1 }, &[_]f32{ 1.0, 3.0 }, false);
 
     const loss = try graph.mseLoss(y_pred, y_true);
     // loss = 0.5 * ((1.5 - 1.0)^2 + (2.5 - 3.0)^2) = 0.5 * (0.25 + 0.25) = 0.25
@@ -513,23 +513,23 @@ test "Tensor mulScalar and add autograd" {
     var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
-    const A = try graph.array(&.{2, 2}, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, true);
-    const B = try graph.array(&.{2, 2}, &[_]f32{ 5.0, 6.0, 7.0, 8.0 }, true);
+    const A = try graph.array(&.{ 2, 2 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, true);
+    const B = try graph.array(&.{ 2, 2 }, &[_]f32{ 5.0, 6.0, 7.0, 8.0 }, true);
 
     // C = A.mulScalar(2.0)
     const C = try graph.mulScalar(A, 2.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 2.0), C.get(&.{0, 0}), 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 8.0), C.get(&.{1, 1}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), C.get(&.{ 0, 0 }), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.0), C.get(&.{ 1, 1 }), 1e-5);
 
     // D = C + B
     const D = try graph.add(C, B);
-    try std.testing.expectApproxEqAbs(@as(f32, 7.0), D.get(&.{0, 0}), 1e-5); // 2.0 + 5.0 = 7.0
-    try std.testing.expectApproxEqAbs(@as(f32, 16.0), D.get(&.{1, 1}), 1e-5); // 8.0 + 8.0 = 16.0
+    try std.testing.expectApproxEqAbs(@as(f32, 7.0), D.get(&.{ 0, 0 }), 1e-5); // 2.0 + 5.0 = 7.0
+    try std.testing.expectApproxEqAbs(@as(f32, 16.0), D.get(&.{ 1, 1 }), 1e-5); // 8.0 + 8.0 = 16.0
 
     // E = D.addScalar(10.0)
     const E = try graph.addScalar(D, 10.0);
-    try std.testing.expectApproxEqAbs(@as(f32, 17.0), E.get(&.{0, 0}), 1e-5); // 7.0 + 10.0 = 17.0
-    try std.testing.expectApproxEqAbs(@as(f32, 26.0), E.get(&.{1, 1}), 1e-5); // 16.0 + 10.0 = 26.0
+    try std.testing.expectApproxEqAbs(@as(f32, 17.0), E.get(&.{ 0, 0 }), 1e-5); // 7.0 + 10.0 = 17.0
+    try std.testing.expectApproxEqAbs(@as(f32, 26.0), E.get(&.{ 1, 1 }), 1e-5); // 16.0 + 10.0 = 26.0
 
     // Set gradients of E to 1.0 to backpropagate
     for (E.grad) |*g| {
@@ -562,19 +562,25 @@ test "Tensor static graph forward and backward" {
     defer graph.deinit();
 
     // 1. Build the static graph template once
-    const A = try graph.array(&.{2, 2}, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, true);
-    const B = try graph.array(&.{2, 2}, &[_]f32{ 5.0, 6.0, 7.0, 8.0 }, true);
+    const A = try graph.array(&.{ 2, 2 }, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, true);
+    const B = try graph.array(&.{ 2, 2 }, &[_]f32{ 5.0, 6.0, 7.0, 8.0 }, true);
     const C = try graph.mulScalar(A, 2.0);
     const D = try graph.add(C, B);
 
     // 2. First Run: set inputs
-    A.data[0] = 1.0; A.data[1] = 2.0; A.data[2] = 3.0; A.data[3] = 4.0;
-    B.data[0] = 5.0; B.data[1] = 6.0; B.data[2] = 7.0; B.data[3] = 8.0;
+    A.data[0] = 1.0;
+    A.data[1] = 2.0;
+    A.data[2] = 3.0;
+    A.data[3] = 4.0;
+    B.data[0] = 5.0;
+    B.data[1] = 6.0;
+    B.data[2] = 7.0;
+    B.data[3] = 8.0;
 
     // Execute forward pass
     try graph.forward();
-    try std.testing.expectApproxEqAbs(@as(f32, 7.0), D.get(&.{0, 0}), 1e-5); // 2*1 + 5 = 7
-    try std.testing.expectApproxEqAbs(@as(f32, 16.0), D.get(&.{1, 1}), 1e-5); // 2*4 + 8 = 16
+    try std.testing.expectApproxEqAbs(@as(f32, 7.0), D.get(&.{ 0, 0 }), 1e-5); // 2*1 + 5 = 7
+    try std.testing.expectApproxEqAbs(@as(f32, 16.0), D.get(&.{ 1, 1 }), 1e-5); // 2*4 + 8 = 16
 
     // Execute backward pass
     graph.zeroGrad(); // Clear all gradients in the graph!
@@ -584,13 +590,19 @@ test "Tensor static graph forward and backward" {
     try std.testing.expectApproxEqAbs(@as(f32, 2.0), A.grad[0], 1e-5);
 
     // 3. Second Run: change input data
-    A.data[0] = 10.0; A.data[1] = 20.0; A.data[2] = 30.0; A.data[3] = 40.0;
-    B.data[0] = 100.0; B.data[1] = 200.0; B.data[2] = 300.0; B.data[3] = 400.0;
+    A.data[0] = 10.0;
+    A.data[1] = 20.0;
+    A.data[2] = 30.0;
+    A.data[3] = 40.0;
+    B.data[0] = 100.0;
+    B.data[1] = 200.0;
+    B.data[2] = 300.0;
+    B.data[3] = 400.0;
 
     // Recompute forward pass on the exact same graph structure!
     try graph.forward();
-    try std.testing.expectApproxEqAbs(@as(f32, 120.0), D.get(&.{0, 0}), 1e-5); // 2*10 + 100 = 120
-    try std.testing.expectApproxEqAbs(@as(f32, 480.0), D.get(&.{1, 1}), 1e-5); // 2*40 + 400 = 480
+    try std.testing.expectApproxEqAbs(@as(f32, 120.0), D.get(&.{ 0, 0 }), 1e-5); // 2*10 + 100 = 120
+    try std.testing.expectApproxEqAbs(@as(f32, 480.0), D.get(&.{ 1, 1 }), 1e-5); // 2*40 + 400 = 480
 
     // Recompute backward pass
     graph.zeroGrad(); // Clear gradients again!
@@ -610,7 +622,7 @@ test "Softmax forward and backward" {
     defer graph.deinit();
 
     // Input shape [2, 3]
-    const X = try graph.array(&.{2, 3}, &[_]f32{
+    const X = try graph.array(&.{ 2, 3 }, &[_]f32{
         1.0, 2.0, 3.0,
         1.0, 1.0, 1.0,
     }, true);
@@ -622,11 +634,11 @@ test "Softmax forward and backward" {
     // Check forward
     // Row 0: exp(1), exp(2), exp(3) -> sum = 2.718 + 7.389 + 20.085 = 30.192
     // exp(1)/sum = 0.0900, exp(2)/sum = 0.2447, exp(3)/sum = 0.6652
-    try std.testing.expectApproxEqAbs(@as(f32, 0.09003057), Y.get(&.{0, 0}), 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.24472847), Y.get(&.{0, 1}), 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.66524096), Y.get(&.{0, 2}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.09003057), Y.get(&.{ 0, 0 }), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.24472847), Y.get(&.{ 0, 1 }), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.66524096), Y.get(&.{ 0, 2 }), 1e-5);
     // Row 1: exp(1), exp(1), exp(1) -> 1/3, 1/3, 1/3
-    try std.testing.expectApproxEqAbs(@as(f32, 0.33333333), Y.get(&.{1, 0}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.33333333), Y.get(&.{ 1, 0 }), 1e-5);
 
     // Backward
     graph.zeroGrad();
@@ -648,8 +660,8 @@ test "Softmax forward and backward" {
     // dX_1 = Y_1 * (0.0 - Y_0) = - Y_1 * Y_0
     // dX_2 = Y_2 * (0.0 - Y_0) = - Y_2 * Y_0
     try graph.backward(Y);
-    const y0 = Y.get(&.{0, 0});
-    const y1 = Y.get(&.{0, 1});
+    const y0 = Y.get(&.{ 0, 0 });
+    const y1 = Y.get(&.{ 0, 1 });
     try std.testing.expectApproxEqAbs(y0 * (1.0 - y0), X.grad[0], 1e-5);
     try std.testing.expectApproxEqAbs(-y1 * y0, X.grad[1], 1e-5);
 }
@@ -663,7 +675,7 @@ test "RMSNorm forward and backward" {
     var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
-    const X = try graph.array(&.{2, 3}, &[_]f32{
+    const X = try graph.array(&.{ 2, 3 }, &[_]f32{
         1.0, 2.0, 3.0,
         4.0, 5.0, 6.0,
     }, true);
@@ -678,9 +690,9 @@ test "RMSNorm forward and backward" {
     // Y_0 = 1 / rms * 1 = 0.46291
     // Y_1 = 2 / rms * 2 = 1.85164
     // Y_2 = 3 / rms * 3 = 4.16619
-    try std.testing.expectApproxEqAbs(@as(f32, 0.46291), Y.get(&.{0, 0}), 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.85164), Y.get(&.{0, 1}), 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 4.16619), Y.get(&.{0, 2}), 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.46291), Y.get(&.{ 0, 0 }), 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.85164), Y.get(&.{ 0, 1 }), 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.16619), Y.get(&.{ 0, 2 }), 1e-4);
 
     // Backward
     graph.zeroGrad();
@@ -705,13 +717,13 @@ test "Embedding forward and backward" {
     var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
-    const W = try graph.array(&.{3, 4}, &[_]f32{
+    const W = try graph.array(&.{ 3, 4 }, &[_]f32{
         0.1, 0.2, 0.3, 0.4,
         1.1, 1.2, 1.3, 1.4,
         2.1, 2.2, 2.3, 2.4,
     }, true);
 
-    const X = try graph.array(&.{2, 2}, &[_]f32{
+    const X = try graph.array(&.{ 2, 2 }, &[_]f32{
         0.0, 2.0,
         1.0, 0.0,
     }, false);
@@ -721,9 +733,9 @@ test "Embedding forward and backward" {
     try graph.forward();
 
     // Check forward
-    try std.testing.expectApproxEqAbs(@as(f32, 0.1), Y.get(&.{0, 0, 0}), 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 2.3), Y.get(&.{0, 1, 2}), 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 1.4), Y.get(&.{1, 0, 3}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), Y.get(&.{ 0, 0, 0 }), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.3), Y.get(&.{ 0, 1, 2 }), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.4), Y.get(&.{ 1, 0, 3 }), 1e-5);
 
     // Backward
     graph.zeroGrad();
@@ -781,8 +793,8 @@ test "Graph.matmul broadcasts a 2-D right operand over leading batch dimensions"
     defer graph.deinit();
 
     const a = try graph.tensorNDWithData(&.{ 2, 2, 3 }, &.{
-        1, 2,  3,  4,  5,  6,
-        7, 8,  9,  10, 11, 12,
+        1, 2, 3, 4,  5,  6,
+        7, 8, 9, 10, 11, 12,
     }, true);
     const w = try graph.tensorNDWithData(&.{ 3, 2 }, &.{ 1, 0, 0, 1, 1, 1 }, true);
     const c = try graph.matmul(a, w);
@@ -818,7 +830,7 @@ test "BatchMatMul forward and backward" {
     defer graph.deinit();
 
     // Shape [2, 2, 2, 3]
-    const A = try graph.array(&.{2, 2, 2, 3}, &[_]f32{
+    const A = try graph.array(&.{ 2, 2, 2, 3 }, &[_]f32{
         // batch 0, head 0
         1, 2, 3,
         4, 5, 6,
@@ -834,7 +846,7 @@ test "BatchMatMul forward and backward" {
     }, true);
 
     // Shape [2, 2, 3, 2]
-    const B = try graph.array(&.{2, 2, 3, 2}, &[_]f32{
+    const B = try graph.array(&.{ 2, 2, 3, 2 }, &[_]f32{
         // batch 0, head 0
         1, 0,
         0, 1,
@@ -862,10 +874,10 @@ test "BatchMatMul forward and backward" {
     // [1, 2, 3]   [1, 0]   [4, 5]
     // [4, 5, 6] * [0, 1] = [10, 11]
     //             [1, 1]
-    try std.testing.expectApproxEqAbs(@as(f32, 4.0), C.get(&.{0, 0, 0, 0}), 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 5.0), C.get(&.{0, 0, 0, 1}), 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 10.0), C.get(&.{0, 0, 1, 0}), 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 11.0), C.get(&.{0, 0, 1, 1}), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), C.get(&.{ 0, 0, 0, 0 }), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), C.get(&.{ 0, 0, 0, 1 }), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), C.get(&.{ 0, 0, 1, 0 }), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 11.0), C.get(&.{ 0, 0, 1, 1 }), 1e-5);
 
     // Backward
     graph.zeroGrad();
@@ -890,7 +902,7 @@ test "GELU forward and backward" {
     var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
-    const A = try graph.tensorNDWithData(&.{2, 2}, &.{ -1.0, 0.0, 1.0, 2.0 }, true);
+    const A = try graph.tensorNDWithData(&.{ 2, 2 }, &.{ -1.0, 0.0, 1.0, 2.0 }, true);
     const C = try graph.gelu(A);
 
     try graph.forward();
@@ -918,7 +930,7 @@ test "Sigmoid forward and backward" {
     var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
 
-    const A = try graph.tensorNDWithData(&.{2, 2}, &.{ -1.0, 0.0, 1.0, 2.0 }, true);
+    const A = try graph.tensorNDWithData(&.{ 2, 2 }, &.{ -1.0, 0.0, 1.0, 2.0 }, true);
     const C = try graph.sigmoid(A);
 
     try graph.forward();
@@ -985,7 +997,7 @@ test "RoPE forward, graph replay, and autograd backward for interleaved and spli
             defer graph.deinit();
 
             const x = try graph.tensorNDWithData(&.{ 1, 2, 4 }, &.{
-                1.0, 2.0, 3.0, 4.0,
+                1.0, 2.0, 3.0,  4.0,
                 0.5, 1.5, -1.0, 2.5,
             }, true);
             const y = try graph.rope(x, 0, .{
@@ -1035,7 +1047,7 @@ test "RoPE forward, graph replay, and autograd backward for interleaved and spli
             defer graph.deinit();
 
             const x = try graph.tensorNDWithData(&.{ 1, 2, 4 }, &.{
-                1.0, 2.0, 3.0, 4.0,
+                1.0, 2.0, 3.0,  4.0,
                 0.5, 1.5, -1.0, 2.5,
             }, false);
             const y = try graph.rope(x, 1, .{
@@ -1051,8 +1063,8 @@ test "RoPE forward, graph replay, and autograd backward for interleaved and spli
 
             // 修改输入张量数值并执行静态图重演
             const new_input = [_]f32{
-                2.0, -1.0, 0.5, 3.0,
-                -2.0, 1.0, 4.0, -0.5,
+                2.0,  -1.0, 0.5, 3.0,
+                -2.0, 1.0,  4.0, -0.5,
             };
             @memcpy(x.data, &new_input);
             try graph.forward();

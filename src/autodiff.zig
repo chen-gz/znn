@@ -21,4 +21,3 @@ test {
     _ = @import("autodiff/tests.zig");
     _ = @import("autodiff/gradcheck_tests.zig");
 }
-

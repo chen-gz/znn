@@ -78,7 +78,7 @@ fn readF32(reader: *std.Io.Reader) !f32 {
 fn writeCheckpointHeader(writer: *std.Io.Writer, tag: OptimizerTypeTag, header: CheckpointHeader, param_count: usize) !void {
     try writer.writeAll(&OPTIMIZER_MAGIC);
     try writeU32(writer, OPTIMIZER_VERSION);
-    try writeU32(writer, @intFromEnum(tag));
+    try writeU32(writer, @backingInt(tag));
     try writeU64(writer, header.step);
     try writeF32(writer, header.lr);
     try writeU64(writer, @as(u64, param_count));
@@ -94,7 +94,7 @@ fn readCheckpointHeader(reader: *std.Io.Reader, tag: OptimizerTypeTag, param_cou
     if (version != OPTIMIZER_VERSION) return error.UnsupportedCheckpointVersion;
 
     const type_tag = try readU32(reader);
-    if (type_tag != @intFromEnum(tag)) return error.OptimizerTypeMismatch;
+    if (type_tag != @backingInt(tag)) return error.OptimizerTypeMismatch;
 
     const step = try readU64(reader);
     const lr = try readF32(reader);

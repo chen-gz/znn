@@ -152,8 +152,18 @@ pub fn conv1d(
     defer if (w != weight) w.deinit(allocator);
 
     try convIm2col(self, w.data, bias, .{
-        .N = N, .C_in = C_in, .H = 1, .W = L, .C_out = C_out, .KH = 1, .KW = K,
-        .stride = stride, .pad_h = 0, .pad_w = padding, .H_out = 1, .W_out = L_out,
+        .N = N,
+        .C_in = C_in,
+        .H = 1,
+        .W = L,
+        .C_out = C_out,
+        .KH = 1,
+        .KW = K,
+        .stride = stride,
+        .pad_h = 0,
+        .pad_w = padding,
+        .H_out = 1,
+        .W_out = L_out,
     }, out, allocator);
     return out;
 }
@@ -203,8 +213,18 @@ pub fn conv2d(
     defer if (w != weight) w.deinit(allocator);
 
     try convIm2col(self, w.data, bias, .{
-        .N = N, .C_in = C_in, .H = H, .W = W, .C_out = C_out, .KH = KH, .KW = KW,
-        .stride = stride, .pad_h = padding, .pad_w = padding, .H_out = H_out, .W_out = W_out,
+        .N = N,
+        .C_in = C_in,
+        .H = H,
+        .W = W,
+        .C_out = C_out,
+        .KH = KH,
+        .KW = KW,
+        .stride = stride,
+        .pad_h = padding,
+        .pad_w = padding,
+        .H_out = H_out,
+        .W_out = W_out,
     }, out, allocator);
     return out;
 }
@@ -321,8 +341,18 @@ pub fn convTranspose1d(
     defer if (w != weight) w.deinit(allocator);
 
     try convTransposeGemm(x.data, w.data, .{
-        .N = N, .C_in = C_in, .H = 1, .W = L_in, .C_out = C_out, .KH = 1, .KW = K,
-        .stride = stride, .pad_h = 0, .pad_w = padding, .H_out = 1, .W_out = L_out,
+        .N = N,
+        .C_in = C_in,
+        .H = 1,
+        .W = L_in,
+        .C_out = C_out,
+        .KH = 1,
+        .KW = K,
+        .stride = stride,
+        .pad_h = 0,
+        .pad_w = padding,
+        .H_out = 1,
+        .W_out = L_out,
     }, out, allocator);
     return out;
 }
@@ -376,8 +406,18 @@ pub fn convTranspose2d(
     defer if (w != weight) w.deinit(allocator);
 
     try convTransposeGemm(x.data, w.data, .{
-        .N = N, .C_in = C_in, .H = H_in, .W = W_in, .C_out = C_out, .KH = KH, .KW = KW,
-        .stride = stride, .pad_h = padding, .pad_w = padding, .H_out = H_out, .W_out = W_out,
+        .N = N,
+        .C_in = C_in,
+        .H = H_in,
+        .W = W_in,
+        .C_out = C_out,
+        .KH = KH,
+        .KW = KW,
+        .stride = stride,
+        .pad_h = padding,
+        .pad_w = padding,
+        .H_out = H_out,
+        .W_out = W_out,
     }, out, allocator);
     return out;
 }
@@ -714,5 +754,3 @@ pub fn adaptiveAvgPool2d(
     }
     return out;
 }
-
-

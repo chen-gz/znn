@@ -231,10 +231,7 @@ pub const DataLoader = struct {
         const input_dim = self.dataset.images.rows * self.dataset.images.cols;
         for (0..actual_batch_size) |j| {
             const idx = self.indices[self.current_index + j];
-            @memcpy(
-                x_dest[j * input_dim .. (j + 1) * input_dim],
-                self.dataset.images.data[idx * input_dim .. (idx + 1) * input_dim]
-            );
+            @memcpy(x_dest[j * input_dim .. (j + 1) * input_dim], self.dataset.images.data[idx * input_dim .. (idx + 1) * input_dim]);
             y_dest[j] = self.dataset.labels.data[idx];
         }
         self.current_index += actual_batch_size;
@@ -244,14 +241,14 @@ pub const DataLoader = struct {
 
 test "DataLoader basic functionality" {
     const allocator = std.testing.allocator;
-    
+
     // Create a mock dataset
     var images_data = try allocator.alloc(f32, 12 * 2);
     defer allocator.free(images_data);
     for (0..24) |i| {
         images_data[i] = @as(f32, @floatFromInt(i));
     }
-    
+
     var labels_data = try allocator.alloc(u8, 12);
     defer allocator.free(labels_data);
     for (0..12) |i| {
@@ -306,7 +303,7 @@ test "DataLoader basic functionality" {
     // Reset and try drop_last = true
     loader.drop_last = true;
     loader.reset();
-    
+
     // First batch: 5 items
     const b1_dl = loader.nextInto(x_buf, y_buf);
     try std.testing.expectEqual(@as(?usize, 5), b1_dl);
