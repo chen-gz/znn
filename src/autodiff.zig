@@ -19,5 +19,6 @@ pub const GraphOptions = graph.GraphOptions;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("autodiff/tests.zig");
+    _ = @import("autodiff/gradcheck_tests.zig");
 }
 
