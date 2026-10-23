@@ -849,3 +849,47 @@ test "Gemma4Q4 loader rejects an LM head quantization mode the hidden size canno
     var model = try M.loadFromMmapWithOptions(allocator, bytes, .{ .lm_head_mode = .q4, .warmup = false });
     model.deinit(allocator);
 }
+
+/// 按 ZNNVOC01 格式在内存中构建词表文件：magic + count + 字符串总字节数 + 偏移表 + 字符串数据
+fn buildVocabBytes(allocator: std.mem.Allocator, pieces: []const []const u8) ![]align(4) u8 {
+    var total: usize = 0;
+    for (pieces) |p| total += p.len;
+    const bytes = try allocator.alignedAlloc(u8, .@"4", 16 + pieces.len * 4 + total);
+    @memcpy(bytes[0..8], gemma4.Gemma4Vocabulary.MAGIC);
+    std.mem.writeInt(u32, bytes[8..12], @intCast(pieces.len), .little);
+    std.mem.writeInt(u32, bytes[12..16], @intCast(total), .little);
+    var off: usize = 0;
+    const str_start = 16 + pieces.len * 4;
+    for (pieces, 0..) |p, i| {
+        std.mem.writeInt(u32, bytes[16 + i * 4 ..][0..4], @intCast(off), .little);
+        @memcpy(bytes[str_start + off ..][0..p.len], p);
+        off += p.len;
+    }
+    return bytes;
+}
+
+test "Gemma4Vocabulary encode falls back to <0xNN> byte tokens instead of dropping bytes" {
+    const allocator = std.testing.allocator;
+    const pieces = [_][]const u8{ "<pad>", "a", " b", "<0x63>", "<0xE2>", "<0x82>", "<0xAC>" };
+    const bytes = try buildVocabBytes(allocator, &pieces);
+    defer allocator.free(bytes);
+    // 词表直接引用内存缓冲区 (非 mmap)，测试结束时不调用会执行 munmap 的 deinit
+    const vocab = try gemma4.Gemma4Vocabulary.loadFromMmap(bytes);
+
+    const ac = try vocab.encode(allocator, "ac");
+    defer allocator.free(ac);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 3 }, ac);
+
+    // 多字节 UTF-8 字符 '€' (E2 82 AC) 整体逐字节回退
+    const euro = try vocab.encode(allocator, "a€");
+    defer allocator.free(euro);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 4, 5, 6 }, euro);
+
+    const spaced = try vocab.encode(allocator, " b");
+    defer allocator.free(spaced);
+    try std.testing.expectEqualSlices(usize, &.{2}, spaced);
+
+    // 词表缺少字节词元 <0x64> ('d') 时返回错误而不是静默丢弃
+    try std.testing.expectError(error.UnencodableByte, vocab.encode(allocator, "ad"));
+    try std.testing.expectEqual(@as(usize, 3), try vocab.byteToken('c'));
+}
