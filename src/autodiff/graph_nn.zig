@@ -8,9 +8,17 @@ const OpContext = types.OpContext;
 const Op = types.Op;
 const Graph = @import("graph.zig").Graph;
 
+/// 交叉熵类损失要求 logits 为连续的二维张量 `[B, num_classes]` 且类别数非零 (三维 logits 需先 reshape 为 `[B * T, V]`)
+fn validateClassLogits(logits: *const Tensor) !void {
+    if (logits.shape.len != 2) return error.IncompatibleDimensions;
+    if (logits.shape.dims[1] == 0) return error.InvalidDimension;
+    if (!logits.isContiguous()) return error.NonContiguousTensor;
+}
+
 // 损失函数 Softmax + Cross Entropy 结合前向传播
 // 在 logits 的行维度计算 Softmax 概率分布，并与 targets 分类标签（支持 u8/u32/usize 等任意整型切片）计算交叉熵损失
 pub fn softmaxCrossEntropy(self: *Graph, logits: *Tensor, targets: anytype) !*Tensor {
+    try validateClassLogits(logits);
     const B = logits.shape.dims[0];
     const N = logits.shape.dims[1];
     if (targets.len != B) return error.ShapeMismatch;
@@ -47,6 +55,7 @@ pub fn softmaxCrossEntropy(self: *Graph, logits: *Tensor, targets: anytype) !*Te
 
 // 监督微调 (Supervised Fine-Tuning, SFT) 掩码交叉熵损失：仅对 mask[i] > 0 的位置计算交叉熵并支持自动微分 (Automatic Differentiation, Autograd) 反向传播
 pub fn maskedCrossEntropyLoss(self: *Graph, logits: *Tensor, targets: anytype, mask: []const f32) !*Tensor {
+    try validateClassLogits(logits);
     const B = logits.shape.dims[0];
     const N = logits.shape.dims[1];
     if (targets.len != B or mask.len != B) return error.ShapeMismatch;
