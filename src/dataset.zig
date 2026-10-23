@@ -322,6 +322,11 @@ test "DataLoader basic functionality" {
 pub const TokenId = u32;
 pub const MergePair = struct { a: TokenId, b: TokenId };
 
+/// 按 (a, b) 字典序比较两个 Pair，用于字节对编码 (Byte Pair Encoding, BPE) 训练时确定性地打破频次平局
+fn pairLessThan(lhs: MergePair, rhs: MergePair) bool {
+    return lhs.a < rhs.a or (lhs.a == rhs.a and lhs.b < rhs.b);
+}
+
 /// 一条合并规则：优先级 (rank 越小越先合并) 与合并结果的 Token ID
 pub const MergeRule = struct { rank: u32, id: TokenId };
 
@@ -503,13 +508,19 @@ pub const BPETokenizer = struct {
                 }
             }
 
+            // 频次最高者胜出；频次相同时取 (a, b) 字典序最小的 Pair，
+            // 使训练结果与哈希表迭代顺序无关，在不同运行与平台上完全确定
             var best_pair: ?MergePair = null;
             var max_freq: usize = 0;
             var it = pair_counts.iterator();
             while (it.next()) |entry| {
-                if (entry.value_ptr.* > max_freq) {
-                    max_freq = entry.value_ptr.*;
-                    best_pair = entry.key_ptr.*;
+                const freq = entry.value_ptr.*;
+                const candidate = entry.key_ptr.*;
+                const better = freq > max_freq or
+                    (freq == max_freq and best_pair != null and pairLessThan(candidate, best_pair.?));
+                if (better) {
+                    max_freq = freq;
+                    best_pair = candidate;
                 }
             }
 
@@ -626,6 +637,35 @@ test "BPETokenizer unsupervised training from corpus" {
     const decoded = try tokenizer.decode(allocator, encoded);
     defer allocator.free(decoded);
     try std.testing.expectEqualStrings(corpus, decoded);
+}
+
+test "BPETokenizer training breaks frequency ties by lexicographic pair order" {
+    const allocator = std.testing.allocator;
+    var tokenizer = try BPETokenizer.init(allocator);
+    defer tokenizer.deinit();
+
+    // 25 个相邻 Pair 都恰好出现 2 次：每一轮都是多方平局，胜者必须是 (a, b) 字典序最小者，
+    // 依次为 "as" (97, 115)、"bn" (98, 110)、"cv" (99, 118)、"df" (100, 102)
+    const keys = "qwertyuiopasdfghjklzxcvbnm";
+    const corpus = keys ++ " " ++ keys;
+    try tokenizer.train(allocator, corpus, 256 + 4);
+
+    const expected = [_][2][]const u8{ .{ "a", "s" }, .{ "b", "n" }, .{ "c", "v" }, .{ "d", "f" } };
+    try std.testing.expectEqual(expected.len, tokenizer.merges.count());
+    for (expected, 0..) |pair, rank| {
+        const key = MergePair{ .a = tokenizer.vocab.get(pair[0]).?, .b = tokenizer.vocab.get(pair[1]).? };
+        const rule = tokenizer.merges.get(key) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u32, @intCast(rank)), rule.rank);
+        try std.testing.expectEqual(@as(TokenId, @intCast(256 + rank)), rule.id);
+    }
+
+    // 再训练一次得到完全相同的词表
+    var again = try BPETokenizer.init(allocator);
+    defer again.deinit();
+    try again.train(allocator, corpus, 256 + 4);
+    for (tokenizer.inv_vocab.items, again.inv_vocab.items) |a, b| {
+        try std.testing.expectEqualStrings(a, b);
+    }
 }
 
 test "BPETokenizer edge cases empty and multibyte UTF8" {
