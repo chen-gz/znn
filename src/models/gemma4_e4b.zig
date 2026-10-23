@@ -17,6 +17,7 @@ pub const Stream = backend.offload.Stream;
 pub const GpuKvCache = backend.offload.GpuKvCache;
 const TokenExclusionMask = backend.offload.TokenExclusionMask;
 const Sampler = backend.sampling.Sampler;
+const SamplingOptions = backend.sampling.SamplingOptions;
 pub const TensorMeta = nn.TensorMeta;
 pub const SafetensorsArchive = nn.SafetensorsArchive;
 
@@ -810,10 +811,10 @@ pub const Gemma4E4BModel = struct {
     /// `compiled_gelu_mul` 静态闭包特化以及权重的首次 GPU 页表映射，使真实推理的首字延迟 (TTFT) 骤降 50% 以上
     pub fn warmup(self: *Gemma4E4BModel) !void {
         const dummy_prompt = [_]usize{ 2, 106 };
-        var first_arr = try self.prefillAsync(&dummy_prompt);
+        var first_arr = try self.prefillOnDevice(&dummy_prompt);
         defer first_arr.deinit();
 
-        var second_arr = try self.decodeStepAsync(first_arr);
+        var second_arr = try self.decodeOnDevice(first_arr);
         defer second_arr.deinit();
 
         _ = try second_arr.itemUint32();
@@ -1131,12 +1132,9 @@ pub const Gemma4E4BModel = struct {
         }
     }
 
-    /// 异步预填充阶段 (Async Prefill)：构建预填充计算图并返回 GPU 上的首词元 ID 张量 (`shape = [1], dtype = uint32`)。
-    /// 只做不带重复惩罚的贪婪采样 (排除掩码后 argmax)，供双阶段异步流水线使用；随机采样走同步的 `prefill`
-    pub fn prefillAsync(
-        self: *Gemma4E4BModel,
-        prompt_tokens: []const usize,
-    ) !mlx.Array {
+    /// 预填充并在设备端贪婪选取首词元：构建预填充计算图，叠加词表排除掩码后 argmax，异步派发并返回 GPU 上的
+    /// 词元 ID 张量 (`shape = [1], dtype = uint32`)，调用方可直接把它喂给 `decodeOnDevice` 而无需等待 GPU 完成
+    fn prefillOnDevice(self: *Gemma4E4BModel, prompt_tokens: []const usize) !mlx.Array {
         const T = prompt_tokens.len;
         if (T == 0) return error.EmptyPrompt;
         self.resetCache();
@@ -1148,19 +1146,15 @@ pub const Gemma4E4BModel = struct {
         var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, 0, T, s);
         defer logits_bf16.deinit();
 
-        // 叠加词表排除掩码后求 argmax：与重复惩罚路径排除同一组词元
         var best_tok_arr = try self.exclusion_mask.argmax(logits_bf16, s);
         best_tok_arr.asyncEval();
         self.curr_len = T;
         return best_tok_arr;
     }
 
-    /// 异步单步解码阶段 (Async Pipelined Decode Step)：直接消费上一步在 GPU 上的词元张量 (`shape = [1]`) 构建下一步计算图并异步派发至 Metal 流水线。
-    /// 与 `prefillAsync` 一样只做不带重复惩罚的贪婪采样；随机采样走同步的 `decodeStep`
-    pub fn decodeStepAsync(
-        self: *Gemma4E4BModel,
-        tok_arr: mlx.Array,
-    ) !mlx.Array {
+    /// 单步解码并在设备端贪婪选取下一个词元：直接消费上一步在 GPU 上的词元张量构建计算图并异步派发，
+    /// 使 CPU 构建第 t+1 步计算图与 GPU 执行第 t 步重叠
+    fn decodeOnDevice(self: *Gemma4E4BModel, tok_arr: mlx.Array) !mlx.Array {
         const s = self.stream;
         const pos = self.curr_len;
 
@@ -1173,20 +1167,8 @@ pub const Gemma4E4BModel = struct {
         return best_tok_arr;
     }
 
-    /// 预填充阶段 (Prefill)：处理 Prompt 词元并初始化 GPU KVCache，按 sampler 返回首个预测词元。
-    /// 不带重复惩罚的贪婪采样复用 `prefillAsync` 的设备端 argmax；其余情况 (带惩罚的贪婪采样、随机采样) 由
-    /// `gemma4_gpu.selectToken` 选取，重复惩罚作用于完整的 Prompt 词元
-    pub fn prefill(
-        self: *Gemma4E4BModel,
-        prompt_tokens: []const usize,
-        sampler: *Sampler,
-    ) !usize {
-        if (sampler.options.isPlainGreedy()) {
-            var best_tok_arr = try self.prefillAsync(prompt_tokens);
-            defer best_tok_arr.deinit();
-            return @intCast(try best_tok_arr.itemUint32());
-        }
-
+    /// 预填充并按 sampler 在主机端完成选取 (带重复惩罚的贪婪采样与随机采样)，重复惩罚作用于完整的 Prompt 词元
+    fn prefillSampled(self: *Gemma4E4BModel, prompt_tokens: []const usize, sampler: *Sampler) !usize {
         const T = prompt_tokens.len;
         if (T == 0) return error.EmptyPrompt;
         self.resetCache();
@@ -1203,24 +1185,13 @@ pub const Gemma4E4BModel = struct {
         return best_tok;
     }
 
-    /// 单步自回归解码 (Autoregressive Decode Step)：按 sampler 选取下一个词元，重复惩罚作用于完整的 history_tokens
-    pub fn decodeStep(
-        self: *Gemma4E4BModel,
-        tok: usize,
-        history_tokens: []const usize,
-        sampler: *Sampler,
-    ) !usize {
+    /// 单步解码并按 sampler 在主机端完成选取；`history_tokens` 为截至并包含 `tok` 的全部词元，重复惩罚作用于完整历史
+    fn decodeSampled(self: *Gemma4E4BModel, tok: usize, history_tokens: []const usize, sampler: *Sampler) !usize {
         const s = self.stream;
         const pos = self.curr_len;
 
         var indices_arr = try self.createTokenIndicesArray(&.{tok});
         defer indices_arr.deinit();
-
-        if (sampler.options.isPlainGreedy()) {
-            var best_tok_arr = try self.decodeStepAsync(indices_arr);
-            defer best_tok_arr.deinit();
-            return @intCast(try best_tok_arr.itemUint32());
-        }
 
         var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, pos, 1, s);
         defer logits_bf16.deinit();
@@ -1229,6 +1200,126 @@ pub const Gemma4E4BModel = struct {
         self.curr_len = pos + 1;
         return best_tok;
     }
+
+    /// 自回归生成选项 (遵循 AGENTS.md §4：所有字段均有默认值)
+    pub const GenerateOptions = struct {
+        /// 采样设置，默认采用 Gemma 4 官方生成配置
+        sampling: SamplingOptions = gemma4.default_generation,
+        /// 最多生成的词元数 (含首个词元)
+        max_new_tokens: usize = 256,
+        /// 生成到这些词元 (含) 即停止
+        stop_tokens: []const usize = &default_stop_tokens,
+
+        pub fn defaultOptions() GenerateOptions {
+            return .{};
+        }
+    };
+
+    const default_stop_tokens = [_]usize{ gemma4.Gemma4Vocabulary.EOS, gemma4.Gemma4Vocabulary.EOT };
+
+    /// 开始一次自回归生成：重置键值缓存并返回逐词元产出的 `Generation`。同一模型同一时刻只能进行一次生成
+    /// (共享键值缓存)；生成对象须在模型之前释放
+    pub fn generate(
+        self: *Gemma4E4BModel,
+        allocator: std.mem.Allocator,
+        prompt_tokens: []const usize,
+        options: GenerateOptions,
+    ) !Generation {
+        if (prompt_tokens.len == 0) return error.EmptyPrompt;
+        var history: std.ArrayList(usize) = .empty;
+        errdefer history.deinit(allocator);
+        try history.appendSlice(allocator, prompt_tokens);
+        return .{
+            .model = self,
+            .allocator = allocator,
+            .options = options,
+            .sampler = Sampler.init(options.sampling),
+            .history = history,
+            .prompt_len = prompt_tokens.len,
+        };
+    }
+
+    /// 自回归生成会话：`next` 逐个返回生成的词元，生成结束 (遇到停止词元或达到 `max_new_tokens`) 后返回 null。
+    /// 不带重复惩罚的贪婪采样自动启用双阶段 GPU 流水线 (在等待第 t 步结果前已派发第 t+1 步，与 mlx-lm `generate_step` 一致；
+    /// 因此遇到停止词元时会多算一步并丢弃)；其余采样设置逐步同步执行并在主机端完成选取
+    pub const Generation = struct {
+        model: *Gemma4E4BModel,
+        allocator: std.mem.Allocator,
+        options: GenerateOptions,
+        sampler: Sampler,
+        /// Prompt 与已生成词元
+        history: std.ArrayList(usize),
+        prompt_len: usize,
+        /// 流水线模式下已派发、尚未取回的下一个词元 (GPU 上的 `shape = [1]` 张量)
+        pending: ?mlx.Array = null,
+        started: bool = false,
+        finished: bool = false,
+
+        pub fn deinit(self: *Generation) void {
+            if (self.pending) |*p| p.deinit();
+            self.pending = null;
+            self.history.deinit(self.allocator);
+        }
+
+        /// 是否使用双阶段 GPU 流水线 (仅不带重复惩罚的贪婪采样)
+        pub fn isPipelined(self: *const Generation) bool {
+            return self.options.sampling.isPlainGreedy();
+        }
+
+        /// 已生成的词元 (不含 Prompt)
+        pub fn generated(self: *const Generation) []const usize {
+            return self.history.items[self.prompt_len..];
+        }
+
+        /// Prompt 与已生成的全部词元
+        pub fn tokens(self: *const Generation) []const usize {
+            return self.history.items;
+        }
+
+        /// 生成下一个词元；生成已结束时返回 null
+        pub fn next(self: *Generation) !?usize {
+            if (self.finished) return null;
+            if (self.options.max_new_tokens == 0) {
+                self.finished = true;
+                return null;
+            }
+            const model = self.model;
+
+            if (!self.isPipelined()) {
+                const tok = if (!self.started)
+                    try model.prefillSampled(self.history.items, &self.sampler)
+                else
+                    try model.decodeSampled(self.history.items[self.history.items.len - 1], self.history.items, &self.sampler);
+                self.started = true;
+                return try self.emit(tok);
+            }
+
+            if (!self.started) {
+                self.pending = try model.prefillOnDevice(self.history.items);
+                self.started = true;
+            }
+            var current = self.pending.?;
+            self.pending = null;
+            defer current.deinit();
+            // 取回第 t 步结果前先派发第 t+1 步
+            if (self.generated().len + 1 < self.options.max_new_tokens) {
+                self.pending = try model.decodeOnDevice(current);
+            }
+            const tok: usize = @intCast(try current.itemUint32());
+            return try self.emit(tok);
+        }
+
+        fn emit(self: *Generation, tok: usize) !usize {
+            try self.history.append(self.allocator, tok);
+            const stop = std.mem.indexOfScalar(usize, self.options.stop_tokens, tok) != null;
+            if (stop or self.generated().len >= self.options.max_new_tokens) {
+                self.finished = true;
+                if (self.pending) |*p| p.deinit();
+                self.pending = null;
+            }
+            return tok;
+        }
+    };
 
     fn forwardLayer(
         self: *Gemma4E4BModel,

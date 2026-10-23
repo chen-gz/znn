@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Gemma 4 E4B 统一生成入口 (`src/models/gemma4_e4b.zig`, `examples/gemma4_e4b.zig`, `plan/TODO.md`)**:
+  - 删除对外并存的 `prefillAsync` / `decodeStepAsync` 与 `prefill` / `decodeStep` 两套接口，改为唯一入口 `Gemma4E4BModel.generate(allocator, prompt_tokens, GenerateOptions)` 返回的 `Generation` 会话：`next()` 逐个产出词元，到达停止词元或 `max_new_tokens` 后返回 null；不带重复惩罚的贪婪采样在内部自动启用双阶段 GPU 流水线，其余采样设置逐步同步执行，调用方无需区分。`GenerateOptions` 含 `sampling`（默认官方生成配置）、`max_new_tokens` 与 `stop_tokens`（默认 `<eos>` / `<turn|>`）。
+
 - **Gemma 4 随机采样：温度、前 K 截断、核采样与可复现种子 (`src/backend/sampling.zig`, `src/backend/mlx.zig`, `src/backend/offload.zig`, `src/models/gemma4*.zig`, `examples/gemma4*.zig`)**:
   - **统一采样定义**：`backend.sampling` 新增 `SamplingOptions`（温度 (Temperature)、前 K 截断 (Top-K)、核采样 (Nucleus Sampling, Top-P)、重复惩罚、随机种子，全部带默认值，`temperature <= 0` 或 `top_k == 1` 为贪婪解码）与持有伪随机数生成器的 `Sampler`，同一种子可复现生成序列；处理顺序与 Hugging Face 一致：最终对数几率截断 → 重复惩罚 → 排除词元 → 温度 → Top-K → Top-P → 抽样。
   - **高效候选选择与共享终结步骤**：`selectTopK` 分块有界堆部分选择（O(V log k)，结果与线程数无关），`logSumExpScaled` 提供全词表归一化常数；CPU 与 GPU 共用 `buildDistribution` / `Distribution` 终结步骤，相同候选集与种子得到相同词元。
