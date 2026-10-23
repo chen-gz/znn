@@ -1,9 +1,9 @@
 # Zig ML (`znn`)
 
-[![Zig](https://img.shields.io/badge/Zig-0.16.0-orange.svg)](https://ziglang.org/)
+[![Zig](https://img.shields.io/badge/Zig-0.17.0-orange.svg)](https://ziglang.org/)
 [![Changelog](https://img.shields.io/badge/docs-CHANGELOG.md-brightgreen.svg)](CHANGELOG.md)
 
-`znn` is a modular deep learning and LLM library written from scratch in pure **Zig 0.16.0**, with no runtime dependencies. The current version is recorded in [`build.zig.zon`](build.zig.zon); release notes are in [`CHANGELOG.md`](CHANGELOG.md).
+`znn` is a modular deep learning and LLM library written from scratch in pure **Zig 0.17.0**, with no runtime dependencies. The current version is recorded in [`build.zig.zon`](build.zig.zon); release notes are in [`CHANGELOG.md`](CHANGELOG.md).
 
 - **Tensors (`src/tensor/`)**: N-dimensional strided tensors, NumPy-style broadcasting, generic dtypes (`f32`, `f64`, `bf16`, `i32`, `i64`, `usize`, `bool`), zero-copy slices, unified operator option structs (`ConvOptions`, `PoolOptions`, `RopeOptions`), 1D/2D convolution and pooling kernels (`src/tensor/conv_pool.zig`), linear algebra decompositions (`qr`, `symeig`, `svd` in `src/tensor/linalg.zig`), and a compile-time shaped `StaticTensor` (`src/tensor/static.zig`).
 - **Autodiff (`src/autodiff/`)**: dynamic reverse-mode graph with operator-level topological sorting, arena-allocated activations and gradients, single-source forward kernels, `initNoGrad` inference mode, and module scopes used by the model graph export.
