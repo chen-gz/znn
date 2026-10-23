@@ -3,75 +3,64 @@ const tensor_mod = @import("../tensor.zig");
 const Tensor = tensor_mod.Tensor;
 const Op = @import("types.zig").Op;
 
-pub fn reduceSumMeanBackward(A: *Tensor, C: *Tensor, axis: ?usize, keepdims: bool, scale: f32) void {
+/// 求和 / 均值归约 (Sum / Mean Reduction) 的反向传播：dA[x] += scale * dC[c(x)]。
+/// 输出梯度 dC (连续存储) 以广播跨度映射回 A 的形状：被归约维度跨度为 0 (全局归约时全部为 0)，
+/// 其余维度沿用 dC 的连续跨度 (keepdims 只多出一个大小为 1 的维度，不改变这些跨度)。
+/// 随后用张量层的逐行跨步遍历器 (`shape.RowIter`，内部先做维度折叠 `coalesceDims`) 同时遍历
+/// A 的梯度 (可以是任意跨步视图) 与 dC，最内层是一维循环，不再逐元素计算多维平铺下标。
+/// 每个元素的梯度互不依赖，因此遍历前先把维度按 A 的跨度从大到小重排，使最内层沿 A 的内存连续方向
+/// (例如转置视图按存储顺序而不是逻辑行顺序写入梯度)。
+pub fn reduceSumMeanBackward(A: *Tensor, C: *Tensor, axis: ?usize, scale: f32) void {
     if (!A.requires_grad) return;
+
+    var reduced = A.shape;
     if (axis) |ax| {
-        const reduce_size = A.shape.dims[ax];
-        var outer_size: usize = 1;
-        for (0..ax) |d| outer_size *= A.shape.dims[d];
-        var inner_size: usize = 1;
-        for ((ax + 1)..A.shape.len) |d| inner_size *= A.shape.dims[d];
-
-        if (A.isContiguous()) {
-            for (0..outer_size) |outer| {
-                const out_base = outer * inner_size;
-                const src_base = outer * reduce_size * inner_size;
-                for (0..inner_size) |inner| {
-                    const g = C.grad[out_base + inner] * scale;
-                    for (0..reduce_size) |k| {
-                        A.grad[src_base + k * inner_size + inner] += g;
-                    }
-                }
-            }
-        } else {
-            const out_rank = C.shape.len;
-            var out_indices: [8]usize = @splat(0);
-            for (0..C.grad.len) |out_idx| {
-                var tmp = out_idx;
-                var d: usize = out_rank;
-                while (d > 0) {
-                    d -= 1;
-                    out_indices[d] = tmp % C.shape.dims[d];
-                    tmp /= C.shape.dims[d];
-                }
-
-                var src_indices: [8]usize = @splat(0);
-                if (keepdims) {
-                    for (0..A.shape.len) |idx_d| {
-                        src_indices[idx_d] = out_indices[idx_d];
-                    }
-                } else {
-                    var src_d: usize = 0;
-                    for (0..A.shape.len) |idx_d| {
-                        if (idx_d == ax) continue;
-                        src_indices[idx_d] = out_indices[src_d];
-                        src_d += 1;
-                    }
-                }
-
-                const g = C.grad[out_idx] * scale;
-                for (0..reduce_size) |k| {
-                    src_indices[ax] = k;
-                    A.grad[A.getFlatIndex(src_indices[0..A.shape.len])] += g;
-                }
-            }
-        }
+        reduced.dims[ax] = 1;
     } else {
-        const g = C.grad[0] * scale;
-        const elem_count = A.shape.numel();
-        if (A.isContiguous() and A.grad.len >= elem_count) {
-            for (A.grad[0..elem_count]) |*ag| {
-                ag.* += g;
+        @memset(reduced.dims[0..reduced.len], 1);
+    }
+    var c_strides = tensor_mod.computeContiguousStrides(reduced);
+    if (axis) |ax| {
+        c_strides.dims[ax] = 0;
+    } else {
+        @memset(c_strides.dims[0..c_strides.len], 0);
+    }
+
+    // 按 A 的跨度从大到小稳定排序维度 (至多 8 维，插入排序)
+    var order: [8]usize = undefined;
+    for (order[0..A.shape.len], 0..) |*o, d| o.* = d;
+    for (1..A.shape.len) |i| {
+        var j = i;
+        while (j > 0 and A.strides.dims[order[j - 1]] < A.strides.dims[order[j]]) : (j -= 1) {
+            std.mem.swap(usize, &order[j - 1], &order[j]);
+        }
+    }
+    var shape = A.shape;
+    var a_strides = A.strides;
+    var c_perm = c_strides;
+    for (order[0..A.shape.len], 0..) |src, d| {
+        shape.dims[d] = A.shape.dims[src];
+        a_strides.dims[d] = A.strides.dims[src];
+        c_perm.dims[d] = c_strides.dims[src];
+    }
+
+    var it = tensor_mod.shape.RowIter(2).init(shape, .{ a_strides, c_perm });
+    const inner = it.inner;
+    const sa = it.inner_strides[0];
+    const sc = it.inner_strides[1];
+    while (it.next()) |offs| {
+        if (sc == 0) {
+            // 整行对应同一个输出梯度 (沿最内层归约)
+            const g = C.grad[offs[1]] * scale;
+            if (sa == 1) {
+                for (A.grad[offs[0]..][0..inner]) |*ag| ag.* += g;
+            } else {
+                for (0..inner) |i| A.grad[offs[0] + i * sa] += g;
             }
+        } else if (sa == 1 and sc == 1) {
+            for (A.grad[offs[0]..][0..inner], C.grad[offs[1]..][0..inner]) |*ag, cg| ag.* += cg * scale;
         } else {
-            var coord: [8]usize = @splat(0);
-            const len = A.shape.len;
-            for (0..elem_count) |_| {
-                var src_idx: usize = 0;
-                for (0..len) |d| src_idx += coord[d] * A.strides.dims[d];
-                A.grad[src_idx] += g;
-                A.shape.incrementCoord(&coord);
-            }
+            for (0..inner) |i| A.grad[offs[0] + i * sa] += C.grad[offs[1] + i * sc] * scale;
         }
     }
 }
@@ -185,13 +174,13 @@ pub fn backwardMath(self: *Op) !void {
         },
         .Sum => {
             const ctx = self.context.Sum;
-            reduceSumMeanBackward(self.inputs[0], self.outputs[0], ctx.axis, ctx.keepdims, 1.0);
+            reduceSumMeanBackward(self.inputs[0], self.outputs[0], ctx.axis, 1.0);
         },
         .Mean => {
             const A = self.inputs[0];
             const ctx = self.context.Mean;
             const count = if (ctx.axis) |ax| @as(f32, @floatFromInt(A.shape.dims[ax])) else @as(f32, @floatFromInt(A.shape.numel()));
-            reduceSumMeanBackward(A, self.outputs[0], ctx.axis, ctx.keepdims, 1.0 / count);
+            reduceSumMeanBackward(A, self.outputs[0], ctx.axis, 1.0 / count);
         },
         .Where => {
             const X = self.inputs[0];
