@@ -143,7 +143,7 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             }
             loss.data[0] = if (N > 0) -(total_obj / @as(f32, @floatFromInt(N))) else 0.0;
         },
-        .BceWithLogitsLoss, .SigmoidCrossEntropy => {
+        .BceWithLogitsLoss => {
             copyFromEager(self.outputs[0], try self.inputs[0].bceWithLogitsLoss(self.inputs[1], allocator), allocator);
         },
         .BceLoss => {
@@ -191,7 +191,7 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         .SubScalar => {
             copyFromEager(self.outputs[0], try self.inputs[0].subScalar(self.context.SubScalar.val, allocator), allocator);
         },
-        .Add, .AddBias => {
+        .Add => {
             copyFromEager(self.outputs[0], try self.inputs[0].add(self.inputs[1], allocator), allocator);
         },
         .Sub => {
@@ -432,7 +432,6 @@ pub fn backward(self: *Op) !void {
         .DpoLoss,
         .GrpoLoss,
         .BceWithLogitsLoss,
-        .SigmoidCrossEntropy,
         .BceLoss,
         .Reshape,
         .Transpose,
@@ -445,7 +444,6 @@ pub fn backward(self: *Op) !void {
         .AddScalar,
         .SubScalar,
         .Add,
-        .AddBias,
         .Sub,
         .Mul,
         .Div,

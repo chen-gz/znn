@@ -364,7 +364,7 @@ pub fn backwardCore(self: *Op) !void {
                 }
             }
         },
-        .BceWithLogitsLoss, .SigmoidCrossEntropy => {
+        .BceWithLogitsLoss => {
             const logits = self.inputs[0];
             const targets = self.inputs[1];
             const loss = self.outputs[0];
@@ -608,7 +608,7 @@ pub fn backwardCore(self: *Op) !void {
                 }
             }
         },
-        .Add, .AddBias => {
+        .Add => {
             const A = self.inputs[0];
             const B = self.inputs[1];
             const C = self.outputs[0];
