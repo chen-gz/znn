@@ -103,10 +103,13 @@ pub const LoRALinear = struct {
         }
     }
 
-    /// 前向传播：Y = X * W_0 + (X * A) * B * scaling (+ bias)
-    pub fn forward(self: *const LoRALinear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+    /// 前向传播：Y = X * W_0 + (X * A) * B * scaling (+ bias)；与 `Linear` 一样支持任意秩输入 [..., in_features]
+    pub fn forward(self: *const LoRALinear, graph: *autodiff.Graph, x_in: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
+        const rows = try core.RowView.init(graph, x_in, self.in_features);
+        const x = rows.matrix;
+
         // 1. 冻结主干前向：x * W_0
         const base_out = try graph.matmul(x, self.weight);
 
@@ -120,9 +123,9 @@ pub const LoRALinear = struct {
         const scaled_lora = try graph.mulScalar(lora_xab, self.scaling);
 
         // 累加主干与旁路：base_out + scaled_lora
-        const out = try graph.add(base_out, scaled_lora);
-        if (self.bias) |b| return try graph.addBias(out, b);
-        return out;
+        const sum = try graph.add(base_out, scaled_lora);
+        const out = if (self.bias) |b| try graph.addBias(sum, b) else sum;
+        return rows.restore(graph, out, self.out_features);
     }
 
     /// 零推理延迟融合：将低秩自适应 (Low-Rank Adaptation, LoRA) 旁路权重融合至主干 W_0 = W_0 + scaling * (A * B)

@@ -71,41 +71,38 @@ pub const Linear = struct {
     /// 模块标准数学变换公式
     pub const formula = "y = x W^T + b";
 
+    /// 支持任意秩输入 [..., in_features]：二维输入直接做矩阵乘法，其余秩先展平为 [N, in_features] 再恢复输出形状
     pub fn forward(self: *const Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        if (x.shape.len == 2) {
-            const z = try graph.matmul(x, self.weight);
-            return try graph.addBias(z, self.bias);
-        } else if (x.shape.len > 2) {
-            const in_features = self.weight.shape.dims[0];
-            const out_features = self.weight.shape.dims[1];
-            if (x.shape.dims[x.shape.len - 1] != in_features) return error.ShapeMismatch;
-            const N = x.shape.numel() / in_features;
+        const rows = try RowView.init(graph, x, self.weight.shape.dims[0]);
+        const z = try graph.matmul(rows.matrix, self.weight);
+        const y = try graph.addBias(z, self.bias);
+        return rows.restore(graph, y, self.weight.shape.dims[1]);
+    }
+};
 
-            const x_flat = try graph.reshape(x, &.{ N, in_features });
-            const z_flat = try graph.matmul(x_flat, self.weight);
-            const out_flat = try graph.addBias(z_flat, self.bias);
+/// 线性变换的行视图：把任意秩输入 [..., in_features] 看作 [N, in_features] 矩阵，
+/// 变换后按原前导维度恢复为 [..., out_features]。二维输入原样使用，不插入额外的重塑 (Reshape) 算子。
+pub const RowView = struct {
+    matrix: *Tensor,
+    input_shape: Shape,
 
-            var out_dims: [8]usize = @splat(0);
-            for (0..x.shape.len - 1) |i| {
-                out_dims[i] = x.shape.dims[i];
-            }
-            out_dims[x.shape.len - 1] = out_features;
-            return try graph.reshape(out_flat, out_dims[0..x.shape.len]);
-        } else if (x.shape.len == 1) {
-            const in_features = self.weight.shape.dims[0];
-            const out_features = self.weight.shape.dims[1];
-            if (x.shape.dims[0] != in_features) return error.ShapeMismatch;
+    pub fn init(graph: *autodiff.Graph, x: *Tensor, in_features: usize) !RowView {
+        if (x.shape.len == 0) return error.IncompatibleDimensions;
+        if (x.shape.len == 2) return .{ .matrix = x, .input_shape = x.shape };
+        if (x.shape.dims[x.shape.len - 1] != in_features) return error.ShapeMismatch;
+        const n = x.shape.numel() / in_features;
+        return .{ .matrix = try graph.reshape(x, &.{ n, in_features }), .input_shape = x.shape };
+    }
 
-            const x_flat = try graph.reshape(x, &.{ 1, in_features });
-            const z_flat = try graph.matmul(x_flat, self.weight);
-            const out_flat = try graph.addBias(z_flat, self.bias);
-            return try graph.reshape(out_flat, &.{out_features});
-        } else {
-            return error.IncompatibleDimensions;
-        }
+    /// 将二维结果 [N, out_features] 恢复为 [..., out_features]
+    pub fn restore(self: RowView, graph: *autodiff.Graph, y: *Tensor, out_features: usize) !*Tensor {
+        if (self.input_shape.len == 2) return y;
+        var out_dims = self.input_shape.dims;
+        out_dims[self.input_shape.len - 1] = out_features;
+        return graph.reshape(y, out_dims[0..self.input_shape.len]);
     }
 };
 
