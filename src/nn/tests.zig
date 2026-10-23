@@ -1928,3 +1928,89 @@ test "KVCache and MLACache init release partial allocations on failure" {
         try std.testing.expectError(error.OutOfMemory, MLACache.init(failing_mla.allocator(), 1, 4, 4, 2));
     }
 }
+
+/// 写入一个 Safetensors 文件：8 字节小端序头部长度 (可人为指定以构造损坏文件)、JSON 头部与载荷
+fn writeRawSafetensors(path: []const u8, header_len: u64, header: []const u8, payload: []const u8) !void {
+    var file = try std.Io.Dir.cwd().createFile(std.testing.io, path, .{});
+    defer file.close(std.testing.io);
+    var buf: [1024]u8 = undefined;
+    var file_writer = file.writer(std.testing.io, &buf);
+    const writer = &file_writer.interface;
+    try writer.writeAll(std.mem.asBytes(&header_len));
+    try writer.writeAll(header);
+    try writer.writeAll(payload);
+    try writer.flush();
+}
+
+fn expectArchiveError(expected: anyerror, header_len: ?u64, header: []const u8, payload: []const u8) !void {
+    const path = "test_archive_validation.safetensors";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    try writeRawSafetensors(path, header_len orelse header.len, header, payload);
+    try std.testing.expectError(expected, serialization.SafetensorsArchive.openSingleFile(std.testing.allocator, std.testing.io, path));
+}
+
+test "SafetensorsArchive rejects malformed headers without panics or leaks" {
+    const zeros4 = "\x00\x00\x00\x00";
+    // 头部长度溢出
+    try expectArchiveError(error.InvalidSafetensorsHeader, std.math.maxInt(u64), "{}", "");
+    // 浮点偏移量、负偏移量、start > end、越过载荷末尾
+    try expectArchiveError(error.InvalidSafetensorsHeader, null, "{\"w\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0.0,4.0]}}", zeros4);
+    try expectArchiveError(error.InvalidSafetensorsHeader, null, "{\"w\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[-4,0]}}", zeros4);
+    try expectArchiveError(error.InvalidSafetensorsHeader, null, "{\"w\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[4,0]}}", zeros4);
+    try expectArchiveError(error.InvalidSafetensorsHeader, null, "{\"w\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}", zeros4);
+    // 第二个条目形状为负数：前一个条目已登记的键必须被释放
+    try expectArchiveError(error.InvalidSafetensorsHeader, null, "{\"a\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]},\"w\":{\"dtype\":\"F32\",\"shape\":[-1],\"data_offsets\":[0,4]}}", zeros4);
+    // 字节数与 形状 * 元素宽度 不一致
+    try expectArchiveError(error.InvalidSafetensorsHeader, null, "{\"w\":{\"dtype\":\"BF16\",\"shape\":[1],\"data_offsets\":[0,4]}}", zeros4);
+}
+
+test "SafetensorsArchive records integer dtypes and skips unknown dtypes" {
+    const path = "test_archive_dtypes.safetensors";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    const header = "{\"__metadata__\":{\"format\":\"pt\"},\"ids\":{\"dtype\":\"I64\",\"shape\":[1],\"data_offsets\":[0,8]},\"f8\":{\"dtype\":\"F8_E4M3\",\"shape\":[2],\"data_offsets\":[8,10]}}";
+    try writeRawSafetensors(path, header.len, header, "\x07\x00\x00\x00\x00\x00\x00\x00\x01\x02");
+    var archive = try serialization.SafetensorsArchive.openSingleFile(std.testing.allocator, std.testing.io, path);
+    defer archive.deinit();
+    const meta = archive.getTensorMeta("ids").?;
+    try std.testing.expectEqual(backend_dtype.int64, meta.dtype);
+    try std.testing.expectEqual(@as(usize, 8), archive.getTensorBytes("ids").?.len);
+    try std.testing.expect(archive.getTensorMeta("f8") == null);
+}
+
+const backend_dtype = @import("../backend.zig").mlx.DType;
+
+test "SafetensorsArchive rejects tensors duplicated across shards and frees the first shard index" {
+    const dir = "test_archive_shards";
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(std.testing.io, dir);
+    defer cwd.deleteTree(std.testing.io, dir) catch {};
+    const header = "{\"w\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}";
+    try writeRawSafetensors(dir ++ "/model-00001-of-00002.safetensors", header.len, header, "\x00\x00\x80\x3f");
+    try writeRawSafetensors(dir ++ "/model-00002-of-00002.safetensors", header.len, header, "\x00\x00\x80\x3f");
+    try std.testing.expectError(error.DuplicateTensorName, serialization.SafetensorsArchive.open(std.testing.allocator, std.testing.io, dir));
+
+    // 第二个分片头部损坏
+    try writeRawSafetensors(dir ++ "/model-00002-of-00002.safetensors", 100, "", "");
+    try std.testing.expectError(error.InvalidSafetensorsHeader, serialization.SafetensorsArchive.open(std.testing.allocator, std.testing.io, dir));
+}
+
+test "loadModel reads half-precision tensors at unaligned offsets" {
+    const path = "test_unaligned_bf16.safetensors";
+    defer std.Io.Dir.cwd().deleteFile(std.testing.io, path) catch {};
+    // 两个 BF16 数值 1.0 与 2.0 位于奇数偏移 1..5
+    const header = "{\"weight\":{\"dtype\":\"BF16\",\"shape\":[2],\"data_offsets\":[1,5]}}";
+    try writeRawSafetensors(path, header.len, header, "\x00\x80\x3f\x00\x40");
+
+    const W = struct { weight: *Tensor };
+    const t = try createPersistentTensor(std.testing.allocator, 1, 2, false);
+    defer freePersistentTensor(std.testing.allocator, t);
+    t.shape = Shape.init(&.{2});
+    t.strides = tensor.computeContiguousStrides(t.shape);
+    var m = W{ .weight = t };
+    try loadModel(&m, std.testing.io, path, std.testing.allocator);
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, 2.0 }, t.data);
+
+    // 头部长度超过上限时直接报错，而不是尝试分配
+    try writeRawSafetensors(path, std.math.maxInt(u64), "", "");
+    try std.testing.expectError(error.InvalidSafetensorsHeader, loadModel(&m, std.testing.io, path, std.testing.allocator));
+}
