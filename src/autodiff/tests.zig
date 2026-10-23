@@ -1577,3 +1577,32 @@ test "softmaxCrossEntropy uses log-sum-exp for confidently wrong predictions" {
     const logits3 = try graph.zeros(&.{ 1, 2, 3 }, true);
     try std.testing.expectError(error.IncompatibleDimensions, graph.softmaxCrossEntropy(logits3, &[_]u8{0}));
 }
+
+test "Graph.q4MatMul frozen backbone trains the head above it" {
+    const allocator = std.testing.allocator;
+    const quant = tensor.quant;
+    const in_f = 32;
+    const out_f = 8;
+    const raw_w = try allocator.alloc(f32, in_f * out_f);
+    defer allocator.free(raw_w);
+    for (raw_w, 0..) |*w, i| w.* = @sin(@as(f32, @floatFromInt(i)) * 0.29);
+    const blocks = try allocator.alloc(quant.Q4Block, (in_f * out_f) / quant.Q4Block.QK);
+    defer allocator.free(blocks);
+    quant.quantizeSlice(blocks, raw_w);
+
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+    const x = try graph.zeros(&.{ 2, in_f }, false);
+    for (x.data, 0..) |*v, i| v.* = @cos(@as(f32, @floatFromInt(i)));
+    const h = try graph.q4MatMul(x, blocks, in_f, out_f);
+    try std.testing.expect(!h.requires_grad);
+    const w_head = try graph.zeros(&.{ out_f, 3 }, true);
+    @memset(w_head.data, 0.1);
+    const logits = try graph.matmul(h, w_head);
+    const loss = try graph.softmaxCrossEntropy(logits, &[_]u8{ 0, 2 });
+    try graph.backward(loss);
+
+    var grad_norm: f32 = 0.0;
+    for (w_head.grad) |g| grad_norm += @abs(g);
+    try std.testing.expect(grad_norm > 1e-4);
+}

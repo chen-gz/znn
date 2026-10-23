@@ -219,6 +219,21 @@ test "gradcheck: matmul with transposed view operands" {
     }, &.{ .{ .shape = &.{ 2, 3 } }, .{ .shape = &.{ 4, 3 } } }, .{});
 }
 
+test "gradcheck: q4MatMul input gradient through frozen quantized weights" {
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            const quant = tensor.quant;
+            const in_f = 64;
+            const out_f = 3;
+            const raw = try g.arenaAllocator().alloc(f32, in_f * out_f);
+            for (raw, 0..) |*w, i| w.* = @sin(@as(f32, @floatFromInt(i)) * 0.37);
+            const blocks = try g.arenaAllocator().alloc(quant.Q4Block, raw.len / quant.Q4Block.QK);
+            quant.quantizeSlice(blocks, raw);
+            return g.q4MatMul(t[0], blocks, in_f, out_f);
+        }
+    }, &.{.{ .shape = &.{ 2, 64 } }}, .{});
+}
+
 test "gradcheck: batchMatMul with transpose" {
     try expectGradientsMatch(struct {
         fn build(g: *Graph, t: []const *Tensor) !*Tensor {

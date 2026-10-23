@@ -473,6 +473,7 @@ pub fn backward(self: *Op) !void {
         .Embedding,
         .TopK,
         .GatherMatMul,
+        .Q4MatMul,
         => try backward_nn.backwardNN(self),
 
         .L2Loss,
@@ -487,7 +488,5 @@ pub fn backward(self: *Op) !void {
         .MaskedFill,
         .Slice,
         => try backward_math.backwardMath(self),
-
-        .Q4MatMul => return error.UnsupportedBackward,
     }
 }
