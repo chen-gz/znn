@@ -179,26 +179,61 @@ fn walkElement(item_ptr: anytype, visitor: anytype, path: *Path) !void {
 
 /// 释放模型持有的全部张量 (参数与缓冲区) 及可变切片字段（去重避免权重共享时 Double Free）
 pub fn deinitModel(model: anytype, allocator: std.mem.Allocator) void {
-    const Visitor = struct {
-        allocator: std.mem.Allocator,
-        seen: std.AutoHashMap(*Tensor, void),
+    const Model = @TypeOf(model);
+
+    // 统计遍历顺序中位于 `limit` 之前、指针等于 `target` 的张量；只比较指针，不解引用 (张量可能已释放)
+    const EarlierScan = struct {
+        target: *Tensor,
+        limit: usize,
+        index: usize = 0,
+        found: bool = false,
 
         pub fn visitTensor(self: *@This(), _: []const u8, t: *Tensor) !void {
-            // 无法登记去重信息时宁可泄漏该张量，也不冒权重共享导致重复释放 (Double Free) 的风险
-            const gop = self.seen.getOrPut(t) catch return;
-            if (gop.found_existing) return;
+            if (self.index < self.limit and t == self.target) self.found = true;
+            self.index += 1;
+        }
+    };
+
+    // 第一遍：释放全部张量。优先用哈希集合去重；集合无法扩容 (内存不足) 时退化为按遍历顺序回扫，
+    // 保证权重共享时既不重复释放 (Double Free) 也不泄漏
+    const TensorPass = struct {
+        allocator: std.mem.Allocator,
+        model: Model,
+        seen: std.AutoHashMap(*Tensor, void),
+        index: usize = 0,
+
+        pub fn visitTensor(self: *@This(), _: []const u8, t: *Tensor) !void {
+            const position = self.index;
+            self.index += 1;
+            if (self.seen.getOrPut(t)) |gop| {
+                if (gop.found_existing) return;
+            } else |_| {
+                var scan = EarlierScan{ .target = t, .limit = position };
+                walk(self.model, &scan) catch |err| switch (err) {};
+                if (scan.found) return;
+            }
             freePersistentTensor(self.allocator, t);
         }
+    };
+    var tensor_pass = TensorPass{
+        .allocator = allocator,
+        .model = model,
+        .seen = std.AutoHashMap(*Tensor, void).init(allocator),
+    };
+    defer tensor_pass.seen.deinit();
+    walk(model, &tensor_pass) catch |err| switch (err) {};
+
+    // 第二遍：张量全部释放后再释放可变切片字段，回扫阶段读取的切片因此始终有效
+    const SlicePass = struct {
+        allocator: std.mem.Allocator,
+
+        pub fn visitTensor(_: *@This(), _: []const u8, _: *Tensor) !void {}
         pub fn visitOwnedSlice(self: *@This(), s: anytype) !void {
             self.allocator.free(s);
         }
     };
-    var v = Visitor{
-        .allocator = allocator,
-        .seen = std.AutoHashMap(*Tensor, void).init(allocator),
-    };
-    defer v.seen.deinit();
-    walk(model, &v) catch |err| switch (err) {};
+    var slice_pass = SlicePass{ .allocator = allocator };
+    walk(model, &slice_pass) catch |err| switch (err) {};
 }
 
 /// 将模型内全部张量的梯度清零 (等价于 PyTorch `module.zero_grad()`)

@@ -137,3 +137,22 @@ test "deinitModel handles tied weights without double free" {
     // deinitModel should free fc1.weight, fc1.bias, and bias2, without double-freeing fc1.weight
     nn.deinitModel(&model, allocator);
 }
+
+test "deinitModel frees tied weights exactly once when the dedup set cannot allocate" {
+    const allocator = std.testing.allocator;
+
+    const TiedModel = struct {
+        layers: []nn.Linear,
+        head_weight: *Tensor,
+    };
+
+    const layers = try allocator.alloc(nn.Linear, 2);
+    layers[0] = try nn.Linear.init(allocator, 4, 4);
+    layers[1] = try nn.Linear.init(allocator, 4, 4);
+    var model = TiedModel{ .layers = layers, .head_weight = layers[0].weight };
+
+    // 去重哈希集合的每次分配都失败，释放仍转发给 testing allocator：既不能泄漏也不能重复释放
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    nn.deinitModel(&model, failing.allocator());
+    try std.testing.expect(failing.has_induced_failure);
+}
