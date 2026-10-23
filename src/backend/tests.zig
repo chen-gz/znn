@@ -1,6 +1,6 @@
 //! Backend 模块单元测试套件 (Backend Unit Tests)
 //!
-//! 统一验证 Apple Silicon Metal GPU 硬件加速计算后端 (`mlx.zig`) 与模型算子卸载基础设施 (`offload.zig`)。
+//! 统一验证 Apple Silicon Metal GPU 硬件加速计算后端 (`mlx.zig`)、模型算子卸载基础设施 (`offload.zig`) 与采样基础设施 (`sampling.zig`)。
 
 const std = @import("std");
 const mlx = @import("mlx.zig");
@@ -1041,4 +1041,406 @@ test "MLX copyToSlice handles strided slice views and VectorArray keeps more tha
     var vec = VectorArray.fromArrays(&many);
     defer vec.deinit();
     try std.testing.expectEqual(@as(usize, 70), vec.size());
+}
+
+// ============================================================================
+// 随机采样 (Stochastic Sampling)：Top-K / Top-P / 温度 / 种子 / 投机采样校验
+// ============================================================================
+
+/// Hugging Face 语义的参考终结分布：温度 → 前 K 截断 (Top-K) → 核采样 (Nucleus Sampling, Top-P)，对完整词表排序计算
+fn referenceProbabilities(allocator: std.mem.Allocator, logits: []const f32, opts: sampling.SamplingOptions) ![]f64 {
+    const n = logits.len;
+    const probs = try allocator.alloc(f64, n);
+    @memset(probs, 0.0);
+    const order = try allocator.alloc(sampling.Candidate, n);
+    defer allocator.free(order);
+    var m: usize = 0;
+    for (logits, 0..) |l, v| {
+        if (std.math.isNan(l) or l == -std.math.inf(f32)) continue;
+        order[m] = .{ .id = @intCast(v), .logit = l };
+        m += 1;
+    }
+    const sorted = order[0..m];
+    std.mem.sort(sampling.Candidate, sorted, {}, struct {
+        fn lt(_: void, a: sampling.Candidate, b: sampling.Candidate) bool {
+            return a.before(b);
+        }
+    }.lt);
+    const kept_k = if (opts.top_k > 0) sorted[0..@min(opts.top_k, m)] else sorted;
+    const inv_t: f64 = 1.0 / @as(f64, opts.temperature);
+    const top: f64 = kept_k[0].logit;
+    var z: f64 = 0.0;
+    for (kept_k) |cand| z += @exp((@as(f64, cand.logit) - top) * inv_t);
+    var kept: usize = kept_k.len;
+    if (opts.top_p < 1.0) {
+        var cum: f64 = 0.0;
+        kept = 0;
+        while (kept < kept_k.len) : (kept += 1) {
+            if (kept > 0 and cum >= @as(f64, opts.top_p) * z) break;
+            cum += @exp((@as(f64, kept_k[kept].logit) - top) * inv_t);
+        }
+    }
+    var mass: f64 = 0.0;
+    for (kept_k[0..kept]) |cand| mass += @exp((@as(f64, cand.logit) - top) * inv_t);
+    for (kept_k[0..kept]) |cand| probs[cand.id] = @exp((@as(f64, cand.logit) - top) * inv_t) / mass;
+    return probs;
+}
+
+/// 皮尔逊卡方统计量 (Pearson Chi-Square Statistic)：只统计期望概率大于 0 的类别，期望为 0 的类别出现即视为失败
+fn chiSquare(counts: []const usize, probs: []const f64, draws: usize) !f64 {
+    var chi2: f64 = 0.0;
+    for (counts, probs) |count, p| {
+        if (p == 0.0) {
+            try std.testing.expectEqual(@as(usize, 0), count);
+            continue;
+        }
+        const expected = p * @as(f64, @floatFromInt(draws));
+        const diff = @as(f64, @floatFromInt(count)) - expected;
+        chi2 += diff * diff / expected;
+    }
+    return chi2;
+}
+
+test "sampling options default to full softmax sampling and detect greedy decoding" {
+    const opts = sampling.SamplingOptions.defaultOptions();
+    try std.testing.expectEqual(@as(f32, 1.0), opts.temperature);
+    try std.testing.expectEqual(@as(usize, 0), opts.top_k);
+    try std.testing.expectEqual(@as(f32, 1.0), opts.top_p);
+    try std.testing.expectEqual(@as(f32, 1.0), opts.repetition_penalty);
+    try std.testing.expect(!opts.isGreedy());
+    try std.testing.expect(sampling.SamplingOptions.greedy.isPlainGreedy());
+    try std.testing.expect((sampling.SamplingOptions{ .temperature = -1.0 }).isGreedy());
+    try std.testing.expect((sampling.SamplingOptions{ .temperature = std.math.nan(f32) }).isGreedy());
+    try std.testing.expect((sampling.SamplingOptions{ .top_k = 1 }).isGreedy());
+    try std.testing.expect(!(sampling.SamplingOptions{ .temperature = 0.0, .repetition_penalty = 1.2 }).isPlainGreedy());
+
+    try std.testing.expectEqual(@as(usize, 1), sampling.SamplingOptions.greedy.candidateCount(1000));
+    try std.testing.expectEqual(@as(usize, 64), (sampling.SamplingOptions{ .top_k = 64 }).candidateCount(1000));
+    try std.testing.expectEqual(@as(usize, 10), (sampling.SamplingOptions{ .top_k = 64 }).candidateCount(10));
+    try std.testing.expectEqual(sampling.bounded_candidate_count, opts.candidateCount(262_144));
+    try std.testing.expect((sampling.SamplingOptions{ .top_p = 0.9 }).needsLogNormalizer());
+    try std.testing.expect(!(sampling.SamplingOptions{ .top_p = 0.9, .top_k = 40 }).needsLogNormalizer());
+}
+
+test "sampling temperature <= 0 and top_k == 1 reproduce greedy argmax" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(7);
+    const rnd = prng.random();
+    const vocab: usize = 5000;
+    const logits = try allocator.alloc(f32, vocab);
+    defer allocator.free(logits);
+    for (0..4) |_| {
+        for (logits) |*l| l.* = rnd.floatNorm(f32) * 3.0;
+        logits[rnd.uintLessThan(usize, vocab)] = -std.math.inf(f32);
+        logits[rnd.uintLessThan(usize, vocab)] = std.math.nan(f32);
+        const expected = sampling.argmaxWithPenalty(logits, vocab, &.{}, &.{}, 1.0);
+        for ([_]sampling.SamplingOptions{
+            .{ .temperature = 0.0 },
+            .{ .temperature = -2.0, .top_k = 50 },
+            .{ .temperature = 1.5, .top_k = 1 },
+            .{ .temperature = 0.7, .top_k = 1, .top_p = 0.5 },
+        }) |opts| {
+            var sampler = sampling.Sampler.init(opts);
+            for (0..5) |_| {
+                try std.testing.expectEqual(expected, try sampler.sampleLogits(Executor.serial, allocator, logits));
+            }
+            // 候选集终结步骤同样只取最优候选
+            var cands = [_]sampling.Candidate{
+                .{ .id = 3, .logit = 1.0 }, .{ .id = 9, .logit = 4.0 }, .{ .id = 1, .logit = 4.0 }, .{ .id = 2, .logit = -1.0 },
+            };
+            try std.testing.expectEqual(@as(u32, 1), sampler.sampleCandidates(&cands, null));
+        }
+    }
+}
+
+test "sampling tiny top_p always picks the most likely token" {
+    const allocator = std.testing.allocator;
+    const logits = [_]f32{ 0.5, 2.0, 1.9, -1.0, 1.95, -std.math.inf(f32), 0.0, 1.0 };
+    for ([_]usize{ 0, 3, 64 }) |top_k| {
+        var sampler = sampling.Sampler.init(.{ .temperature = 1.0, .top_k = top_k, .top_p = 1e-6, .seed = top_k + 1 });
+        for (0..300) |_| {
+            try std.testing.expectEqual(@as(usize, 1), try sampler.sampleLogits(Executor.serial, allocator, &logits));
+        }
+    }
+}
+
+test "sampling top_k restricts the support to the k most likely tokens" {
+    const allocator = std.testing.allocator;
+    // 8 个词元概率接近，前 3 名为 2、5、7
+    const logits = [_]f32{ 0.10, 0.20, 0.90, 0.30, 0.15, 0.85, 0.05, 0.80 };
+    var sampler = sampling.Sampler.init(.{ .temperature = 1.0, .top_k = 3, .seed = 11 });
+    var counts: [8]usize = @splat(0);
+    for (0..3000) |_| counts[try sampler.sampleLogits(Executor.serial, allocator, &logits)] += 1;
+    for (counts, 0..) |count, v| {
+        if (v == 2 or v == 5 or v == 7) {
+            try std.testing.expect(count > 700);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), count);
+        }
+    }
+}
+
+test "sampling frequencies approximate the processed softmax distribution for a fixed seed" {
+    const allocator = std.testing.allocator;
+    const logits = [_]f32{ 1.0, 0.2, -0.5, 2.0, 0.0, -std.math.inf(f32), 1.4, -1.2, 0.7, 0.3 };
+    const draws: usize = 40_000;
+    for ([_]sampling.SamplingOptions{
+        .{ .temperature = 1.0, .seed = 1 },
+        .{ .temperature = 0.6, .seed = 2 },
+        .{ .temperature = 1.3, .top_k = 4, .seed = 3 },
+        .{ .temperature = 1.0, .top_p = 0.8, .seed = 4 },
+        .{ .temperature = 0.9, .top_k = 6, .top_p = 0.9, .seed = 5 },
+    }) |opts| {
+        const probs = try referenceProbabilities(allocator, &logits, opts);
+        defer allocator.free(probs);
+        var sampler = sampling.Sampler.init(opts);
+        var counts: [logits.len]usize = @splat(0);
+        for (0..draws) |_| counts[try sampler.sampleLogits(Executor.serial, allocator, &logits)] += 1;
+        // 自由度不超过 8：卡方统计量超过 35 的概率约 2e-5
+        try std.testing.expect(try chiSquare(&counts, probs, draws) < 35.0);
+    }
+}
+
+test "sampling applies the repetition penalty once per token before excluding tokens" {
+    const allocator = std.testing.allocator;
+    var logits = [_]f32{ 4.0, -2.0, 3.0, 2.0, 0.0, 6.0 };
+    const recent = [_]usize{ 2, 1, 2, 2, 99, 4 };
+    const excluded = [_]sampling.TokenRange{ .single(0), .single(5) };
+    var reference = logits;
+    try sampling.applyRepetitionPenaltyInPlace(allocator, &logits, &recent, 2.0);
+    // 正值除以系数、负值乘以系数，重复出现的词元只惩罚一次，越界词元被忽略
+    try std.testing.expectEqualSlices(f32, &.{ 4.0, -4.0, 1.5, 2.0, 0.0, 6.0 }, &logits);
+    sampling.maskExcludedInPlace(&logits, &excluded);
+    try std.testing.expect(logits[0] == -std.math.inf(f32) and logits[5] == -std.math.inf(f32));
+
+    // 惩罚与排除之后的贪婪结果与融合实现 `argmaxWithPenalty` 一致 (词元 2 受罚后词元 3 胜出)
+    var greedy = sampling.Sampler.init(.{ .temperature = 0.0 });
+    const fused = sampling.argmaxWithPenalty(&reference, reference.len, &excluded, &recent, 2.0);
+    try std.testing.expectEqual(@as(usize, 2), sampling.argmaxWithPenalty(&reference, reference.len, &excluded, &.{}, 2.0));
+    try std.testing.expectEqual(fused, try greedy.sampleLogits(Executor.serial, allocator, &logits));
+    try std.testing.expectEqual(@as(usize, 3), fused);
+
+    // 系数不大于 1 时不施加惩罚
+    try sampling.applyRepetitionPenaltyInPlace(allocator, &reference, &recent, 1.0);
+    try std.testing.expectEqual(@as(f32, 3.0), reference[2]);
+}
+
+test "sampling with the same seed reproduces the same token sequence" {
+    const allocator = std.testing.allocator;
+    var logits: [300]f32 = undefined;
+    for (&logits, 0..) |*l, i| l.* = @sin(@as(f32, @floatFromInt(i)) * 0.37) * 2.0;
+    const opts = sampling.SamplingOptions{ .temperature = 1.0, .top_k = 64, .top_p = 0.95, .seed = 1234 };
+    var a = sampling.Sampler.init(opts);
+    var b = sampling.Sampler.init(opts);
+    var c_other = sampling.Sampler.init(.{ .temperature = 1.0, .top_k = 64, .top_p = 0.95, .seed = 4321 });
+    var differs = false;
+    for (0..200) |_| {
+        const ta = try a.sampleLogits(Executor.serial, allocator, &logits);
+        try std.testing.expectEqual(ta, try b.sampleLogits(Executor.serial, allocator, &logits));
+        if (ta != try c_other.sampleLogits(Executor.serial, allocator, &logits)) differs = true;
+    }
+    try std.testing.expect(differs);
+}
+
+test "sampling selectTopK matches a full sort and does not depend on the thread count" {
+    const allocator = std.testing.allocator;
+    var threaded = std.Io.Threaded.init(allocator, .{});
+    defer threaded.deinit();
+    const parallel = Executor{ .io = threaded.io(), .max_tasks = 4 };
+
+    var prng = std.Random.DefaultPrng.init(99);
+    const rnd = prng.random();
+    const vocab: usize = 70_001;
+    const logits = try allocator.alloc(f32, vocab);
+    defer allocator.free(logits);
+    // 离散取值制造大量并列，混入 NaN 与 -inf
+    for (logits) |*l| {
+        const r = rnd.uintLessThan(u32, 200);
+        l.* = switch (r) {
+            0 => std.math.nan(f32),
+            1 => -std.math.inf(f32),
+            else => @as(f32, @floatFromInt(r)) * 0.25,
+        };
+    }
+    const all = try allocator.alloc(sampling.Candidate, vocab);
+    defer allocator.free(all);
+    var usable: usize = 0;
+    for (logits, 0..) |l, v| {
+        if (std.math.isNan(l) or l == -std.math.inf(f32)) continue;
+        all[usable] = .{ .id = @intCast(v), .logit = l };
+        usable += 1;
+    }
+    std.mem.sort(sampling.Candidate, all[0..usable], {}, struct {
+        fn lt(_: void, a: sampling.Candidate, b: sampling.Candidate) bool {
+            return a.before(b);
+        }
+    }.lt);
+
+    for ([_]usize{ 1, 64, 1000, 40_000 }) |k| {
+        const buf_serial = try allocator.alloc(sampling.Candidate, k);
+        defer allocator.free(buf_serial);
+        const buf_parallel = try allocator.alloc(sampling.Candidate, k);
+        defer allocator.free(buf_parallel);
+        const serial_sel = try sampling.selectTopK(Executor.serial, allocator, logits, buf_serial);
+        const parallel_sel = try sampling.selectTopK(parallel, allocator, logits, buf_parallel);
+        try std.testing.expectEqual(k, serial_sel.len);
+        _ = sampling.buildDistribution(serial_sel, .{ .temperature = 1.0 }, null);
+        _ = sampling.buildDistribution(parallel_sel, .{ .temperature = 1.0 }, null);
+        try std.testing.expectEqualSlices(sampling.Candidate, all[0..k], serial_sel);
+        try std.testing.expectEqualSlices(sampling.Candidate, all[0..k], parallel_sel);
+    }
+
+    // 可采样词元少于 k 时只返回全部可采样词元
+    const small = [_]f32{ 1.0, -std.math.inf(f32), 2.0 };
+    var buf: [8]sampling.Candidate = undefined;
+    try std.testing.expectEqual(@as(usize, 2), (try sampling.selectTopK(Executor.serial, allocator, &small, &buf)).len);
+}
+
+test "sampling nucleus partial selection over a large vocabulary matches the full-vocabulary reference" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(5);
+    const rnd = prng.random();
+    const vocab: usize = 20_000;
+    const logits = try allocator.alloc(f32, vocab);
+    defer allocator.free(logits);
+    // 较平坦的分布：核采样阈值需要远多于首轮 256 个候选，触发候选数扩大
+    for (logits) |*l| l.* = rnd.floatNorm(f32) * 0.5;
+    const all = try allocator.alloc(sampling.Candidate, vocab);
+    defer allocator.free(all);
+
+    for ([_]f32{ 0.5, 0.95 }) |top_p| {
+        const opts = sampling.SamplingOptions{ .temperature = 0.8, .top_p = top_p, .seed = 77 };
+        var fast = sampling.Sampler.init(opts);
+        var reference = sampling.Sampler.init(opts);
+        for (0..50) |_| {
+            for (all, logits, 0..) |*cand, l, v| cand.* = .{ .id = @intCast(v), .logit = l };
+            const expected = reference.sampleCandidates(all, null);
+            try std.testing.expectEqual(@as(usize, expected), try fast.sampleLogits(Executor.serial, allocator, logits));
+        }
+    }
+
+    // 完整词表的对数配分函数与直接计算一致
+    var direct: f64 = 0.0;
+    for (logits) |l| direct += @exp(@as(f64, l) / 0.8);
+    try std.testing.expectApproxEqRel(@as(f32, @floatCast(@log(direct))), try sampling.logSumExpScaled(Executor.serial, logits, 1.0 / 0.8), 1e-5);
+}
+
+test "sampling candidate finisher gives identical tokens for identical candidate sets in any order" {
+    const base = [_]sampling.Candidate{
+        .{ .id = 10, .logit = 2.0 },               .{ .id = 4, .logit = 1.5 },   .{ .id = 7, .logit = 1.5 },
+        .{ .id = 1, .logit = 0.2 },                .{ .id = 30, .logit = -0.4 }, .{ .id = 2, .logit = 1.9 },
+        .{ .id = 8, .logit = -std.math.inf(f32) }, .{ .id = 5, .logit = 0.9 },
+    };
+    const opts = sampling.SamplingOptions{ .temperature = 1.1, .top_k = 6, .top_p = 0.9, .seed = 2024 };
+    var a = sampling.Sampler.init(opts);
+    var b = sampling.Sampler.init(opts);
+    var prng = std.Random.DefaultPrng.init(3);
+    for (0..300) |_| {
+        var x = base;
+        var y = base;
+        prng.random().shuffle(sampling.Candidate, &y);
+        try std.testing.expectEqual(a.sampleCandidates(&x, null), b.sampleCandidates(&y, null));
+    }
+}
+
+test "sampling speculative draft verification keeps the target distribution unbiased" {
+    const allocator = std.testing.allocator;
+    const logits = [_]f32{ 1.2, 0.3, -0.7, 2.0, 0.1, -std.math.inf(f32) };
+    const opts = sampling.SamplingOptions{ .temperature = 1.0, .top_k = 5, .top_p = 0.97 };
+    const probs = try referenceProbabilities(allocator, &logits, opts);
+    defer allocator.free(probs);
+    const draws: usize = 40_000;
+
+    // 草稿分别为高概率词元、低概率词元、被核采样截断的词元与排除词元
+    for ([_]u32{ 3, 1, 2, 5 }, 0..) |draft, round| {
+        var sampler = sampling.Sampler.init(.{ .temperature = 1.0, .top_k = 5, .top_p = 0.97, .seed = 100 + round });
+        var counts: [logits.len]usize = @splat(0);
+        var accepted: usize = 0;
+        for (0..draws) |_| {
+            var cands: [logits.len]sampling.Candidate = undefined;
+            for (&cands, logits, 0..) |*cand, l, v| cand.* = .{ .id = @intCast(v), .logit = l };
+            const dist = sampler.distribution(&cands, null);
+            switch (sampler.verifyDraft(dist, draft)) {
+                .accepted => {
+                    accepted += 1;
+                    counts[draft] += 1;
+                },
+                .rejected => |tok| {
+                    try std.testing.expect(tok != draft);
+                    counts[tok] += 1;
+                },
+            }
+        }
+        try std.testing.expect(try chiSquare(&counts, probs, draws) < 30.0);
+        const accept_rate = @as(f64, @floatFromInt(accepted)) / @as(f64, @floatFromInt(draws));
+        try std.testing.expectApproxEqAbs(probs[draft], accept_rate, 0.015);
+    }
+
+    // 贪婪终结分布退化为精确匹配规则，且不消耗随机数
+    var greedy = sampling.Sampler.init(.{ .temperature = 0.0, .seed = 9 });
+    const before_state = greedy.prng.s;
+    var cands: [logits.len]sampling.Candidate = undefined;
+    for (&cands, logits, 0..) |*cand, l, v| cand.* = .{ .id = @intCast(v), .logit = l };
+    const dist = greedy.distribution(&cands, null);
+    try std.testing.expectEqual(sampling.DraftVerdict.accepted, greedy.verifyDraft(dist, 3));
+    try std.testing.expectEqual(sampling.DraftVerdict{ .rejected = 3 }, greedy.verifyDraft(dist, 0));
+    try std.testing.expectEqual(before_state, greedy.prng.s);
+}
+
+test "MLX candidate selection bindings: argpartition, take/put along axis, logsumexp and where" {
+    if (!has_mlx) return;
+    var stream = try Stream.defaultGpu();
+    defer stream.deinit();
+
+    const data = [_]f32{ 0.5, 3.0, -1.0, 2.0, 2.5, -4.0 };
+    var logits = try Array.fromSlice(&data, &.{ 1, 6 });
+    defer logits.deinit();
+
+    // 取负后部分排序：前 3 个下标即对数几率最大的 3 个词元 (集合 {1, 4, 3})
+    var neg = try logits.negative(stream);
+    defer neg.deinit();
+    var part = try neg.argpartitionAxis(2, -1, stream);
+    defer part.deinit();
+    var top_view = try part.sliceAxis(1, 0, 3, stream);
+    defer top_view.deinit();
+    var top_ids = try top_view.contiguous(stream);
+    defer top_ids.deinit();
+    var top_vals = try logits.takeAlongAxis(top_ids, -1, stream);
+    defer top_vals.deinit();
+    var cands: [3]sampling.Candidate = undefined;
+    for (try top_ids.dataUint32(), try top_vals.dataFloat32(), &cands) |id, v, *cand| cand.* = .{ .id = id, .logit = v };
+    _ = sampling.buildDistribution(&cands, .{}, null);
+    try std.testing.expectEqualSlices(sampling.Candidate, &.{
+        .{ .id = 1, .logit = 3.0 }, .{ .id = 4, .logit = 2.5 }, .{ .id = 3, .logit = 2.0 },
+    }, &cands);
+
+    // 按下标写回重复惩罚后的值：正值除以 2，负值乘以 2
+    const idx_data = [_]i32{ 1, 2 };
+    var idx = try Array.fromSliceI32(&idx_data, &.{ 1, 2 });
+    defer idx.deinit();
+    var gathered = try logits.takeAlongAxis(idx, -1, stream);
+    defer gathered.deinit();
+    var zero = try Array.fromScalarF32(0.0);
+    defer zero.deinit();
+    var positive = try Array.greater(gathered, zero, stream);
+    defer positive.deinit();
+    var shrunk = try gathered.mulScalar(0.5, stream);
+    defer shrunk.deinit();
+    var grown = try gathered.mulScalar(2.0, stream);
+    defer grown.deinit();
+    var penalized = try Array.where(positive, shrunk, grown, stream);
+    defer penalized.deinit();
+    var updated = try logits.putAlongAxis(idx, penalized, -1, stream);
+    defer updated.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 0.5, 1.5, -2.0, 2.0, 2.5, -4.0 }, try updated.dataFloat32());
+
+    var lse = try logits.logsumexpAxis(-1, false, stream);
+    defer lse.deinit();
+    var direct: f32 = 0.0;
+    for (data) |v| direct += @exp(v);
+    try std.testing.expectApproxEqRel(@log(direct), (try lse.dataFloat32())[0], 1e-5);
+
+    var shared = try logits.share();
+    defer shared.deinit();
+    try std.testing.expectEqualSlices(f32, &data, try shared.dataFloat32());
 }

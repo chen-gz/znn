@@ -974,6 +974,92 @@ pub const Array = struct {
         return res;
     }
 
+    /// 沿指定轴部分排序的下标 (Argpartition along Axis)：结果中第 kth 个位置恰为排序后的第 kth 小元素下标，
+    /// 其前的元素均不大于它、其后的元素均不小于它 (各段内部无序)；下标类型为 uint32
+    pub fn argpartitionAxis(self: Array, kth: usize, axis: i32, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = try resolveStream(stream);
+
+        const rc = c.mlx_argpartition_axis(&res.handle, self.handle, @intCast(kth), axis, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 沿指定轴按逐元素下标取值 (Take Along Axis)：indices 与 self 维数相同，结果形状与 indices 一致
+    pub fn takeAlongAxis(self: Array, indices: Array, axis: i32, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = try resolveStream(stream);
+
+        const rc = c.mlx_take_along_axis(&res.handle, self.handle, indices.handle, axis, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 沿指定轴按逐元素下标写入 (Put Along Axis)：返回把 values 写入 self 中 indices 位置后的新数组 (self 不变)
+    pub fn putAlongAxis(self: Array, indices: Array, values: Array, axis: i32, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = try resolveStream(stream);
+
+        const rc = c.mlx_put_along_axis(&res.handle, self.handle, indices.handle, values.handle, axis, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 沿指定轴的对数求和指数 (Log-Sum-Exp along Axis)：log Σ exp(x)，数值稳定
+    pub fn logsumexpAxis(self: Array, axis: i32, keepdims: bool, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = try resolveStream(stream);
+
+        const rc = c.mlx_logsumexp_axis(&res.handle, self.handle, axis, keepdims, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 逐元素取负 (Negative)：`res = -self`
+    pub fn negative(self: Array, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = try resolveStream(stream);
+
+        const rc = c.mlx_negative(&res.handle, self.handle, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 逐元素严格大于比较 (Greater)：`res = a > b` (布尔数组，支持广播)
+    pub fn greater(a: Array, b: Array, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = try resolveStream(stream);
+
+        const rc = c.mlx_greater(&res.handle, a.handle, b.handle, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 逐元素条件选择 (Where)：condition 为真处取 x，否则取 y (支持广播)
+    pub fn where(condition: Array, x: Array, y: Array, stream: ?Stream) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = try resolveStream(stream);
+
+        const rc = c.mlx_where(&res.handle, condition.handle, x.handle, y.handle, s);
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
+    /// 创建引用同一底层数组的新句柄 (共享数据，不复制)；新句柄须单独 `deinit`
+    pub fn share(self: Array) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        if (c.mlx_array_set(&res.handle, self.handle) != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
     /// 沿指定轴均等切分 (Split into equal sections)
     pub fn split(self: Array, num_splits: i32, axis: i32, stream: ?Stream) !VectorArray {
         if (!has_mlx) return error.MlxNotSupported;
