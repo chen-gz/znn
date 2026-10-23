@@ -491,8 +491,29 @@ pub const Graph = struct {
         );
     }
 
-    // 矩阵乘法算子前向传播：C = A * B
+    /// 矩阵乘法算子前向传播：C = A * B，右操作数 B 必须是二维矩阵 [K, N] (如投影权重)。
+    /// 左操作数 A 可以带任意前导批次维度 [..., K]：前导维度先展平为 [M, K] 行矩阵 (连续输入为零拷贝重塑视图)，
+    /// 与所有批次共享的 B 做一次矩阵乘法后再恢复为 [..., N]。整个变换以 Reshape -> MatMul -> Reshape 算子记录，
+    /// 前向重演与反向传播 (dA = dC B^T，dB = A^T dC，按展平后的行累加) 都复用二维算子。
+    /// 两侧都带批次维度的 [B, H, M, K] x [B, H, K, N] 乘法使用 `batchMatMul`。
     pub fn matmul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+        if (A.shape.len > 2) {
+            if (B.shape.len != 2) return error.IncompatibleDimensions;
+            const rank = A.shape.len;
+            const K = A.shape.dims[rank - 1];
+            if (K != B.shape.dims[0]) return error.ShapeMismatch;
+            var out_dims: [8]usize = undefined;
+            var rows: usize = 1;
+            for (A.shape.dims[0 .. rank - 1], out_dims[0 .. rank - 1]) |d, *o| {
+                rows *= d;
+                o.* = d;
+            }
+            out_dims[rank - 1] = B.shape.dims[1];
+            const A_rows = try self.reshape(A, &.{ rows, K });
+            const C_rows = try self.matmul(A_rows, B);
+            return self.reshape(C_rows, out_dims[0..rank]);
+        }
+
         const allocator = self.arena.allocator();
         if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
             const M = A.shape.dims[0];

@@ -743,6 +743,39 @@ test "Embedding forward and backward" {
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), W.grad[8], 1e-5);
 }
 
+test "Graph.matmul broadcasts a 2-D right operand over leading batch dimensions" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    const a = try graph.tensorNDWithData(&.{ 2, 2, 3 }, &.{
+        1, 2,  3,  4,  5,  6,
+        7, 8,  9,  10, 11, 12,
+    }, true);
+    const w = try graph.tensorNDWithData(&.{ 3, 2 }, &.{ 1, 0, 0, 1, 1, 1 }, true);
+    const c = try graph.matmul(a, w);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2, 2 }, c.shape.dims[0..c.shape.len]);
+    // 每行 [x0, x1, x2] -> [x0 + x2, x1 + x2]
+    try std.testing.expectEqualSlices(f32, &.{ 4, 5, 10, 11, 16, 17, 22, 23 }, c.data);
+
+    // 反向传播：dA = dC W^T，dW = sum_rows(A^T dC)
+    const loss = try graph.sum(c, null, false);
+    try graph.backward(loss);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2 }, a.grad);
+    try std.testing.expectEqualSlices(f32, &.{ 22, 22, 26, 26, 30, 30 }, w.grad);
+
+    // 前向重演：修改输入后 Graph.forward 重新计算批次输出
+    @memset(a.data, 1.0);
+    try graph.forward();
+    for (c.data) |v| try std.testing.expectEqual(@as(f32, 2.0), v);
+
+    // 右操作数必须是二维矩阵；内维必须一致
+    const w3 = try graph.ones(&.{ 1, 3, 2 }, false);
+    try std.testing.expectError(error.IncompatibleDimensions, graph.matmul(a, w3));
+    const w_bad = try graph.ones(&.{ 4, 2 }, false);
+    try std.testing.expectError(error.ShapeMismatch, graph.matmul(a, w_bad));
+}
+
 test "BatchMatMul forward and backward" {
     const allocator = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(allocator);
