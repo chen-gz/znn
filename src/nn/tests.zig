@@ -1817,3 +1817,114 @@ test "computeGroupAdvantages rejects invalid group sizes" {
     try std.testing.expectError(error.InvalidArgument, computeGroupAdvantages(allocator, &rewards, 0, 1e-6));
     try std.testing.expectError(error.InvalidArgument, computeGroupAdvantages(allocator, &rewards, 2, 1e-6));
 }
+
+/// 以随机参数 (含全部偏置) 对比多头潜在注意力 (Multi-Head Latent Attention, MLA) 增量推理与全序列前向的最大误差。
+/// batch_2d = true 时以二维输入 [B, C] 批量执行单步推理
+fn mlaIncrementalMaxDiff(batch_2d: bool) !f32 {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+    const dim = 8;
+    const T = 4;
+    const B = 2;
+    var mla = try MLALayer.init(allocator, dim, 2, 4, 4, 2);
+    defer nn.deinitModel(&mla, allocator);
+    const params = try nn.parameters(&mla, allocator);
+    defer allocator.free(params);
+    for (params) |p| {
+        for (p.data) |*v| v.* = random.floatNorm(f32) * 0.3;
+    }
+
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+    const x = try g.tensorND(&.{ B, T, dim }, false);
+    for (x.data) |*v| v.* = random.floatNorm(f32);
+    const y_full = try mla.forward(&g, x);
+
+    var cache = try MLACache.init(allocator, B, T, 4, 2);
+    defer cache.deinit(allocator);
+    var max_diff: f32 = 0;
+    const step = try allocator.alloc(f32, B * dim);
+    defer allocator.free(step);
+    for (0..T) |t| {
+        for (0..B) |b| @memcpy(step[b * dim .. (b + 1) * dim], x.data[(b * T + t) * dim ..][0..dim]);
+        const shape: []const usize = if (batch_2d) &.{ B, dim } else &.{ B, 1, dim };
+        const xt = try tensor.array(allocator, shape, step);
+        defer tensor.free(allocator, xt);
+        const yt = try mla.forwardInference(allocator, xt, &cache);
+        defer tensor.free(allocator, yt);
+        try std.testing.expectEqual(B, yt.shape.dims[0]);
+        for (0..B) |b| {
+            for (0..dim) |c| {
+                max_diff = @max(max_diff, @abs(yt.data[b * dim + c] - y_full.data[(b * T + t) * dim + c]));
+            }
+        }
+    }
+    return max_diff;
+}
+
+test "MLALayer forwardInference matches full forward with biases and batched inputs" {
+    try std.testing.expect(try mlaIncrementalMaxDiff(false) < 1e-4);
+    try std.testing.expect(try mlaIncrementalMaxDiff(true) < 1e-4);
+}
+
+test "CausalSelfAttention forwardInference matches full forward and reports a full cache" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(5);
+    const random = prng.random();
+    const C = 12;
+    const T = 3;
+    const B = 2;
+    var attn = try CausalSelfAttention.initGQA(allocator, C, 4, 2);
+    defer nn.deinitModel(&attn, allocator);
+    const params = try nn.parameters(&attn, allocator);
+    defer allocator.free(params);
+    for (params) |p| {
+        for (p.data) |*v| v.* = random.floatNorm(f32) * 0.3;
+    }
+
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+    const x = try g.tensorND(&.{ B, T, C }, false);
+    for (x.data) |*v| v.* = random.floatNorm(f32);
+    const y_full = try attn.forward(&g, x);
+
+    var cache = try KVCache.init(allocator, B, 2, T, C / 4);
+    defer cache.deinit(allocator);
+    var step: [B * C]f32 = undefined;
+    for (0..T) |t| {
+        for (0..B) |b| @memcpy(step[b * C .. (b + 1) * C], x.data[(b * T + t) * C ..][0..C]);
+        const xt = try tensor.array(allocator, &.{ B, 1, C }, &step);
+        defer tensor.free(allocator, xt);
+        const yt = try attn.forwardInference(allocator, xt, &cache);
+        defer tensor.free(allocator, yt);
+        for (0..B) |b| {
+            for (0..C) |c| {
+                try std.testing.expectApproxEqAbs(y_full.data[(b * T + t) * C + c], yt.data[b * C + c], 1e-4);
+            }
+        }
+    }
+
+    const xt = try tensor.array(allocator, &.{ B, 1, C }, &step);
+    defer tensor.free(allocator, xt);
+    try std.testing.expectError(error.ContextWindowExceeded, attn.forwardInference(allocator, xt, &cache));
+
+    var mla = try MLALayer.init(allocator, 8, 2, 4, 4, 2);
+    defer nn.deinitModel(&mla, allocator);
+    var mla_cache = try MLACache.init(allocator, 1, 1, 4, 2);
+    defer mla_cache.deinit(allocator);
+    mla_cache.curr_len = 1;
+    const x_mla = try tensor.zeros(allocator, &.{ 1, 8 });
+    defer tensor.free(allocator, x_mla);
+    try std.testing.expectError(error.ContextWindowExceeded, mla.forwardInference(allocator, x_mla, &mla_cache));
+}
+
+test "KVCache and MLACache init release partial allocations on failure" {
+    // 每个无梯度缓存张量分配两次 (张量结构体与数据)，逐一让第 1..3 次分配失败
+    for (1..4) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, KVCache.init(failing.allocator(), 1, 2, 4, 4));
+        var failing_mla = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, MLACache.init(failing_mla.allocator(), 1, 4, 4, 2));
+    }
+}
