@@ -257,7 +257,7 @@ pub const CausalSelfAttention = struct {
     }
 
     /// 模块标准数学变换公式
-    pub const formula = "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o";
+    pub const formula = "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V W_o + b_o";
     pub const core_formula = ScaledDotProductAttention.formula;
 
     /// 前向注意力计算流程

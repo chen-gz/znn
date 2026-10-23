@@ -29,7 +29,7 @@ fn zeroState(
 }
 
 /// 单步经典 Elman 循环神经网络单元 (Recurrent Neural Network Cell, RNNCell)
-/// 隐状态更新公式：h_t = tanh(W_ih * x_t + W_hh * h_{t-1} + b)
+/// 隐状态更新公式：h_t = tanh(x_t * W_ih + h_{t-1} * W_hh + b)
 pub const RNNCell = struct {
     input_dim: usize,
     hidden_dim: usize,
@@ -38,7 +38,7 @@ pub const RNNCell = struct {
     name: ?[]const u8 = null,
     module_type: []const u8 = "RNNCell",
 
-    pub const formula = "h_t = \\tanh(x_t W_{ih}^T + b_{ih} + h_{t-1} W_{hh}^T + b_{hh})";
+    pub const formula = "h_t = \\tanh(x_t W_{ih} + b_{ih} + h_{t-1} W_{hh} + b_{hh})";
 
     pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize) !RNNCell {
         const weight_ih = try Linear.init(allocator, input_dim, hidden_dim);
@@ -54,7 +54,7 @@ pub const RNNCell = struct {
         };
     }
 
-    /// 单时间步前向：h_t = tanh(W_ih * x_t + W_hh * h_{t-1} + b)
+    /// 单时间步前向：h_t = tanh(x_t * W_ih + h_{t-1} * W_hh + b)
     /// x: [batch_size, input_dim], h_prev: [batch_size, hidden_dim]
     pub fn forward(
         self: *const RNNCell,
@@ -226,25 +226,25 @@ pub const LSTMCell = struct {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        // 1. 遗忘门: f_t = sigmoid(W_f * x + U_f * h_prev)
+        // 1. 遗忘门: f_t = sigmoid(x * W_f + h_prev * U_f)
         const f_x = try self.w_ih_f.forward(graph, x);
         const f_h = try self.w_hh_f.forward(graph, h_prev);
         const f_sum = try graph.add(f_x, f_h);
         const f_t = try graph.sigmoid(f_sum);
 
-        // 2. 输入门: i_t = sigmoid(W_i * x + U_i * h_prev)
+        // 2. 输入门: i_t = sigmoid(x * W_i + h_prev * U_i)
         const i_x = try self.w_ih_i.forward(graph, x);
         const i_h = try self.w_hh_i.forward(graph, h_prev);
         const i_sum = try graph.add(i_x, i_h);
         const i_t = try graph.sigmoid(i_sum);
 
-        // 3. 候选状态: c_cand = tanh(W_c * x + U_c * h_prev)
+        // 3. 候选状态: c_cand = tanh(x * W_c + h_prev * U_c)
         const c_x = try self.w_ih_c.forward(graph, x);
         const c_h = try self.w_hh_c.forward(graph, h_prev);
         const c_sum = try graph.add(c_x, c_h);
         const c_cand = try graph.tanh(c_sum);
 
-        // 4. 输出门: o_t = sigmoid(W_o * x + U_o * h_prev)
+        // 4. 输出门: o_t = sigmoid(x * W_o + h_prev * U_o)
         const o_x = try self.w_ih_o.forward(graph, x);
         const o_h = try self.w_hh_o.forward(graph, h_prev);
         const o_sum = try graph.add(o_x, o_h);
@@ -476,7 +476,7 @@ pub const GRUCell = struct {
     name: ?[]const u8 = null,
     module_type: []const u8 = "GRUCell",
 
-    pub const formula = "h_t = (1 - z_t) \\odot h_{t-1} + z_t \\odot \\tanh(W_h x_t + U_h (r_t \\odot h_{t-1}))";
+    pub const formula = "h_t = (1 - z_t) \\odot h_{t-1} + z_t \\odot \\tanh(x_t W_h + b_{ih} + (r_t \\odot h_{t-1}) U_h + b_{hh})";
 
     pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize) !GRUCell {
         const w_ih_r = try Linear.init(allocator, input_dim, hidden_dim);
@@ -515,19 +515,19 @@ pub const GRUCell = struct {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        // 1. 重置门: r_t = sigmoid(W_r * x + U_r * h_prev)
+        // 1. 重置门: r_t = sigmoid(x * W_r + h_prev * U_r)
         const r_x = try self.w_ih_r.forward(graph, x);
         const r_h = try self.w_hh_r.forward(graph, h_prev);
         const r_sum = try graph.add(r_x, r_h);
         const r_t = try graph.sigmoid(r_sum);
 
-        // 2. 更新门: z_t = sigmoid(W_z * x + U_z * h_prev)
+        // 2. 更新门: z_t = sigmoid(x * W_z + h_prev * U_z)
         const z_x = try self.w_ih_z.forward(graph, x);
         const z_h = try self.w_hh_z.forward(graph, h_prev);
         const z_sum = try graph.add(z_x, z_h);
         const z_t = try graph.sigmoid(z_sum);
 
-        // 3. 候选隐状态: h_tilde = tanh(W_h * x + U_h * (r_t * h_prev))
+        // 3. 候选隐状态: h_tilde = tanh(x * W_h + (r_t * h_prev) * U_h)
         const rh = try graph.mul(r_t, h_prev);
         const h_x = try self.w_ih_h.forward(graph, x);
         const h_h = try self.w_hh_h.forward(graph, rh);

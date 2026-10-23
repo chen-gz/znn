@@ -104,7 +104,7 @@ test "Hierarchical module naming and interactive HTML report export" {
 
     const q_attn_obj = layer0_obj.get("children").?.array.items[1].object.get("children").?.array.items[0].object; // "q_attn"
     try std.testing.expectEqualStrings("Linear", q_attn_obj.get("module_type").?.string);
-    try std.testing.expectEqualStrings("y = x W^T + b", q_attn_obj.get("formula").?.string);
+    try std.testing.expectEqualStrings("y = x W + b", q_attn_obj.get("formula").?.string);
     try std.testing.expectEqual(2, q_attn_obj.get("parameters").?.array.items.len);
     try std.testing.expect(q_attn_obj.get("ops").?.array.items.len >= 2);
 

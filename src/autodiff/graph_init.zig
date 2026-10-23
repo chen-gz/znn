@@ -46,7 +46,7 @@ pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u
 
     // 4. 根据模块注册的原生类型推导标准公式 (避免脆弱的字符串模式推测)
     if (self.getModuleType(module_path)) |m_type| {
-        if (std.mem.eql(u8, m_type, "Linear")) return "y = x W^T + b";
+        if (std.mem.eql(u8, m_type, "Linear")) return "y = x W + b";
         if (std.mem.eql(u8, m_type, "Conv1D")) return "y = \\text{Conv1D}(x; W, b)";
         if (std.mem.eql(u8, m_type, "Conv2D")) return "y = \\text{Conv2D}(x; W, b)";
         if (std.mem.eql(u8, m_type, "ConvTranspose1D")) return "y = \\text{ConvTranspose1D}(x; W, b)";
@@ -63,19 +63,19 @@ pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u
         if (std.mem.eql(u8, m_type, "BatchNorm2d")) return "y = \\text{BatchNorm2d}(x; \\gamma, \\beta)";
         if (std.mem.eql(u8, m_type, "GroupNorm")) return "y = \\text{GroupNorm}(x; \\gamma, \\beta)";
         if (std.mem.eql(u8, m_type, "Embedding")) return "y = \\text{Embedding}(x; W)";
-        if (std.mem.eql(u8, m_type, "MLP")) return "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}";
+        if (std.mem.eql(u8, m_type, "MLP")) return "y = \\text{GELU}(x W_{fc} + b_{fc}) W_{proj} + b_{proj}";
         if (std.mem.eql(u8, m_type, "SwiGLU")) return "y = (\\text{SiLU}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
-        if (std.mem.eql(u8, m_type, "CausalSelfAttention")) return "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V \\cdot W_o^T + b_o";
+        if (std.mem.eql(u8, m_type, "CausalSelfAttention")) return "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V W_o + b_o";
         if (std.mem.eql(u8, m_type, "ScaledDotProductAttention")) return "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V";
         if (std.mem.eql(u8, m_type, "TransformerBlock")) return "h_l = x_l + \\text{Attention}(\\text{RMSNorm}(x_l)), \\quad x_{l+1} = \\text{TransformerBlock}(x_l) = h_l + \\text{MLP}(\\text{RMSNorm}(h_l))";
         if (std.mem.eql(u8, m_type, "TransformerDecoder")) return "x_L = \\text{DecoderStack}(x_0) = (\\text{Block}_L \\circ \\dots \\circ \\text{Block}_1)(x_0)";
         if (std.mem.eql(u8, m_type, "GPT")) return "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]";
-        if (std.mem.eql(u8, m_type, "RNNCell")) return "h_t = \\tanh(x_t W_{ih}^T + b_{ih} + h_{t-1} W_{hh}^T + b_{hh})";
+        if (std.mem.eql(u8, m_type, "RNNCell")) return "h_t = \\tanh(x_t W_{ih} + b_{ih} + h_{t-1} W_{hh} + b_{hh})";
         if (std.mem.eql(u8, m_type, "RNN")) return "h_{1:T} = \\text{RNN}(x_{1:T}, h_0)";
         if (std.mem.eql(u8, m_type, "LSTMCell")) return "c_t = f_t \\odot c_{t-1} + i_t \\odot \\tilde{c}_t, \\quad h_t = o_t \\odot \\tanh(c_t)";
         if (std.mem.eql(u8, m_type, "LSTM")) return "(h_{1:T}, c_{1:T}) = \\text{LSTM}(x_{1:T}, h_0, c_0)";
         if (std.mem.eql(u8, m_type, "StackedLSTM")) return "h^{(L)}_{1:T} = \\text{StackedLSTM}(x_{1:T})";
-        if (std.mem.eql(u8, m_type, "GRUCell")) return "h_t = (1 - z_t) \\odot h_{t-1} + z_t \\odot \\tanh(W_h x_t + U_h (r_t \\odot h_{t-1}))";
+        if (std.mem.eql(u8, m_type, "GRUCell")) return "h_t = (1 - z_t) \\odot h_{t-1} + z_t \\odot \\tanh(x_t W_h + b_{ih} + (r_t \\odot h_{t-1}) U_h + b_{hh})";
         if (std.mem.eql(u8, m_type, "GRU")) return "h_{1:T} = \\text{GRU}(x_{1:T}, h_0)";
         if (std.mem.eql(u8, m_type, "MoELayer")) return "y = \\sum_{i \\in \\text{TopK}(g(x))} p_i(x) E_i(x) + \\sum_{j} E^{\\text{shared}}_j(x)";
         if (std.mem.eql(u8, m_type, "MLALayer")) return "c_t^{KV} = x_t W^{DKV}, \\quad y = \\text{MLA}(Q, c^{KV}, k^R) W^O";
@@ -470,7 +470,7 @@ pub fn detectConsumerActivation(self: *Graph, target: *Tensor) init_mod.Nonlinea
                                 break;
                             }
                         },
-                        .AddBias, .Add, .Reshape, .Transpose => {
+                        .Add, .Reshape, .Transpose => {
                             if (op.outputs.len > 0) {
                                 current = op.outputs[0];
                                 advanced = true;

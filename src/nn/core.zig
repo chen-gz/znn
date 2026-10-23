@@ -69,7 +69,7 @@ pub const Linear = struct {
     }
 
     /// 模块标准数学变换公式
-    pub const formula = "y = x W^T + b";
+    pub const formula = "y = x W + b";
 
     /// 支持任意秩输入 [..., in_features]：二维输入直接做矩阵乘法，其余秩先展平为 [N, in_features] 再恢复输出形状
     pub fn forward(self: *const Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {

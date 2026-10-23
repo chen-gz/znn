@@ -13,7 +13,7 @@ const ThreeLayerMLP = struct {
     name: ?[]const u8 = null,
     module_type: []const u8 = "MLP",
 
-    pub const formula = "h_1 = \\text{ReLU}(x W_1^T + b_1), \\; h_2 = \\text{ReLU}(h_1 W_2^T + b_2), \\; y = h_2 W_3^T + b_3";
+    pub const formula = "h_1 = \\text{ReLU}(x W_1 + b_1), \\; h_2 = \\text{ReLU}(h_1 W_2 + b_2), \\; y = h_2 W_3 + b_3";
 
     /// 只分配各层参数内存；参数数值在建立前向计算图后由 nn.initModel 依据计算图初始化
     pub fn init(allocator: std.mem.Allocator) !ThreeLayerMLP {
