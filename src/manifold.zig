@@ -51,6 +51,11 @@ pub fn computePairwiseDistances(allocator: std.mem.Allocator, X: []const f32, N:
 /// Binary search on Gaussian precision beta_i = 1 / (2 * sigma_i^2)
 /// such that Shannon entropy matches log2(target_perplexity).
 /// Returns an N x N conditional affinity matrix P_cond (p_{j|i}).
+///
+/// Distances are shifted by the row's smallest off-diagonal distance before exponentiation
+/// (exp(-(d_j - d_min) * beta)). The shift cancels in the normalized p_{j|i} and in the entropy,
+/// but keeps the nearest neighbour at exp(0) = 1 so the row never underflows to all zeros when
+/// distances are large.
 pub fn binarySearchPerplexity(
     allocator: std.mem.Allocator,
     dist_sq: []const f32,
@@ -61,6 +66,7 @@ pub fn binarySearchPerplexity(
 ) ![]f32 {
     const P = try allocator.alloc(f32, N * N);
     @memset(P, 0.0);
+    if (N < 2) return P;
 
     const target_entropy = @log2(target_perplexity);
     const ln2 = @log(2.0);
@@ -71,22 +77,27 @@ pub fn binarySearchPerplexity(
         var beta: f32 = 1.0;
 
         const row_dist = dist_sq[i * N .. (i + 1) * N];
+        const row_p = P[i * N .. (i + 1) * N];
+
+        var d_min: f32 = std.math.inf(f32);
+        for (row_dist, 0..) |d, j| {
+            if (j != i) d_min = @min(d_min, d);
+        }
 
         for (0..max_iter) |_| {
             var sum_p: f32 = 0.0;
             var sum_dp: f32 = 0.0;
 
-            for (0..N) |j| {
+            for (row_dist, 0..) |d, j| {
                 if (j != i) {
-                    const pj = @exp(-row_dist[j] * beta);
+                    const shifted = d - d_min;
+                    const pj = @exp(-shifted * beta);
                     sum_p += pj;
-                    sum_dp += row_dist[j] * pj;
+                    sum_dp += shifted * pj;
                 }
             }
 
-            if (sum_p == 0.0) sum_p = 1e-12;
-
-            // Shannon entropy H = log2(sum_p) + (beta / ln(2)) * (sum_dp / sum_p)
+            // Shannon entropy H = log2(sum_p) + (beta / ln(2)) * (sum_dp / sum_p); sum_p >= 1 thanks to the shift
             const H = @log2(sum_p) + (beta / ln2) * (sum_dp / sum_p);
             const p_diff = H - target_entropy;
 
@@ -111,20 +122,16 @@ pub fn binarySearchPerplexity(
 
         // Final normalization for sample i
         var sum_final: f32 = 0.0;
-        for (0..N) |j| {
+        for (row_dist, row_p, 0..) |d, *p, j| {
             if (j != i) {
-                const pj = @exp(-row_dist[j] * beta);
-                P[i * N + j] = pj;
-                sum_final += pj;
+                p.* = @exp(-(d - d_min) * beta);
+                sum_final += p.*;
             } else {
-                P[i * N + j] = 0.0;
+                p.* = 0.0;
             }
         }
-        if (sum_final == 0.0) sum_final = 1e-12;
-
-        for (0..N) |j| {
-            P[i * N + j] /= sum_final;
-        }
+        const inv_sum = 1.0 / sum_final;
+        for (row_p) |*p| p.* *= inv_sum;
     }
 
     return P;
@@ -182,29 +189,22 @@ pub const TSNE = struct {
         const random = prng.random();
 
         const Y = try allocator.alloc(f32, N * d_out);
-        const Y_prev = try allocator.alloc(f32, N * d_out);
-        defer allocator.free(Y_prev);
+        errdefer allocator.free(Y);
 
         const gains = try allocator.alloc(f32, N * d_out);
         defer allocator.free(gains);
 
-        for (0..N * d_out) |idx| {
-            const init_val = normalRandom(random) * 1e-4;
-            Y[idx] = init_val;
-            Y_prev[idx] = init_val;
-            gains[idx] = 1.0;
-        }
+        for (Y) |*y_val| y_val.* = normalRandom(random) * 1e-4;
+        @memset(gains, 1.0);
 
         // Scratch buffers for optimization loop
         const num = try allocator.alloc(f32, N * N);
         defer allocator.free(num);
 
-        const Q = try allocator.alloc(f32, N * N);
-        defer allocator.free(Q);
-
         const grad = try allocator.alloc(f32, N * d_out);
         defer allocator.free(grad);
 
+        // Previous update (momentum buffer), as in the reference implementation
         const dY = try allocator.alloc(f32, N * d_out);
         defer allocator.free(dY);
         @memset(dY, 0.0);
@@ -219,7 +219,7 @@ pub const TSNE = struct {
                 }
             }
 
-            // Stage 3: Low-dimensional Student-t kernel similarities
+            // Stage 3: Low-dimensional Student-t kernel similarities w_ij = 1 / (1 + ||y_i - y_j||^2)
             var num_sum: f32 = 0.0;
             for (0..N) |i| {
                 num[i * N + i] = 0.0;
@@ -227,8 +227,8 @@ pub const TSNE = struct {
                 for (i + 1..N) |j| {
                     const yj = Y[j * d_out .. (j + 1) * d_out];
                     var dist_y_sq: f32 = 0.0;
-                    for (0..d_out) |c| {
-                        const diff = yi[c] - yj[c];
+                    for (yi, yj) |a, b| {
+                        const diff = a - b;
                         dist_y_sq += diff * diff;
                     }
                     const w = 1.0 / (1.0 + dist_y_sq);
@@ -241,50 +241,40 @@ pub const TSNE = struct {
             if (num_sum == 0.0) num_sum = 1e-12;
             const inv_num_sum = 1.0 / num_sum;
 
-            for (0..N) |i| {
-                Q[i * N + i] = 0.0;
-                for (0..N) |j| {
-                    if (i != j) {
-                        Q[i * N + j] = @max(num[i * N + j] * inv_num_sum, 1e-12);
-                    }
-                }
-            }
-
-            // Stage 4: Gradient computation: dC/dy_i = 4 * sum_j (p_ij - q_ij) * w_ij * (y_i - y_j)
+            // Stage 4: Gradient computation: dC/dy_i = 4 * sum_j (p_ij - q_ij) * w_ij * (y_i - y_j),
+            // with q_ij = max(w_ij / sum(w), 1e-12) evaluated on the fly (no N x N Q buffer)
             @memset(grad, 0.0);
             for (0..N) |i| {
                 const yi = Y[i * d_out .. (i + 1) * d_out];
                 const grad_i = grad[i * d_out .. (i + 1) * d_out];
+                const p_row = P[i * N .. (i + 1) * N];
+                const w_row = num[i * N .. (i + 1) * N];
 
                 for (0..N) |j| {
                     if (i == j) continue;
-                    const mult = 4.0 * (P[i * N + j] - Q[i * N + j]) * num[i * N + j];
+                    const q_ij = @max(w_row[j] * inv_num_sum, 1e-12);
+                    const mult = 4.0 * (p_row[j] - q_ij) * w_row[j];
                     const yj = Y[j * d_out .. (j + 1) * d_out];
-                    for (0..d_out) |c| {
-                        grad_i[c] += mult * (yi[c] - yj[c]);
+                    for (grad_i, yi, yj) |*g, a, b| {
+                        g.* += mult * (a - b);
                     }
                 }
             }
 
             // Stage 5: Momentum and adaptive learning rate update
-            const momentum: f32 = if (step < 250) 0.5 else 0.8;
+            const momentum: f32 = if (step < self.options.early_exaggeration_iter) 0.5 else 0.8;
 
-            for (0..N * d_out) |idx| {
-                const g = grad[idx];
-                const delta = Y[idx] - Y_prev[idx];
-
-                // Adaptive gain schedule: increase gain if direction changes, decrease if consistent
-                if ((g > 0.0) != (delta > 0.0)) {
-                    gains[idx] += 0.2;
+            for (Y, dY, gains, grad) |*y_val, *update, *gain, g| {
+                // Adaptive gain schedule: increase gain if the gradient opposes the previous update, decrease if consistent
+                if ((g > 0.0) != (update.* > 0.0)) {
+                    gain.* += 0.2;
                 } else {
-                    gains[idx] = @max(gains[idx] * 0.8, self.options.min_gain);
+                    gain.* = @max(gain.* * 0.8, self.options.min_gain);
                 }
 
-                // Momentum step: dY = momentum * delta - lr * gains * grad
-                const step_dY = momentum * delta - self.options.lr * gains[idx] * g;
-                dY[idx] = step_dY;
-                Y_prev[idx] = Y[idx];
-                Y[idx] += step_dY;
+                // Momentum step: dY = momentum * dY - lr * gains * grad
+                update.* = momentum * update.* - self.options.lr * gain.* * g;
+                y_val.* += update.*;
             }
 
             // Zero-center the embedding coordinates Y
@@ -417,4 +407,34 @@ test "t-SNE fitTransform on synthetic cluster points" {
     }
     try testing.expectApproxEqAbs(@as(f32, 0.0), mean_x / 6.0, 1e-4);
     try testing.expectApproxEqAbs(@as(f32, 0.0), mean_y / 6.0, 1e-4);
+}
+
+test "t-SNE perplexity search stays calibrated for large pairwise distances" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // 1D points far from the origin: every squared distance from point 0 exceeds 1e6, so
+    // exp(-d * beta) underflows to 0 for any beta that resolves the ~1e3 gaps between neighbours
+    // unless the row is shifted by its nearest-neighbour distance first.
+    const X = [_]f32{ 0.0, 1000.0, 1001.0, 1003.0, 1006.0, 1010.0 };
+    const N = X.len;
+    const dist = try computePairwiseDistances(allocator, &X, N, 1);
+    defer allocator.free(dist);
+
+    const perplexity: f32 = 2.0;
+    const P_cond = try binarySearchPerplexity(allocator, dist, N, perplexity, 1e-5, 100);
+    defer allocator.free(P_cond);
+
+    for (0..N) |i| {
+        var row_sum: f32 = 0.0;
+        var entropy: f32 = 0.0;
+        for (0..N) |j| {
+            const p = P_cond[i * N + j];
+            try testing.expect(!std.math.isNan(p));
+            row_sum += p;
+            if (p > 0.0) entropy -= p * @log2(p);
+        }
+        try testing.expectApproxEqAbs(@as(f32, 1.0), row_sum, 1e-4);
+        try testing.expectApproxEqAbs(@log2(perplexity), entropy, 1e-2);
+    }
 }
