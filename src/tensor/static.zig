@@ -219,12 +219,11 @@ pub fn StaticTensor(comptime ElemT: type, comptime dims: anytype) type {
             const M = S[0];
             const K = S[1];
             const N = other_shape[1];
-            const zero_val = types_mod.convertScalar(ElemT, usize, 0);
 
+            // 完整累加每个乘积（不跳过零元素），使 0 * Inf 与非数 (Not a Number, NaN) 像基础线性代数子程序 (Basic Linear Algebra Subprograms, BLAS) 一样传播
             for (0..M) |i| {
                 for (0..K) |p| {
                     const a_val = self.data[i * K + p];
-                    if (a_val == zero_val) continue;
                     for (0..N) |j| {
                         result.data[i * N + j] += a_val * other.data[p * N + j];
                     }
