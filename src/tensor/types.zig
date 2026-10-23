@@ -112,9 +112,6 @@ pub const RopeOptions = struct {
     }
 };
 
-/// 旋转位置编码配置类型别名 (Rotary Position Embedding Options Alias, RoPEOptions)
-pub const RoPEOptions = RopeOptions;
-
 /// 将任意张量标量元素安全转换为非负索引 (`usize`)，并对越界或非有限值返回 `IndexOutOfBounds`
 pub inline fn indexScalarToUsize(comptime IdxT: type, raw: IdxT, bound: usize) !usize {
     const idx: usize = switch (@typeInfo(IdxT)) {
@@ -697,6 +694,5 @@ pub const LongTensor = GenericTensor(i64);
 pub const BoolTensor = GenericTensor(bool);
 pub const BFloat16Tensor = GenericTensor(bf16);
 pub const UsizeTensor = GenericTensor(usize);
-pub const TensorOf = GenericTensor;
 
 

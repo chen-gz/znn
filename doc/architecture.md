@@ -150,7 +150,7 @@ flowchart TD
 ### 2.4 统一算子配置结构体 (`ConvOptions`, `PoolOptions` & `RopeOptions`)
 * **`ConvOptions` (`src/tensor/types.zig`)**：`stride: usize = 1, padding: usize = 0`，统一用于 `conv1d`、`conv2d`、`convTranspose1d`、`convTranspose2d`；
 * **`PoolOptions` (`src/tensor/types.zig`)**：`stride: ?usize = null, padding: usize = 0`（提供 `resolveStride(pool_size)`，当 `stride == null` 时默认等于 `pool_size`），统一用于 `maxpool1d`、`avgpool1d`、`maxpool2d`、`avgpool2d`；
-* **`RopeOptions` / `RoPEOptions` (`src/tensor/types.zig`)**：`rotary_offset: usize = 0, base: f32 = 10000.0, mode: Mode = .interleaved, partial_rotary_factor: f32 = 1.0`（支持 `.interleaved` 相邻配对与 `.split_half` 半切分配对以及比例旋转因子），统一用于 `Tensor.rope(start_pos, options, alloc)` 与 `Graph.rope(x, start_pos, options)`。
+* **`RopeOptions` (`src/tensor/types.zig`)**：`rotary_offset: usize = 0, base: f32 = 10000.0, mode: Mode = .interleaved, partial_rotary_factor: f32 = 1.0`（支持 `.interleaved` 相邻配对与 `.split_half` 半切分配对以及比例旋转因子），统一用于 `Tensor.rope(start_pos, options, alloc)` 与 `Graph.rope(x, start_pos, options)`。
 
 ### 2.5 4-bit 分块量化与 Split-Half 向量化排布 (`src/tensor/quant.zig`)
 为满足大语言模型（如 Gemma 4）在端侧的高速低显存/低内存推理，`src/tensor/quant.zig` 实现了 split-half 排布的 `Q4Block`：
