@@ -43,7 +43,6 @@ const abs = tensor.abs;
 const applyRoPE = tensor.applyRoPE;
 const solveLinearSystem = tensor.solveLinearSystem;
 
-
 test "applyRoPE rotation properties" {
     var data = [_]f32{ 1.0, 0.0, 0.0, 1.0 }; // seq_len=2, n_head=1, head_dim=2
     applyRoPE(&data, 2, 1, 2, 10000.0);
@@ -746,9 +745,9 @@ test "Tensor strided view slicing, contiguous, clip, sort, argsort, nonzero" {
 
     // Slice error conditions
     try std.testing.expectError(error.DimensionOutOfBounds, t.slice(&.{ .{}, .{}, .{} }, allocator));
-    try std.testing.expectError(error.IndexOutOfBounds, t.slice(&.{ .{ .start = 10 } }, allocator));
-    try std.testing.expectError(error.InvalidSliceRange, t.slice(&.{ .{ .start = 2, .end = 1 } }, allocator));
-    try std.testing.expectError(error.InvalidStep, t.slice(&.{ .{ .step = 0 } }, allocator));
+    try std.testing.expectError(error.IndexOutOfBounds, t.slice(&.{.{ .start = 10 }}, allocator));
+    try std.testing.expectError(error.InvalidSliceRange, t.slice(&.{.{ .start = 2, .end = 1 }}, allocator));
+    try std.testing.expectError(error.InvalidStep, t.slice(&.{.{ .step = 0 }}, allocator));
 
     // 2. clip and clip_
     var t_clip = try array(allocator, &.{4}, &[_]f32{ -5.0, 0.5, 3.0, 10.0 });
@@ -1003,7 +1002,7 @@ test "Tensor slice views and non-contiguous inputs to ops" {
 
     // Slice rows 1..3 (2 rows, 4 cols)
     // In this view, self.data.len = 16 - 4 = 12, but shape.numel() = 8!
-    const s = try parent.slice(&.{ .{ .start = 1, .end = 3 } }, allocator);
+    const s = try parent.slice(&.{.{ .start = 1, .end = 3 }}, allocator);
     defer free(allocator, s);
     try std.testing.expectEqual(@as(usize, 8), s.shape.numel());
     try std.testing.expect(s.data.len > s.shape.numel());
@@ -1117,8 +1116,8 @@ test "Tensor linear algebra: Jacobi real symmetric eigenvalue decomposition (sym
     defer free(allocator, A);
     @memcpy(A.data, &[_]f32{
         4.0,  1.0, -2.0,
-        1.0,  2.0,  0.0,
-       -2.0,  0.0,  3.0,
+        1.0,  2.0, 0.0,
+        -2.0, 0.0, 3.0,
     });
 
     const res = try A.symeig(allocator);
@@ -1298,7 +1297,6 @@ test "Tensor to MLX Array bridge zero-copy and conversion" {
     try arr_direct.copyToTensor(t_restored);
     try std.testing.expectApproxEqAbs(@as(f32, 777.0), t_restored.data[1], 1e-4);
 }
-
 
 // ============================================================================
 // 审计回归测试 (Audit Regression Tests)：内存安全、数值稳定性、视图语义与内核等价性

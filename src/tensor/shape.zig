@@ -8,7 +8,7 @@ const std = @import("std");
 /// 为避免动态内存分配带来的开销，本框架采用静态数组 `[8]usize` 存储各维度大小，最多支持 8 维张量。
 pub const Shape = struct {
     dims: [8]usize, // 存储每一维度大小的静态数组，未使用的维度默认为 0
-    len: usize,     // 张量的维度个数（Rank，例如 2D 矩阵的 Rank 为 2）
+    len: usize, // 张量的维度个数（Rank，例如 2D 矩阵的 Rank 为 2）
 
     /// 从切片安全初始化 Shape，超过 8 维返回 error.MaxDimensionsExceeded
     pub fn fromSlice(shape_slice: []const usize) !Shape {
@@ -29,7 +29,6 @@ pub const Shape = struct {
             error.MaxDimensionsExceeded => @panic("Shape.init: maximum dimensions (8) exceeded"),
         };
     }
-
 
     /// 校验两个 Shape 是否完全相等（维度个数及每一维大小都匹配）
     pub fn eq(self: Shape, other: Shape) bool {
@@ -336,5 +335,3 @@ pub fn broadcastBinaryOpRaw(
         }
     }
 }
-
-

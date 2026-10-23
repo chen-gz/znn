@@ -1098,7 +1098,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             if (mmap_bytes.len < expected_len) return error.IncompleteModelFile;
             try LmHeadWeights.validateMode(options.lm_head_mode, config.vocab_size, config.hidden_size);
 
-            _ = std.posix.system.madvise(@alignCast(@ptrCast(@constCast(mmap_bytes.ptr))), mmap_bytes.len, std.posix.MADV.WILLNEED);
+            _ = std.posix.system.madvise(@ptrCast(@alignCast(@constCast(mmap_bytes.ptr))), mmap_bytes.len, std.posix.MADV.WILLNEED);
 
             // 1. 最终层 RMSNorm 权重 (BF16)
             const norm = try GemmaRMSNorm.init(allocator, config.hidden_size, config.rms_norm_eps);

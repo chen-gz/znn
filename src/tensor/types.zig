@@ -694,5 +694,3 @@ pub const LongTensor = GenericTensor(i64);
 pub const BoolTensor = GenericTensor(bool);
 pub const BFloat16Tensor = GenericTensor(bf16);
 pub const UsizeTensor = GenericTensor(usize);
-
-

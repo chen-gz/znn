@@ -266,7 +266,7 @@ test "MLX GPU backend matmul and fast kernels" {
     mlx_u32[3] = w3;
 
     const w_shape = [_]c_int{ 1, 4 }; // [out_features=1, in_features/8 = 4]
-    const mlx_w_arr = c.mlx_array_new_data(@ptrCast(&mlx_u32), &w_shape, 2, @intFromEnum(DType.uint32));
+    const mlx_w_arr = c.mlx_array_new_data(@ptrCast(&mlx_u32), &w_shape, 2, @backingInt(DType.uint32));
     var mlx_w = Array{ .handle = mlx_w_arr };
     defer mlx_w.deinit();
 
@@ -274,11 +274,11 @@ test "MLX GPU backend matmul and fast kernels" {
     var mlx_bias_val = [1]f16{@floatCast(-8.0 * d)};
     const sb_shape = [_]c_int{ 1, 1 };
 
-    const mlx_s_arr = c.mlx_array_new_data(@ptrCast(&mlx_scale_val), &sb_shape, 2, @intFromEnum(DType.float16));
+    const mlx_s_arr = c.mlx_array_new_data(@ptrCast(&mlx_scale_val), &sb_shape, 2, @backingInt(DType.float16));
     var mlx_s = Array{ .handle = mlx_s_arr };
     defer mlx_s.deinit();
 
-    const mlx_b_arr = c.mlx_array_new_data(@ptrCast(&mlx_bias_val), &sb_shape, 2, @intFromEnum(DType.float16));
+    const mlx_b_arr = c.mlx_array_new_data(@ptrCast(&mlx_bias_val), &sb_shape, 2, @backingInt(DType.float16));
     var mlx_b = Array{ .handle = mlx_b_arr };
     defer mlx_b.deinit();
 
@@ -763,7 +763,7 @@ test "Q4Weights inside compiled closure" {
     const Helper = struct {
         fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, pl: ?*anyopaque) callconv(.c) c_int {
             if (!mlx.has_mlx) return 1;
-            const p: *const Payload = @alignCast(@ptrCast(pl.?));
+            const p: *const Payload = @ptrCast(@alignCast(pl.?));
             var x_handle: mlx.c.mlx_array = .{ .ctx = null };
             if (mlx.c.mlx_vector_array_get(&x_handle, in, 0) != 0 or x_handle.ctx == null) return 1;
             const x = mlx.Array{ .handle = x_handle };

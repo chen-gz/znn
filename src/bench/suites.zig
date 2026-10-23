@@ -959,11 +959,11 @@ pub fn runTokenizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
 
     // Populate common English subword merges
     const common_merges = [_][2][]const u8{
-        .{ "t", "h" }, .{ "th", "e" }, .{ "i", "n" }, .{ "e", "r" },
-        .{ "a", "n" }, .{ "r", "e" },  .{ "o", "n" }, .{ "a", "t" },
-        .{ "e", "n" }, .{ "e", "s" },  .{ "o", "r" }, .{ "t", "e" },
-        .{ " ", "t" }, .{ " ", "a" },  .{ " ", "w" }, .{ " ", "b" },
-        .{ "C", "i" }, .{ "Ci", "t" }, .{ "Cit", "i" }, .{ "Citi", "z" },
+        .{ "t", "h" },     .{ "th", "e" },     .{ "i", "n" },   .{ "e", "r" },
+        .{ "a", "n" },     .{ "r", "e" },      .{ "o", "n" },   .{ "a", "t" },
+        .{ "e", "n" },     .{ "e", "s" },      .{ "o", "r" },   .{ "t", "e" },
+        .{ " ", "t" },     .{ " ", "a" },      .{ " ", "w" },   .{ " ", "b" },
+        .{ "C", "i" },     .{ "Ci", "t" },     .{ "Cit", "i" }, .{ "Citi", "z" },
         .{ "Citiz", "e" }, .{ "Citize", "n" },
     };
     for (common_merges, 0..) |m, rank| {

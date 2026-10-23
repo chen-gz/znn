@@ -34,7 +34,7 @@ pub fn main() !void {
     // Input: Batch = 2, SeqLen = 3
     std.debug.print("\nInput Token IDs (Shape: [2, 3]):\n", .{});
     const x = try allocator.create(tensor.Tensor);
-    const shape = tensor.Shape.init(&.{2, 3});
+    const shape = tensor.Shape.init(&.{ 2, 3 });
     x.* = tensor.Tensor{
         .data = try allocator.alloc(f32, 6),
         .grad = &.{},
@@ -47,8 +47,12 @@ pub fn main() !void {
         allocator.free(x.data);
         allocator.destroy(x);
     }
-    x.data[0] = 0; x.data[1] = 1; x.data[2] = 2;
-    x.data[3] = 3; x.data[4] = 4; x.data[5] = 5;
+    x.data[0] = 0;
+    x.data[1] = 1;
+    x.data[2] = 2;
+    x.data[3] = 3;
+    x.data[4] = 4;
+    x.data[5] = 5;
     x.print();
 
     // 用样本输入建立一次前向计算图，依据计算图与下游激活函数初始化参数
@@ -67,7 +71,7 @@ pub fn main() !void {
     var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
-    const x_node = try graph.tensorND(&.{2, 3}, false);
+    const x_node = try graph.tensorND(&.{ 2, 3 }, false);
     @memcpy(x_node.data, x.data);
 
     const y = try emb.forward(&graph, x_node);

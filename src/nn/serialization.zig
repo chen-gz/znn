@@ -458,4 +458,3 @@ pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8, allocator: s
     var loader = TensorLoader{ .data_payload = data_payload, .meta_obj = meta_obj };
     try module.walk(model, &loader);
 }
-

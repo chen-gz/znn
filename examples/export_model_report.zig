@@ -93,4 +93,3 @@ pub fn main() !void {
     try nn.exportJson(&min_graph, minimal_path, min_graph.backing_allocator);
     std.debug.print("  * Graph written to: {s}\n\n", .{minimal_path});
 }
-

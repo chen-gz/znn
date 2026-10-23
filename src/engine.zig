@@ -377,9 +377,9 @@ test "engine trainClassificationEpoch and evaluateClassification with DataLoader
     defer optim.deinit();
 
     var img_data = [_]f32{
-        1, 2, 3, 4,
-        5, 6, 7, 8,
-        9, 10, 11, 12,
+        1,  2,  3,  4,
+        5,  6,  7,  8,
+        9,  10, 11, 12,
         13, 14, 15, 16,
     };
     var lbl_data = [_]u8{ 0, 1, 0, 1 };
@@ -435,8 +435,8 @@ test "engine evaluateClassification standalone" {
     defer model.deinit();
 
     var img_data = [_]f32{
-        1, 2, 3, 4,
-        5, 6, 7, 8,
+        1, 2,  3,  4,
+        5, 6,  7,  8,
         9, 10, 11, 12,
     };
     var lbl_data = [_]u8{ 0, 1, 0 };

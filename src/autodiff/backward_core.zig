@@ -540,10 +540,10 @@ pub fn backwardCore(self: *Op) !void {
 
                 for (0..B) |b| {
                     for (0..n_kv) |kv_h| {
-                        const x_grad = X.grad[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
+                        const x_grad = X.grad[((b * n_kv + kv_h) * head_bytes)..((b * n_kv + kv_h + 1) * head_bytes)];
                         for (0..groups) |g| {
                             const h = kv_h * groups + g;
-                            const y_grad = Y.grad[((b * (n_kv * groups) + h) * head_bytes) .. ((b * (n_kv * groups) + h + 1) * head_bytes)];
+                            const y_grad = Y.grad[((b * (n_kv * groups) + h) * head_bytes)..((b * (n_kv * groups) + h + 1) * head_bytes)];
                             for (x_grad, y_grad) |*xg, yg| {
                                 xg.* += yg;
                             }

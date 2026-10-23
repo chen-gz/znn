@@ -26,7 +26,6 @@ pub const MLP = struct {
         };
     }
 
-
     // 用户只需专注定义前向数据流逻辑，所有算子都通过传入的计算图执行。
     // 【内存管理说明】：前向计算产生的中间张量（x1, a1, x2, a2）全部挂载在计算图上，由调用方在批次结束调用 graph.deinit() 统一释放。
     // 训练时使用 `Graph.initDefault` 记录反向传播所需的算子；推理时使用 `Graph.init(allocator, .{ .enable_grad = false })`，只执行前向计算，不分配梯度缓冲区。
@@ -37,8 +36,6 @@ pub const MLP = struct {
         const a2 = try graph.relu(x2);
         return try self.fc3.forward(graph, a2);
     }
-
-
 };
 
 pub const NeuralNetwork = nn.Module(MLP);
@@ -83,7 +80,6 @@ pub fn main(init: std.process.Init) !void {
     try runTraining(&model, io, allocator, arena, train_dataset, test_dataset);
     try printPredictions(&model, allocator, test_dataset, 5);
 }
-
 
 /// `allocator` 用于每个批次的计算图：计算图在批次结束时释放，内存会真正归还；
 /// `arena` 只承载生命周期贯穿整个训练过程的对象 (优化器状态、数据加载器)。
@@ -228,7 +224,6 @@ test "MLP model initialization and forward passes (no-grad & gradient graphs)" {
 
         try std.testing.expectEqualSlices(usize, &.{ 2, 10 }, logits.shape.dims[0..logits.shape.len]);
     }
-
 
     // Training mode (gradient-recording graph)
     {

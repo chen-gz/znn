@@ -74,8 +74,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("                       znn (Zig Neural Network) - Performance Benchmark Suite                         \n", .{});
     std.debug.print("======================================================================================================\n", .{});
     std.debug.print("  Target Platform : {s} ({s})\n", .{ @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) });
-    std.debug.print("  Build Mode      : {s}\n", .{ @tagName(builtin.mode) });
-    std.debug.print("  BLAS Backend    : {s}\n", .{ blas_backend });
+    std.debug.print("  Build Mode      : {s}\n", .{@tagName(builtin.mode)});
+    std.debug.print("  BLAS Backend    : {s}\n", .{blas_backend});
     std.debug.print("  Config          : Warmup={d}, Iterations={d}", .{ config.warmup, config.iterations });
     if (config.suite) |s| {
         std.debug.print(", Suite='{s}'", .{s});

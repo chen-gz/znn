@@ -35,7 +35,7 @@ pub fn main() !void {
     // Input: Shape [1, 3, 8]
     std.debug.print("Input Tensor (Shape: [1, 3, 8]):\n", .{});
     const x = try allocator.create(tensor.Tensor);
-    const shape = tensor.Shape.init(&.{1, 3, 8});
+    const shape = tensor.Shape.init(&.{ 1, 3, 8 });
     x.* = tensor.Tensor{
         .data = try allocator.alloc(f32, 24),
         .grad = &.{},
@@ -60,7 +60,7 @@ pub fn main() !void {
     var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
 
-    const x_node = try graph.tensorND(&.{1, 3, 8}, false);
+    const x_node = try graph.tensorND(&.{ 1, 3, 8 }, false);
     @memcpy(x_node.data, x.data);
 
     const y = try block.forward(&graph, x_node);

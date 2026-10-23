@@ -132,8 +132,10 @@ pub fn main(init: std.process.Init) !void {
                 const q_num_blocks = (q_dim * config.hidden_size) / 32;
                 const k_num_blocks = (kv_dim * config.hidden_size) / 32;
 
-                const q_slice = ctx.in_mmap[in_c .. in_c + q_num_blocks * 18]; in_c += q_num_blocks * 18;
-                const k_slice = ctx.in_mmap[in_c .. in_c + k_num_blocks * 18]; in_c += k_num_blocks * 18;
+                const q_slice = ctx.in_mmap[in_c .. in_c + q_num_blocks * 18];
+                in_c += q_num_blocks * 18;
+                const k_slice = ctx.in_mmap[in_c .. in_c + k_num_blocks * 18];
+                in_c += k_num_blocks * 18;
 
                 const fused_qkv_blocks = ((q_dim + kv_dim + v_dim) * config.hidden_size) / 32;
                 const qkv_wq_len = fused_qkv_blocks * 16;
@@ -148,14 +150,16 @@ pub fn main(init: std.process.Init) !void {
                     Q4Weights.packBlocksToDirectBuffers(&.{ q_slice, k_slice }, &.{ q_dim, kv_dim }, config.hidden_size, qkv_wq_out, qkv_sc_out, qkv_bi_out);
                 } else {
                     const v_num_blocks = (v_dim * config.hidden_size) / 32;
-                    const v_slice = ctx.in_mmap[in_c .. in_c + v_num_blocks * 18]; in_c += v_num_blocks * 18;
+                    const v_slice = ctx.in_mmap[in_c .. in_c + v_num_blocks * 18];
+                    in_c += v_num_blocks * 18;
                     Q4Weights.packBlocksToDirectBuffers(&.{ q_slice, k_slice, v_slice }, &.{ q_dim, kv_dim, kv_dim }, config.hidden_size, qkv_wq_out, qkv_sc_out, qkv_bi_out);
                 }
                 out_c += qkv_wq_len + qkv_sc_len + qkv_bi_len;
 
                 // 3. 重排并写入 o_proj
                 const o_num_blocks = (config.hidden_size * q_dim) / 32;
-                const o_slice = ctx.in_mmap[in_c .. in_c + o_num_blocks * 18]; in_c += o_num_blocks * 18;
+                const o_slice = ctx.in_mmap[in_c .. in_c + o_num_blocks * 18];
+                in_c += o_num_blocks * 18;
 
                 const o_wq_len = o_num_blocks * 16;
                 const o_sc_len = o_num_blocks * 2;
@@ -188,7 +192,8 @@ pub fn main(init: std.process.Init) !void {
 
                 // 5. 重排并写入 down_proj
                 const down_blocks = (config.hidden_size * config.intermediate_size) / 32;
-                const down_slice = ctx.in_mmap[in_c .. in_c + down_blocks * 18]; in_c += down_blocks * 18;
+                const down_slice = ctx.in_mmap[in_c .. in_c + down_blocks * 18];
+                in_c += down_blocks * 18;
 
                 const down_wq_len = down_blocks * 16;
                 const down_sc_len = down_blocks * 2;

@@ -378,12 +378,17 @@ test "cblas_sgemm_fallback matrix multiplication" {
         CblasRowMajor,
         CblasNoTrans,
         CblasNoTrans,
-        2, 2, 3,
+        2,
+        2,
+        3,
         1.0,
-        &A, 3,
-        &B, 2,
+        &A,
+        3,
+        &B,
+        2,
         0.0,
-        &C, 2,
+        &C,
+        2,
     );
 
     // C = A * B
@@ -404,12 +409,17 @@ test "cblas_sgemm_fallback matrix multiplication" {
         CblasRowMajor,
         CblasNoTrans,
         CblasTrans,
-        2, 2, 10,
+        2,
+        2,
+        10,
         1.0,
-        &A10, 10,
-        &B10, 10,
+        &A10,
+        10,
+        &B10,
+        10,
         0.0,
-        &C_nt, 2,
+        &C_nt,
+        2,
     );
     var expected00: f32 = 0.0;
     var expected01: f32 = 0.0;
@@ -428,8 +438,8 @@ test "cblas_sgemm_fallback matches reference for all layouts, transposes, edge t
 
     // 覆盖小矩阵路径、恰好整块、行列尾块以及跨越多个 KC / MC 分块的尺寸
     const shapes = [_][3]usize{
-        .{ 1, 1, 1 },   .{ 3, 5, 7 },     .{ 1, 40, 33 },  .{ 33, 3, 17 },
-        .{ 6, 16, 8 },  .{ 7, 17, 9 },    .{ 13, 35, 300 }, .{ 80, 50, 600 },
+        .{ 1, 1, 1 },     .{ 3, 5, 7 },      .{ 1, 40, 33 },   .{ 33, 3, 17 },
+        .{ 6, 16, 8 },    .{ 7, 17, 9 },     .{ 13, 35, 300 }, .{ 80, 50, 600 },
         .{ 145, 33, 70 }, .{ 12, 200, 257 },
     };
     const scalars = [_][2]f32{ .{ 1.0, 0.0 }, .{ -0.5, 1.0 }, .{ 2.0, 0.25 } };
@@ -473,12 +483,17 @@ test "cblas_sgemm_fallback matches reference for all layouts, transposes, edge t
                             if (col_major) CblasColMajor else CblasRowMajor,
                             if (ta) CblasTrans else CblasNoTrans,
                             if (tb) CblasTrans else CblasNoTrans,
-                            @intCast(m), @intCast(n), @intCast(k),
+                            @intCast(m),
+                            @intCast(n),
+                            @intCast(k),
                             ab[0],
-                            A.ptr, @intCast(lda),
-                            B.ptr, @intCast(ldb),
+                            A.ptr,
+                            @intCast(lda),
+                            B.ptr,
+                            @intCast(ldb),
                             ab[1],
-                            C.ptr, @intCast(ldc),
+                            C.ptr,
+                            @intCast(ldc),
                         );
                         referenceGemm(col_major, ta, tb, m, n, k, ab[0], A, lda, B, ldb, ab[1], C_ref, ldc);
 
@@ -524,12 +539,17 @@ test "cblas_sgemm_fallback propagates NaN from 0 * Inf consistently across trans
                     CblasRowMajor,
                     if (ta) CblasTrans else CblasNoTrans,
                     if (tb) CblasTrans else CblasNoTrans,
-                    @intCast(m), @intCast(n), @intCast(k),
+                    @intCast(m),
+                    @intCast(n),
+                    @intCast(k),
                     1.0,
-                    A.ptr, @intCast(if (ta) m else k),
-                    B.ptr, @intCast(if (tb) k else n),
+                    A.ptr,
+                    @intCast(if (ta) m else k),
+                    B.ptr,
+                    @intCast(if (tb) k else n),
                     0.0,
-                    C.ptr, @intCast(n),
+                    C.ptr,
+                    @intCast(n),
                 );
                 try std.testing.expect(std.math.isNan(C[0]));
                 // 其余行的 op(A)[i, 0] = 1，与 Inf 相乘得 +Inf；第 0 行其余列只含有限值，结果为 0

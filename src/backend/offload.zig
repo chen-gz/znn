@@ -647,7 +647,7 @@ pub const Q4Weights = struct {
 
         const res_data = try res_mlx.dataFloat32();
         if (res_data.len != rows * out_f) return error.ShapeMismatch;
-        @memcpy(out.data[0..rows * out_f], res_data);
+        @memcpy(out.data[0 .. rows * out_f], res_data);
     }
 };
 

@@ -50,8 +50,8 @@ test "walk visits slices and arrays of sub-modules and skips comptime tuple fiel
     var named = try nn.namedParameters(&model, allocator);
     defer named.deinit();
     const expected = [_][]const u8{
-        "blocks.0.weight", "blocks.0.bias", "blocks.1.weight", "blocks.1.bias",
-        "pair.0.weight",   "pair.0.bias",   "pair.1.weight",   "pair.1.bias",
+        "blocks.0.weight",      "blocks.0.bias",      "blocks.1.weight", "blocks.1.bias",
+        "pair.0.weight",        "pair.0.bias",        "pair.1.weight",   "pair.1.bias",
         "head.layers.0.weight", "head.layers.0.bias",
     };
     try std.testing.expectEqual(expected.len, named.items.len);
