@@ -875,7 +875,7 @@ test "Sigmoid forward and backward" {
     }
 }
 
-test "SigmoidCrossEntropy forward and backward" {
+test "sigmoidCrossEntropy records BceWithLogitsLoss forward and backward" {
     const arena_allocator = std.testing.allocator;
     var graph = autodiff.Graph.initDefault(arena_allocator);
     defer graph.deinit();
@@ -883,6 +883,7 @@ test "SigmoidCrossEntropy forward and backward" {
     const logits = try graph.tensorNDWithData(&.{3}, &.{ -1.0, 0.0, 2.0 }, true);
     const targets = try graph.tensorNDWithData(&.{3}, &.{ 0.0, 1.0, 1.0 }, false);
     const loss = try graph.sigmoidCrossEntropy(logits, targets);
+    try std.testing.expectEqual(autodiff.OpType.BceWithLogitsLoss, autodiff.Op.creatorOf(loss).?.op_type);
 
     try graph.forward();
 

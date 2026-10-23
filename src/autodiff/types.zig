@@ -5,7 +5,6 @@ const Tensor = tensor_mod.Tensor;
 pub const OpType = enum {
     // --- 基础数学与张量逐元素运算 (Basic Math & Element-wise Ops) ---
     Add, // 张量逐元素加法（支持多维广播）
-    AddBias, // 偏置项加法（广播机制）
     AddScalar, // 标量加法
     Sub, // 张量逐元素减法（支持多维广播）
     SubScalar, // 标量减法
@@ -68,7 +67,6 @@ pub const OpType = enum {
     MseLoss, // 均方误差损失函数 (Mean Squared Error, MSE Loss)
     BceLoss, // 二元交叉熵损失函数 (Binary Cross-Entropy, BCE Loss)
     BceWithLogitsLoss, // 二元交叉熵带对数几率损失函数 (Binary Cross-Entropy with Logits, BCEWithLogitsLoss)
-    SigmoidCrossEntropy, // Sigmoid 二元交叉熵损失 (Binary Cross-Entropy, BCE with Logits)
     SoftmaxCrossEntropy, // 结合 Softmax 与交叉熵损失（数值稳定性更好）
     DpoLoss, // 直接偏好优化损失 (Direct Preference Optimization, DPO Loss)
     GrpoLoss, // 群组相对策略优化损失 (Group Relative Policy Optimization, GRPO Loss)
@@ -79,7 +77,6 @@ pub const OpType = enum {
     pub fn getFormula(self: OpType) []const u8 {
         return switch (self) {
             .Add => "C = A + B",
-            .AddBias => "y = x + b",
             .AddScalar => "y = x + c",
             .Sub => "C = A - B",
             .SubScalar => "y = x - c",
@@ -131,7 +128,6 @@ pub const OpType = enum {
             .MseLoss => "\\mathcal{L} = \\frac{1}{N} \\sum (y - \\hat{y})^2",
             .BceLoss => "\\mathcal{L} = -\\frac{1}{N} \\sum [y \\log \\hat{y} + (1-y) \\log(1-\\hat{y})]",
             .BceWithLogitsLoss => "\\mathcal{L} = \\max(x, 0) - x \\cdot y + \\log(1 + e^{-|x|})",
-            .SigmoidCrossEntropy => "\\mathcal{L} = \\max(x, 0) - x \\cdot y + \\log(1 + e^{-|x|})",
             .SoftmaxCrossEntropy => "\\mathcal{L} = -\\log \\left( \\frac{e^{z_y}}{\\sum_j e^{z_j}} \\right)",
             .DpoLoss => "\\mathcal{L}_{\\text{DPO}} = -\\log \\sigma(\\beta (\\log \\frac{\\pi_\\theta(y_w)}{\\pi_{\\text{ref}}(y_w)} - \\log \\frac{\\pi_\\theta(y_l)}{\\pi_{\\text{ref}}(y_l)}))",
             .GrpoLoss => "\\mathcal{L}_{\\text{GRPO}} = -\\frac{1}{N} \\sum [\\min(r_t A_t, \\text{clip}(r_t) A_t) - \\beta D_{\\text{KL}}]",
@@ -145,7 +141,6 @@ pub const OpType = enum {
 pub const OpContext = union(enum) {
     // --- 基础数学与张量逐元素运算 ---
     Add: void,
-    AddBias: void,
     AddScalar: struct {
         val: f32,
     },
@@ -318,7 +313,6 @@ pub const OpContext = union(enum) {
         eps: f32,
     },
     BceWithLogitsLoss: void,
-    SigmoidCrossEntropy: void,
     SoftmaxCrossEntropy: struct {
         probs: []f32,
         targets: []const usize,
