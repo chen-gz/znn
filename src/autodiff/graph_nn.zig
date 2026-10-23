@@ -96,12 +96,14 @@ pub fn maskedCrossEntropyLoss(self: *Graph, logits: *Tensor, targets: anytype, m
 // 直接偏好优化 (Direct Preference Optimization, DPO) 损失函数：支持对策略模型对数概率 pi_chosen_logps / pi_rejected_logps 的计算图反向传播
 pub fn dpoLoss(
     self: *Graph,
-    pi_chosen_logps: *Tensor,
-    pi_rejected_logps: *Tensor,
+    pi_chosen_in: *Tensor,
+    pi_rejected_in: *Tensor,
     ref_chosen_logps: []const f32,
     ref_rejected_logps: []const f32,
     beta: f32,
 ) !*Tensor {
+    const pi_chosen_logps = try self.contiguous(pi_chosen_in);
+    const pi_rejected_logps = try self.contiguous(pi_rejected_in);
     const N = pi_chosen_logps.data.len;
     if (pi_rejected_logps.data.len != N or ref_chosen_logps.len != N or ref_rejected_logps.len != N) {
         return error.ShapeMismatch;
@@ -134,13 +136,15 @@ pub fn dpoLoss(
 // 群组相对策略优化 (Group Relative Policy Optimization, GRPO) 损失函数：支持在计算图中对 new_logps 自动微分求导
 pub fn grpoLoss(
     self: *Graph,
-    old_logps: *Tensor,
-    new_logps: *Tensor,
+    old_logps_in: *Tensor,
+    new_logps_in: *Tensor,
     advantages: []const f32,
     ref_logps: ?[]const f32,
     beta: f32,
     clip_eps: f32,
 ) !*Tensor {
+    const old_logps = try self.contiguous(old_logps_in);
+    const new_logps = try self.contiguous(new_logps_in);
     const N = old_logps.data.len;
     if (new_logps.data.len != N or advantages.len != N) return error.ShapeMismatch;
     if (ref_logps) |refs| {
@@ -178,7 +182,9 @@ pub fn grpoLoss(
 }
 
 // 均方误差 (Mean Squared Error, MSE) 损失函数：C = 1/N * sum((y_pred - y_true)^2)
-pub fn mseLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor) !*Tensor {
+pub fn mseLoss(self: *Graph, y_pred_in: *Tensor, y_true_in: *Tensor) !*Tensor {
+    const y_pred = try self.contiguous(y_pred_in);
+    const y_true = try self.contiguous(y_true_in);
     const req_grad = self.enable_grad and (y_pred.requires_grad or y_true.requires_grad);
     const loss = try self.tensor(1, 1, req_grad);
     return self.runAndRecordPreallocatedOp(
@@ -190,7 +196,9 @@ pub fn mseLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor) !*Tensor {
     );
 }
 
-pub fn bceWithLogitsLoss(self: *Graph, logits: *Tensor, targets: *Tensor) !*Tensor {
+pub fn bceWithLogitsLoss(self: *Graph, logits_in: *Tensor, targets_in: *Tensor) !*Tensor {
+    const logits = try self.contiguous(logits_in);
+    const targets = try self.contiguous(targets_in);
     const req_grad = self.enable_grad and (logits.requires_grad or targets.requires_grad);
     const loss = try self.tensor(1, 1, req_grad);
     return self.runAndRecordPreallocatedOp(
@@ -206,7 +214,9 @@ pub fn sigmoidCrossEntropy(self: *Graph, logits: *Tensor, targets: *Tensor) !*Te
     return self.bceWithLogitsLoss(logits, targets);
 }
 
-pub fn bceLoss(self: *Graph, probs: *Tensor, targets: *Tensor, eps: f32) !*Tensor {
+pub fn bceLoss(self: *Graph, probs_in: *Tensor, targets_in: *Tensor, eps: f32) !*Tensor {
+    const probs = try self.contiguous(probs_in);
+    const targets = try self.contiguous(targets_in);
     const req_grad = self.enable_grad and (probs.requires_grad or targets.requires_grad);
     const loss = try self.tensor(1, 1, req_grad);
     return self.runAndRecordPreallocatedOp(
@@ -231,7 +241,8 @@ pub fn randomUniform(self: *Graph, shape_slice: []const usize, random: std.Rando
 }
 
 // 二阶范数 (L2 Norm) 正则化损失函数：C = 0.5 * lambda * sum(weight_i^2)
-pub fn l2Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
+pub fn l2Loss(self: *Graph, weight_in: *Tensor, lambda: f32) !*Tensor {
+    const weight = try self.contiguous(weight_in);
     const req_grad = self.enable_grad and weight.requires_grad;
     const loss = try self.tensor(1, 1, req_grad);
     return self.runAndRecordPreallocatedOp(
@@ -252,7 +263,8 @@ pub fn ridgeLoss(self: *Graph, y_pred: *Tensor, y_true: *Tensor, weight: *Tensor
 }
 
 // 一阶范数 (L1 Norm) 正则化损失：Loss = lambda * sum(|weight_i|)
-pub fn l1Loss(self: *Graph, weight: *Tensor, lambda: f32) !*Tensor {
+pub fn l1Loss(self: *Graph, weight_in: *Tensor, lambda: f32) !*Tensor {
+    const weight = try self.contiguous(weight_in);
     const req_grad = self.enable_grad and weight.requires_grad;
     const loss = try self.tensor(1, 1, req_grad);
     return self.runAndRecordPreallocatedOp(
@@ -326,12 +338,15 @@ pub fn conv2d(
 
 pub fn convTranspose1d(
     self: *Graph,
-    A: *Tensor,
-    weight: *Tensor,
-    bias: ?*Tensor,
+    A_in: *Tensor,
+    weight_in: *Tensor,
+    bias_in: ?*Tensor,
     options: tensor_mod.ConvOptions,
 ) !*Tensor {
     const allocator = self.arena.allocator();
+    const A = try self.contiguous(A_in);
+    const weight = try self.contiguous(weight_in);
+    const bias: ?*Tensor = if (bias_in) |b| try self.contiguous(b) else null;
     const C = try A.convTranspose1d(weight, bias, options, allocator);
     const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
     const ctx: OpContext = .{ .ConvTranspose1D = .{ .stride = options.stride, .padding = options.padding } };
@@ -344,12 +359,15 @@ pub fn convTranspose1d(
 
 pub fn convTranspose2d(
     self: *Graph,
-    A: *Tensor,
-    weight: *Tensor,
-    bias: ?*Tensor,
+    A_in: *Tensor,
+    weight_in: *Tensor,
+    bias_in: ?*Tensor,
     options: tensor_mod.ConvOptions,
 ) !*Tensor {
     const allocator = self.arena.allocator();
+    const A = try self.contiguous(A_in);
+    const weight = try self.contiguous(weight_in);
+    const bias: ?*Tensor = if (bias_in) |b| try self.contiguous(b) else null;
     const C = try A.convTranspose2d(weight, bias, options, allocator);
     const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
     const ctx: OpContext = .{ .ConvTranspose2D = .{ .stride = options.stride, .padding = options.padding } };
@@ -448,8 +466,9 @@ pub fn adaptiveAvgPool2d(self: *Graph, A: *Tensor, output_size: [2]usize) !*Tens
     );
 }
 
-pub fn softmax(self: *Graph, A: *Tensor) !*Tensor {
+pub fn softmax(self: *Graph, A_in: *Tensor) !*Tensor {
     const allocator = self.arena.allocator();
+    const A = try self.contiguous(A_in);
     const C = try A.softmax(allocator);
     return self.registerSingleOutputOp(
         C,
@@ -460,8 +479,10 @@ pub fn softmax(self: *Graph, A: *Tensor) !*Tensor {
     );
 }
 
-pub fn rmsNorm(self: *Graph, X: *Tensor, G: *Tensor, eps: f32) !*Tensor {
+pub fn rmsNorm(self: *Graph, X_in: *Tensor, G_in: *Tensor, eps: f32) !*Tensor {
     const allocator = self.arena.allocator();
+    const X = try self.contiguous(X_in);
+    const G = try self.contiguous(G_in);
     if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
         const Y = try self.tensorND(X.shape.dims[0..X.shape.len], false);
         try backend.offload.rmsNorm(X, G, Y, eps, self.options.mlx_stream);
@@ -478,8 +499,11 @@ pub fn rmsNorm(self: *Graph, X: *Tensor, G: *Tensor, eps: f32) !*Tensor {
     );
 }
 
-pub fn layerNorm(self: *Graph, X: *Tensor, G: *Tensor, B: *Tensor, eps: f32) !*Tensor {
+pub fn layerNorm(self: *Graph, X_in: *Tensor, G_in: *Tensor, B_in: *Tensor, eps: f32) !*Tensor {
     const allocator = self.arena.allocator();
+    const X = try self.contiguous(X_in);
+    const G = try self.contiguous(G_in);
+    const B = try self.contiguous(B_in);
     const Y = try X.layerNorm(G, B, eps, allocator);
     return self.registerSingleOutputOp(
         Y,
@@ -494,15 +518,18 @@ pub fn layerNorm(self: *Graph, X: *Tensor, G: *Tensor, B: *Tensor, eps: f32) !*T
 /// 支持二维 `[N, C]` 与三维 `[N, C, L]` 输入张量
 pub fn batchNorm1d(
     self: *Graph,
-    X: *Tensor,
-    G: *Tensor,
-    B: *Tensor,
+    X_in: *Tensor,
+    G_in: *Tensor,
+    B_in: *Tensor,
     running_mean: *Tensor,
     running_var: *Tensor,
     eps: f32,
     momentum: f32,
     training: bool,
 ) !*Tensor {
+    const X = try self.contiguous(X_in);
+    const G = try self.contiguous(G_in);
+    const B = try self.contiguous(B_in);
     if (X.shape.len != 2 and X.shape.len != 3) return error.IncompatibleDimensions;
     const C = X.shape.dims[1];
     if (G.data.len != C or B.data.len != C or running_mean.data.len != C or running_var.data.len != C) {
@@ -545,15 +572,18 @@ pub fn batchNorm1d(
 
 pub fn batchNorm2d(
     self: *Graph,
-    X: *Tensor,
-    G: *Tensor,
-    B: *Tensor,
+    X_in: *Tensor,
+    G_in: *Tensor,
+    B_in: *Tensor,
     running_mean: *Tensor,
     running_var: *Tensor,
     eps: f32,
     momentum: f32,
     training: bool,
 ) !*Tensor {
+    const X = try self.contiguous(X_in);
+    const G = try self.contiguous(G_in);
+    const B = try self.contiguous(B_in);
     if (X.shape.len != 4) return error.IncompatibleDimensions;
     const C = X.shape.dims[1];
     if (G.data.len != C or B.data.len != C or running_mean.data.len != C or running_var.data.len != C) {
@@ -598,12 +628,15 @@ pub fn batchNorm2d(
 /// 支持任意维度 `>= 2` 的输入张量 `[N, C, ...]`，要求 `C % num_groups == 0`
 pub fn groupNorm(
     self: *Graph,
-    X: *Tensor,
-    G: *Tensor,
-    B: *Tensor,
+    X_in: *Tensor,
+    G_in: *Tensor,
+    B_in: *Tensor,
     num_groups: usize,
     eps: f32,
 ) !*Tensor {
+    const X = try self.contiguous(X_in);
+    const G = try self.contiguous(G_in);
+    const B = try self.contiguous(B_in);
     if (X.shape.len < 2) return error.IncompatibleDimensions;
     const N = X.shape.dims[0];
     const C = X.shape.dims[1];
@@ -638,8 +671,10 @@ pub fn groupNorm(
     );
 }
 
-pub fn dropout(self: *Graph, X: *Tensor, p: f32, random: std.Random) !*Tensor {
+pub fn dropout(self: *Graph, X_in: *Tensor, p: f32, random: std.Random) !*Tensor {
+    if (!(p >= 0.0 and p <= 1.0)) return error.InvalidProbability;
     const allocator = self.arena.allocator();
+    const X = try self.contiguous(X_in);
     const mask_scale = try allocator.alloc(f32, X.numel());
     const scale = 1.0 / (1.0 - p);
 
@@ -661,7 +696,8 @@ pub fn dropout(self: *Graph, X: *Tensor, p: f32, random: std.Random) !*Tensor {
     );
 }
 
-pub fn rope(self: *Graph, X: *Tensor, start_pos: usize, options: tensor_mod.RopeOptions) !*Tensor {
+pub fn rope(self: *Graph, X_in: *Tensor, start_pos: usize, options: tensor_mod.RopeOptions) !*Tensor {
+    const X = try self.contiguous(X_in);
     if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad and options.rotary_offset == 0 and options.partial_rotary_factor == 1.0) {
         const D = X.shape.dims[X.shape.len - 1];
         if (D % 2 == 0) {
@@ -689,8 +725,10 @@ pub fn rope(self: *Graph, X: *Tensor, start_pos: usize, options: tensor_mod.Rope
     );
 }
 
-pub fn batchMatMul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+pub fn batchMatMul(self: *Graph, A_in: *Tensor, B_in: *Tensor) !*Tensor {
     const allocator = self.arena.allocator();
+    const A = try self.contiguous(A_in);
+    const B = try self.contiguous(B_in);
     if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
         const ndim = A.shape.len;
         var out_shape: [8]usize = undefined;
@@ -760,8 +798,9 @@ pub fn scaledDotProductAttention(
     return try self.batchMatMul(att_sm, v);
 }
 
-pub fn embedding(self: *Graph, W: *Tensor, X: anytype) !*Tensor {
+pub fn embedding(self: *Graph, W_in: *Tensor, X: anytype) !*Tensor {
     const allocator = self.arena.allocator();
+    const W = try self.contiguous(W_in);
     const XT = @TypeOf(X);
     const x_tensor: *Tensor = if (XT == *Tensor or XT == *const Tensor)
         @constCast(X)
@@ -811,12 +850,13 @@ pub fn embedding(self: *Graph, W: *Tensor, X: anytype) !*Tensor {
 /// 量化权重冻结，反向传播只对输入 `x` 求梯度 (可在量化骨干网络之上训练低秩自适应 (Low-Rank Adaptation, LoRA) 等可训练模块)
 pub fn q4MatMul(
     self: *Graph,
-    x: *Tensor,
+    x_in: *Tensor,
     blocks: []const tensor_mod.quant.Q4Block,
     in_features: usize,
     out_features: usize,
 ) !*Tensor {
     const allocator = self.arena.allocator();
+    const x = try self.contiguous(x_in);
     const Y = try tensor_mod.quant.q4MatMul(self.executor(), x, blocks, in_features, out_features, allocator);
     const ctx: OpContext = .{
         .Q4MatMul = .{
@@ -837,8 +877,9 @@ pub fn q4MatMul(
 /// 无分支前 K 大元素与下标选择算子 (Branchless Top-K Selection Operator, TopK)：
 /// 沿输入张量最后一维选出前 `k` 大元素 `values` 与对应专家下标 `indices`，
 /// 全程无数据依赖 `if` 跳转，反向传播将 `values.grad` 按 `indices` 路由回原位置。
-pub fn topK(self: *Graph, X: *Tensor, k: usize) !Tensor.TopKResult {
+pub fn topK(self: *Graph, X_in: *Tensor, k: usize) !Tensor.TopKResult {
     const allocator = self.arena.allocator();
+    const X = try self.contiguous(X_in);
     const res = try X.topK(k, allocator);
     const req_grad = self.enable_grad and X.requires_grad;
 
@@ -881,12 +922,22 @@ pub fn topK(self: *Graph, X: *Tensor, k: usize) !Tensor.TopKResult {
 /// 直接寻址并执行矩阵乘法，仅激活 `K` 个被选中专家且无任何主机端或数据依赖 `if` 分支。
 pub fn gatherMatMul(
     self: *Graph,
-    X: *Tensor,
-    indices: *Tensor,
-    weights: []const *Tensor,
-    biases: ?[]const *Tensor,
+    X_in: *Tensor,
+    indices_in: *Tensor,
+    weights_in: []const *Tensor,
+    biases_in: ?[]const *Tensor,
 ) !*Tensor {
     const allocator = self.arena.allocator();
+    const X = try self.contiguous(X_in);
+    const indices = try self.contiguous(indices_in);
+    const weights = try allocator.alloc(*Tensor, weights_in.len);
+    for (weights, weights_in) |*dst, src| dst.* = try self.contiguous(src);
+    var biases: ?[]const *Tensor = null;
+    if (biases_in) |bs_in| {
+        const bs = try allocator.alloc(*Tensor, bs_in.len);
+        for (bs, bs_in) |*dst, src| dst.* = try self.contiguous(src);
+        biases = bs;
+    }
     const E = weights.len;
     const has_bias = biases != null;
     const Y = try X.gatherMatMul(indices, weights, biases, allocator);

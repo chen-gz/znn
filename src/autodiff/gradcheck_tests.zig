@@ -561,6 +561,38 @@ test "gradcheck: scaled dot-product attention with causal mask" {
     }, .{});
 }
 
+test "gradcheck: contiguous-layout kernels receive transposed view inputs" {
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            const arena = g.arenaAllocator();
+            const xt = try t[0].transposeView(0, 1, arena); // [3, 4]
+            const sm = try g.softmax(xt);
+            const th = try g.tanh(xt);
+            const ln = try g.layerNorm(xt, t[1], t[2], 1e-5);
+            const sc = try g.mulScalar(xt, 0.5);
+            const cat = try g.concat(&.{ sm, th, ln, sc }, 0); // [12, 4]
+            const parts = try g.split(xt, 2, 1);
+            const ps = try g.sub(parts[0], parts[1]); // [3, 2]
+            const mse = try g.mseLoss(ps, try g.zeros(&.{ 3, 2 }, false));
+
+            const kt = try t[3].transposeView(2, 3, arena); // [1, 2, 3, 4]
+            const att = try g.batchMatMul(t[4], kt); // [1, 2, 2, 4]
+            const sa = try g.sum(att, null, false);
+            const sc_sum = try g.sum(cat, null, false);
+            const sq = try g.sum(try g.mul(cat, cat), null, false);
+            const a = try g.add(sa, sc_sum);
+            const b = try g.add(a, sq);
+            return g.add(b, mse);
+        }
+    }, &.{
+        .{ .shape = &.{ 4, 3 } },
+        .{ .shape = &.{4}, .offset = 1.0, .scale = 0.3 },
+        .{ .shape = &.{4} },
+        .{ .shape = &.{ 1, 2, 4, 3 } },
+        .{ .shape = &.{ 1, 2, 2, 3 } },
+    }, .{});
+}
+
 // ============================================================================
 // 损失函数 (Loss Functions)
 // ============================================================================

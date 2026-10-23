@@ -1606,3 +1606,14 @@ test "Graph.q4MatMul frozen backbone trains the head above it" {
     for (w_head.grad) |g| grad_norm += @abs(g);
     try std.testing.expect(grad_norm > 1e-4);
 }
+
+test "Graph.dropout rejects probabilities outside [0, 1]" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+    var prng = std.Random.DefaultPrng.init(1);
+    const x = try graph.ones(&.{ 2, 2 }, true);
+    try std.testing.expectError(error.InvalidProbability, graph.dropout(x, -0.1, prng.random()));
+    try std.testing.expectError(error.InvalidProbability, graph.dropout(x, 1.5, prng.random()));
+    try std.testing.expectError(error.InvalidProbability, graph.dropout(x, std.math.nan(f32), prng.random()));
+}

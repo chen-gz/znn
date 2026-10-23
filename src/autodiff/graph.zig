@@ -311,6 +311,14 @@ pub const Graph = struct {
         );
     }
 
+    /// 返回张量的连续 (行优先) 版本：连续张量原样返回；跨步视图 (如 `transposeView`) 物化为连续副本，
+    /// 复制记录为 `Reshape` 算子，其反向按原跨步把梯度散射回视图。
+    /// 只支持连续布局的算子内核在入口处调用它，从而对视图输入也给出正确的前向结果与梯度。
+    pub fn contiguous(self: *Graph, t: *Tensor) !*Tensor {
+        if (t.isContiguous()) return t;
+        return self.reshape(t, t.shape.dims[0..t.shape.len]);
+    }
+
     /// 将单输出张量 `C` 注册到计算图中，并在满足梯度条件时构建与记录 `Op` 节点
     pub fn registerSingleOutputOp(
         self: *Graph,
@@ -400,8 +408,10 @@ pub const Graph = struct {
     }
 
     // 沿指定维度拼接张量数组 (Concat)
-    pub fn concat(self: *Graph, inputs: []const *Tensor, dim: usize) !*Tensor {
+    pub fn concat(self: *Graph, inputs_in: []const *Tensor, dim: usize) !*Tensor {
         const allocator = self.arena.allocator();
+        const inputs = try allocator.alloc(*Tensor, inputs_in.len);
+        for (inputs, inputs_in) |*dst, src| dst.* = try self.contiguous(src);
         const C = try tensor_mod.concat(allocator, inputs, dim);
 
         var req_grad = false;
@@ -423,8 +433,9 @@ pub const Graph = struct {
     }
 
     // 沿指定维度将张量均等切分为 num_splits 份 (Split)
-    pub fn split(self: *Graph, input: *Tensor, num_splits: usize, dim: usize) ![]*Tensor {
+    pub fn split(self: *Graph, input_in: *Tensor, num_splits: usize, dim: usize) ![]*Tensor {
         const allocator = self.arena.allocator();
+        const input = try self.contiguous(input_in);
         const outputs = try tensor_mod.split(allocator, input, num_splits, dim);
 
         const req_grad = self.enable_grad and input.requires_grad;
@@ -467,10 +478,11 @@ pub const Graph = struct {
     // 分组查询注意力 (Grouped-Query Attention, GQA) 中沿注意力头维度复制广播键/值 (Key/Value, KV) 张量 (RepeatKV)
     // 输入 X: [B, num_kv_heads, T, hs]
     // 输出 Y: [B, num_kv_heads * groups, T, hs]
-    pub fn repeatKV(self: *Graph, X: *Tensor, groups: usize) !*Tensor {
-        if (groups == 1) return X;
+    pub fn repeatKV(self: *Graph, X_in: *Tensor, groups: usize) !*Tensor {
+        if (groups == 1) return X_in;
 
         const allocator = self.arena.allocator();
+        const X = try self.contiguous(X_in);
         const Y = try X.repeatKV(groups, allocator);
         return self.registerSingleOutputOp(
             Y,
@@ -508,8 +520,9 @@ pub const Graph = struct {
     }
 
     // 修正线性单元 (Rectified Linear Unit, ReLU) 激活函数前向传播：C = max(0, A)
-    pub fn relu(self: *Graph, A: *Tensor) !*Tensor {
+    pub fn relu(self: *Graph, A_in: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
         const C = try A.relu(allocator);
         return self.registerSingleOutputOp(
             C,
@@ -520,8 +533,9 @@ pub const Graph = struct {
         );
     }
 
-    pub fn gelu(self: *Graph, A: *Tensor) !*Tensor {
+    pub fn gelu(self: *Graph, A_in: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
         const C = try A.gelu(allocator);
         return self.registerSingleOutputOp(
             C,
@@ -532,8 +546,9 @@ pub const Graph = struct {
         );
     }
 
-    pub fn sigmoid(self: *Graph, A: *Tensor) !*Tensor {
+    pub fn sigmoid(self: *Graph, A_in: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
         const C = try A.sigmoid(allocator);
         return self.registerSingleOutputOp(
             C,
@@ -544,8 +559,9 @@ pub const Graph = struct {
         );
     }
 
-    pub fn tanh(self: *Graph, A: *Tensor) !*Tensor {
+    pub fn tanh(self: *Graph, A_in: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
         const C = try A.tanh(allocator);
         return self.registerSingleOutputOp(
             C,
@@ -556,8 +572,9 @@ pub const Graph = struct {
         );
     }
 
-    pub fn leakyRelu(self: *Graph, A: *Tensor, alpha: f32) !*Tensor {
+    pub fn leakyRelu(self: *Graph, A_in: *Tensor, alpha: f32) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
         const C = try A.leakyRelu(alpha, allocator);
         return self.registerSingleOutputOp(
             C,
@@ -569,8 +586,9 @@ pub const Graph = struct {
     }
 
     // Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU / Swish) 激活函数前向传播：C = A * sigmoid(A)
-    pub fn silu(self: *Graph, A: *Tensor) !*Tensor {
+    pub fn silu(self: *Graph, A_in: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
         const C = try A.silu(allocator);
         return self.registerSingleOutputOp(
             C,
@@ -599,8 +617,9 @@ pub const Graph = struct {
     pub const elasticNetLoss = graph_nn.elasticNetLoss;
 
     // 标量乘法（缩放）：C = val * A
-    pub fn mulScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
+    pub fn mulScalar(self: *Graph, A_in: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
         const C = try A.mulScalar(val, allocator);
         return self.registerSingleOutputOp(
             C,
@@ -612,8 +631,9 @@ pub const Graph = struct {
     }
 
     // 标量加法：C = A + val
-    pub fn addScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
+    pub fn addScalar(self: *Graph, A_in: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
         const C = try A.addScalar(val, allocator);
         return self.registerSingleOutputOp(
             C,
@@ -625,8 +645,9 @@ pub const Graph = struct {
     }
 
     // 标量减法：C = A - val
-    pub fn subScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
+    pub fn subScalar(self: *Graph, A_in: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
         const C = try A.subScalar(val, allocator);
         return self.registerSingleOutputOp(
             C,
@@ -638,8 +659,9 @@ pub const Graph = struct {
     }
 
     // 标量除法：C = A / val
-    pub fn divScalar(self: *Graph, A: *Tensor, val: f32) !*Tensor {
+    pub fn divScalar(self: *Graph, A_in: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
         const C = try A.divScalar(val, allocator);
         return self.registerSingleOutputOp(
             C,
