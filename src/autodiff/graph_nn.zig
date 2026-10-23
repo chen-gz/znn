@@ -49,7 +49,6 @@ pub fn softmaxCrossEntropy(self: *Graph, logits: *Tensor, targets: anytype) !*Te
                 .total_weight = @as(f32, @floatFromInt(B)),
             },
         },
-        req_grad,
     );
 }
 
@@ -89,7 +88,6 @@ pub fn maskedCrossEntropyLoss(self: *Graph, logits: *Tensor, targets: anytype, m
                 .total_weight = 0.0,
             },
         },
-        req_grad,
     );
 }
 
@@ -129,7 +127,6 @@ pub fn dpoLoss(
                 .beta = beta,
             },
         },
-        req_grad,
     );
 }
 
@@ -177,7 +174,6 @@ pub fn grpoLoss(
                 .clip_eps = clip_eps,
             },
         },
-        req_grad,
     );
 }
 
@@ -192,7 +188,6 @@ pub fn mseLoss(self: *Graph, y_pred_in: *Tensor, y_true_in: *Tensor) !*Tensor {
         &.{ y_pred, y_true },
         .MseLoss,
         .{ .MseLoss = {} },
-        req_grad,
     );
 }
 
@@ -206,7 +201,6 @@ pub fn bceWithLogitsLoss(self: *Graph, logits_in: *Tensor, targets_in: *Tensor) 
         &.{ logits, targets },
         .BceWithLogitsLoss,
         .{ .BceWithLogitsLoss = {} },
-        req_grad,
     );
 }
 
@@ -224,7 +218,6 @@ pub fn bceLoss(self: *Graph, probs_in: *Tensor, targets_in: *Tensor, eps: f32) !
         &.{ probs, targets },
         .BceLoss,
         .{ .BceLoss = .{ .eps = eps } },
-        req_grad,
     );
 }
 
@@ -250,7 +243,6 @@ pub fn l2Loss(self: *Graph, weight_in: *Tensor, lambda: f32) !*Tensor {
         &.{weight},
         .L2Loss,
         .{ .L2Loss = .{ .lambda = lambda } },
-        req_grad,
     );
 }
 
@@ -272,7 +264,6 @@ pub fn l1Loss(self: *Graph, weight_in: *Tensor, lambda: f32) !*Tensor {
         &.{weight},
         .L1Loss,
         .{ .L1Loss = .{ .lambda = lambda } },
-        req_grad,
     );
 }
 

@@ -365,9 +365,7 @@ pub const Graph = struct {
         inputs: []const *Tensor,
         op_type: OpType,
         context: OpContext,
-        req_grad: bool,
     ) !*Tensor {
-        _ = req_grad;
         var temp_op = Op{
             .op_type = op_type,
             .inputs = @constCast(inputs),
@@ -938,7 +936,6 @@ pub const Graph = struct {
                     .rank = A.shape.len,
                 },
             },
-            req_grad,
         );
     }
 
