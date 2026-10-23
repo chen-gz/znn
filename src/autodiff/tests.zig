@@ -1435,4 +1435,81 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
     }
 }
 
+test "Graph.backward called repeatedly accumulates parameter gradients without re-propagating stale intermediate gradients" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
 
+    // 共享主干 h = x * w，两个损失头 l1 = sum(2h)、l2 = sum(3h)
+    const x = try graph.array(&.{ 1, 2 }, &.{ 1.0, 2.0 }, false);
+    const w = try graph.array(&.{ 2, 1 }, &.{ 0.5, -0.5 }, true);
+    const h = try graph.matmul(x, w);
+    const l1 = try graph.sum(try graph.mulScalar(h, 2.0), null, false);
+    const l2 = try graph.sum(try graph.mulScalar(h, 3.0), null, false);
+
+    try graph.backward(l1);
+    try graph.backward(l2);
+
+    // dL1/dw + dL2/dw = (2 + 3) * x^T = [5, 10]
+    try std.testing.expectApproxEqAbs(@as(f32, 5.0), w.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 10.0), w.grad[1], 1e-5);
+
+    // 同一损失重复反向两次：参数梯度恰好翻倍
+    graph.zeroGrad();
+    try graph.backward(l1);
+    try graph.backward(l1);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), w.grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.0), w.grad[1], 1e-5);
+}
+
+test "Graph.backward skips frozen subgraphs that do not require gradients" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    // 冻结的均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)：输入与缩放参数都不需要梯度
+    const x = try graph.array(&.{ 2, 4 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, false);
+    const gamma = try graph.array(&.{4}, &.{ 1, 1, 1, 1 }, false);
+    const y = try graph.rmsNorm(x, gamma, 1e-6);
+    try std.testing.expect(!y.requires_grad);
+
+    const w = try graph.zeros(&.{ 4, 3 }, true);
+    @memset(w.data, 0.1);
+    const logits = try graph.matmul(y, w);
+    const loss = try graph.softmaxCrossEntropy(logits, &[_]u8{ 0, 2 });
+    try graph.backward(loss);
+
+    var grad_norm: f32 = 0.0;
+    for (w.grad) |g| grad_norm += @abs(g);
+    try std.testing.expect(grad_norm > 1e-4);
+}
+
+test "Graph.backward rejects a root tensor that does not require gradients" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    const x = try graph.array(&.{ 1, 2 }, &.{ 1.0, 2.0 }, false);
+    const s = try graph.sum(x, null, false);
+    try std.testing.expectError(error.TensorDoesNotRequireGrad, graph.backward(s));
+    try std.testing.expectError(error.TensorDoesNotRequireGrad, graph.backwardWithGrad(s));
+}
+
+test "Graph.backward on a persistent graph does not grow the arena" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    var h = try graph.zeros(&.{ 4, 16 }, true);
+    for (0..64) |_| h = try graph.tanh(h);
+    const loss = try graph.mean(h, null, false);
+
+    try graph.backward(loss);
+    const capacity_before = graph.arena.queryCapacity();
+    for (0..32) |_| {
+        graph.zeroGrad();
+        try graph.forward();
+        try graph.backward(loss);
+    }
+    try std.testing.expectEqual(capacity_before, graph.arena.queryCapacity());
+}

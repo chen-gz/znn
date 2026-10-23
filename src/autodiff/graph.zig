@@ -921,64 +921,73 @@ pub const Graph = struct {
         );
     }
 
-    // 执行计算图的反向传播
+    /// 执行计算图的反向传播：把损失张量的梯度种子设为 1.0 (dL/dL = 1.0) 后，
+    /// 按拓扑逆序把梯度传导到所有需要梯度的叶子张量 (参数梯度累加，可连续调用以累积多个损失的梯度)。
+    /// 损失张量不需要梯度时返回 `error.TensorDoesNotRequireGrad`。
     pub fn backward(self: *Graph, loss_tensor: *Tensor) !void {
-        const allocator = self.arena.allocator();
-        var visited = std.AutoHashMap(*Op, void).init(allocator);
-        defer visited.deinit();
-        var sorted_ops: std.ArrayList(*Op) = .empty;
-        defer sorted_ops.deinit(allocator);
-
-        // 1. 对算子进行拓扑排序，以确保节点按正确的计算依赖关系进行链式求导
-        if (Op.creatorOf(loss_tensor)) |root_op| {
-            try self.topologicalSortOps(root_op, &visited, &sorted_ops);
-        }
-
-        // 2. 损失函数节点本身的偏导数设为 1.0 (dL/dL = 1.0)
-        loss_tensor.grad[0] = 1.0;
-
-        // 3. 按拓扑排序的逆序执行各算子的 backward 求导函数，由深至浅传导梯度
-        var i = sorted_ops.items.len;
-        while (i > 0) {
-            i -= 1;
-            const op = sorted_ops.items[i];
-            try op_mod.backward(op);
-        }
+        try self.runBackward(loss_tensor, true);
     }
 
-    // 执行计算图的反向传播，起点张量的梯度已被外部手动预填（常用于自定义损失函数如 MSE）
+    /// 执行计算图的反向传播，起点张量的梯度已被外部手动预填（常用于自定义损失函数或向量-雅可比积）
     pub fn backwardWithGrad(self: *Graph, output_tensor: *Tensor) !void {
-        const allocator = self.arena.allocator();
-        var visited = std.AutoHashMap(*Op, void).init(allocator);
-        defer visited.deinit();
-        var sorted_ops: std.ArrayList(*Op) = .empty;
-        defer sorted_ops.deinit(allocator);
-
-        // 1. 对算子进行拓扑排序
-        if (Op.creatorOf(output_tensor)) |root_op| {
-            try self.topologicalSortOps(root_op, &visited, &sorted_ops);
-        }
-
-        // 2. 按拓扑排序的逆序执行各算子的 backward 求导，由深至浅传导梯度
-        var i = sorted_ops.items.len;
-        while (i > 0) {
-            i -= 1;
-            const op = sorted_ops.items[i];
-            try op_mod.backward(op);
-        }
+        try self.runBackward(output_tensor, false);
     }
 
-    // 拓扑排序辅助函数（深度优先搜索 DFS 实现，以算子为图节点）
-    fn topologicalSortOps(self: *Graph, op: *Op, visited: *std.AutoHashMap(*Op, void), list: *std.ArrayList(*Op)) !void {
-        if (visited.contains(op)) return;
-        try visited.put(op, {});
+    fn runBackward(self: *Graph, root: *Tensor, seed_root: bool) !void {
+        if (!root.requires_grad or root.grad.len == 0) return error.TensorDoesNotRequireGrad;
 
-        for (op.inputs) |input| {
-            if (Op.creatorOf(input)) |prev_op| {
-                try self.topologicalSortOps(prev_op, visited, list);
+        const allocator = self.backing_allocator;
+        var order: std.ArrayList(*Op) = .empty;
+        defer order.deinit(allocator);
+        if (Op.creatorOf(root)) |root_op| {
+            try self.collectBackwardOps(root_op, &order);
+        }
+
+        // 中间张量的梯度只在本次反向传播内有效：先清零，避免上一次反向残留的梯度被重复传导到参数
+        for (order.items) |op| {
+            for (op.outputs) |out| {
+                if (out != root) @memset(out.grad, 0.0);
             }
         }
-        try list.append(self.arena.allocator(), op);
+        if (seed_root) root.grad[0] = 1.0;
+
+        var i = order.items.len;
+        while (i > 0) {
+            i -= 1;
+            try op_mod.backward(order.items[i]);
+        }
+    }
+
+    /// 以迭代式深度优先搜索 (Depth-First Search, DFS) 收集从 `root_op` 可达、且确实需要传导梯度的算子，
+    /// 按拓扑序 (输入先于消费者) 追加到 `order`。只沿 `requires_grad` 的输入回溯：
+    /// 不需要梯度的子图 (冻结的骨干网络、常量分支、仅推理的算子) 不参与反向传播。
+    fn collectBackwardOps(self: *Graph, root_op: *Op, order: *std.ArrayList(*Op)) !void {
+        const allocator = self.backing_allocator;
+        var visited: std.AutoHashMapUnmanaged(*Op, void) = .empty;
+        defer visited.deinit(allocator);
+        try visited.ensureTotalCapacity(allocator, @intCast(@max(self.ops.items.len, 1)));
+
+        const Frame = struct { op: *Op, next_input: usize };
+        var stack: std.ArrayList(Frame) = .empty;
+        defer stack.deinit(allocator);
+
+        visited.putAssumeCapacity(root_op, {});
+        try stack.append(allocator, .{ .op = root_op, .next_input = 0 });
+        while (stack.items.len > 0) {
+            const top = &stack.items[stack.items.len - 1];
+            if (top.next_input < top.op.inputs.len) {
+                const input = top.op.inputs[top.next_input];
+                top.next_input += 1;
+                if (!input.requires_grad) continue;
+                const prev_op = Op.creatorOf(input) orelse continue;
+                const entry = try visited.getOrPut(allocator, prev_op);
+                if (entry.found_existing) continue;
+                try stack.append(allocator, .{ .op = prev_op, .next_input = 0 });
+            } else {
+                try order.append(allocator, top.op);
+                _ = stack.pop();
+            }
+        }
     }
 
     // 运行计算图的前向传播，根据输入更新所有算子节点的值
