@@ -19,6 +19,45 @@ pub const TensorMeta = struct {
     dtype: mlx.DType,
 };
 
+/// Safetensors 头部长度上限 (与参考实现一致)，防止恶意长度导致整数溢出或超大分配
+const max_header_len: u64 = 100 * 1024 * 1024;
+
+/// Safetensors 数据类型字符串到后端数据类型与单元素字节宽度的映射
+const DTypeInfo = struct { dtype: mlx.DType, size: usize };
+const safetensors_dtypes = std.StaticStringMap(DTypeInfo).initComptime(.{
+    .{ "BOOL", DTypeInfo{ .dtype = .bool, .size = 1 } },
+    .{ "U8", DTypeInfo{ .dtype = .uint8, .size = 1 } },
+    .{ "I8", DTypeInfo{ .dtype = .int8, .size = 1 } },
+    .{ "U16", DTypeInfo{ .dtype = .uint16, .size = 2 } },
+    .{ "I16", DTypeInfo{ .dtype = .int16, .size = 2 } },
+    .{ "F16", DTypeInfo{ .dtype = .float16, .size = 2 } },
+    .{ "BF16", DTypeInfo{ .dtype = .bfloat16, .size = 2 } },
+    .{ "U32", DTypeInfo{ .dtype = .uint32, .size = 4 } },
+    .{ "I32", DTypeInfo{ .dtype = .int32, .size = 4 } },
+    .{ "F32", DTypeInfo{ .dtype = .float32, .size = 4 } },
+    .{ "U64", DTypeInfo{ .dtype = .uint64, .size = 8 } },
+    .{ "I64", DTypeInfo{ .dtype = .int64, .size = 8 } },
+    .{ "F64", DTypeInfo{ .dtype = .float64, .size = 8 } },
+});
+
+/// 读取 JSON 非负整数并转换为 usize，其他取值视为损坏的头部
+fn jsonUsize(v: std.json.Value) !usize {
+    if (v != .integer or v.integer < 0) return error.InvalidSafetensorsHeader;
+    return std.math.cast(usize, v.integer) orelse error.InvalidSafetensorsHeader;
+}
+
+const DataOffsets = struct { start: usize, end: usize };
+
+/// 解析张量条目的 `data_offsets: [start, end]`，要求两者为非负整数且 start <= end
+fn parseDataOffsets(obj: std.json.ObjectMap) !DataOffsets {
+    const v = obj.get("data_offsets") orelse return error.InvalidSafetensorsHeader;
+    if (v != .array or v.array.items.len != 2) return error.InvalidSafetensorsHeader;
+    const start = try jsonUsize(v.array.items[0]);
+    const end = try jsonUsize(v.array.items[1]);
+    if (end < start) return error.InvalidSafetensorsHeader;
+    return .{ .start = start, .end = end };
+}
+
 /// Safetensors 文件头解析与零拷贝内存映射句柄 (Memory-Mapped Safetensors Archive)
 pub const SafetensorsArchive = struct {
     allocator: std.mem.Allocator,
@@ -67,7 +106,7 @@ pub const SafetensorsArchive = struct {
         _ = std.posix.madvise(mmap2.ptr, mmap2.len, std.posix.MADV.WILLNEED) catch {};
 
         var tensors = std.StringHashMap(TensorMeta).init(allocator);
-        errdefer tensors.deinit();
+        errdefer freeTensorIndex(allocator, &tensors);
         try tensors.ensureTotalCapacity(800);
 
         const p1 = try parseHeader(allocator, mmap1, 1, &tensors);
@@ -102,7 +141,7 @@ pub const SafetensorsArchive = struct {
         _ = std.posix.madvise(mmap1.ptr, mmap1.len, std.posix.MADV.WILLNEED) catch {};
 
         var tensors = std.StringHashMap(TensorMeta).init(allocator);
-        errdefer tensors.deinit();
+        errdefer freeTensorIndex(allocator, &tensors);
         try tensors.ensureTotalCapacity(512);
 
         const p1 = try parseHeader(allocator, mmap1, 1, &tensors);
@@ -118,15 +157,22 @@ pub const SafetensorsArchive = struct {
     }
 
     pub fn deinit(self: *SafetensorsArchive) void {
-        var it = self.tensors.keyIterator();
-        while (it.next()) |k| {
-            self.allocator.free(k.*);
-        }
-        self.tensors.deinit();
+        freeTensorIndex(self.allocator, &self.tensors);
         if (self.mmap1.len > 0) std.posix.munmap(@alignCast(self.mmap1));
         if (self.mmap2.len > 0) std.posix.munmap(@alignCast(self.mmap2));
     }
 
+    /// 释放张量索引及其持有的键字符串
+    fn freeTensorIndex(allocator: std.mem.Allocator, tensors: *std.StringHashMap(TensorMeta)) void {
+        var it = tensors.keyIterator();
+        while (it.next()) |k| allocator.free(k.*);
+        tensors.deinit();
+    }
+
+    /// 解析单个分片的 JSON 头部并登记其全部张量，返回数据载荷切片。
+    /// 每个条目都经过完整校验：偏移量为非负整数且 start <= end <= 载荷长度，形状维度为非负整数，
+    /// 字节数与 `形状元素数 * 元素宽度` 一致；无法识别的数据类型 (如 8 位浮点) 不登记；
+    /// 同名张量 (含跨分片) 视为损坏的归档。
     fn parseHeader(
         allocator: std.mem.Allocator,
         mmap_slice: []const u8,
@@ -135,10 +181,11 @@ pub const SafetensorsArchive = struct {
     ) ![]const u8 {
         if (mmap_slice.len < 8) return error.InvalidSafetensorsHeader;
         const header_len = std.mem.readInt(u64, mmap_slice[0..8], .little);
-        if (8 + header_len > mmap_slice.len) return error.InvalidSafetensorsHeader;
+        if (header_len > max_header_len or header_len > mmap_slice.len - 8) return error.InvalidSafetensorsHeader;
+        const header_end: usize = @intCast(8 + header_len);
 
-        const header_bytes = mmap_slice[8 .. 8 + header_len];
-        const payload = mmap_slice[8 + header_len ..];
+        const header_bytes = mmap_slice[8..header_end];
+        const payload = mmap_slice[header_end..];
 
         var parsed = try std.json.parseFromSlice(std.json.Value, allocator, header_bytes, .{});
         defer parsed.deinit();
@@ -147,57 +194,53 @@ pub const SafetensorsArchive = struct {
         var it = parsed.value.object.iterator();
         while (it.next()) |entry| {
             if (std.mem.eql(u8, entry.key_ptr.*, "__metadata__")) continue;
-            if (entry.value_ptr.* != .object) continue;
+            if (entry.value_ptr.* != .object) return error.InvalidSafetensorsHeader;
             const obj = entry.value_ptr.*.object;
 
-            const offsets_v = obj.get("data_offsets") orelse continue;
-            if (offsets_v != .array or offsets_v.array.items.len != 2) continue;
-            const start: usize = @intCast(offsets_v.array.items[0].integer);
-            const end: usize = @intCast(offsets_v.array.items[1].integer);
+            const dtype_v = obj.get("dtype") orelse return error.InvalidSafetensorsHeader;
+            if (dtype_v != .string) return error.InvalidSafetensorsHeader;
+            const dtype_info = safetensors_dtypes.get(dtype_v.string) orelse continue;
 
-            const dtype_v = obj.get("dtype") orelse continue;
-            var dt: mlx.DType = .float32;
-            if (dtype_v == .string) {
-                if (std.mem.eql(u8, dtype_v.string, "U32")) {
-                    dt = .uint32;
-                } else if (std.mem.eql(u8, dtype_v.string, "BF16")) {
-                    dt = .bfloat16;
-                } else if (std.mem.eql(u8, dtype_v.string, "F16")) {
-                    dt = .float16;
-                } else if (std.mem.eql(u8, dtype_v.string, "F32")) {
-                    dt = .float32;
-                }
-            }
+            const offsets = try parseDataOffsets(obj);
+            if (offsets.end > payload.len) return error.InvalidSafetensorsHeader;
 
-            var shape: [8]usize = undefined;
+            var shape: [8]usize = @splat(0);
             var shape_len: u8 = 0;
+            var numel: usize = 1;
             if (obj.get("shape")) |sv| {
-                if (sv == .array and sv.array.items.len <= 8) {
-                    for (sv.array.items, 0..) |dim_v, d_i| {
-                        shape[d_i] = @intCast(dim_v.integer);
-                    }
-                    shape_len = @intCast(sv.array.items.len);
+                if (sv != .array or sv.array.items.len > shape.len) return error.InvalidSafetensorsHeader;
+                for (sv.array.items, 0..) |dim_v, d_i| {
+                    shape[d_i] = try jsonUsize(dim_v);
+                    numel = std.math.mul(usize, numel, shape[d_i]) catch return error.InvalidSafetensorsHeader;
                 }
+                shape_len = @intCast(sv.array.items.len);
             }
+            const expected_bytes = std.math.mul(usize, numel, dtype_info.size) catch return error.InvalidSafetensorsHeader;
+            if (offsets.end - offsets.start != expected_bytes) return error.InvalidSafetensorsHeader;
 
-            const key_dup = try allocator.dupe(u8, entry.key_ptr.*);
-            try tensors.put(key_dup, .{
+            const gop = try tensors.getOrPut(entry.key_ptr.*);
+            if (gop.found_existing) return error.DuplicateTensorName;
+            gop.key_ptr.* = allocator.dupe(u8, entry.key_ptr.*) catch |err| {
+                tensors.removeByPtr(gop.key_ptr);
+                return err;
+            };
+            gop.value_ptr.* = .{
                 .file_idx = file_idx,
-                .start = start,
-                .end = end,
+                .start = offsets.start,
+                .end = offsets.end,
                 .shape = shape,
                 .shape_len = shape_len,
-                .dtype = dt,
-            });
+                .dtype = dtype_info.dtype,
+            };
         }
 
         return payload;
     }
 
+    /// 张量原始字节 (解析时已校验 start <= end <= 载荷长度)
     pub fn getTensorBytes(self: *const SafetensorsArchive, name: []const u8) ?[]const u8 {
         const meta = self.tensors.get(name) orelse return null;
         const payload = if (meta.file_idx == 1) self.payload1 else self.payload2;
-        if (meta.end > payload.len) return null;
         return payload[meta.start..meta.end];
     }
 
@@ -344,36 +387,28 @@ pub fn loadTensorData(
     }
 
     // 校验偏移量并按偏移量随机访问读取（无需强求物理顺序与结构体字段顺序一致）
-    const offsets_val = tensor_meta.get("data_offsets") orelse return error.InvalidSafetensorsHeader;
-    if (offsets_val != .array or offsets_val.array.items.len != 2) return error.InvalidSafetensorsHeader;
-    if (offsets_val.array.items[0] != .integer or offsets_val.array.items[1] != .integer) return error.InvalidSafetensorsHeader;
-    if (offsets_val.array.items[0].integer < 0 or offsets_val.array.items[1].integer < offsets_val.array.items[0].integer) {
-        return error.InvalidSafetensorsHeader;
-    }
-    const start_offset = @as(usize, @intCast(offsets_val.array.items[0].integer));
-    const end_offset = @as(usize, @intCast(offsets_val.array.items[1].integer));
-
+    const offsets = try parseDataOffsets(tensor_meta);
     const expected_len_bytes = dest.data.len * elem_size;
-    if (end_offset - start_offset != expected_len_bytes) {
+    if (offsets.end - offsets.start != expected_len_bytes) {
         return error.SizeMismatch;
     }
-    if (end_offset > data_payload.len) {
+    if (offsets.end > data_payload.len) {
         return error.UnexpectedEndOfStream;
     }
 
-    const raw_slice = data_payload[start_offset..end_offset];
-    if (std.mem.eql(u8, dtype_str, "F32")) {
+    // 载荷缓冲区与张量偏移量不保证按元素宽度对齐，半精度数据逐元素按小端序读取
+    const raw_slice = data_payload[offsets.start..offsets.end];
+    if (elem_size == 4) {
         @memcpy(std.mem.sliceAsBytes(dest.data), raw_slice);
     } else if (std.mem.eql(u8, dtype_str, "BF16")) {
-        const u16_slice: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, raw_slice));
-        for (dest.data, u16_slice) |*d, b_bits| {
-            const val: tensor.bf16 = .{ .bits = b_bits };
+        for (dest.data, 0..) |*d, i| {
+            const val: tensor.bf16 = .{ .bits = std.mem.readInt(u16, raw_slice[2 * i ..][0..2], .little) };
             d.* = val.toF32();
         }
-    } else if (std.mem.eql(u8, dtype_str, "F16")) {
-        const f16_slice: []const f16 = @alignCast(std.mem.bytesAsSlice(f16, raw_slice));
-        for (dest.data, f16_slice) |*d, f_val| {
-            d.* = @floatCast(f_val);
+    } else {
+        for (dest.data, 0..) |*d, i| {
+            const bits = std.mem.readInt(u16, raw_slice[2 * i ..][0..2], .little);
+            d.* = @floatCast(@as(f16, @bitCast(bits)));
         }
     }
 }
@@ -391,9 +426,10 @@ pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8, allocator: s
     var temp_8: [8]u8 = undefined;
     try reader.readSliceAll(&temp_8);
     const header_len = std.mem.readInt(u64, &temp_8, .little);
+    if (header_len > max_header_len) return error.InvalidSafetensorsHeader;
 
     // 2. 读取 JSON 头部
-    const header_buf = try allocator.alloc(u8, header_len);
+    const header_buf = try allocator.alloc(u8, @intCast(header_len));
     defer allocator.free(header_buf);
     try reader.readSliceAll(header_buf);
 
@@ -409,15 +445,9 @@ pub fn loadModel(model: anytype, io: std.Io, file_path: []const u8, allocator: s
     while (it.next()) |entry| {
         if (std.mem.eql(u8, entry.key_ptr.*, "__metadata__")) continue;
         if (entry.value_ptr.* != .object) return error.InvalidSafetensorsHeader;
-        if (entry.value_ptr.object.get("data_offsets")) |offsets_val| {
-            if (offsets_val != .array or offsets_val.array.items.len != 2) return error.InvalidSafetensorsHeader;
-            if (offsets_val.array.items[0] != .integer or offsets_val.array.items[1] != .integer) return error.InvalidSafetensorsHeader;
-            if (offsets_val.array.items[0].integer < 0 or offsets_val.array.items[1].integer < offsets_val.array.items[0].integer) {
-                return error.InvalidSafetensorsHeader;
-            }
-            const end_off: usize = @intCast(offsets_val.array.items[1].integer);
-            if (end_off > max_end_offset) max_end_offset = end_off;
-        }
+        if (!entry.value_ptr.object.contains("data_offsets")) continue;
+        const offsets = try parseDataOffsets(entry.value_ptr.object);
+        max_end_offset = @max(max_end_offset, offsets.end);
     }
 
     const data_payload = try allocator.alloc(u8, max_end_offset);
