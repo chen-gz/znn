@@ -19,6 +19,7 @@ pub const evalModel = module.evalModel;
 pub const nameModules = module.nameModules;
 pub const enterModuleScope = module.enterModuleScope;
 pub const createPersistentTensor = module.createPersistentTensor;
+pub const createVectorTensor = module.createVectorTensor;
 pub const freePersistentTensor = module.freePersistentTensor;
 const applyCustomInit = module.applyCustomInit;
 
@@ -132,10 +133,8 @@ pub const Conv1D = struct {
         weight.shape = Shape.init(&.{ out_channels, in_channels, kernel_size });
         weight.strides = tensor.computeContiguousStrides(weight.shape);
 
-        const bias = try createPersistentTensor(allocator, 1, out_channels, true);
+        const bias = try createVectorTensor(allocator, out_channels, 0.0, true);
         errdefer freePersistentTensor(allocator, bias);
-        bias.shape = Shape.init(&.{out_channels});
-        bias.strides = tensor.computeContiguousStrides(bias.shape);
 
         return Conv1D{
             .weight = weight,
@@ -191,10 +190,8 @@ pub const Conv2D = struct {
         weight.shape = Shape.init(&.{ out_channels, in_channels, kernel_size, kernel_size });
         weight.strides = tensor.computeContiguousStrides(weight.shape);
 
-        const bias = try createPersistentTensor(allocator, 1, out_channels, true);
+        const bias = try createVectorTensor(allocator, out_channels, 0.0, true);
         errdefer freePersistentTensor(allocator, bias);
-        bias.shape = Shape.init(&.{out_channels});
-        bias.strides = tensor.computeContiguousStrides(bias.shape);
 
         return Conv2D{
             .weight = weight,
@@ -264,11 +261,7 @@ pub const ConvTranspose1D = struct {
 
         var bias: ?*Tensor = null;
         if (options.use_bias) {
-            const b = try createPersistentTensor(allocator, 1, out_channels, true);
-            errdefer freePersistentTensor(allocator, b);
-            b.shape = Shape.init(&.{out_channels});
-            b.strides = tensor.computeContiguousStrides(b.shape);
-            bias = b;
+            bias = try createVectorTensor(allocator, out_channels, 0.0, true);
         }
 
         return ConvTranspose1D{
@@ -340,11 +333,7 @@ pub const ConvTranspose2D = struct {
 
         var bias: ?*Tensor = null;
         if (options.use_bias) {
-            const b = try createPersistentTensor(allocator, 1, out_channels, true);
-            errdefer freePersistentTensor(allocator, b);
-            b.shape = Shape.init(&.{out_channels});
-            b.strides = tensor.computeContiguousStrides(b.shape);
-            bias = b;
+            bias = try createVectorTensor(allocator, out_channels, 0.0, true);
         }
 
         return ConvTranspose2D{

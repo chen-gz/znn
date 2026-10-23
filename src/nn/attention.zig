@@ -223,10 +223,11 @@ pub const CausalSelfAttention = struct {
     /// 初始化支持分组查询注意力 (Grouped-Query Attention, GQA)、多查询注意力 (Multi-Query Attention, MQA) 与多头注意力 (Multi-Head Attention, MHA) 的自注意力层
     /// n_embd: 隐藏特征嵌入维度，必须能被 n_head 整除
     /// n_head: 查询 (Query) 注意力头数
-    /// num_kv_heads: 键值 (Key-Value) 头数，必须能整除 n_head
+    /// num_kv_heads: 键值 (Key-Value) 头数，必须能整除 n_head；不满足整除关系时返回 `error.InvalidConfiguration`
     pub fn initGQA(allocator: std.mem.Allocator, n_embd: usize, n_head: usize, num_kv_heads: usize) !CausalSelfAttention {
-        std.debug.assert(n_embd % n_head == 0);
-        std.debug.assert(n_head % num_kv_heads == 0);
+        if (n_head == 0 or num_kv_heads == 0 or n_embd % n_head != 0 or n_head % num_kv_heads != 0) {
+            return error.InvalidConfiguration;
+        }
         const hs = n_embd / n_head;
         const kv_dim = num_kv_heads * hs;
 

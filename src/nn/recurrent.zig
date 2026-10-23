@@ -111,7 +111,7 @@ pub const RNN = struct {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        std.debug.assert(inputs.len > 0);
+        if (inputs.len == 0) return error.EmptyInputs;
         const seq_len = inputs.len;
         const outputs = try graph.arenaAllocator().alloc(*Tensor, seq_len);
 
@@ -302,7 +302,7 @@ pub const LSTM = struct {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        std.debug.assert(inputs.len > 0);
+        if (inputs.len == 0) return error.EmptyInputs;
         const seq_len = inputs.len;
         const outputs = try graph.arenaAllocator().alloc(*Tensor, seq_len);
 
@@ -391,11 +391,13 @@ pub const StackedLSTM = struct {
         h_outs: []*Tensor,
         c_outs: []*Tensor,
     ) !void {
+        const L = self.num_layers;
+        if (h_prevs.len != L or c_prevs.len != L or h_outs.len != L or c_outs.len != L) return error.ShapeMismatch;
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
         var cur_in = x_t;
-        for (0..self.num_layers) |l| {
+        for (0..L) |l| {
             const state = try self.layers[l].forward(graph, cur_in, h_prevs[l], c_prevs[l]);
             h_outs[l] = state.h;
             c_outs[l] = state.c;
@@ -413,10 +415,13 @@ pub const StackedLSTM = struct {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        std.debug.assert(inputs.len > 0);
+        if (inputs.len == 0) return error.EmptyInputs;
         const seq_len = inputs.len;
         const L = self.num_layers;
         const batch_size = inputs[0].shape.dims[0];
+
+        if (h_0) |h_inits| if (h_inits.len != L) return error.ShapeMismatch;
+        if (c_0) |c_inits| if (c_inits.len != L) return error.ShapeMismatch;
 
         var h_states = try graph.arenaAllocator().alloc(*Tensor, L);
         var c_states = try graph.arenaAllocator().alloc(*Tensor, L);
@@ -574,7 +579,7 @@ pub const GRU = struct {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        std.debug.assert(inputs.len > 0);
+        if (inputs.len == 0) return error.EmptyInputs;
         const seq_len = inputs.len;
         const outputs = try graph.arenaAllocator().alloc(*Tensor, seq_len);
 
