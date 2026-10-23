@@ -820,49 +820,67 @@ pub const LocalGraphBuilder = struct {
         }
 
         // 3. 在局部图内重新计算残差跳跃标记
-        self.markSkips();
+        try self.markSkips();
     }
 
-    fn findNode(self: *const LocalGraphBuilder, id: []const u8) ?FlowNode {
-        for (self.module.flow_nodes.items) |n| {
-            if (std.mem.eql(u8, n.id, id)) return n;
-        }
-        return null;
-    }
+    /// 局部图的出边邻接表 (节点 id -> 后继节点 id 列表)
+    const Adjacency = std.StringHashMap(std.ArrayList([]const u8));
 
-    fn reaches(self: *LocalGraphBuilder, from: []const u8, target: []const u8) bool {
-        var queue: std.ArrayList([]const u8) = .empty;
-        var visited = std.StringHashMap(void).init(self.arena);
-        queue.append(self.arena, from) catch return false;
-        visited.put(from, {}) catch return false;
+    /// 广度优先搜索 (Breadth-First Search, BFS) 判断 from 是否经至少一条边可达 target；
+    /// queue / visited 由调用方提供并在每次搜索前清空，避免为每对边重复分配
+    fn reaches(
+        self: *LocalGraphBuilder,
+        adjacency: *const Adjacency,
+        queue: *std.ArrayList([]const u8),
+        visited: *std.StringHashMap(void),
+        from: []const u8,
+        target: []const u8,
+    ) !bool {
+        queue.clearRetainingCapacity();
+        visited.clearRetainingCapacity();
+        try queue.append(self.arena, from);
+        try visited.put(from, {});
 
         var head: usize = 0;
         while (head < queue.items.len) : (head += 1) {
-            const curr = queue.items[head];
-            for (self.module.edges.items) |e| {
-                if (!std.mem.eql(u8, e.from, curr)) continue;
-                if (std.mem.eql(u8, e.to, target)) return true;
-                if (!visited.contains(e.to)) {
-                    visited.put(e.to, {}) catch return false;
-                    queue.append(self.arena, e.to) catch return false;
-                }
+            const successors = adjacency.get(queue.items[head]) orelse continue;
+            for (successors.items) |next| {
+                if (std.mem.eql(u8, next, target)) return true;
+                const gop = try visited.getOrPut(next);
+                if (!gop.found_existing) try queue.append(self.arena, next);
             }
         }
         return false;
     }
 
-    /// 边 (u -> t) 为 skip，当且仅当 t 是加法汇聚节点，且 t 另有入边 (w -> t) 使得 u 在局部图内可达 w
-    fn markSkips(self: *LocalGraphBuilder) void {
+    /// 边 (u -> t) 为 skip，当且仅当 t 是加法汇聚节点，且 t 另有入边 (w -> t) 使得 u 在局部图内可达 w。
+    /// 先一次性建立邻接表与加法节点集合，使每次可达性查询为 O(V + E) 而非逐节点扫描全部边。
+    fn markSkips(self: *LocalGraphBuilder) !void {
         const edges = self.module.edges.items;
+
+        var add_nodes = std.StringHashMap(void).init(self.arena);
+        for (self.module.flow_nodes.items) |n| {
+            if (n.kind != .op) continue;
+            const op_type = n.op_type orelse continue;
+            if (std.mem.eql(u8, op_type, "Add")) try add_nodes.put(n.id, {});
+        }
+        if (add_nodes.count() == 0) return;
+
+        var adjacency = Adjacency.init(self.arena);
+        for (edges) |e| {
+            const gop = try adjacency.getOrPut(e.from);
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(self.arena, e.to);
+        }
+
+        var queue: std.ArrayList([]const u8) = .empty;
+        var visited = std.StringHashMap(void).init(self.arena);
         for (edges, 0..) |*e, i| {
-            const target = self.findNode(e.to) orelse continue;
-            if (target.kind != .op) continue;
-            const op_type = target.op_type orelse continue;
-            if (!std.mem.eql(u8, op_type, "Add")) continue;
+            if (!add_nodes.contains(e.to)) continue;
             for (edges, 0..) |other, j| {
                 if (i == j or !std.mem.eql(u8, other.to, e.to)) continue;
                 if (std.mem.eql(u8, other.from, e.from)) continue;
-                if (self.reaches(e.from, other.from)) {
+                if (try self.reaches(&adjacency, &queue, &visited, e.from, other.from)) {
                     e.is_skip = true;
                     break;
                 }
