@@ -10,9 +10,7 @@ const builtin = @import("builtin");
 /// 当前构建目标是否支持 Apple 机器学习拓展 (Machine Learning Explore, MLX)
 pub const has_mlx: bool = (builtin.os.tag == .macos and builtin.cpu.arch == .aarch64);
 
-pub const c = if (has_mlx) @cImport({
-    @cInclude("mlx/c/mlx.h");
-}) else struct {
+pub const c = if (has_mlx) @import("mlx_c.zig") else struct {
     pub const mlx_array = extern struct { ctx: ?*anyopaque = null };
     pub const mlx_vector_array = extern struct { ctx: ?*anyopaque = null };
     pub const mlx_closure = extern struct { ctx: ?*anyopaque = null };
@@ -564,7 +562,7 @@ pub const Array = struct {
         }
 
         // 通用 N 维非连续步长重排回写
-        var coord = [_]usize{0} ** 8;
+        var coord: [8]usize = @splat(0);
         for (0..src.len) |out_idx| {
             var in_idx: usize = 0;
             for (0..n) |d| {

@@ -279,7 +279,7 @@ pub const Gemma4E4BModel = struct {
     stream: Stream,
 
     // 24 个独立 KV 层的块式预分配显存键值缓存 (Pre-allocated Chunked GPU Key-Value Cache)
-    gpu_kv: [24]?GpuKvCache = [_]?GpuKvCache{null} ** 24,
+    gpu_kv: [24]?GpuKvCache = @splat(null),
     curr_len: usize = 0,
     sqrt_hidden: f32,
     sqrt_hidden_arr: mlx.Array,
@@ -865,7 +865,7 @@ pub const Gemma4E4BModel = struct {
         }
 
         // 4. 在加载期预分配 24 个独立 KV 层的显存缓冲区，消除 Prefill 首字延迟中的 48 次 zeros 内核分配开销
-        var gpu_kv: [24]?GpuKvCache = [_]?GpuKvCache{null} ** 24;
+        var gpu_kv: [24]?GpuKvCache = @splat(null);
         errdefer {
             for (&gpu_kv) |*kv_opt| {
                 if (kv_opt.*) |*c| c.deinit();

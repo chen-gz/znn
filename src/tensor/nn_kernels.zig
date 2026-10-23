@@ -537,7 +537,7 @@ pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator) 
     if (is_tensor_like) {
         const in_rank = indices.shape.len;
         if (in_rank == 0 or in_rank >= 8) return error.MaxDimensionsExceeded;
-        var out_dims = [_]usize{0} ** 8;
+        var out_dims: [8]usize = @splat(0);
         for (0..in_rank) |d| out_dims[d] = indices.shape.dims[d];
         out_dims[in_rank] = D;
 
@@ -553,7 +553,7 @@ pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator) 
                 @memcpy(y_row, w_row);
             }
         } else {
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             for (0..num_indices) |i| {
                 var flat_idx: usize = 0;
                 for (0..in_rank) |d| flat_idx += coord[d] * indices.strides.dims[d];
@@ -627,7 +627,7 @@ pub fn topK(self: *Tensor, k: usize, allocator: std.mem.Allocator) !TopKResult {
     const E = self.shape.dims[self.shape.len - 1];
     if (k == 0 or k > E) return error.InvalidArgument;
 
-    var out_dims = [_]usize{0} ** 8;
+    var out_dims: [8]usize = @splat(0);
     for (0..self.shape.len - 1) |d| {
         out_dims[d] = self.shape.dims[d];
     }

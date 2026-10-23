@@ -25,7 +25,7 @@ pub fn reduceSumMeanBackward(A: *Tensor, C: *Tensor, axis: ?usize, keepdims: boo
             }
         } else {
             const out_rank = C.shape.len;
-            var out_indices = [_]usize{0} ** 8;
+            var out_indices: [8]usize = @splat(0);
             for (0..C.grad.len) |out_idx| {
                 var tmp = out_idx;
                 var d: usize = out_rank;
@@ -35,7 +35,7 @@ pub fn reduceSumMeanBackward(A: *Tensor, C: *Tensor, axis: ?usize, keepdims: boo
                     tmp /= C.shape.dims[d];
                 }
 
-                var src_indices = [_]usize{0} ** 8;
+                var src_indices: [8]usize = @splat(0);
                 if (keepdims) {
                     for (0..A.shape.len) |idx_d| {
                         src_indices[idx_d] = out_indices[idx_d];
@@ -64,7 +64,7 @@ pub fn reduceSumMeanBackward(A: *Tensor, C: *Tensor, axis: ?usize, keepdims: boo
                 ag.* += g;
             }
         } else {
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = A.shape.len;
             for (0..elem_count) |_| {
                 var src_idx: usize = 0;
@@ -109,7 +109,7 @@ pub fn backwardMath(self: *Op) !void {
                         A.grad[i] += cg / (2.0 * @max(c_val, 1e-12));
                     }
                 } else {
-                    var coord = [_]usize{0} ** 8;
+                    var coord: [8]usize = @splat(0);
                     const len = A.shape.len;
                     for (C.grad, C.data) |cg, c_val| {
                         var src_idx: usize = 0;
@@ -129,7 +129,7 @@ pub fn backwardMath(self: *Op) !void {
                         A.grad[i] += cg * c_val;
                     }
                 } else {
-                    var coord = [_]usize{0} ** 8;
+                    var coord: [8]usize = @splat(0);
                     const len = A.shape.len;
                     for (C.grad, C.data) |cg, c_val| {
                         var src_idx: usize = 0;
@@ -149,7 +149,7 @@ pub fn backwardMath(self: *Op) !void {
                         A.grad[i] += cg / a_val;
                     }
                 } else {
-                    var coord = [_]usize{0} ** 8;
+                    var coord: [8]usize = @splat(0);
                     const len = A.shape.len;
                     for (C.grad) |cg| {
                         var src_idx: usize = 0;
@@ -170,7 +170,7 @@ pub fn backwardMath(self: *Op) !void {
                         A.grad[i] += cg * sign;
                     }
                 } else {
-                    var coord = [_]usize{0} ** 8;
+                    var coord: [8]usize = @splat(0);
                     const len = A.shape.len;
                     for (C.grad) |cg| {
                         var src_idx: usize = 0;
@@ -202,7 +202,7 @@ pub fn backwardMath(self: *Op) !void {
                 const x_strides = tensor_mod.computeBroadcastStrides(X.shape, X.strides, C.shape);
                 const y_strides = tensor_mod.computeBroadcastStrides(Y.shape, Y.strides, C.shape);
                 const rank = C.shape.len;
-                var indices = [_]usize{0} ** 8;
+                var indices: [8]usize = @splat(0);
                 for (0..C.grad.len) |c_flat| {
                     const g = C.grad[c_flat];
                     if (mask[c_flat]) {
@@ -232,7 +232,7 @@ pub fn backwardMath(self: *Op) !void {
                         if (!m) X.grad[i] += g;
                     }
                 } else {
-                    var coord = [_]usize{0} ** 8;
+                    var coord: [8]usize = @splat(0);
                     const len = X.shape.len;
                     for (C.grad, ctx.mask) |g, m| {
                         if (!m) {
@@ -250,7 +250,7 @@ pub fn backwardMath(self: *Op) !void {
             const C = self.outputs[0];
             const ctx = self.context.Slice;
             if (X.requires_grad) {
-                var coord = [_]usize{0} ** 8;
+                var coord: [8]usize = @splat(0);
                 for (0..C.grad.len) |dest_i| {
                     var src_idx: usize = ctx.offset;
                     for (0..ctx.rank) |d| src_idx += coord[d] * ctx.strides[d];

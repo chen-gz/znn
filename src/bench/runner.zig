@@ -262,18 +262,20 @@ pub const BenchmarkRunner = struct {
     }
 
     pub fn printSummary(self: *const BenchmarkRunner) void {
+        const double_sep: [106]u8 = @splat('=');
+        const single_sep: [106]u8 = @splat('-');
         std.debug.print("\n", .{});
-        std.debug.print("=" ** 106 ++ "\n", .{});
+        std.debug.print("{s}\n", .{double_sep});
         std.debug.print(" {s:<36} {s:<14} {s:>5}  {s:>9}  {s:>9}  {s:>9}  {s:>16}\n", .{
             "Benchmark Name", "Category", "Iter", "Min(ms)", "Avg(ms)", "Max(ms)", "Throughput",
         });
-        std.debug.print("-" ** 106 ++ "\n", .{});
+        std.debug.print("{s}\n", .{single_sep});
 
         var current_cat: ?[]const u8 = null;
         for (self.results.items) |st| {
             if (current_cat == null or !std.mem.eql(u8, current_cat.?, st.category)) {
                 if (current_cat != null) {
-                    std.debug.print("-" ** 106 ++ "\n", .{});
+                    std.debug.print("{s}\n", .{single_sep});
                 }
                 current_cat = st.category;
             }
@@ -292,7 +294,7 @@ pub const BenchmarkRunner = struct {
             });
         }
 
-        std.debug.print("=" ** 106 ++ "\n", .{});
+        std.debug.print("{s}\n", .{double_sep});
         std.debug.print(" Total benchmarks completed: {d}\n\n", .{self.results.items.len});
     }
 };

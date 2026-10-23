@@ -113,9 +113,8 @@ pub const graph_ir = struct {
         }
 
         // 0. 注入所有标准基础算子类型 (OpType) 的标准 LaTeX 公式字典
-        inline for (std.meta.fields(autodiff.OpType)) |field| {
-            const op_enum: autodiff.OpType = @enumFromInt(field.value);
-            try formulas.put(try arena_alloc.dupe(u8, field.name), try arena_alloc.dupe(u8, op_enum.getFormula()));
+        inline for (std.enums.values(autodiff.OpType)) |op_enum| {
+            try formulas.put(try arena_alloc.dupe(u8, @tagName(op_enum)), try arena_alloc.dupe(u8, op_enum.getFormula()));
         }
 
         // 1. 为每个算子实例绑定其算子类型的标准公式
@@ -435,7 +434,7 @@ pub const graph_ir = struct {
         const json_content = try graph_ir.generateJson(graph, allocator);
         defer allocator.free(json_content);
 
-        const path_z = try allocator.dupeZ(u8, file_path);
+        const path_z = try allocator.dupeSentinel(u8, file_path, 0);
         defer allocator.free(path_z);
 
         const file = std.c.fopen(path_z.ptr, "wb") orelse return error.CannotOpenFile;

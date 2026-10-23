@@ -147,7 +147,7 @@ pub const Executor = struct {
 
 test "Executor serial execution" {
     const exec = Executor.serial;
-    var data = [_]u32{0} ** 100;
+    var data: [100]u32 = @splat(0);
     const Ctx = struct {
         arr: []u32,
         fn fill(ctx: @This(), begin: usize, end: usize) void {
@@ -183,7 +183,7 @@ test "Executor multi-task execution with std.Io.Threaded" {
     defer threaded.deinit();
 
     const exec = Executor{ .io = threaded.io(), .max_tasks = 4 };
-    var data = [_]u32{0} ** 1000;
+    var data: [1000]u32 = @splat(0);
     const Ctx = struct {
         arr: []u32,
         fn fill(ctx: @This(), begin: usize, end: usize) void {

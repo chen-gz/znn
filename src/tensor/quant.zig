@@ -175,7 +175,7 @@ pub fn q4MatMulInto(
                 const c0 = (tile % ctx.col_tiles) * col_tile;
                 const c1 = @min(c0 + col_tile, ctx.out_features);
                 for (c0..c1) |j| {
-                    var sums = [_]f32{0.0} ** row_tile;
+                    var sums: [row_tile]f32 = @splat(0.0);
                     const w_row = ctx.blocks[j * ctx.blocks_per_row ..][0..ctx.blocks_per_row];
                     for (w_row, 0..) |blk, b| {
                         const w = blk.unpack();

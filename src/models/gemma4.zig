@@ -975,7 +975,7 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
         ) !usize {
             const recent_window = if (recent_tokens.len > 64) recent_tokens[recent_tokens.len - 64 ..] else recent_tokens;
             const bitset_words = (config.vocab_size + 63) / 64;
-            var recent_bitset = [_]u64{0} ** bitset_words;
+            var recent_bitset: [bitset_words]u64 = @splat(0);
             if (repetition_penalty > 1.0) {
                 for (recent_window) |rec| {
                     if (rec < config.vocab_size) {

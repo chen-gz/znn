@@ -299,7 +299,7 @@ pub fn GenericTensor(comptime T: type) type {
             if (self.isContiguous() and self.data.len >= out.data.len) {
                 @memcpy(out.data, self.data[0..out.data.len]);
             } else {
-                var coord = [_]usize{0} ** 8;
+                var coord: [8]usize = @splat(0);
                 const len = self.shape.len;
                 for (0..out.data.len) |dest_i| {
                     var src_idx: usize = 0;
@@ -356,8 +356,8 @@ pub fn GenericTensor(comptime T: type) type {
         pub fn slice(self: *Self, ranges: []const SliceRange, allocator: std.mem.Allocator) !*Self {
             if (ranges.len > self.shape.len) return error.DimensionOutOfBounds;
 
-            var new_dims = [_]usize{0} ** 8;
-            var new_strides = [_]usize{0} ** 8;
+            var new_dims: [8]usize = @splat(0);
+            var new_strides: [8]usize = @splat(0);
             var offset: usize = 0;
 
             for (0..self.shape.len) |d| {
@@ -411,7 +411,7 @@ pub fn GenericTensor(comptime T: type) type {
             const a_strides = computeBroadcastStrides(self.shape, self.strides, target_shape);
             const b_strides = computeBroadcastStrides(other.shape, other.strides, target_shape);
             const rank = target_shape.len;
-            var indices = [_]usize{0} ** 8;
+            var indices: [8]usize = @splat(0);
 
             for (0..out.data.len) |c_flat| {
                 var a_flat: usize = 0;
@@ -534,7 +534,7 @@ pub fn GenericTensor(comptime T: type) type {
                 }
                 return false;
             }
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = self.shape.len;
             for (0..elem_count) |_| {
                 var src_idx: usize = 0;
@@ -553,7 +553,7 @@ pub fn GenericTensor(comptime T: type) type {
                 }
                 return true;
             }
-            var coord = [_]usize{0} ** 8;
+            var coord: [8]usize = @splat(0);
             const len = self.shape.len;
             for (0..elem_count) |_| {
                 var src_idx: usize = 0;
@@ -569,7 +569,7 @@ pub fn GenericTensor(comptime T: type) type {
                 if (ax >= self.shape.len) return error.DimensionOutOfBounds;
                 const reduce_size = self.shape.dims[ax];
 
-                var out_shape_dims = [_]usize{0} ** 8;
+                var out_shape_dims: [8]usize = @splat(0);
                 var out_rank: usize = 0;
                 if (keepdims) {
                     out_rank = self.shape.len;
@@ -593,7 +593,7 @@ pub fn GenericTensor(comptime T: type) type {
                 const out = try Self.zeros(allocator, out_shape_dims[0..out_rank]);
                 errdefer out.deinit(allocator);
 
-                var out_indices = [_]usize{0} ** 8;
+                var out_indices: [8]usize = @splat(0);
                 for (0..out.data.len) |out_idx| {
                     var tmp = out_idx;
                     var d: usize = out_rank;
@@ -603,7 +603,7 @@ pub fn GenericTensor(comptime T: type) type {
                         tmp /= out.shape.dims[d];
                     }
 
-                    var src_indices = [_]usize{0} ** 8;
+                    var src_indices: [8]usize = @splat(0);
                     if (keepdims) {
                         for (0..self.shape.len) |idx_d| src_indices[idx_d] = out_indices[idx_d];
                     } else {
@@ -630,7 +630,7 @@ pub fn GenericTensor(comptime T: type) type {
                 if (self.isContiguous() and self.data.len >= elem_count) {
                     for (self.data[0..elem_count]) |v| acc += convertScalar(f64, T, v);
                 } else {
-                    var coord = [_]usize{0} ** 8;
+                    var coord: [8]usize = @splat(0);
                     const len = self.shape.len;
                     for (0..elem_count) |_| {
                         var src_idx: usize = 0;
@@ -640,7 +640,7 @@ pub fn GenericTensor(comptime T: type) type {
                     }
                 }
                 if (keepdims) {
-                    const out_shape_dims = [_]usize{1} ** 8;
+                    const out_shape_dims: [8]usize = @splat(1);
                     return Self.init(allocator, out_shape_dims[0..self.shape.len], convertScalar(T, f64, acc));
                 } else {
                     return Self.init(allocator, &.{1}, convertScalar(T, f64, acc));
@@ -668,7 +668,7 @@ pub fn GenericTensor(comptime T: type) type {
                     out.data[i] = convertScalar(DestT, T, val);
                 }
             } else {
-                var coord = [_]usize{0} ** 8;
+                var coord: [8]usize = @splat(0);
                 const len = self.shape.len;
                 for (0..out.data.len) |dest_i| {
                     var src_idx: usize = 0;
