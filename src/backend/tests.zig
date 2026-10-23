@@ -5,6 +5,8 @@
 const std = @import("std");
 const mlx = @import("mlx.zig");
 const offload = @import("offload.zig");
+const cblas = @import("cblas.zig");
+const Executor = @import("executor.zig").Executor;
 
 const has_mlx = mlx.has_mlx;
 const c = mlx.c;
@@ -793,4 +795,39 @@ test "GpuKvCache rotating sliding-window wrap-around range calculation" {
     try std.testing.expectEqual(@as(usize, 0), r_global.slice_start);
     try std.testing.expectEqual(@as(usize, 513), r_global.slice_stop);
     try std.testing.expect(!r_global.use_full_buffer);
+}
+
+test "Executor parallelFor and parallelReduce with grain near maxInt(usize) do not overflow" {
+    const Count = struct {
+        hits: *std.atomic.Value(usize),
+        fn body(ctx: @This(), begin: usize, end: usize) void {
+            _ = ctx.hits.fetchAdd(end - begin, .monotonic);
+        }
+        fn map(ctx: @This(), begin: usize, end: usize) usize {
+            _ = ctx;
+            return end - begin;
+        }
+        fn add(a: usize, b: usize) usize {
+            return a + b;
+        }
+    };
+
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const execs = [_]Executor{ Executor.serial, .{ .io = threaded.io(), .max_tasks = 4 } };
+    const max = std.math.maxInt(usize);
+    for (execs) |exec| {
+        for ([_]usize{ max, max - 1, max / 2 + 1 }) |grain| {
+            var hits = std.atomic.Value(usize).init(0);
+            try exec.parallelFor(10, grain, Count{ .hits = &hits }, Count.body);
+            try std.testing.expectEqual(@as(usize, 10), hits.load(.monotonic));
+
+            const total = try exec.parallelReduce(usize, 10, grain, Count{ .hits = &hits }, Count.map, Count.add, 0);
+            try std.testing.expectEqual(@as(usize, 10), total);
+        }
+        // 区间长度本身接近上限时，最后一块的结束位置也不得回绕
+        var big_hits = std.atomic.Value(usize).init(0);
+        try exec.parallelFor(max, max / 2 + 1, Count{ .hits = &big_hits }, Count.body);
+        try std.testing.expectEqual(max, big_hits.load(.monotonic));
+    }
 }
