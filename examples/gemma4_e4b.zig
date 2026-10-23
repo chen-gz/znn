@@ -5,7 +5,6 @@
 const std = @import("std");
 const zig_ml = @import("zig_ml");
 
-const mlx = zig_ml.backend.mlx;
 const gemma4 = zig_ml.models.gemma4;
 const gemma4_e4b = zig_ml.models.gemma4_e4b;
 const sampling = zig_ml.backend.sampling;
@@ -62,9 +61,6 @@ pub fn main(init: std.process.Init) !void {
             }
         }
     } else |_| {}
-    var sampler = sampling.Sampler.init(sampling_options);
-    // 不带重复惩罚的贪婪采样启用双阶段 GPU 异步流水线；随机采样与带惩罚的贪婪采样走同步解码
-    const use_pipeline = sampling_options.isPlainGreedy();
 
     std.debug.print("================================================================================\n", .{});
     std.debug.print("🤖 Gemma 4 E4B Instruct (4B 等效端侧大模型) GPU 极速推理与真实评测\n", .{});
@@ -130,8 +126,14 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("]\n\n", .{});
 
-    // 4. 执行推理评测
+    // 4. 执行推理评测：`Gemma4E4BModel.generate` 是唯一的生成入口，不带重复惩罚的贪婪采样时内部自动启用双阶段 GPU 流水线
     std.debug.print("4. [启动 Gemma 4 E4B 自回归生成推理]:\n", .{});
+    var generation = try model.generate(allocator, prompt_tokens, .{
+        .sampling = sampling_options,
+        .max_new_tokens = max_new_tokens,
+    });
+    defer generation.deinit();
+    const use_pipeline = generation.isPipelined();
     printSamplingOptions(sampling_options, use_pipeline);
     std.debug.print("   User  : {s}\n", .{user_prompt_str});
     std.debug.print("   Model : ", .{});
@@ -140,114 +142,23 @@ pub fn main(init: std.process.Init) !void {
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
     const start_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
 
-    // Prefill 阶段：对齐官方 mlx_lm.generate_step 流水线，在等待 Prefill GPU 执行完成的同时，
-    // 提前构建并异步入队第 1 个 Decode 步的计算图，实现 Prefill -> Decode 零气泡无缝衔接
-    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
-    const p_start = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
-
-    var first_tok_arr_opt: ?mlx.Array = if (use_pipeline)
-        try model.prefillAsync(prompt_tokens)
-    else
-        null;
-    defer if (first_tok_arr_opt) |*a| a.deinit();
-
-    var pending_tok_arr_opt: ?mlx.Array = if (first_tok_arr_opt != null and max_new_tokens > 1)
-        try model.decodeStepAsync(first_tok_arr_opt.?)
-    else
-        null;
-    errdefer if (pending_tok_arr_opt) |*p| p.deinit();
-
-    const first_tok: usize = if (first_tok_arr_opt) |a|
-        @intCast(try a.itemUint32())
-    else
-        try model.prefill(prompt_tokens, &sampler);
-
-    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
-    const p_end = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
-    const prefill_time_ms = @as(f64, @floatFromInt(p_end - p_start)) / 1e6;
-
-    var current_tokens: std.ArrayList(usize) = .empty;
-    defer current_tokens.deinit(allocator);
-    for (prompt_tokens) |tok| try current_tokens.append(allocator, tok);
-    try current_tokens.append(allocator, first_tok);
-
-    var gen_count: usize = 1;
-    const piece1 = vocab.decode(first_tok);
-    if (piece1.len > 0) {
-        std.debug.print("{s}", .{piece1});
-    } else {
-        std.debug.print("[#{}]", .{first_tok});
-    }
-
-    // Decode 循环：不带重复惩罚的贪婪采样启用双阶段 GPU 异步流水线 (2-Stage Async GPU Pipelining)，
-    // 使 CPU 构建第 t+1 步计算图与 GPU 执行第 t 步 Metal 内核完全重叠，彻底消除步间气泡
-    var current_tok = first_tok;
-    const decode_start_ns = p_end;
-
-    if (use_pipeline) {
-        if (first_tok_arr_opt) |*a| {
-            a.deinit();
-            first_tok_arr_opt = null;
+    // 首个词元到达的时刻即预填充结束 (TTFT)，其后为自回归解码
+    var decode_start_ns: u64 = start_ns;
+    var prefill_time_ms: f64 = 0.0;
+    while (try generation.next()) |tok| {
+        if (generation.generated().len == 1) {
+            _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
+            decode_start_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
+            prefill_time_ms = @as(f64, @floatFromInt(decode_start_ns - start_ns)) / 1e6;
         }
-        if (gen_count < max_new_tokens and current_tok != gemma4.Gemma4Vocabulary.EOS and current_tok != gemma4.Gemma4Vocabulary.EOT) {
-            var pending_tok_arr = pending_tok_arr_opt.?;
-            pending_tok_arr_opt = null;
-
-            while (gen_count < max_new_tokens) {
-                // 在等待当前步 GPU 完成前，直接以 GPU 词元张量预构建并异步派发下一步计算图
-                var next_pending_opt: ?mlx.Array = if (gen_count + 1 < max_new_tokens)
-                    try model.decodeStepAsync(pending_tok_arr)
-                else
-                    null;
-
-                const next_tok: usize = @intCast(try pending_tok_arr.itemUint32());
-                pending_tok_arr.deinit();
-
-                try current_tokens.append(allocator, next_tok);
-                current_tok = next_tok;
-                gen_count += 1;
-
-                const piece = vocab.decode(next_tok);
-                if (piece.len > 0) {
-                    std.debug.print("{s}", .{piece});
-                } else {
-                    std.debug.print("[#{}]", .{next_tok});
-                }
-
-                if (current_tok == gemma4.Gemma4Vocabulary.EOS or current_tok == gemma4.Gemma4Vocabulary.EOT) {
-                    if (next_pending_opt) |*np| np.deinit();
-                    break;
-                }
-
-                if (next_pending_opt) |np| {
-                    pending_tok_arr = np;
-                } else {
-                    break;
-                }
-            }
-        } else if (pending_tok_arr_opt) |*p| {
-            p.deinit();
-            pending_tok_arr_opt = null;
-        }
-    } else {
-        while (gen_count < max_new_tokens) {
-            if (current_tok == gemma4.Gemma4Vocabulary.EOS or current_tok == gemma4.Gemma4Vocabulary.EOT) {
-                break;
-            }
-
-            const next_tok = try model.decodeStep(current_tok, current_tokens.items, &sampler);
-            try current_tokens.append(allocator, next_tok);
-            current_tok = next_tok;
-            gen_count += 1;
-
-            const piece = vocab.decode(next_tok);
-            if (piece.len > 0) {
-                std.debug.print("{s}", .{piece});
-            } else {
-                std.debug.print("[#{}]", .{next_tok});
-            }
+        const piece = vocab.decode(tok);
+        if (piece.len > 0) {
+            std.debug.print("{s}", .{piece});
+        } else {
+            std.debug.print("[#{}]", .{tok});
         }
     }
+    const gen_count = generation.generated().len;
 
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
     const end_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));

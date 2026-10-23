@@ -92,7 +92,7 @@
    - 诊断发现 C++ `mlx_array_new_float32` 创建的是强类型 `float32` 张量（不同于 Python `float` 弱类型标量）。此前 `mulScalar` 与 `gelu` 使用 `fromScalarF32` 导致 `bfloat16` 激活从 `getEmbeddings` 起被 `promote_types(bfloat16, float32)` 强制提升为 `float32`。
    - 这一隐式提升导致每步 296 次 `quantizedMatmul` 在 GPU 上动态发射 **592 个 `astype(bfloat16 -> float32)` 内核**转换权重 `scales` 与 `biases`，并将 24 层 `GpuKvCache` 提升为 `float32`。
    - 通过 `fromScalarBf16`、`fromScalarTyped` 与模型初始化期预分配的常驻 `bfloat16` 标量张量，确保全网 42 层、KV 缓存与 LM Head 100% 运行在原生 16-bit `bfloat16` 快速通道。
-3. **真正的双级 GPU 异步流水线重叠（`prefillAsync` + `decodeStepAsync`）——【已解决】**
+3. **真正的双级 GPU 异步流水线重叠（统一生成入口 `Gemma4E4BModel.generate` / `Generation.next` 内部自动启用）——【已解决】**
    - 修复此前 `best_tok_arr.asyncEval()` 后紧接 `best_tok_arr.itemUint32()` 导致 CPU 在当前步立刻同步阻塞等待 GPU 完成的假异步问题。
    - 直接将第 $t$ 步的 GPU `argmax` 输出张量（`[1]`, `uint32`）传入第 $t+1$ 步的 `takeAxis` 构建并 `asyncEval` 入队第 $t+1$ 步计算图，随后再提取第 $t$ 步词元 ID，使 CPU 图构建与 GPU 内核执行实现 100% 并发重叠。
 4. **开启 MLX 静态图编译与 `compiled_gelu_mul` 算子融合——【已解决】**
@@ -107,7 +107,7 @@
 7. **自回归解码 (Decode) 90 次 QMV 矩阵融合、43 次编译残差缩放融合与共享 KV 视图复用（每步再减 133 个 Metal 内核）——【已解决】**
    - **24 层注意力 QKV 融合 (`qkv_proj`) 与 42 层 MLP Gate+Up 融合 (`fused_gate_up`)**：通过 `Q4Weights.initFusedFromDirectBuffersCustom` 在加载期将前 24 层的 `q_proj + k_proj + v_proj`（4-bit）合并为单一矩阵、将全部 42 层的 `gate_proj + up_proj`（8-bit）合并为单一矩阵。每生成一个词元直接减少 **90 次 `quantized_matmul` (QMV) Metal 内核启动**（从 344 次降至 254 次）与 90 次 `in_norm` / `pre_mlp` 重复读取，并解决了小维度 `k_proj`/`v_proj`（`N = 512`）线程组占用率不足的瓶颈。
    - **静态编译残差相加与层缩放融合 (`compileAddMul` / `fusedAddMul`)**：将 42 层末尾的 `(x2 + ple_normed) * layer_scalar_w` 与步首的 `(ple_proj_normed + ple_tokens_arr) * input_scale_arr` 编译融合为单一 Metal 内核，每步减少 **43 次逐元素 Metal 内核启动**与 43 次中间张量显存读写。
-   - **18 个键值共享层 (`24..41`) 的单步有效切片缓存 (`step_eff_k` / `step_eff_v`) 与 Prefill → Decode 首步预入队**：在层 22 与层 23 缓存当前步 `slice4dAxis2` 结果供后 18 层直接复用（省去每步 36 次冗余 `mlx_slice` 调用），并在等待 `prefillAsync` 完成前提前入队第 1 个 Decode 步计算图，消除解码首步图构建气泡。
+   - **18 个键值共享层 (`24..41`) 的单步有效切片缓存 (`step_eff_k` / `step_eff_v`) 与 Prefill → Decode 首步预入队**：在层 22 与层 23 缓存当前步 `slice4dAxis2` 结果供后 18 层直接复用（省去每步 36 次冗余 `mlx_slice` 调用），并在等待预填充完成前提前入队第 1 个 Decode 步计算图，消除解码首步图构建气泡。
 
 #### 3. 落地实施任务清单 (Actionable P0 Tasks)
 - [x] **P0.1 块式预分配与切片原地更新 KVCache (`step = 256`)**：
@@ -116,7 +116,7 @@
 - [x] **P0.2 GPU 原生 Argmax 采样算子与轻量回读**：
   - 在 `src/backend/mlx.zig` 中暴露 `mlx.Array.argmax(axis, keepdims, stream)` 算子与 `dataUint32()` / `itemUint32()`。
   - 在自回归解码主循环中，直接在 Metal GPU 上完成 `argmax` 规约，将 CPU 拷贝数据量从 1 MB (262,144 floats) 骤降至 4 字节 (1 个 uint32 ID)。
-- [x] **P0.3 真双级异步执行管线 (`decodeStepAsync`) 消除 GPU 同步停顿**：
+- [x] **P0.3 真双级异步执行管线 (`Generation.next` 内部流水线) 消除 GPU 同步停顿**：
   - 改造解码循环，利用 GPU `argmax` 张量直接驱动下一步 `takeAxis` 嵌入查表并先行 `asyncEval()`，随后再同步读取上一步词元，彻底消除步间 CPU-GPU 气泡。
 - [x] **P0.4 逐层嵌入输入 (PLE) 步首预切分、单步零转置快车道与原生 `bfloat16` 精度锁定**：
   - 将 `getPleTokens` 与投影输出在进入 42 层循环前使用 `split(42, 2)` 一次性切分出 42 个层级张量引用，并在 `seq_len == 1` 时跳过全部冗余 `reshape` 与 `transposeAxes`。
