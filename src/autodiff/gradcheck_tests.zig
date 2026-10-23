@@ -202,6 +202,23 @@ test "gradcheck: matmul" {
     }, &.{ .{ .shape = &.{ 3, 4 } }, .{ .shape = &.{ 4, 5 } } }, .{});
 }
 
+test "gradcheck: matmul with transposed view operands" {
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            const a_t = try t[0].transposeView(0, 1, g.arenaAllocator());
+            const b_t = try t[1].transposeView(0, 1, g.arenaAllocator());
+            return g.matmul(a_t, b_t);
+        }
+    }, &.{ .{ .shape = &.{ 4, 3 } }, .{ .shape = &.{ 5, 4 } } }, .{});
+    // 权重共享 (Weight Tying) 场景：y = x W^T，W 以零拷贝转置视图参与乘法
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            const w_t = try t[1].transposeView(0, 1, g.arenaAllocator());
+            return g.matmul(t[0], w_t);
+        }
+    }, &.{ .{ .shape = &.{ 2, 3 } }, .{ .shape = &.{ 4, 3 } } }, .{});
+}
+
 test "gradcheck: batchMatMul with transpose" {
     try expectGradientsMatch(struct {
         fn build(g: *Graph, t: []const *Tensor) !*Tensor {

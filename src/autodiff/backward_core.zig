@@ -6,6 +6,58 @@ const Op = @import("types.zig").Op;
 
 extern fn erff(x: f32) f32;
 
+/// 二维矩阵在基础线性代数子程序 (Basic Linear Algebra Subprograms, BLAS) 中的存储描述：
+/// 逻辑元素 `X[i][j]` 位于 `ptr[i * ld + j]` (行主序，`trans = false`) 或 `ptr[j * ld + i]` (转置存储，`trans = true`)
+const MatLayout = struct {
+    ld: usize,
+    trans: bool,
+
+    /// 同一块存储解释为逻辑转置矩阵时的描述
+    fn transposed(self: MatLayout) MatLayout {
+        return .{ .ld = self.ld, .trans = !self.trans };
+    }
+};
+
+/// 由二维张量的形状与跨步推导 BLAS 存储描述；跨步无法表达为行主序或转置存储 (如带步长的切片) 时返回 null
+fn matLayout(t: *const tensor.Tensor) ?MatLayout {
+    const rows = t.shape.dims[0];
+    const cols = t.shape.dims[1];
+    const s0 = t.strides.dims[0];
+    const s1 = t.strides.dims[1];
+    if ((cols <= 1 or s1 == 1) and (rows <= 1 or s0 >= cols)) {
+        return .{ .ld = if (rows <= 1) @max(cols, 1) else s0, .trans = false };
+    }
+    if ((rows <= 1 or s0 == 1) and (cols <= 1 or s1 >= rows)) {
+        return .{ .ld = if (cols <= 1) @max(rows, 1) else s1, .trans = true };
+    }
+    return null;
+}
+
+fn blasOp(trans: bool) c_int {
+    return if (trans) c.CblasTrans else c.CblasNoTrans;
+}
+
+/// 逻辑矩阵乘加 `C[m x n] += A[m x k] * B[k x n]`，三个操作数各自可以是行主序或转置存储
+fn gemmAccumulate(
+    m: usize,
+    n: usize,
+    k: usize,
+    a_ptr: [*]const f32,
+    a: MatLayout,
+    b_ptr: [*]const f32,
+    b: MatLayout,
+    c_ptr: [*]f32,
+    cl: MatLayout,
+) void {
+    if (m == 0 or n == 0) return;
+    if (!cl.trans) {
+        c.cblas_sgemm(c.CblasRowMajor, blasOp(a.trans), blasOp(b.trans), @intCast(m), @intCast(n), @intCast(k), 1.0, a_ptr, @intCast(a.ld), b_ptr, @intCast(b.ld), 1.0, c_ptr, @intCast(cl.ld));
+    } else {
+        // 输出为转置存储时改算 C^T += B^T * A^T
+        c.cblas_sgemm(c.CblasRowMajor, blasOp(!b.trans), blasOp(!a.trans), @intCast(n), @intCast(m), @intCast(k), 1.0, b_ptr, @intCast(b.ld), a_ptr, @intCast(a.ld), 1.0, c_ptr, @intCast(cl.ld));
+    }
+}
+
 pub fn backwardCore(self: *Op) !void {
     switch (self.op_type) {
         // ====================================================================
@@ -19,44 +71,40 @@ pub fn backwardCore(self: *Op) !void {
             const K = A.shape.dims[1];
             const N = B.shape.dims[1];
 
-            // 1. 计算对左乘矩阵 A 的梯度: dA += dC * B^T
-            if (A.requires_grad) {
-                c.cblas_sgemm(
-                    c.CblasRowMajor,
-                    c.CblasNoTrans, // C.grad 不转置
-                    c.CblasTrans,   // B.data 需转置为 B^T
-                    @intCast(M),
-                    @intCast(K),
-                    @intCast(N),
-                    1.0,            // alpha = 1.0
-                    C.grad.ptr,
-                    @intCast(N),
-                    B.data.ptr,
-                    @intCast(N),
-                    1.0,            // beta = 1.0 表示累加到 A.grad，不覆盖已有值
-                    A.grad.ptr,
-                    @intCast(K),
-                );
-            }
-
-            // 2. 计算对右乘矩阵 B 的梯度: dB += A^T * dC
-            if (B.requires_grad) {
-                c.cblas_sgemm(
-                    c.CblasRowMajor,
-                    c.CblasTrans,   // A.data 需转置为 A^T
-                    c.CblasNoTrans, // C.grad 不转置
-                    @intCast(K),
-                    @intCast(N),
-                    @intCast(M),
-                    1.0,            // alpha = 1.0
-                    A.data.ptr,
-                    @intCast(K),
-                    C.grad.ptr,
-                    @intCast(N),
-                    1.0,            // beta = 1.0 同样进行累加
-                    B.grad.ptr,
-                    @intCast(N),
-                );
+            // 梯度缓冲区与数据缓冲区共用同一跨步布局，因此转置视图等非连续操作数也能直接交给 BLAS
+            const a_layout = matLayout(A);
+            const b_layout = matLayout(B);
+            const c_layout = matLayout(C);
+            if (a_layout != null and b_layout != null and c_layout != null) {
+                const al = a_layout.?;
+                const bl = b_layout.?;
+                const cl = c_layout.?;
+                // 1. 左乘矩阵 A 的梯度: dA += dC * B^T (累加到 A.grad，不覆盖已有值)
+                if (A.requires_grad) {
+                    gemmAccumulate(M, K, N, C.grad.ptr, cl, B.data.ptr, bl.transposed(), A.grad.ptr, al);
+                }
+                // 2. 右乘矩阵 B 的梯度: dB += A^T * dC
+                if (B.requires_grad) {
+                    gemmAccumulate(K, N, M, A.data.ptr, al.transposed(), C.grad.ptr, cl, B.grad.ptr, bl);
+                }
+            } else {
+                // 任意跨步 (如带步长的切片视图) 的通用回退路径
+                const sa0 = A.strides.dims[0];
+                const sa1 = A.strides.dims[1];
+                const sb0 = B.strides.dims[0];
+                const sb1 = B.strides.dims[1];
+                const sc0 = C.strides.dims[0];
+                const sc1 = C.strides.dims[1];
+                for (0..M) |i| {
+                    for (0..N) |j| {
+                        const dc = C.grad[i * sc0 + j * sc1];
+                        if (dc == 0.0) continue;
+                        for (0..K) |k| {
+                            if (A.requires_grad) A.grad[i * sa0 + k * sa1] += dc * B.data[k * sb0 + j * sb1];
+                            if (B.requires_grad) B.grad[k * sb0 + j * sb1] += A.data[i * sa0 + k * sa1] * dc;
+                        }
+                    }
+                }
             }
         },
         // ====================================================================
