@@ -1513,3 +1513,43 @@ test "Graph.backward on a persistent graph does not grow the arena" {
     }
     try std.testing.expectEqual(capacity_before, graph.arena.queryCapacity());
 }
+
+test "Graph.forward replays training-mode batch normalization with fresh batch statistics" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    const x = try graph.array(&.{ 4, 1 }, &.{ 1, 2, 3, 4 }, true);
+    const gamma = try graph.array(&.{1}, &.{1.5}, true);
+    const beta = try graph.array(&.{1}, &.{0.5}, true);
+    const rm = try graph.array(&.{1}, &.{0}, false);
+    const rv = try graph.array(&.{1}, &.{1}, false);
+    const y = try graph.batchNorm1d(x, gamma, beta, rm, rv, 1e-5, 0.1, true);
+    const w = try graph.array(&.{ 4, 1 }, &.{ 1.0, -2.0, 0.5, 3.0 }, false);
+    const loss = try graph.sum(try graph.mul(y, w), null, false);
+
+    // 输入整体平移并缩放后重演前向：训练模式输出只取决于批内标准化结果
+    for (x.data, 0..) |*v, i| v.* = 100.0 + 2.0 * @as(f32, @floatFromInt(i));
+    const running_mean_before = rm.data[0];
+    try graph.forward();
+    graph.zeroGrad();
+    try graph.backward(loss);
+
+    var fresh = Graph.initDefault(allocator);
+    defer fresh.deinit();
+    const x2 = try fresh.array(&.{ 4, 1 }, x.data, true);
+    const gamma2 = try fresh.array(&.{1}, &.{1.5}, true);
+    const beta2 = try fresh.array(&.{1}, &.{0.5}, true);
+    const rm2 = try fresh.array(&.{1}, &.{0}, false);
+    const rv2 = try fresh.array(&.{1}, &.{1}, false);
+    const y2 = try fresh.batchNorm1d(x2, gamma2, beta2, rm2, rv2, 1e-5, 0.1, true);
+    const w2 = try fresh.array(&.{ 4, 1 }, &.{ 1.0, -2.0, 0.5, 3.0 }, false);
+    const loss2 = try fresh.sum(try fresh.mul(y2, w2), null, false);
+    try fresh.backward(loss2);
+
+    for (y.data, y2.data) |a, b| try std.testing.expectApproxEqAbs(b, a, 1e-4);
+    for (x.grad, x2.grad) |a, b| try std.testing.expectApproxEqAbs(b, a, 1e-4);
+    try std.testing.expectApproxEqAbs(gamma2.grad[0], gamma.grad[0], 1e-4);
+    // 重演同样按动量更新运行均值
+    try std.testing.expect(rm.data[0] > running_mean_before);
+}

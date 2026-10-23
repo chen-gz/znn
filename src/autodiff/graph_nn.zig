@@ -525,7 +525,10 @@ pub fn batchNorm1d(
         .BatchNorm1d,
         .{ .BatchNorm1d = .{
             .eps = eps,
+            .momentum = momentum,
             .training = training,
+            .running_mean = running_mean,
+            .running_var = running_var,
             .save_mean = save_mean,
             .save_inv_std = save_inv_std,
         } },
@@ -573,7 +576,10 @@ pub fn batchNorm2d(
         .BatchNorm2d,
         .{ .BatchNorm2d = .{
             .eps = eps,
+            .momentum = momentum,
             .training = training,
+            .running_mean = running_mean,
+            .running_var = running_var,
             .save_mean = save_mean,
             .save_inv_std = save_inv_std,
         } },

@@ -271,15 +271,21 @@ pub const OpContext = union(enum) {
     },
     BatchNorm1d: struct {
         eps: f32,
+        momentum: f32,
         training: bool,
-        save_mean: []f32,
-        save_inv_std: []f32,
+        running_mean: *Tensor, // 运行均值缓冲区：前向重演 (`Graph.forward`) 在训练模式下按动量继续更新
+        running_var: *Tensor, // 运行方差缓冲区
+        save_mean: []f32, // 本次前向使用的均值 (训练模式为批统计量)，供反向传播使用
+        save_inv_std: []f32, // 本次前向使用的标准差倒数
     },
     BatchNorm2d: struct {
         eps: f32,
+        momentum: f32,
         training: bool,
-        save_mean: []f32,
-        save_inv_std: []f32,
+        running_mean: *Tensor, // 运行均值缓冲区：前向重演 (`Graph.forward`) 在训练模式下按动量继续更新
+        running_var: *Tensor, // 运行方差缓冲区
+        save_mean: []f32, // 本次前向使用的均值 (训练模式为批统计量)，供反向传播使用
+        save_inv_std: []f32, // 本次前向使用的标准差倒数
     },
     GroupNorm: struct {
         num_groups: usize,
