@@ -8,18 +8,16 @@ const std = @import("std");
 const backend = @import("../backend.zig");
 const nn = @import("../nn.zig");
 const gemma4 = @import("gemma4.zig");
+const gemma4_gpu = @import("gemma4_gpu.zig");
 
 const mlx = backend.mlx;
 pub const Gemma4Config = gemma4.Gemma4Config;
 pub const Q4Weights = backend.offload.Q4Weights;
 pub const Stream = backend.offload.Stream;
 pub const GpuKvCache = backend.offload.GpuKvCache;
+const TokenExclusionMask = backend.offload.TokenExclusionMask;
 pub const TensorMeta = nn.TensorMeta;
 pub const SafetensorsArchive = nn.SafetensorsArchive;
-
-/// 滑动窗口注意力层与全局注意力层的旋转位置编码频率基数 (RoPE Theta)
-const sliding_attention_rope_theta: f32 = 10000.0;
-const full_attention_rope_theta: f32 = 1000000.0;
 
 /// 持有独立键值缓存的解码层数 (其余 num_kv_shared_layers 层复用前层缓存)
 pub const num_kv_layers: usize = Gemma4Config.e4b.num_hidden_layers - Gemma4Config.e4b.num_kv_shared_layers;
@@ -45,41 +43,6 @@ pub fn isKvSharedSource(cfg: Gemma4Config, layer_idx: usize) bool {
         if (kvSourceLayer(cfg, shared_idx) == layer_idx) return true;
     }
     return false;
-}
-
-/// 计算比例旋转位置编码 (Proportional Rotary Position Embedding, Proportional RoPE) 的周期表，
-/// 与 mlx-lm `ProportionalRoPE` 及 Hugging Face `proportional` RoPE 一致：在完整 head_dim 上以 (i, i + head_dim / 2) 配对，
-/// freqs[i] = base^(2i / head_dim) (i < rotated_dims / 2)，其余角度周期为 +inf (旋转角恒为 0，保持恒等)。
-/// `mlx.fast.rope` 以 theta_i = pos / freqs[i] 计算旋转角。
-pub fn proportionalRopeFreqs(out: []f32, head_dim: usize, rotated_dims: usize, base: f32) void {
-    std.debug.assert(out.len == head_dim / 2 and rotated_dims <= head_dim);
-    const hd_f: f32 = @floatFromInt(head_dim);
-    for (out, 0..) |*f, i| {
-        f.* = if (2 * i < rotated_dims)
-            std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / hd_f)
-        else
-            std.math.inf(f32);
-    }
-}
-
-/// 以自定义周期表调用 `mlx.fast.rope` (base 置空，dims 为完整 head_dim，非交错半切分配对)
-fn fastRopeWithFreqs(x: mlx.Array, dims: usize, freqs: mlx.Array, offset: usize, s: Stream) !mlx.Array {
-    if (!mlx.has_mlx) return error.MlxNotSupported;
-    var res = mlx.Array.init();
-    const no_base = mlx.c.mlx_optional_float{ .value = 0.0, .has_value = false };
-    const rc = mlx.c.mlx_fast_rope(
-        &res.handle,
-        x.handle,
-        @intCast(dims),
-        false,
-        no_base,
-        1.0,
-        @intCast(offset),
-        freqs.handle,
-        s.handle,
-    );
-    if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
-    return res;
 }
 
 /// 逐层嵌入输入结构 (Per-Layer Inputs, PLE)
@@ -227,18 +190,10 @@ pub const GpuLayerE4B = struct {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    rope_theta: f32,
-    /// 全局注意力层的比例旋转位置编码周期表 [head_dim / 2] (滑动窗口层为 null，使用标准 RoPE)
-    rope_freqs: ?mlx.Array = null,
+    /// 旋转位置编码：滑动窗口层为标准半切分 RoPE，全局注意力层为在完整 head_dim 上旋转的比例旋转位置编码 (Proportional RoPE)
+    rope: gemma4_gpu.GpuRope,
     rms_norm_eps: f32,
     compiled_tail: ?mlx.Closure = null,
-
-    /// 对 [B, heads, T, head_dim] 张量施加旋转位置编码：滑动窗口层为标准半切分 RoPE (base = rope_theta)，
-    /// 全局注意力层为比例旋转位置编码 (Proportional RoPE)
-    fn applyRope(self: *const GpuLayerE4B, x: mlx.Array, offset: usize, s: Stream) !mlx.Array {
-        if (self.rope_freqs) |freqs| return fastRopeWithFreqs(x, self.head_dim, freqs, offset, s);
-        return mlx.Array.fastRoPE(x, self.head_dim, false, self.rope_theta, 1.0, offset, s);
-    }
 
     /// 静态编译当前解码层单步解码阶段 (`seq_len == 1`) 注意力投影之后的全尾部计算图 (Post-Attention + Gated MLP + PLE + LayerScalar)
     /// 将每层 20+ 个独立 C API 调度节点收拢为单一预编译静态闭包，由 MLX JIT 自动跨算子融合所有逐元素激活与残差连接
@@ -337,7 +292,7 @@ pub const GpuLayerE4B = struct {
         self.ple_proj.deinit();
         self.ple_norm_w.deinit();
         if (self.layer_scalar_w) |*sw| sw.deinit();
-        if (self.rope_freqs) |*rf| rf.deinit();
+        self.rope.deinit();
     }
 };
 
@@ -353,6 +308,8 @@ pub const Gemma4E4BModel = struct {
 
     config: Gemma4Config,
     stream: Stream,
+    /// 与 `config.sampling_excluded_tokens` 一致的 GPU 词表排除掩码 (贪婪 argmax 前叠加)
+    exclusion_mask: TokenExclusionMask,
 
     // 全部独立 KV 层 (num_kv_layers 个) 的块式预分配显存键值缓存 (Pre-allocated Chunked GPU Key-Value Cache)
     gpu_kv: [num_kv_layers]?GpuKvCache = @splat(null),
@@ -680,6 +637,9 @@ pub const Gemma4E4BModel = struct {
             if (ple_prep_ctx) |ctx_ptr| allocator.destroy(ctx_ptr);
         }
 
+        var exclusion_mask = try TokenExclusionMask.init(allocator, cfg.vocab_size, cfg.sampling_excluded_tokens);
+        errdefer exclusion_mask.deinit();
+
         // 4. 在加载期预分配全部独立 KV 层的显存缓冲区，消除 Prefill 首字延迟中的 zeros 内核分配开销
         var gpu_kv: [num_kv_layers]?GpuKvCache = @splat(null);
         errdefer {
@@ -701,6 +661,7 @@ pub const Gemma4E4BModel = struct {
             .lm_head = embed_tokens,
             .config = cfg,
             .stream = stream,
+            .exclusion_mask = exclusion_mask,
             .gpu_kv = gpu_kv,
             .curr_len = 0,
             .sqrt_hidden = sqrt_hidden_val,
@@ -765,14 +726,8 @@ pub const Gemma4E4BModel = struct {
         var scalar = try src.layerScalar(idx);
         errdefer if (scalar.arr) |*arr| arr.deinit();
 
-        // 全局注意力层采用 partial_rotary_factor = 0.25 的比例旋转位置编码
-        var rope_freqs: ?mlx.Array = null;
-        if (is_full) {
-            var freqs_buf: [Gemma4Config.e4b.global_head_dim / 2]f32 = undefined;
-            const freqs = freqs_buf[0 .. hd / 2];
-            proportionalRopeFreqs(freqs, hd, hd / 4, full_attention_rope_theta);
-            rope_freqs = try mlx.Array.fromSlice(freqs, &.{hd / 2});
-        }
+        // 全局注意力层采用 partial_rotary_factor = 0.25 的比例旋转位置编码 (与 12B GPU 路径共用同一实现)
+        const rope = try gemma4_gpu.GpuRope.init(hd, spec.attn_type.partialRotaryFactor(), spec.attn_type.ropeTheta());
 
         return .{
             .qkv_proj = qkv_proj,
@@ -798,8 +753,7 @@ pub const Gemma4E4BModel = struct {
             .num_heads = cfg.num_attention_heads,
             .num_kv_heads = cfg.num_key_value_heads,
             .head_dim = hd,
-            .rope_theta = if (is_full) full_attention_rope_theta else sliding_attention_rope_theta,
-            .rope_freqs = rope_freqs,
+            .rope = rope,
             .rms_norm_eps = cfg.rms_norm_eps,
         };
     }
@@ -836,6 +790,7 @@ pub const Gemma4E4BModel = struct {
         self.norm_w.deinit();
         self.sqrt_hidden_arr.deinit();
         self.embed_tokens.deinit();
+        self.exclusion_mask.deinit();
         self.stream.deinit();
     }
 
@@ -860,7 +815,7 @@ pub const Gemma4E4BModel = struct {
         var second_arr = try self.decodeStepAsync(first_arr);
         defer second_arr.deinit();
 
-        _ = second_arr.itemUint32();
+        _ = try second_arr.itemUint32();
         self.stream.synchronize();
         self.resetCache();
         mlx.clearCache();
@@ -1191,7 +1146,8 @@ pub const Gemma4E4BModel = struct {
         var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, 0, T, s);
         defer logits_bf16.deinit();
 
-        var best_tok_arr = try logits_bf16.argmax(1, false, s);
+        // 叠加词表排除掩码后求 argmax：与重复惩罚路径排除同一组词元
+        var best_tok_arr = try self.exclusion_mask.argmax(logits_bf16, s);
         best_tok_arr.asyncEval();
         self.curr_len = T;
         return best_tok_arr;
@@ -1208,22 +1164,22 @@ pub const Gemma4E4BModel = struct {
         var logits_bf16 = try self.forwardTokenArrayToLogits(tok_arr, pos, 1, s);
         defer logits_bf16.deinit();
 
-        var best_tok_arr = try logits_bf16.argmax(1, false, s);
+        var best_tok_arr = try self.exclusion_mask.argmax(logits_bf16, s);
         best_tok_arr.asyncEval();
         self.curr_len = pos + 1;
         return best_tok_arr;
     }
 
-    /// 预填充阶段 (Prefill)：处理 Prompt 词元并初始化 GPU KVCache
+    /// 预填充阶段 (Prefill)：处理 Prompt 词元并初始化 GPU KVCache，返回首个预测词元
     pub fn prefill(
         self: *Gemma4E4BModel,
         prompt_tokens: []const usize,
         repetition_penalty: f32,
     ) !usize {
-        if (repetition_penalty == 1.0) {
+        if (!backend.sampling.penaltyActive(repetition_penalty)) {
             var best_tok_arr = try self.prefillAsync(prompt_tokens);
             defer best_tok_arr.deinit();
-            return @intCast(best_tok_arr.itemUint32());
+            return @intCast(try best_tok_arr.itemUint32());
         }
 
         const T = prompt_tokens.len;
@@ -1237,24 +1193,7 @@ pub const Gemma4E4BModel = struct {
         var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, 0, T, s);
         defer logits_bf16.deinit();
 
-        var logits_f32 = try logits_bf16.astype(.float32, s);
-        defer logits_f32.deinit();
-
-        const cap = self.config.final_logit_softcapping;
-        var logits = if (cap > 0.0) blk2: {
-            var scaled_l = try logits_f32.mulScalar(1.0 / cap, s);
-            defer scaled_l.deinit();
-            var tanh_l = try mlx.Array.tanh(scaled_l, s);
-            defer tanh_l.deinit();
-            break :blk2 try tanh_l.mulScalar(cap, s);
-        } else try logits_f32.mulScalar(1.0, s);
-        defer logits.deinit();
-
-        logits.eval();
-        s.synchronize();
-
-        const logits_slice = logits.dataFloat32();
-        const best_tok = backend.offload.LmHeadWeights.argmaxWithPenalty(logits_slice, self.config.vocab_size, prompt_tokens, repetition_penalty);
+        const best_tok = try gemma4_gpu.selectToken(logits_bf16, self.config, &self.exclusion_mask, prompt_tokens, repetition_penalty, s);
         self.curr_len = T;
         return best_tok;
     }
@@ -1272,33 +1211,16 @@ pub const Gemma4E4BModel = struct {
         var indices_arr = try self.createTokenIndicesArray(&.{tok});
         defer indices_arr.deinit();
 
-        if (repetition_penalty == 1.0) {
+        if (!backend.sampling.penaltyActive(repetition_penalty)) {
             var best_tok_arr = try self.decodeStepAsync(indices_arr);
             defer best_tok_arr.deinit();
-            return @intCast(best_tok_arr.itemUint32());
+            return @intCast(try best_tok_arr.itemUint32());
         }
 
         var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, pos, 1, s);
         defer logits_bf16.deinit();
 
-        var logits_f32 = try logits_bf16.astype(.float32, s);
-        defer logits_f32.deinit();
-
-        const cap = self.config.final_logit_softcapping;
-        var logits = if (cap > 0.0) blk2: {
-            var scaled_l = try logits_f32.mulScalar(1.0 / cap, s);
-            defer scaled_l.deinit();
-            var tanh_l = try mlx.Array.tanh(scaled_l, s);
-            defer tanh_l.deinit();
-            break :blk2 try tanh_l.mulScalar(cap, s);
-        } else try logits_f32.mulScalar(1.0, s);
-        defer logits.deinit();
-
-        logits.eval();
-        s.synchronize();
-
-        const logits_slice = logits.dataFloat32();
-        const best_tok = backend.offload.LmHeadWeights.argmaxWithPenalty(logits_slice, self.config.vocab_size, history_tokens, repetition_penalty);
+        const best_tok = try gemma4_gpu.selectToken(logits_bf16, self.config, &self.exclusion_mask, history_tokens, repetition_penalty, s);
         self.curr_len = pos + 1;
         return best_tok;
     }
@@ -1351,14 +1273,14 @@ pub const Gemma4E4BModel = struct {
 
                 var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
                 defer q_normed.deinit();
-                q_rot_opt = try l.applyRope(q_normed, pos, s);
+                q_rot_opt = try l.rope.apply(q_normed, pos, s);
 
                 var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
                 defer k_normed.deinit();
                 v_4d = try mlx.Array.fastRmsNorm(v_4d_raw, null, l.rms_norm_eps, s);
                 errdefer v_4d.deinit();
 
-                k_rot = try l.applyRope(k_normed, pos, s);
+                k_rot = try l.rope.apply(k_normed, pos, s);
             } else {
                 var qkv_4d = try qkv_raw.reshape(&.{ 1, seq_len, total_heads, l.head_dim }, s);
                 defer qkv_4d.deinit();
@@ -1374,7 +1296,7 @@ pub const Gemma4E4BModel = struct {
                 defer q_normed.deinit();
                 var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
                 defer q_4d.deinit();
-                q_rot_opt = try l.applyRope(q_4d, pos, s);
+                q_rot_opt = try l.rope.apply(q_4d, pos, s);
 
                 var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
                 defer k_normed.deinit();
@@ -1386,7 +1308,7 @@ pub const Gemma4E4BModel = struct {
                 v_4d = try v_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
                 errdefer v_4d.deinit();
 
-                k_rot = try l.applyRope(k_4d, pos, s);
+                k_rot = try l.rope.apply(k_4d, pos, s);
             }
             defer v_4d.deinit();
             defer k_rot.deinit();
@@ -1435,7 +1357,7 @@ pub const Gemma4E4BModel = struct {
                 defer q_4d_raw.deinit();
                 var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
                 defer q_normed.deinit();
-                q_rot_opt = try l.applyRope(q_normed, pos, s);
+                q_rot_opt = try l.rope.apply(q_normed, pos, s);
             } else {
                 var q_4d_raw = try qkv_raw.reshape(&.{ 1, seq_len, l.num_heads, l.head_dim }, s);
                 defer q_4d_raw.deinit();
@@ -1443,7 +1365,7 @@ pub const Gemma4E4BModel = struct {
                 defer q_normed.deinit();
                 var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
                 defer q_4d.deinit();
-                q_rot_opt = try l.applyRope(q_4d, pos, s);
+                q_rot_opt = try l.rope.apply(q_4d, pos, s);
             }
 
             const cache = &self.gpu_kv[l.prev_kv_idx].?;

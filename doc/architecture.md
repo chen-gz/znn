@@ -11,12 +11,13 @@
 ```text
 src/
 ├── root.zig                      # 顶层公共门面 (Facade)，聚合导出所有核心子模块
-├── backend.zig                   # 硬件后端与执行器门面 (导出 Executor, cblas, mlx, offload)
+├── backend.zig                   # 硬件后端与执行器门面 (导出 Executor, cblas, mlx, offload, sampling)
 ├── backend/
 │   ├── cblas.zig                 # macOS Accelerate (AMX) 构建期链接与跨平台 8 路 SIMD GEMM 后备内核
 │   ├── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
 │   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定与 GPU 数组算子
-│   ├── offload.zig               # 硬件加速统一卸载基础设施 (GEMM, RMSNorm, RoPE, SDPA, Q4Weights, GpuKvCache, GpuModelContext)
+│   ├── offload.zig               # 与模型无关的硬件加速卸载原语 (GEMM, RMSNorm, RoPE, SDPA, 滑动窗口注意力, LmHeadWeights, TokenExclusionMask, Q4Weights, GpuKvCache)
+│   ├── sampling.zig              # 通用贪婪采样与重复惩罚 (TokenRange 排除区间, argmaxWithPenalty, BF16 排除掩码)
 │   └── tests.zig                 # 硬件计算后端与 GPU 算子卸载单元测试集
 ├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, Q4Block, ops)
 ├── tensor/
@@ -62,10 +63,11 @@ src/
 │   ├── tests_init.zig            # 权重自动初始化与增益推导专项测试
 │   ├── tests_module.zig          # 编译期反射协议、字段路径命名与权重共享 (Tied Weights) 生命周期测试
 │   └── tests_vis.zig             # 可视化作用域归属、Schema 2.0 黄金边集与 18 个经典模型导出测试
-├── models.zig                    # 专用模型门面 (导出 gemma4, gemma4_q4, gemma4_e4b, Gemma4E4BModel)
+├── models.zig                    # 专用模型门面 (导出 gemma4, gemma4_q4, gemma4_gpu, gemma4_e4b, Gemma4E4BModel)
 ├── models/
 │   ├── gemma4.zig                # Gemma 4 架构全精度实现 (GemmaRMSNorm, Gemma4Attention, Gemma4ForCausalLM, TinyGemma4)
 │   ├── gemma4_q4.zig             # Gemma 4 架构 4-bit 量化实现 (Q4Linear, Gemma4Q4Attention, Gemma4Q4ForCausalLM, TinyQ4Gemma4)
+│   ├── gemma4_gpu.zig            # Gemma 4 GPU 推理共享组件与 12B 端到端解码上下文 (GpuRope, selectToken, Gemma4GpuLayer, Gemma4GpuContext)
 │   ├── gemma4_e4b.zig            # Gemma 4 E4B (Effective 4B) 4-bit/8-bit 混合量化端侧推理引擎 (PleWeights, GpuLayerE4B, Gemma4E4BModel)
 │   └── tests.zig                 # Gemma 4 全精度、4-bit 量化与 E4B 推理引擎单元测试
 ├── optim.zig                     # SGD, Adam, AdamW 优化器、4 类学习率调度器、梯度裁剪与 ZNNO 检查点

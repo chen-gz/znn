@@ -1267,7 +1267,7 @@ test "Tensor to MLX Array bridge zero-copy and conversion" {
     defer arr.deinit();
     try std.testing.expectEqual(@as(usize, 6), arr.size());
     try std.testing.expectEqual(@as(usize, 2), arr.ndim());
-    try std.testing.expectEqualSlices(f32, t.data, arr.dataFloat32());
+    try std.testing.expectEqualSlices(f32, t.data, try arr.dataFloat32());
 
     // 2. 验证从 MLX 数组新建分配张量 (fromMlxArray)
     const t_restored = try Tensor.fromMlxArray(allocator, arr);
@@ -1282,7 +1282,7 @@ test "Tensor to MLX Array bridge zero-copy and conversion" {
 
     // 对原张量底层数据原地修改，统一内存下由 MLX 阵列可见
     t.data[0] = 999.0;
-    try std.testing.expectApproxEqAbs(@as(f32, 999.0), arr_zc.dataFloat32()[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 999.0), (try arr_zc.dataFloat32())[0], 1e-4);
 
     // 验证 copyFromMlxArray 与 backend.mlx.Array.copyToTensor
     t_restored.data[0] = 0.0;
@@ -1294,7 +1294,7 @@ test "Tensor to MLX Array bridge zero-copy and conversion" {
     defer arr_direct.deinit();
     try std.testing.expectEqual(@as(usize, 6), arr_direct.size());
     t.data[1] = 777.0;
-    try std.testing.expectApproxEqAbs(@as(f32, 777.0), arr_direct.dataFloat32()[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 777.0), (try arr_direct.dataFloat32())[1], 1e-4);
     try arr_direct.copyToTensor(t_restored);
     try std.testing.expectApproxEqAbs(@as(f32, 777.0), t_restored.data[1], 1e-4);
 }

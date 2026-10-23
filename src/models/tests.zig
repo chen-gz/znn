@@ -9,6 +9,8 @@ const Tensor = tensor.Tensor;
 const gemma4 = models.gemma4;
 const gemma4_q4 = models.gemma4_q4;
 const gemma4_e4b = models.gemma4_e4b;
+const gemma4_gpu = models.gemma4_gpu;
+const sampling = backend.sampling;
 const Gemma4E4BModel = gemma4_e4b.Gemma4E4BModel;
 
 test "Gemma 4 specialized operators, modules, and CausalLM forward" {
@@ -209,7 +211,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
             @memset(mock_mmap, 0);
             @memcpy(mock_mmap[0..8], "ZNNQ4G02");
 
-            var mmap_model = try gemma4_q4.TinyQ4Gemma4.loadFromMmap(allocator, mock_mmap);
+            var mmap_model = try gemma4_q4.TinyQ4Gemma4.loadFromMmapWithOptions(allocator, mock_mmap, .{ .lm_head_mode = .bf16 });
             defer mmap_model.deinit(allocator);
 
             var g_prefill = autodiff.Graph.initDefault(allocator);
@@ -531,7 +533,7 @@ const TinyQ4Gemma4Ctor = struct {
 const TinyQ4MmapCtor = struct {
     bytes: []const u8,
     fn construct(self: @This(), allocator: std.mem.Allocator) !gemma4_q4.TinyQ4Gemma4 {
-        return gemma4_q4.TinyQ4Gemma4.loadFromMmapWithOptions(allocator, self.bytes, .{ .warmup = false });
+        return gemma4_q4.TinyQ4Gemma4.loadFromMmapWithOptions(allocator, self.bytes, .{ .lm_head_mode = .bf16, .warmup = false });
     }
     fn destroy(model: *gemma4_q4.TinyQ4Gemma4, allocator: std.mem.Allocator) void {
         model.deinit(allocator);
@@ -579,7 +581,7 @@ test "Gemma4Q4 mmap loader reads per-layer norms and layer_scalar in storage ord
     std.mem.writeInt(u16, bytes[scalar_off..][0..2], 0x3F00, .little);
     try std.testing.expectEqual(M.computeExpectedFileSize(), offsets[cfg.num_hidden_layers]);
 
-    var model = try M.loadFromMmapWithOptions(allocator, bytes, .{ .warmup = false });
+    var model = try M.loadFromMmapWithOptions(allocator, bytes, .{ .lm_head_mode = .bf16, .warmup = false });
     defer model.deinit(allocator);
     try std.testing.expectEqual(@as(f32, 2.0), model.layers[1].input_layernorm.weight.data[0]);
     try std.testing.expectEqual(@as(f32, 0.5), model.layers[1].layer_scalar.data[0]);
@@ -615,7 +617,7 @@ test "Gemma4Q4 direct layout requires hardware offload and never leaks on reject
     defer allocator.free(bytes);
     @memset(bytes, 0);
     @memcpy(bytes[0..8], M.DIRECT_MAGIC);
-    try std.testing.expectError(error.DirectLayoutRequiresOffload, M.loadFromMmapWithOptions(allocator, bytes, .{ .warmup = false }));
+    try std.testing.expectError(error.DirectLayoutRequiresOffload, M.loadFromMmapWithOptions(allocator, bytes, .{ .lm_head_mode = .bf16, .warmup = false }));
 }
 
 test "promptLookup tolerates a zero minimum n-gram length" {
@@ -646,31 +648,45 @@ test "Gemma 4 SIMD dot kernels match scalar references" {
     }
 }
 
-test "Gemma4E4B proportional RoPE frequencies match the F32 proportional RoPE path" {
+/// 以 `mlx.fast.rope(dims = hd, freqs)` 的语义 (配对 (i, i + hd/2)，theta_i = pos / freqs[i]) 在 CPU 上旋转单个头向量
+fn ropeWithFreqsReference(x: []const f32, freqs: []const f32, pos: usize, out: []f32) void {
+    const half = x.len / 2;
+    @memcpy(out, x);
+    for (freqs, 0..) |f, i| {
+        const theta = @as(f32, @floatFromInt(pos)) / f;
+        const a = x[i];
+        const b = x[i + half];
+        out[i] = a * @cos(theta) - b * @sin(theta);
+        out[i + half] = b * @cos(theta) + a * @sin(theta);
+    }
+}
+
+fn checkProportionalRopeTable(comptime hd: usize, pos: usize, attn_type: gemma4.Gemma4AttentionType) !void {
     const allocator = std.testing.allocator;
     var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer g.deinit();
-    const hd: usize = 16;
-    const pos: usize = 5;
-    const base: f32 = 1000000.0;
+    const base = attn_type.ropeTheta();
+    const factor = attn_type.partialRotaryFactor();
     const x = try g.tensorND(&.{ 1, 1, 1, hd }, false);
-    for (x.data, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i + 1)) * 0.1;
-    const y_ref = try gemma4.ropeSplitHalf(&g, x, pos, 0.25, base);
+    for (x.data, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i + 1))) * 0.5;
+    const y_ref = try gemma4.ropeSplitHalf(&g, x, pos, factor, base);
 
-    // mlx.fast.rope(dims = hd, freqs) 参考实现：配对 (i, i + hd/2)，theta_i = pos / freqs[i]
     var freqs: [hd / 2]f32 = undefined;
-    gemma4_e4b.proportionalRopeFreqs(&freqs, hd, hd / 4, base);
+    gemma4_gpu.proportionalRopeFreqs(&freqs, hd, factor, base);
     var y: [hd]f32 = undefined;
-    @memcpy(&y, x.data[0..hd]);
-    for (freqs, 0..) |f, i| {
-        const theta = @as(f32, @floatFromInt(pos)) / f;
-        const a = x.data[i];
-        const b = x.data[i + hd / 2];
-        y[i] = a * @cos(theta) - b * @sin(theta);
-        y[i + hd / 2] = b * @cos(theta) + a * @sin(theta);
-    }
-    try std.testing.expect(maxAbsDiff(y_ref.data[0..hd], &y) < 1e-5);
-    try std.testing.expect(std.math.isInf(freqs[hd / 2 - 1]));
+    ropeWithFreqsReference(x.data[0..hd], &freqs, pos, &y);
+    try std.testing.expect(maxAbsDiff(y_ref.data[0..hd], &y) < 1e-4);
+    // 未参与旋转的角度周期为 +inf (保持恒等)
+    const num_angles: usize = @intFromFloat(@as(f32, @floatFromInt(hd / 2)) * factor);
+    for (freqs, 0..) |f, i| try std.testing.expectEqual(i >= num_angles, std.math.isInf(f));
+}
+
+test "Gemma 4 proportional RoPE frequency table matches the F32 CPU path for E4B and 12B global layers" {
+    // 小维度、E4B / 12B 全局注意力层 (global_head_dim = 512, partial_rotary_factor = 0.25) 与滑动窗口层 (head_dim = 256, 全旋转)
+    try checkProportionalRopeTable(16, 5, .full_attention);
+    try checkProportionalRopeTable(gemma4.Gemma4Config.default.global_head_dim, 37, .full_attention);
+    try checkProportionalRopeTable(gemma4.Gemma4Config.e4b.global_head_dim, 1000, .full_attention);
+    try checkProportionalRopeTable(gemma4.Gemma4Config.default.head_dim, 9, .sliding_attention);
 }
 
 test "Gemma4E4B KV-shared layers reuse the last non-shared layer of the same attention type" {
@@ -688,4 +704,148 @@ test "Gemma4E4B KV-shared layers reuse the last non-shared layer of the same att
     for (0..gemma4_e4b.num_kv_layers) |idx| {
         try std.testing.expectEqual(idx == 22 or idx == 23, gemma4_e4b.isKvSharedSource(cfg, idx));
     }
+}
+
+// ============================================================================
+// 回归测试：采样排除词元、截断后惩罚、键值缓存窗口同步与 LM Head 量化模式校验
+// ============================================================================
+
+const tiny_sampling_excluded = [_]sampling.TokenRange{ .single(0), .{ .first = 5, .last = 6 } };
+
+/// 8 词元、2 维隐状态、截断上限 2.0 的采样测试配置
+const tiny_sampling_config = blk: {
+    var c = gemma4.Gemma4Config.tiny_test;
+    c.vocab_size = 8;
+    c.hidden_size = 2;
+    c.final_logit_softcapping = 2.0;
+    c.sampling_excluded_tokens = &tiny_sampling_excluded;
+    break :blk c;
+};
+
+test "Gemma 4 CPU greedy LM head skips configured tokens and penalizes after softcapping" {
+    const allocator = std.testing.allocator;
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+
+    // h = [1, 0] 时每个词元的原始对数几率即嵌入行首元素
+    const raw = [_]f32{ 100.0, 1.5, 10.0, -1.0, 0.5, 50.0, 40.0, 1.0 };
+    var embed_f32: [16]f32 = undefined;
+    var embed_bf16: [16]u16 = undefined;
+    for (raw, 0..) |r, v| {
+        embed_f32[v * 2] = r;
+        embed_f32[v * 2 + 1] = 0.0;
+        embed_bf16[v * 2] = @truncate(@as(u32, @bitCast(r)) >> 16);
+        embed_bf16[v * 2 + 1] = 0;
+    }
+    const h = [_]f32{ 1.0, 0.0 };
+    const cfg = tiny_sampling_config;
+
+    inline for (.{ f32, u16 }) |Elem| {
+        const embed: []const Elem = if (Elem == f32) &embed_f32 else &embed_bf16;
+        // 0、5、6 号词元得分最高但属于配置中的排除集合
+        try std.testing.expectEqual(@as(usize, 2), try gemma4.greedyLmHeadCpu(cfg, Elem, &g, embed, &h, &.{}, 1.0));
+        // 截断后惩罚：2 * tanh(10 / 2) / 2 ≈ 1.0 < 2 * tanh(1.5 / 2) ≈ 1.27，词元 1 胜出；
+        // 若先惩罚再截断，2 * tanh(5 / 2) ≈ 1.97 仍会选中词元 2
+        try std.testing.expectEqual(@as(usize, 1), try gemma4.greedyLmHeadCpu(cfg, Elem, &g, embed, &h, &.{2}, 2.0));
+    }
+
+    const after = gemma4.samplingLogit(10.0, 2.0, true, 2.0);
+    const before = gemma4.softcapLogit(10.0 / 2.0, 2.0);
+    try std.testing.expectApproxEqAbs(2.0 * std.math.tanh(@as(f32, 5.0)) / 2.0, after, 1e-6);
+    try std.testing.expect(before > gemma4.samplingLogit(1.5, 2.0, false, 2.0));
+    try std.testing.expect(after < gemma4.samplingLogit(1.5, 2.0, false, 2.0));
+    // 负值惩罚同样作用在截断之后：乘以惩罚系数
+    try std.testing.expectApproxEqAbs(2.0 * std.math.tanh(@as(f32, -0.5)) * 3.0, gemma4.samplingLogit(-1.0, 2.0, true, 3.0), 1e-6);
+    try std.testing.expectEqual(@as(f32, 7.0), gemma4.softcapLogit(7.0, 0.0));
+}
+
+test "Gemma 4 sampling exclusions come from the config and agree between CPU argmax and the GPU mask" {
+    const allocator = std.testing.allocator;
+    const cfg = gemma4.Gemma4Config.default;
+    try std.testing.expect(cfg.isSamplingExcluded(0));
+    for (258880..258885) |v| try std.testing.expect(cfg.isSamplingExcluded(v));
+    try std.testing.expect(!cfg.isSamplingExcluded(258879));
+    try std.testing.expect(!cfg.isSamplingExcluded(258885));
+    // E4B 与 12B 共用同一份词表排除定义
+    try std.testing.expectEqual(cfg.sampling_excluded_tokens.ptr, gemma4.Gemma4Config.e4b.sampling_excluded_tokens.ptr);
+
+    const logits = try allocator.alloc(f32, cfg.vocab_size);
+    defer allocator.free(logits);
+    @memset(logits, -1.0);
+    logits[0] = 10.0;
+    logits[258882] = 9.0;
+    logits[77] = 3.0;
+    try std.testing.expectEqual(@as(usize, 77), sampling.argmaxWithPenalty(logits, cfg.vocab_size, cfg.sampling_excluded_tokens, &.{}, 1.0));
+    try std.testing.expectEqual(@as(usize, 77), sampling.argmaxWithPenalty(logits, cfg.vocab_size, cfg.sampling_excluded_tokens, &.{5}, 1.5));
+
+    // GPU 贪婪路径叠加的 BF16 加性掩码恰好屏蔽同一组词元
+    const mask = try allocator.alloc(u16, cfg.vocab_size);
+    defer allocator.free(mask);
+    sampling.fillExclusionMaskBf16(mask, cfg.sampling_excluded_tokens);
+    for (mask, 0..) |bits, v| {
+        try std.testing.expectEqual(cfg.isSamplingExcluded(v), bits == sampling.bf16_neg_inf_bits);
+    }
+}
+
+test "Gemma4KVCache layer window pack and restore keep incremental decode identical" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(23);
+    const random = prng.random();
+    const n_kv: usize = 2;
+    const hd: usize = 4;
+    const nh: usize = 4;
+    const W: usize = 3;
+    const T: usize = 6;
+
+    inline for (.{ gemma4.Gemma4AttentionType.sliding_attention, gemma4.Gemma4AttentionType.full_attention }) |attn_type| {
+        var cache_a = try gemma4.Gemma4KVCache.LayerCache.init(allocator, attn_type, n_kv, hd, W, 16);
+        defer cache_a.deinit(allocator);
+        var k: [n_kv * T * hd]f32 = undefined;
+        var v: [n_kv * T * hd]f32 = undefined;
+        fillNormal(&k, random, 1.0);
+        fillNormal(&v, random, 1.0);
+        try gemma4.writePrefillKVCache(&cache_a, &k, &v, 1, T);
+
+        // 打包可见窗口 (滑动窗口层只保留最近 W 个位置)，写回一个全新的缓存 (模拟 GPU -> CPU 同步)
+        const win = cache_a.windowLen();
+        try std.testing.expectEqual(if (attn_type == .sliding_attention) W else T, win);
+        var packed_k: [n_kv * T * hd]f32 = undefined;
+        var packed_v: [n_kv * T * hd]f32 = undefined;
+        try cache_a.packWindow(packed_k[0 .. n_kv * win * hd], packed_v[0 .. n_kv * win * hd]);
+
+        var cache_b = try gemma4.Gemma4KVCache.LayerCache.init(allocator, attn_type, n_kv, hd, W, 16);
+        defer cache_b.deinit(allocator);
+        try cache_b.writeWindow(packed_k[0 .. n_kv * win * hd], packed_v[0 .. n_kv * win * hd], win, T);
+        try std.testing.expectEqual(T, cache_b.curr_len);
+        // 全局注意力层必须恢复完整历史，过短的窗口被拒绝
+        if (attn_type == .full_attention) {
+            try std.testing.expectError(error.ShapeMismatch, cache_b.writeWindow(packed_k[0 .. n_kv * hd], packed_v[0 .. n_kv * hd], 1, T));
+        }
+
+        // 两个缓存上的下一步增量解码结果逐位一致
+        var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+        defer g.deinit();
+        var q: [nh * hd]f32 = undefined;
+        var k1: [n_kv * hd]f32 = undefined;
+        var v1: [n_kv * hd]f32 = undefined;
+        fillNormal(&q, random, 1.0);
+        fillNormal(&k1, random, 1.0);
+        fillNormal(&v1, random, 1.0);
+        const y_a = try gemma4.decodeAttention(&g, &cache_a, attn_type, W, nh, &q, &k1, &v1);
+        const y_b = try gemma4.decodeAttention(&g, &cache_b, attn_type, W, nh, &q, &k1, &v1);
+        try std.testing.expectEqualSlices(f32, y_a.data, y_b.data);
+    }
+}
+
+test "Gemma4Q4 loader rejects an LM head quantization mode the hidden size cannot support" {
+    const allocator = std.testing.allocator;
+    const M = gemma4_q4.TinyQ4Gemma4;
+    const bytes = try allocator.alloc(u8, M.computeExpectedFileSize());
+    defer allocator.free(bytes);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..8], M.Q4_MAGIC);
+    // hidden_size = 32 不整除 Q8 分组长度 64：显式报错而不是静默退回 BF16
+    try std.testing.expectError(error.UnsupportedQuantMode, M.loadFromMmapWithOptions(allocator, bytes, .{ .lm_head_mode = .q8, .warmup = false }));
+    var model = try M.loadFromMmapWithOptions(allocator, bytes, .{ .lm_head_mode = .q4, .warmup = false });
+    model.deinit(allocator);
 }

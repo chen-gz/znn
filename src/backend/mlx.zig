@@ -25,6 +25,7 @@ pub const MlxError = error{
     OutOfMemory,
     ShapeMismatch,
     NonContiguousTensor,
+    DTypeMismatch,
 };
 
 /// 硬件计算设备类型：图形处理器 (Graphics Processing Unit, GPU) 与中央处理器 (Central Processing Unit, CPU)
@@ -86,6 +87,39 @@ pub const Stream = struct {
         }
     }
 };
+
+/// 未显式传入命令流时全部 MLX 算子共用的默认 GPU 命令流句柄 (`mlx_stream.ctx`)：
+/// 首次使用时惰性创建并缓存，之后所有算子与线程复用同一句柄，不再为每次算子调用各自创建并释放一个默认流句柄
+var default_gpu_stream_ctx: std.atomic.Value(?*anyopaque) = .init(null);
+
+/// 获取缓存的默认 GPU 命令流句柄（首次调用时创建；多线程并发首次调用时只保留一个句柄，其余立即释放）
+fn defaultGpuStreamHandle() MlxError!c.mlx_stream {
+    if (!has_mlx) return error.MlxNotSupported;
+    if (default_gpu_stream_ctx.load(.acquire)) |ctx| return .{ .ctx = ctx };
+    const created = c.mlx_default_gpu_stream_new();
+    const created_ctx = created.ctx orelse return error.MlxInitializationFailed;
+    if (default_gpu_stream_ctx.cmpxchgStrong(null, created_ctx, .acq_rel, .acquire)) |existing| {
+        _ = c.mlx_stream_free(created);
+        return .{ .ctx = existing };
+    }
+    return created;
+}
+
+/// 解析算子使用的命令流：显式传入时直接使用（所有权归调用方），否则使用缓存的默认 GPU 命令流
+fn resolveStream(stream: ?Stream) MlxError!c.mlx_stream {
+    if (!has_mlx) return error.MlxNotSupported;
+    if (stream) |st| return st.handle;
+    return defaultGpuStreamHandle();
+}
+
+/// 释放缓存的默认 GPU 命令流句柄，之后未指定命令流的算子会重新惰性创建。
+/// 只能在没有任何 MLX 算子仍在使用默认流时调用（例如进程退出前或测试结束时）。
+pub fn releaseDefaultStream() void {
+    if (!has_mlx) return;
+    if (default_gpu_stream_ctx.swap(null, .acq_rel)) |ctx| {
+        _ = c.mlx_stream_free(.{ .ctx = ctx });
+    }
+}
 
 /// 机器学习拓展计算图编译模式 (Compilation Mode)
 pub const CompileMode = enum(c_uint) {
@@ -387,8 +421,7 @@ pub const Array = struct {
         }
 
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_zeros(
             &res.handle,
@@ -529,8 +562,7 @@ pub const Array = struct {
     pub fn contiguous(self: Array, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
         const rc = c.mlx_contiguous(&res.handle, self.handle, false, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
         return res;
@@ -634,30 +666,35 @@ pub const Array = struct {
         }
     }
 
-    /// 获取就绪后的单精度浮点切片指针
-    pub fn dataFloat32(self: Array) []const f32 {
-        if (!has_mlx or self.handle.ctx == null) return &.{};
+    /// 校验数组句柄有效且元素数据类型为 expected，随后触发求值使底层缓冲区就绪
+    fn prepareTypedRead(self: Array, expected: DType) MlxError!void {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (self.handle.ctx == null) return error.MlxOperationFailed;
+        if (self.dtype() != expected) return error.DTypeMismatch;
         self.eval();
-        const ptr = c.mlx_array_data_float32(self.handle);
-        if (ptr == null) return &.{};
-        const len = c.mlx_array_size(self.handle);
-        return ptr[0..len];
     }
 
-    /// 获取就绪后的 32 位无符号整型切片指针
-    pub fn dataUint32(self: Array) []const u32 {
-        if (!has_mlx or self.handle.ctx == null) return &.{};
-        self.eval();
-        const ptr = c.mlx_array_data_uint32(self.handle);
-        if (ptr == null) return &.{};
-        const len = c.mlx_array_size(self.handle);
-        return ptr[0..len];
+    /// 获取求值就绪后的单精度浮点数据切片（借用数组内部缓冲区，生命周期不超过数组本身）。
+    /// 数组元素类型不是 float32 时返回 `error.DTypeMismatch`（需要转换时先调用 `astype` 或改用 `copyToSlice`）。
+    pub fn dataFloat32(self: Array) MlxError![]const f32 {
+        if (!has_mlx) return error.MlxNotSupported;
+        try self.prepareTypedRead(.float32);
+        const ptr: [*]const f32 = c.mlx_array_data_float32(self.handle) orelse return error.MlxOperationFailed;
+        return ptr[0..self.size()];
     }
 
-    /// 提取标量或单元素张量的 uint32 值
-    pub fn itemUint32(self: Array) u32 {
-        const d = self.dataUint32();
-        if (d.len == 0) return 0;
+    /// 获取求值就绪后的 32 位无符号整型数据切片（借用数组内部缓冲区）；元素类型不是 uint32 时返回 `error.DTypeMismatch`
+    pub fn dataUint32(self: Array) MlxError![]const u32 {
+        if (!has_mlx) return error.MlxNotSupported;
+        try self.prepareTypedRead(.uint32);
+        const ptr: [*]const u32 = c.mlx_array_data_uint32(self.handle) orelse return error.MlxOperationFailed;
+        return ptr[0..self.size()];
+    }
+
+    /// 提取单元素 uint32 张量的值（例如 `argmax` 的结果）；元素数不为 1 时返回 `error.InvalidShape`
+    pub fn itemUint32(self: Array) MlxError!u32 {
+        const d = try self.dataUint32();
+        if (d.len != 1) return error.InvalidShape;
         return d[0];
     }
 
@@ -674,18 +711,11 @@ pub const Array = struct {
         return if (d > 0) @intCast(d) else 0;
     }
 
-    fn maybeFreeStream(s: c.mlx_stream, custom: ?Stream) void {
-        if (custom == null) {
-            _ = c.mlx_stream_free(s);
-        }
-    }
-
     /// 矩阵或多维数组转置 (Transpose)
     pub fn transpose(self: Array, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_transpose(&res.handle, self.handle, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -702,8 +732,7 @@ pub const Array = struct {
         }
 
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_reshape(&res.handle, self.handle, &shape_ints, shape_dims.len, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -720,8 +749,7 @@ pub const Array = struct {
         }
 
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_transpose_axes(&res.handle, self.handle, &axes_ints, axes.len, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -737,8 +765,7 @@ pub const Array = struct {
         defer _ = c.mlx_vector_array_free(vec);
 
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_concatenate_axis(&res.handle, vec, axis, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -767,8 +794,7 @@ pub const Array = struct {
         }
 
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_slice(
             &res.handle,
@@ -794,8 +820,7 @@ pub const Array = struct {
         const strides_arr = [_]c_int{ 1, 1 };
 
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_slice(
             &res.handle,
@@ -841,8 +866,7 @@ pub const Array = struct {
         }
 
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_slice_update(
             &res.handle,
@@ -876,8 +900,7 @@ pub const Array = struct {
         const strides_arr = [_]c_int{ 1, 1, 1, 1 };
 
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_slice(
             &res.handle,
@@ -911,8 +934,7 @@ pub const Array = struct {
         const strides_arr = [_]c_int{ 1, 1, 1, 1 };
 
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_slice_update(
             &res.handle,
@@ -934,8 +956,7 @@ pub const Array = struct {
     pub fn takeAxis(self: Array, indices: Array, axis: c_int, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_take_axis(&res.handle, self.handle, indices.handle, axis, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -946,8 +967,7 @@ pub const Array = struct {
     pub fn argmax(self: Array, axis: i32, keepdims: bool, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_argmax_axis(&res.handle, self.handle, axis, keepdims, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -959,8 +979,7 @@ pub const Array = struct {
         if (!has_mlx) return error.MlxNotSupported;
         var res = VectorArray.init();
         errdefer res.deinit();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_split(&res.handle, self.handle, num_splits, axis, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -978,8 +997,7 @@ pub const Array = struct {
     pub fn astype(self: Array, dt: DType, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_astype(&res.handle, self.handle, @intFromEnum(dt), s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -990,8 +1008,7 @@ pub const Array = struct {
     pub fn matmul(a: Array, b: Array, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_matmul(&res.handle, a.handle, b.handle, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -1002,8 +1019,7 @@ pub const Array = struct {
     pub fn add(a: Array, b: Array, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_add(&res.handle, a.handle, b.handle, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -1014,8 +1030,7 @@ pub const Array = struct {
     pub fn subtract(a: Array, b: Array, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_subtract(&res.handle, a.handle, b.handle, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -1026,8 +1041,7 @@ pub const Array = struct {
     pub fn multiply(a: Array, b: Array, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_multiply(&res.handle, a.handle, b.handle, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -1038,8 +1052,7 @@ pub const Array = struct {
     pub fn erf(self: Array, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_erf(&res.handle, self.handle, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -1199,8 +1212,7 @@ pub const Array = struct {
     pub fn softmax(a: Array, axis: c_int, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const rc = c.mlx_softmax_axis(&res.handle, a.handle, axis, false, s);
         if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
@@ -1211,8 +1223,7 @@ pub const Array = struct {
     pub fn fastRmsNorm(x: Array, weight: ?Array, eps: f32, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const w_handle = if (weight) |w| w.handle else c.mlx_array{ .ctx = null };
         const rc = c.mlx_fast_rms_norm(&res.handle, x.handle, w_handle, eps, s);
@@ -1232,8 +1243,7 @@ pub const Array = struct {
     ) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const opt_base = if (base) |b|
             c.mlx_optional_float{ .value = b, .has_value = true }
@@ -1256,6 +1266,37 @@ pub const Array = struct {
         return res;
     }
 
+    /// 以自定义旋转周期表执行快速旋转位置编码 (Rotary Position Embedding with Custom Frequencies)：
+    /// freqs 为 [dims / 2] 的单精度周期表，第 i 对分量的旋转角为 (offset + t) / freqs[i]（周期为 +inf 时该对保持恒等）
+    pub fn fastRoPEWithFreqs(
+        x: Array,
+        dims: usize,
+        traditional: bool,
+        scale: f32,
+        offset: usize,
+        freqs: Array,
+        stream: ?Stream,
+    ) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        var res = Array.init();
+        const s = try resolveStream(stream);
+
+        const no_base = c.mlx_optional_float{ .value = 0.0, .has_value = false };
+        const rc = c.mlx_fast_rope(
+            &res.handle,
+            x.handle,
+            @intCast(dims),
+            traditional,
+            no_base,
+            scale,
+            @intCast(offset),
+            freqs.handle,
+            s,
+        );
+        if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+        return res;
+    }
+
     /// 快速缩放点积注意力 (Scaled Dot-Product Attention, SDPA) / FlashAttention
     pub fn fastScaledDotProductAttention(
         queries: Array,
@@ -1267,8 +1308,7 @@ pub const Array = struct {
     ) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const mask_mode: [*c]const u8 = if (is_causal) "causal" else "";
         const empty_arr = c.mlx_array{ .ctx = null };
@@ -1303,8 +1343,7 @@ pub const Array = struct {
     ) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res: c.mlx_array = .{ .ctx = null };
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const gs: c.mlx_optional_int = .{ .value = group_size, .has_value = true };
         const b: c.mlx_optional_int = .{ .value = bits, .has_value = true };
@@ -1338,8 +1377,7 @@ pub const Array = struct {
     ) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res: c.mlx_array = .{ .ctx = null };
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const gs: c.mlx_optional_int = .{ .value = group_size, .has_value = true };
         const b: c.mlx_optional_int = .{ .value = bits, .has_value = true };
@@ -1366,8 +1404,7 @@ pub const Array = struct {
     pub fn tanh(a: Array, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res: c.mlx_array = .{ .ctx = null };
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const status = c.mlx_tanh(&res, a.handle, s);
         if (status != 0 or res.ctx == null) return error.MlxOperationFailed;
@@ -1399,8 +1436,7 @@ pub const Array = struct {
         var vec = c.mlx_vector_array_new();
         defer _ = c.mlx_vector_array_free(vec);
 
-        const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
-        defer maybeFreeStream(s, stream);
+        const s = try resolveStream(stream);
 
         const gs = c.mlx_optional_int{ .value = group_size, .has_value = true };
         const b = c.mlx_optional_int{ .value = bits, .has_value = true };

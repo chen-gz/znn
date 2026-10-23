@@ -144,7 +144,7 @@ pub fn main(init: std.process.Init) !void {
     errdefer if (pending_tok_arr_opt) |*p| p.deinit();
 
     const first_tok: usize = if (first_tok_arr_opt) |a|
-        @intCast(a.itemUint32())
+        @intCast(try a.itemUint32())
     else
         try model.prefill(prompt_tokens, repetition_penalty);
 
@@ -186,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
                 else
                     null;
 
-                const next_tok: usize = @intCast(pending_tok_arr.itemUint32());
+                const next_tok: usize = @intCast(try pending_tok_arr.itemUint32());
                 pending_tok_arr.deinit();
 
                 try current_tokens.append(allocator, next_tok);
