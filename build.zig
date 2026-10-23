@@ -147,6 +147,16 @@ const examples = [_]ExampleTarget{
     },
 };
 
+fn forwardArgs(b: *std.Build, run_cmd: *std.Build.Step.Run) void {
+    if (comptime @hasField(std.Build, "args")) {
+        if (@field(b, "args")) |args| {
+            run_cmd.addArgs(args);
+        }
+    } else if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        run_cmd.addPassthruArgs();
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -229,9 +239,7 @@ pub fn build(b: *std.Build) void {
         run_step.dependOn(&run_cmd.step);
         run_cmd.step.dependOn(b.getInstallStep());
         if (ex.forward_args) {
-            if (b.args) |args| {
-                run_cmd.addArgs(args);
-            }
+            forwardArgs(b, run_cmd);
         }
 
         if (ex.alias_step) |alias_name| {
@@ -256,9 +264,7 @@ pub fn build(b: *std.Build) void {
     const coverage_step = b.step("coverage", "Generate and display test code coverage report using kcov");
     const coverage_cmd = b.addSystemCommand(&.{ "bash", "scripts/coverage.sh" });
     coverage_cmd.step.dependOn(test_step);
-    if (b.args) |args| {
-        coverage_cmd.addArgs(args);
-    }
+    forwardArgs(b, coverage_cmd);
     coverage_step.dependOn(&coverage_cmd.step);
 
     // Dataset Download Step (Pure Zig: zig build download-dataset -- tinyshakespeare)
@@ -278,11 +284,8 @@ pub fn build(b: *std.Build) void {
     }
 
     const download_cmd = b.addRunArtifact(exe_download);
-    if (b.args) |args| {
-        download_cmd.addArgs(args);
-    } else {
-        download_cmd.addArg(dataset_opt);
-    }
+    forwardArgs(b, download_cmd);
+    download_cmd.addArg(dataset_opt);
 
     const download_step = b.step("download-dataset", "Download dataset in pure Zig (e.g. tinyshakespeare, wikitext2, tinystories, alpaca, fashion_mnist, mnist)");
     download_step.dependOn(&download_cmd.step);
@@ -307,9 +310,7 @@ pub fn build(b: *std.Build) void {
         exe_quantize.root_module.linkFramework("Accelerate", .{});
     }
     const quantize_cmd = b.addRunArtifact(exe_quantize);
-    if (b.args) |args| {
-        quantize_cmd.addArgs(args);
-    }
+    forwardArgs(b, quantize_cmd);
     const quantize_step = b.step("quantize-gemma4", "Quantize Gemma 4 12B model.safetensors to 4-bit Q4 binary");
     quantize_step.dependOn(&quantize_cmd.step);
 
@@ -331,9 +332,7 @@ pub fn build(b: *std.Build) void {
     }
     b.installArtifact(exe_pack);
     const pack_cmd = b.addRunArtifact(exe_pack);
-    if (b.args) |args| {
-        pack_cmd.addArgs(args);
-    }
+    forwardArgs(b, pack_cmd);
     const pack_step = b.step("pack-gemma4", "Reorder Gemma 4 12B Q4 weights into zero-copy direct layout (1.5s fast load)");
     pack_step.dependOn(&pack_cmd.step);
 }
