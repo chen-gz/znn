@@ -219,6 +219,29 @@ test "gradcheck: matmul with transposed view operands" {
     }, &.{ .{ .shape = &.{ 2, 3 } }, .{ .shape = &.{ 4, 3 } } }, .{});
 }
 
+test "gradcheck: matmul with leading batch dimensions on the left operand" {
+    // [B, T, K] x [K, N]：前导维度展平为行后与共享右操作数相乘
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.matmul(t[0], t[1]);
+        }
+    }, &.{ .{ .shape = &.{ 2, 3, 4 } }, .{ .shape = &.{ 4, 5 } } }, .{});
+    // 四维左操作数，且右操作数为转置视图 (权重共享 (Weight Tying) 投影)
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            const w_t = try t[1].transposeView(0, 1, g.arenaAllocator());
+            return g.matmul(t[0], w_t);
+        }
+    }, &.{ .{ .shape = &.{ 2, 1, 3, 4 } }, .{ .shape = &.{ 3, 4 } } }, .{});
+    // 非连续左操作数 (转置后的批次视图) 先物化再展平
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            const x_t = try g.transposeND(t[0], 0, 1);
+            return g.matmul(x_t, t[1]);
+        }
+    }, &.{ .{ .shape = &.{ 3, 2, 4 } }, .{ .shape = &.{ 4, 2 } } }, .{});
+}
+
 test "gradcheck: q4MatMul input gradient through frozen quantized weights" {
     try expectGradientsMatch(struct {
         fn build(g: *Graph, t: []const *Tensor) !*Tensor {
