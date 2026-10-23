@@ -6,6 +6,115 @@ const Op = @import("types.zig").Op;
 /// 4-bit 量化矩阵乘法 (4-bit Quantized Matrix Multiplication) 反向时每次反量化的权重行数
 const q4_backward_row_tile: usize = 64;
 
+/// 一维 / 二维转置卷积 (Transposed Convolution, ConvTranspose) 反向传播 (一维视为高度为 1 的二维)。
+/// 前向关系 `Y[n, co, h * s + kh - p, w * s + kw - p] += X[n, ci, h, w] * W[ci, co, kh, kw]`，
+/// 把上游梯度按输入位置展开为列矩阵 `col[(co, kh, kw), (h, w)] = dY[n, co, h * s + kh - p, w * s + kw - p]` (越界为 0) 后：
+///   dX_n[C_in, H*W]            += W[C_in, C_out*KH*KW] * col
+///   dW[C_in, C_out*KH*KW]      += X_n[C_in, H*W] * col^T
+/// 两者都交给单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM)。输入由 `Graph.contiguous` 保证连续。
+fn convTransposeBackward(self: *Op, stride: usize, padding: usize) !void {
+    const A = self.inputs[0];
+    const W = self.inputs[1];
+    const C = self.outputs[0];
+    const bias = if (self.inputs.len > 2) self.inputs[2] else null;
+    const is_2d = A.shape.len == 4;
+
+    const N = A.shape.dims[0];
+    const C_in = A.shape.dims[1];
+    const H_in = if (is_2d) A.shape.dims[2] else 1;
+    const W_in = A.shape.dims[A.shape.len - 1];
+    const C_out = W.shape.dims[1];
+    const KH = if (is_2d) W.shape.dims[2] else 1;
+    const KW = W.shape.dims[W.shape.len - 1];
+    const H_out = if (is_2d) C.shape.dims[2] else 1;
+    const W_out = C.shape.dims[C.shape.len - 1];
+    const out_plane = H_out * W_out;
+    // 一维时高度方向既无步长也无填充
+    const stride_h = if (is_2d) stride else 1;
+    const pad_h = if (is_2d) padding else 0;
+
+    if (bias) |b| {
+        if (b.requires_grad) {
+            for (0..N) |n| {
+                for (0..C_out) |co| {
+                    const plane = C.grad[(n * C_out + co) * out_plane ..][0..out_plane];
+                    var acc: f32 = 0.0;
+                    for (plane) |g| acc += g;
+                    b.grad[co] += acc;
+                }
+            }
+        }
+    }
+    if (!A.requires_grad and !W.requires_grad) return;
+
+    const in_plane = H_in * W_in;
+    const K_col = C_out * KH * KW;
+    if (in_plane == 0 or K_col == 0 or C_in == 0) return;
+    const col = try std.heap.c_allocator.alloc(f32, K_col * in_plane);
+    defer std.heap.c_allocator.free(col);
+
+    for (0..N) |n| {
+        const dY_n = C.grad[n * C_out * out_plane ..][0 .. C_out * out_plane];
+        for (0..C_out) |co| {
+            for (0..KH) |kh| {
+                for (0..KW) |kw| {
+                    const col_row = col[((co * KH + kh) * KW + kw) * in_plane ..][0..in_plane];
+                    for (0..H_in) |h| {
+                        const dst = col_row[h * W_in ..][0..W_in];
+                        const oh_raw = h * stride_h + kh;
+                        if (oh_raw < pad_h or oh_raw - pad_h >= H_out) {
+                            @memset(dst, 0.0);
+                            continue;
+                        }
+                        const src_row = dY_n[(co * H_out + (oh_raw - pad_h)) * W_out ..][0..W_out];
+                        for (dst, 0..) |*d, w| {
+                            const ow_raw = w * stride + kw;
+                            d.* = if (ow_raw >= padding and ow_raw - padding < W_out) src_row[ow_raw - padding] else 0.0;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (A.requires_grad) {
+            c.cblas_sgemm(
+                c.CblasRowMajor,
+                c.CblasNoTrans,
+                c.CblasNoTrans,
+                @intCast(C_in),
+                @intCast(in_plane),
+                @intCast(K_col),
+                1.0,
+                W.data.ptr,
+                @intCast(K_col),
+                col.ptr,
+                @intCast(in_plane),
+                1.0,
+                A.grad.ptr + n * C_in * in_plane,
+                @intCast(in_plane),
+            );
+        }
+        if (W.requires_grad) {
+            c.cblas_sgemm(
+                c.CblasRowMajor,
+                c.CblasNoTrans,
+                c.CblasTrans,
+                @intCast(C_in),
+                @intCast(K_col),
+                @intCast(in_plane),
+                1.0,
+                A.data.ptr + n * C_in * in_plane,
+                @intCast(in_plane),
+                col.ptr,
+                @intCast(in_plane),
+                1.0,
+                W.grad.ptr,
+                @intCast(K_col),
+            );
+        }
+    }
+}
+
 pub fn backwardNN(self: *Op) !void {
     switch (self.op_type) {
         .Conv1D => {
@@ -371,138 +480,12 @@ pub fn backwardNN(self: *Op) !void {
             }
         },
         .ConvTranspose1D => {
-            const A = self.inputs[0];
-            const W = self.inputs[1];
-            const C = self.outputs[0];
-            const bias = if (self.inputs.len > 2) self.inputs[2] else null;
-            const stride = self.context.ConvTranspose1D.stride;
-            const padding = self.context.ConvTranspose1D.padding;
-
-            const N = A.shape.dims[0];
-            const C_in = A.shape.dims[1];
-            const L_in = A.shape.dims[2];
-
-            const C_out = W.shape.dims[1];
-            const K = W.shape.dims[2];
-            const L_out = C.shape.dims[2];
-
-            if (bias) |b| {
-                if (b.requires_grad) {
-                    for (0..N) |n| {
-                        for (0..C_out) |co| {
-                            for (0..L_out) |l| {
-                                b.grad[co] += C.grad[(n * C_out + co) * L_out + l];
-                            }
-                        }
-                    }
-                }
-            }
-
-            for (0..N) |n| {
-                for (0..C_in) |ci| {
-                    for (0..L_in) |l_in| {
-                        const in_idx = (n * C_in + ci) * L_in + l_in;
-                        const input_val = A.data[in_idx];
-
-                        for (0..C_out) |co| {
-                            for (0..K) |k| {
-                                const out_l_raw = l_in * stride + k;
-                                if (out_l_raw < padding) continue;
-                                const out_l = out_l_raw - padding;
-                                if (out_l >= L_out) continue;
-
-                                const out_idx = (n * C_out + co) * L_out + out_l;
-                                const grad_out = C.grad[out_idx];
-                                if (grad_out == 0.0) continue;
-
-                                const w_idx = (ci * C_out + co) * K + k;
-                                if (W.requires_grad) {
-                                    W.grad[w_idx] += grad_out * input_val;
-                                }
-                                if (A.requires_grad) {
-                                    A.grad[in_idx] += grad_out * W.data[w_idx];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            const ctx = self.context.ConvTranspose1D;
+            try convTransposeBackward(self, ctx.stride, ctx.padding);
         },
         .ConvTranspose2D => {
-            const A = self.inputs[0];
-            const W = self.inputs[1];
-            const C = self.outputs[0];
-            const bias = if (self.inputs.len > 2) self.inputs[2] else null;
-            const stride = self.context.ConvTranspose2D.stride;
-            const padding = self.context.ConvTranspose2D.padding;
-
-            const N = A.shape.dims[0];
-            const C_in = A.shape.dims[1];
-            const H_in = A.shape.dims[2];
-            const W_in = A.shape.dims[3];
-
-            const C_out = W.shape.dims[1];
-            const KH = W.shape.dims[2];
-            const KW = W.shape.dims[3];
-
-            const H_out = C.shape.dims[2];
-            const W_out = C.shape.dims[3];
-
-            // Bias gradient
-            if (bias) |b| {
-                if (b.requires_grad) {
-                    for (0..N) |n| {
-                        for (0..C_out) |co| {
-                            for (0..H_out) |h| {
-                                for (0..W_out) |w| {
-                                    b.grad[co] += C.grad[n * (C_out * H_out * W_out) + co * (H_out * W_out) + h * W_out + w];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            for (0..N) |n| {
-                for (0..C_in) |ci| {
-                    for (0..H_in) |h| {
-                        for (0..W_in) |w| {
-                            const in_idx = n * (C_in * H_in * W_in) + ci * (H_in * W_in) + h * W_in + w;
-                            const input_val = A.data[in_idx];
-
-                            for (0..C_out) |co| {
-                                for (0..KH) |kh| {
-                                    const out_h_raw = h * stride + kh;
-                                    if (out_h_raw < padding) continue;
-                                    const out_h = out_h_raw - padding;
-                                    if (out_h >= H_out) continue;
-
-                                    for (0..KW) |kw| {
-                                        const out_w_raw = w * stride + kw;
-                                        if (out_w_raw < padding) continue;
-                                        const out_w = out_w_raw - padding;
-                                        if (out_w >= W_out) continue;
-
-                                        const out_idx = n * (C_out * H_out * W_out) + co * (H_out * W_out) + out_h * W_out + out_w;
-                                        const grad_out = C.grad[out_idx];
-                                        if (grad_out == 0.0) continue;
-
-                                        const w_idx = ci * (C_out * KH * KW) + co * (KH * KW) + kh * KW + kw;
-
-                                        if (W.requires_grad) {
-                                            W.grad[w_idx] += grad_out * input_val;
-                                        }
-
-                                        if (A.requires_grad) {
-                                            A.grad[in_idx] += grad_out * W.data[w_idx];
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            const ctx = self.context.ConvTranspose2D;
+            try convTransposeBackward(self, ctx.stride, ctx.padding);
         },
         .MaxPool1D => {
             const A = self.inputs[0];
