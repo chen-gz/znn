@@ -74,6 +74,7 @@ const SwiGLU = nn.SwiGLU;
 const MoELayer = nn.MoELayer;
 const CausalSelfAttention = nn.CausalSelfAttention;
 const applyRope1D = nn.applyRope1D;
+const rope1DAngles = nn.rope1DAngles;
 const MLACache = nn.MLACache;
 const MLALayer = nn.MLALayer;
 const TransformerBlock = nn.TransformerBlock;
@@ -713,7 +714,7 @@ test "Dropout and AvgPool2D forward and backward passes" {
     var prng = std.Random.DefaultPrng.init(42);
     const rand = prng.random();
 
-    const drop = Dropout.init(0.2);
+    const drop = try Dropout.init(0.2);
     const x = try tensor.zeros(allocator, &.{ 1, 10 });
     defer tensor.free(allocator, x);
     @memset(x.data, 1.0);
@@ -1090,6 +1091,28 @@ test "dpoLoss and GRPO losses reject mismatched lengths and invalid hyperparamet
     for (new_t.grad) |g| try std.testing.expectEqual(@as(f32, 0.0), g);
 }
 
+test "Dropout.init rejects probabilities outside [0, 1] and NaN" {
+    try std.testing.expectError(error.InvalidProbability, Dropout.init(-0.1));
+    try std.testing.expectError(error.InvalidProbability, Dropout.init(1.5));
+    try std.testing.expectError(error.InvalidProbability, Dropout.init(std.math.nan(f32)));
+    try std.testing.expectError(error.InvalidProbability, Dropout.init(std.math.inf(f32)));
+    try std.testing.expectError(error.InvalidProbability, Dropout.init(-std.math.inf(f32)));
+
+    // 边界值 0 与 1 合法：p = 1 时训练模式输出全部为 0
+    const keep_all = try Dropout.init(0.0);
+    try std.testing.expectEqual(@as(f32, 0.0), keep_all.p);
+    const drop_all = try Dropout.init(1.0);
+    try std.testing.expect(drop_all.training);
+
+    const allocator = std.testing.allocator;
+    var graph = autodiff.Graph.initDefault(allocator);
+    defer graph.deinit();
+    var prng = std.Random.DefaultPrng.init(5);
+    const x = try graph.ones(&.{ 2, 3 }, false);
+    const y = try drop_all.forward(&graph, x, prng.random());
+    for (y.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
+}
+
 test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
     const allocator = std.testing.allocator;
 
@@ -1126,8 +1149,8 @@ test "RMSNorm and LayerNorm zero variance and uniform numerical stability" {
 
     // 3. Dropout with p=0.0 (returns x directly) and high p
     var prng = std.Random.DefaultPrng.init(11);
-    const drop0 = Dropout.init(0.0);
-    const drop_heavy = Dropout.init(0.9999);
+    const drop0 = try Dropout.init(0.0);
+    const drop_heavy = try Dropout.init(0.9999);
 
     const x_test = try tensor.zeros(allocator, &.{ 1, 4 });
     defer tensor.free(allocator, x_test);
@@ -1904,6 +1927,43 @@ fn mlaIncrementalMaxDiff(batch_2d: bool) !f32 {
         }
     }
     return max_diff;
+}
+
+test "applyRope1D with precomputed angles matches the per-element reference rotation" {
+    // 逐元素重新计算幂函数与三角函数的参考实现 (旋转位置编码 (Rotary Position Embedding, RoPE) 交错配对)
+    const reference = struct {
+        fn rotate(vec: []f32, pos: usize) void {
+            const pos_f = @as(f32, @floatFromInt(pos));
+            for (0..vec.len / 2) |i| {
+                const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(vec.len)));
+                const theta = pos_f * freq;
+                const x0 = vec[2 * i];
+                const x1 = vec[2 * i + 1];
+                vec[2 * i] = x0 * @cos(theta) - x1 * @sin(theta);
+                vec[2 * i + 1] = x0 * @sin(theta) + x1 * @cos(theta);
+            }
+        }
+    };
+
+    var prng = std.Random.DefaultPrng.init(2468);
+    const random = prng.random();
+    // 偶数与奇数长度 (奇数时最后一个元素保持不变)
+    inline for (.{ 2, 8, 9, 64 }) |dim| {
+        for ([_]usize{ 0, 1, 7, 1000 }) |pos| {
+            var cos_t: [dim / 2]f32 = undefined;
+            var sin_t: [dim / 2]f32 = undefined;
+            rope1DAngles(&cos_t, &sin_t, dim, pos);
+            // 同一张角度表复用于多个向量 (对应批次与注意力头)
+            for (0..3) |_| {
+                var expected: [dim]f32 = undefined;
+                for (&expected) |*v| v.* = random.float(f32) * 2.0 - 1.0;
+                var actual = expected;
+                reference.rotate(&expected, pos);
+                applyRope1D(&actual, &cos_t, &sin_t);
+                try std.testing.expectEqualSlices(f32, &expected, &actual);
+            }
+        }
+    }
 }
 
 test "MLALayer forwardInference matches full forward with biases and batched inputs" {

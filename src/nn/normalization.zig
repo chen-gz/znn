@@ -242,7 +242,7 @@ pub const GroupNorm = struct {
 
 /// 随机失活正则化层 (Dropout Regularization, Dropout)
 pub const Dropout = struct {
-    p: f32 = 0.5, // 丢弃概率 (0.0 <= p < 1.0)
+    p: f32 = 0.5, // 丢弃概率 (0.0 <= p <= 1.0；p = 1.0 时输出全部为 0)
     training: bool = true, // 是否处于训练模式
     name: ?[]const u8 = null,
     module_type: []const u8 = "Dropout",
@@ -259,7 +259,10 @@ pub const Dropout = struct {
         return .{};
     }
 
-    pub fn init(p: f32) Dropout {
+    /// 以丢弃概率 p 创建训练模式的随机失活层；p 不在 [0, 1] 内或为非数 (Not a Number, NaN) 时返回
+    /// `error.InvalidProbability` (与 `Graph.dropout` 的校验一致)
+    pub fn init(p: f32) error{InvalidProbability}!Dropout {
+        if (!(p >= 0.0 and p <= 1.0)) return error.InvalidProbability;
         return .{ .p = p, .training = true };
     }
 

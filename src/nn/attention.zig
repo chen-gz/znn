@@ -402,19 +402,31 @@ pub const CausalSelfAttention = struct {
     }
 };
 
-/// 旋转位置编码 (Rotary Position Embedding, RoPE) 一维 (1-Dimensional, 1D) 原地旋转变换
-pub fn applyRope1D(vec: []f32, pos: usize) void {
-    const half = vec.len / 2;
+/// 旋转位置编码 (Rotary Position Embedding, RoPE) 一维 (1-Dimensional, 1D) 旋转角表：
+/// 为长度 `dim` 的向量在位置 `pos` 处计算每个频率 i 的 cos(pos * inv_freq_i) 与 sin(pos * inv_freq_i)，
+/// 其中 inv_freq_i = 1 / 10000^(2i / dim)。`cos_out` 与 `sin_out` 的长度必须都为 dim / 2。
+/// 每个频率只计算一次幂函数与三角函数，同一位置的所有向量 (批次、注意力头) 复用同一张表。
+pub fn rope1DAngles(cos_out: []f32, sin_out: []f32, dim: usize, pos: usize) void {
+    std.debug.assert(cos_out.len == dim / 2 and sin_out.len == dim / 2);
     const pos_f = @as(f32, @floatFromInt(pos));
-    for (0..half) |i| {
-        const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(vec.len)));
-        const theta = pos_f * freq;
-        const cos_t = @cos(theta);
-        const sin_t = @sin(theta);
+    const dim_f = @as(f32, @floatFromInt(dim));
+    for (cos_out, sin_out, 0..) |*c, *s, i| {
+        const inv_freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / dim_f);
+        const theta = pos_f * inv_freq;
+        c.* = @cos(theta);
+        s.* = @sin(theta);
+    }
+}
+
+/// 旋转位置编码 (Rotary Position Embedding, RoPE) 一维 (1-Dimensional, 1D) 原地旋转变换 (交错配对 (2i, 2i + 1))：
+/// 使用 `rope1DAngles` 预计算的旋转角表，`cos_t` / `sin_t` 的长度必须为 vec.len / 2 (奇数长度时最后一个元素保持不变)
+pub fn applyRope1D(vec: []f32, cos_t: []const f32, sin_t: []const f32) void {
+    std.debug.assert(cos_t.len == vec.len / 2 and sin_t.len == vec.len / 2);
+    for (cos_t, sin_t, 0..) |c, s, i| {
         const x0 = vec[2 * i];
         const x1 = vec[2 * i + 1];
-        vec[2 * i] = x0 * cos_t - x1 * sin_t;
-        vec[2 * i + 1] = x0 * sin_t + x1 * cos_t;
+        vec[2 * i] = x0 * c - x1 * s;
+        vec[2 * i + 1] = x0 * s + x1 * c;
     }
 }
 
@@ -614,10 +626,13 @@ pub const MLALayer = struct {
 
         // 2. 施加旋转位置编码 (Rotary Position Embedding, RoPE) 并写入多头潜在注意力缓存 (Multi-Head Latent Attention Cache, MLACache)
         const t = cache.curr_len;
+        const rope_cos = try step_alloc.alloc(f32, dr / 2);
+        const rope_sin = try step_alloc.alloc(f32, dr / 2);
+        rope1DAngles(rope_cos, rope_sin, dr, t);
 
         for (0..B) |b| {
             const k_r_vec = k_r_step.data[b * dr .. (b + 1) * dr];
-            applyRope1D(k_r_vec, t);
+            applyRope1D(k_r_vec, rope_cos, rope_sin);
 
             const dest_c = cache.c_kv.data[(b * cache.max_len + t) * dc .. (b * cache.max_len + t + 1) * dc];
             const dest_r = cache.k_r.data[(b * cache.max_len + t) * dr .. (b * cache.max_len + t + 1) * dr];
@@ -643,7 +658,7 @@ pub const MLALayer = struct {
                 const q_offset = b * (nh * q_stride) + h * q_stride;
                 const q_c_head = q_all.data[q_offset .. q_offset + hd];
                 const q_r_head = q_all.data[q_offset + hd .. q_offset + q_stride];
-                applyRope1D(q_r_head, t);
+                applyRope1D(q_r_head, rope_cos, rope_sin);
 
                 // 公式 (7) 矩阵吸收: \tilde{q}_{t,i} = (W_i^{UK})^T q_{t,i}^C \in R^{dc}
                 // 内容键偏置 b^{UK} 对所有位置贡献同一常数 q^C \cdot b^{UK}，归一化指数函数 (Softmax) 对其不变，故可省略
