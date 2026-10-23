@@ -18,40 +18,136 @@ pub const CheckpointError = error{
     OptimizerTypeMismatch,
     ParamCountMismatch,
     BufferSizeMismatch,
+    CheckpointSizeMismatch,
 };
 
-fn writeU32(writer: anytype, val: u32) !void {
+// =========================================================================
+// 检查点 (Checkpoint) 公共读写
+// =========================================================================
+//
+// 文件布局 (头部为小端序)：
+//   magic[4] | version u32 | type_tag u32 | step u64 | lr f32 | param_count u64
+//   [仅 SGD: has_velocity u8]
+//   每个参数: param_len u64 | 状态缓冲 0 (param_len 个 f32) | 状态缓冲 1 | ...
+//
+// 加载时先校验头部与文件总长度，全部通过后才写入优化器状态，避免损坏或不匹配的
+// 检查点只更新一半状态 (例如学习率、步数已被覆盖却随后报错)。
+
+/// 公共头部字节数：magic + version + type_tag + step + lr + param_count
+const CHECKPOINT_HEADER_BYTES: u64 = 4 + 4 + 4 + 8 + 4 + 8;
+
+const CheckpointHeader = struct {
+    step: u64,
+    lr: f32,
+};
+
+fn writeU32(writer: *std.Io.Writer, val: u32) !void {
     var b: [4]u8 = undefined;
     std.mem.writeInt(u32, &b, val, .little);
     try writer.writeAll(&b);
 }
 
-fn writeU64(writer: anytype, val: u64) !void {
+fn writeU64(writer: *std.Io.Writer, val: u64) !void {
     var b: [8]u8 = undefined;
     std.mem.writeInt(u64, &b, val, .little);
     try writer.writeAll(&b);
 }
 
-fn writeF32(writer: anytype, val: f32) !void {
-    const bits: u32 = @bitCast(val);
-    try writeU32(writer, bits);
+fn writeF32(writer: *std.Io.Writer, val: f32) !void {
+    try writeU32(writer, @bitCast(val));
 }
 
-fn readU32(reader: anytype) !u32 {
+fn readU32(reader: *std.Io.Reader) !u32 {
     var b: [4]u8 = undefined;
     try reader.readSliceAll(&b);
     return std.mem.readInt(u32, &b, .little);
 }
 
-fn readU64(reader: anytype) !u64 {
+fn readU64(reader: *std.Io.Reader) !u64 {
     var b: [8]u8 = undefined;
     try reader.readSliceAll(&b);
     return std.mem.readInt(u64, &b, .little);
 }
 
-fn readF32(reader: anytype) !f32 {
-    const bits = try readU32(reader);
-    return @bitCast(bits);
+fn readF32(reader: *std.Io.Reader) !f32 {
+    return @bitCast(try readU32(reader));
+}
+
+fn writeCheckpointHeader(writer: *std.Io.Writer, tag: OptimizerTypeTag, header: CheckpointHeader, param_count: usize) !void {
+    try writer.writeAll(&OPTIMIZER_MAGIC);
+    try writeU32(writer, OPTIMIZER_VERSION);
+    try writeU32(writer, @intFromEnum(tag));
+    try writeU64(writer, header.step);
+    try writeF32(writer, header.lr);
+    try writeU64(writer, @as(u64, param_count));
+}
+
+/// 读取并校验公共头部，只返回解析结果，不修改任何优化器状态
+fn readCheckpointHeader(reader: *std.Io.Reader, tag: OptimizerTypeTag, param_count: usize) !CheckpointHeader {
+    var magic: [4]u8 = undefined;
+    try reader.readSliceAll(&magic);
+    if (!std.mem.eql(u8, &magic, &OPTIMIZER_MAGIC)) return error.InvalidCheckpointMagic;
+
+    const version = try readU32(reader);
+    if (version != OPTIMIZER_VERSION) return error.UnsupportedCheckpointVersion;
+
+    const type_tag = try readU32(reader);
+    if (type_tag != @intFromEnum(tag)) return error.OptimizerTypeMismatch;
+
+    const step = try readU64(reader);
+    const lr = try readF32(reader);
+    const saved_count = try readU64(reader);
+    if (saved_count != param_count) return error.ParamCountMismatch;
+
+    return .{ .step = step, .lr = lr };
+}
+
+/// 状态区字节数：每个参数一个 u64 长度字段，加上 `buffers_per_param` 个与参数等长的 f32 缓冲
+fn checkpointStateBytes(params: []const *Tensor, buffers_per_param: usize) u64 {
+    var total: u64 = 0;
+    for (params) |param| {
+        total += 8 + @as(u64, buffers_per_param) * @as(u64, param.data.len) * @sizeOf(f32);
+    }
+    return total;
+}
+
+/// 逐参数写入长度字段与各状态缓冲 (`states[k][i]` 为第 i 个参数的第 k 个状态缓冲)
+fn writeStateBuffers(writer: *std.Io.Writer, params: []const *Tensor, states: []const []const []f32) !void {
+    for (params, 0..) |param, i| {
+        try writeU64(writer, @as(u64, param.data.len));
+        for (states) |state| {
+            try writer.writeAll(std.mem.sliceAsBytes(state[i]));
+        }
+    }
+}
+
+fn readStateBuffers(reader: *std.Io.Reader, params: []const *Tensor, states: []const []const []f32) !void {
+    for (params, 0..) |param, i| {
+        const param_len = try readU64(reader);
+        if (param_len != param.data.len) return error.BufferSizeMismatch;
+        for (states) |state| {
+            try reader.readSliceAll(std.mem.sliceAsBytes(state[i]));
+        }
+    }
+}
+
+/// 为每个参数分配一块与参数等长、清零的状态缓冲；失败时释放已分配部分
+fn allocZeroedStates(allocator: std.mem.Allocator, params: []const *Tensor) ![][]f32 {
+    const states = try allocator.alloc([]f32, params.len);
+    errdefer allocator.free(states);
+    var initialized: usize = 0;
+    errdefer for (states[0..initialized]) |s| allocator.free(s);
+    for (params) |param| {
+        states[initialized] = try allocator.alloc(f32, param.data.len);
+        @memset(states[initialized], 0.0);
+        initialized += 1;
+    }
+    return states;
+}
+
+fn freeStates(allocator: std.mem.Allocator, states: []const []f32) void {
+    for (states) |s| allocator.free(s);
+    allocator.free(states);
 }
 
 /// 随机梯度下降 (Stochastic Gradient Descent, SGD) 优化器配置
@@ -83,21 +179,7 @@ pub const SGDOptimizer = struct {
         nn.warnIfParametersUninitialized(params);
         errdefer allocator.free(params);
 
-        var velocities: ?[][]f32 = null;
-        if (config.momentum > 0.0) {
-            const v_list = try allocator.alloc([]f32, params.len);
-            errdefer allocator.free(v_list);
-            var initialized: usize = 0;
-            errdefer {
-                for (0..initialized) |j| allocator.free(v_list[j]);
-            }
-            for (params) |param| {
-                v_list[initialized] = try allocator.alloc(f32, param.data.len);
-                @memset(v_list[initialized], 0.0);
-                initialized += 1;
-            }
-            velocities = v_list;
-        }
+        const velocities: ?[][]f32 = if (config.momentum > 0.0) try allocZeroedStates(allocator, params) else null;
 
         return SGDOptimizer{
             .allocator = allocator,
@@ -110,10 +192,7 @@ pub const SGDOptimizer = struct {
     }
 
     pub fn deinit(self: SGDOptimizer) void {
-        if (self.velocities) |v_list| {
-            for (v_list) |v| self.allocator.free(v);
-            self.allocator.free(v_list);
-        }
+        if (self.velocities) |v_list| freeStates(self.allocator, v_list);
         self.allocator.free(self.params);
     }
 
@@ -157,21 +236,13 @@ pub const SGDOptimizer = struct {
         var file_writer = file.writer(io, &buf);
         const writer = &file_writer.interface;
 
-        try writer.writeAll(&OPTIMIZER_MAGIC);
-        try writeU32(writer, OPTIMIZER_VERSION);
-        try writeU32(writer, @intFromEnum(OptimizerTypeTag.sgd));
-        try writeU64(writer, self.step_count);
-        try writeF32(writer, self.lr);
-        try writeU64(writer, @as(u64, self.params.len));
-
+        try writeCheckpointHeader(writer, .sgd, .{ .step = self.step_count, .lr = self.lr }, self.params.len);
         const has_vel: u8 = if (self.velocities != null) 1 else 0;
         try writer.writeAll(&[_]u8{has_vel});
-
-        for (self.params, 0..) |param, i| {
-            try writeU64(writer, @as(u64, param.data.len));
-            if (self.velocities) |v_list| {
-                try writer.writeAll(std.mem.sliceAsBytes(v_list[i]));
-            }
+        if (self.velocities) |v_list| {
+            try writeStateBuffers(writer, self.params, &.{v_list});
+        } else {
+            try writeStateBuffers(writer, self.params, &.{});
         }
         try writer.flush();
     }
@@ -180,50 +251,85 @@ pub const SGDOptimizer = struct {
         const cwd = std.Io.Dir.cwd();
         var file = try cwd.openFile(io, file_path, .{});
         defer file.close(io);
+        const file_len = try file.length(io);
 
         var buf: [65536]u8 = undefined;
         var file_reader = file.reader(io, &buf);
         const reader = &file_reader.interface;
 
-        var magic: [4]u8 = undefined;
-        try reader.readSliceAll(&magic);
-        if (!std.mem.eql(u8, &magic, &OPTIMIZER_MAGIC)) return error.InvalidCheckpointMagic;
-
-        const version = try readU32(reader);
-        if (version != OPTIMIZER_VERSION) return error.UnsupportedCheckpointVersion;
-
-        const type_tag = try readU32(reader);
-        if (type_tag != @intFromEnum(OptimizerTypeTag.sgd)) return error.OptimizerTypeMismatch;
-
-        self.step_count = try readU64(reader);
-        self.lr = try readF32(reader);
-        const param_count = try readU64(reader);
-        if (param_count != self.params.len) return error.ParamCountMismatch;
-
+        const header = try readCheckpointHeader(reader, .sgd, self.params.len);
         var has_vel_byte: [1]u8 = undefined;
         try reader.readSliceAll(&has_vel_byte);
         const has_vel = has_vel_byte[0] == 1;
 
-        if (has_vel and self.velocities == null) {
-            const v_list = try self.allocator.alloc([]f32, self.params.len);
-            errdefer self.allocator.free(v_list);
-            var init_count: usize = 0;
-            errdefer {
-                for (0..init_count) |j| self.allocator.free(v_list[j]);
-            }
-            for (self.params) |param| {
-                v_list[init_count] = try self.allocator.alloc(f32, param.data.len);
-                init_count += 1;
-            }
-            self.velocities = v_list;
+        const buffers: usize = if (has_vel) 1 else 0;
+        if (file_len != CHECKPOINT_HEADER_BYTES + 1 + checkpointStateBytes(self.params, buffers)) {
+            return error.CheckpointSizeMismatch;
         }
 
-        for (self.params, 0..) |param, i| {
-            const param_len = try readU64(reader);
-            if (param_len != param.data.len) return error.BufferSizeMismatch;
-            if (has_vel) {
-                try reader.readSliceAll(std.mem.sliceAsBytes(self.velocities.?[i]));
+        if (has_vel) {
+            if (self.velocities == null) self.velocities = try allocZeroedStates(self.allocator, self.params);
+            try readStateBuffers(reader, self.params, &.{self.velocities.?});
+        } else {
+            try readStateBuffers(reader, self.params, &.{});
+            // 检查点不含动量缓冲：清零现有缓冲，使恢复后的状态与检查点一致
+            if (self.velocities) |v_list| {
+                for (v_list) |v| @memset(v, 0.0);
             }
+        }
+
+        self.step_count = header.step;
+        self.lr = header.lr;
+    }
+};
+
+/// Adam 系列优化器的逐元素更新系数：
+///   m = beta1 * m + (1 - beta1) * g
+///   v = beta2 * v + (1 - beta2) * g^2
+///   w = w - decay * w - step_size * m / (sqrt(v) * denom_scale + eps)
+/// 偏差修正 (Bias Correction) 的除法均在每步开始时折算进 `step_size` 与 `denom_scale`，
+/// 内层循环不再逐元素做两次除法。
+const AdamUpdate = struct {
+    beta1: f32,
+    one_minus_beta1: f32,
+    beta2: f32,
+    one_minus_beta2: f32,
+    step_size: f32,
+    denom_scale: f32,
+    eps: f32,
+    decay: f32,
+
+    const vec_len = std.simd.suggestVectorLength(f32) orelse 4;
+    const Vec = @Vector(vec_len, f32);
+
+    fn apply(self: AdamUpdate, w: []f32, g: []const f32, m: []f32, v: []f32) void {
+        std.debug.assert(g.len == w.len and m.len == w.len and v.len == w.len);
+        const b1: Vec = @splat(self.beta1);
+        const omb1: Vec = @splat(self.one_minus_beta1);
+        const b2: Vec = @splat(self.beta2);
+        const omb2: Vec = @splat(self.one_minus_beta2);
+        const step_size: Vec = @splat(self.step_size);
+        const denom_scale: Vec = @splat(self.denom_scale);
+        const eps: Vec = @splat(self.eps);
+        const keep: Vec = @splat(1.0 - self.decay);
+
+        var i: usize = 0;
+        while (i + vec_len <= w.len) : (i += vec_len) {
+            const gv: Vec = g[i..][0..vec_len].*;
+            const mv = b1 * @as(Vec, m[i..][0..vec_len].*) + omb1 * gv;
+            const vv = b2 * @as(Vec, v[i..][0..vec_len].*) + omb2 * (gv * gv);
+            const wv: Vec = w[i..][0..vec_len].*;
+            m[i..][0..vec_len].* = mv;
+            v[i..][0..vec_len].* = vv;
+            w[i..][0..vec_len].* = keep * wv - step_size * mv / (@sqrt(vv) * denom_scale + eps);
+        }
+        while (i < w.len) : (i += 1) {
+            const gi = g[i];
+            const mi = self.beta1 * m[i] + self.one_minus_beta1 * gi;
+            const vi = self.beta2 * v[i] + self.one_minus_beta2 * (gi * gi);
+            m[i] = mi;
+            v[i] = vi;
+            w[i] = (1.0 - self.decay) * w[i] - self.step_size * mi / (@sqrt(vi) * self.denom_scale + self.eps);
         }
     }
 };
@@ -251,7 +357,8 @@ pub const AdamOptimizer = struct {
     beta1: f32,
     beta2: f32,
     eps: f32,
-    t: f32, // Timestep
+    /// 已执行的更新步数；整数计数避免 f32 步数在 2^24 步后停止增长
+    step_count: u64 = 0,
 
     pub fn initDefault(allocator: std.mem.Allocator, model: anytype) !AdamOptimizer {
         return init(allocator, model, AdamConfig.default);
@@ -262,26 +369,9 @@ pub const AdamOptimizer = struct {
         nn.warnIfParametersUninitialized(params);
         errdefer allocator.free(params);
 
-        const m = try allocator.alloc([]f32, params.len);
-        errdefer allocator.free(m);
-        const v = try allocator.alloc([]f32, params.len);
-        errdefer allocator.free(v);
-
-        var initialized: usize = 0;
-        errdefer {
-            for (0..initialized) |i| {
-                allocator.free(m[i]);
-                allocator.free(v[i]);
-            }
-        }
-
-        for (params) |param| {
-            m[initialized] = try allocator.alloc(f32, param.data.len);
-            v[initialized] = try allocator.alloc(f32, param.data.len);
-            @memset(m[initialized], 0.0);
-            @memset(v[initialized], 0.0);
-            initialized += 1;
-        }
+        const m = try allocZeroedStates(allocator, params);
+        errdefer freeStates(allocator, m);
+        const v = try allocZeroedStates(allocator, params);
 
         return AdamOptimizer{
             .allocator = allocator,
@@ -292,17 +382,13 @@ pub const AdamOptimizer = struct {
             .beta1 = config.beta1,
             .beta2 = config.beta2,
             .eps = config.eps,
-            .t = 0.0,
+            .step_count = 0,
         };
     }
 
     pub fn deinit(self: AdamOptimizer) void {
-        for (0..self.params.len) |i| {
-            self.allocator.free(self.m[i]);
-            self.allocator.free(self.v[i]);
-        }
-        self.allocator.free(self.m);
-        self.allocator.free(self.v);
+        freeStates(self.allocator, self.m);
+        freeStates(self.allocator, self.v);
         self.allocator.free(self.params);
     }
 
@@ -315,22 +401,24 @@ pub const AdamOptimizer = struct {
     }
 
     pub fn stepWithLR(self: *AdamOptimizer, current_lr: f32) void {
-        self.t += 1.0;
-        const correction1 = 1.0 - std.math.pow(f32, self.beta1, self.t);
-        const correction2 = 1.0 - std.math.pow(f32, self.beta2, self.t);
-        const lr_t = current_lr * @sqrt(correction2) / correction1;
+        self.step_count += 1;
+        const t: f32 = @floatFromInt(self.step_count);
+        const correction1 = 1.0 - std.math.pow(f32, self.beta1, t);
+        const correction2 = 1.0 - std.math.pow(f32, self.beta2, t);
+        // 原论文的高效形式：lr_t = lr * sqrt(1 - beta2^t) / (1 - beta1^t)，eps 不做偏差修正
+        const update = AdamUpdate{
+            .beta1 = self.beta1,
+            .one_minus_beta1 = 1.0 - self.beta1,
+            .beta2 = self.beta2,
+            .one_minus_beta2 = 1.0 - self.beta2,
+            .step_size = current_lr * @sqrt(correction2) / correction1,
+            .denom_scale = 1.0,
+            .eps = self.eps,
+            .decay = 0.0,
+        };
 
-        for (self.params, 0..) |param, i| {
-            const w = param.data;
-            const dw = param.grad;
-            const m_t = self.m[i];
-            const v_t = self.v[i];
-
-            for (w, dw, m_t, v_t) |*weight, grad, *m_i, *v_i| {
-                m_i.* = self.beta1 * m_i.* + (1.0 - self.beta1) * grad;
-                v_i.* = self.beta2 * v_i.* + (1.0 - self.beta2) * grad * grad;
-                weight.* -= lr_t * m_i.* / (@sqrt(v_i.*) + self.eps);
-            }
+        for (self.params, self.m, self.v) |param, m_t, v_t| {
+            update.apply(param.data, param.grad, m_t, v_t);
         }
     }
 
@@ -347,18 +435,8 @@ pub const AdamOptimizer = struct {
         var file_writer = file.writer(io, &buf);
         const writer = &file_writer.interface;
 
-        try writer.writeAll(&OPTIMIZER_MAGIC);
-        try writeU32(writer, OPTIMIZER_VERSION);
-        try writeU32(writer, @intFromEnum(OptimizerTypeTag.adam));
-        try writeU64(writer, @as(u64, @intFromFloat(self.t)));
-        try writeF32(writer, self.lr);
-        try writeU64(writer, @as(u64, self.params.len));
-
-        for (self.params, 0..) |param, i| {
-            try writeU64(writer, @as(u64, param.data.len));
-            try writer.writeAll(std.mem.sliceAsBytes(self.m[i]));
-            try writer.writeAll(std.mem.sliceAsBytes(self.v[i]));
-        }
+        try writeCheckpointHeader(writer, .adam, .{ .step = self.step_count, .lr = self.lr }, self.params.len);
+        try writeStateBuffers(writer, self.params, &.{ self.m, self.v });
         try writer.flush();
     }
 
@@ -366,33 +444,20 @@ pub const AdamOptimizer = struct {
         const cwd = std.Io.Dir.cwd();
         var file = try cwd.openFile(io, file_path, .{});
         defer file.close(io);
+        const file_len = try file.length(io);
 
         var buf: [65536]u8 = undefined;
         var file_reader = file.reader(io, &buf);
         const reader = &file_reader.interface;
 
-        var magic: [4]u8 = undefined;
-        try reader.readSliceAll(&magic);
-        if (!std.mem.eql(u8, &magic, &OPTIMIZER_MAGIC)) return error.InvalidCheckpointMagic;
-
-        const version = try readU32(reader);
-        if (version != OPTIMIZER_VERSION) return error.UnsupportedCheckpointVersion;
-
-        const type_tag = try readU32(reader);
-        if (type_tag != @intFromEnum(OptimizerTypeTag.adam)) return error.OptimizerTypeMismatch;
-
-        const step_val = try readU64(reader);
-        self.t = @as(f32, @floatFromInt(step_val));
-        self.lr = try readF32(reader);
-        const param_count = try readU64(reader);
-        if (param_count != self.params.len) return error.ParamCountMismatch;
-
-        for (self.params, 0..) |param, i| {
-            const param_len = try readU64(reader);
-            if (param_len != param.data.len) return error.BufferSizeMismatch;
-            try reader.readSliceAll(std.mem.sliceAsBytes(self.m[i]));
-            try reader.readSliceAll(std.mem.sliceAsBytes(self.v[i]));
+        const header = try readCheckpointHeader(reader, .adam, self.params.len);
+        if (file_len != CHECKPOINT_HEADER_BYTES + checkpointStateBytes(self.params, 2)) {
+            return error.CheckpointSizeMismatch;
         }
+        try readStateBuffers(reader, self.params, &.{ self.m, self.v });
+
+        self.step_count = header.step;
+        self.lr = header.lr;
     }
 };
 
@@ -428,26 +493,9 @@ pub const AdamWOptimizer = struct {
         nn.warnIfParametersUninitialized(params);
         errdefer allocator.free(params);
 
-        const m = try allocator.alloc([]f32, params.len);
-        errdefer allocator.free(m);
-        const v = try allocator.alloc([]f32, params.len);
-        errdefer allocator.free(v);
-
-        var initialized: usize = 0;
-        errdefer {
-            for (0..initialized) |i| {
-                allocator.free(m[i]);
-                allocator.free(v[i]);
-            }
-        }
-
-        for (params) |param| {
-            m[initialized] = try allocator.alloc(f32, param.data.len);
-            v[initialized] = try allocator.alloc(f32, param.data.len);
-            @memset(m[initialized], 0.0);
-            @memset(v[initialized], 0.0);
-            initialized += 1;
-        }
+        const m = try allocZeroedStates(allocator, params);
+        errdefer freeStates(allocator, m);
+        const v = try allocZeroedStates(allocator, params);
 
         return AdamWOptimizer{
             .allocator = allocator,
@@ -460,12 +508,8 @@ pub const AdamWOptimizer = struct {
     }
 
     pub fn deinit(self: AdamWOptimizer) void {
-        for (0..self.params.len) |i| {
-            self.allocator.free(self.m[i]);
-            self.allocator.free(self.v[i]);
-        }
-        self.allocator.free(self.m);
-        self.allocator.free(self.v);
+        freeStates(self.allocator, self.m);
+        freeStates(self.allocator, self.v);
         self.allocator.free(self.params);
     }
 
@@ -479,36 +523,28 @@ pub const AdamWOptimizer = struct {
 
     pub fn stepWithLR(self: *AdamWOptimizer, current_lr: f32) void {
         self.step_count += 1;
-        const t_f32 = @as(f32, @floatFromInt(self.step_count));
+        const t: f32 = @floatFromInt(self.step_count);
         const beta1 = self.config.beta1;
         const beta2 = self.config.beta2;
-        const eps = self.config.eps;
-        const wd = self.config.weight_decay;
 
-        const bias_correction1 = 1.0 - std.math.pow(f32, beta1, t_f32);
-        const bias_correction2 = 1.0 - std.math.pow(f32, beta2, t_f32);
+        const bias_correction1 = 1.0 - std.math.pow(f32, beta1, t);
+        const bias_correction2 = 1.0 - std.math.pow(f32, beta2, t);
 
-        for (self.params, 0..) |param, i| {
-            const w = param.data;
-            const dw = param.grad;
-            const m_t = self.m[i];
-            const v_t = self.v[i];
+        // w = w - lr * (m_hat / (sqrt(v_hat) + eps) + wd * w)，其中
+        // m_hat = m / bias_correction1，v_hat = v / bias_correction2
+        const update = AdamUpdate{
+            .beta1 = beta1,
+            .one_minus_beta1 = 1.0 - beta1,
+            .beta2 = beta2,
+            .one_minus_beta2 = 1.0 - beta2,
+            .step_size = current_lr / bias_correction1,
+            .denom_scale = 1.0 / @sqrt(bias_correction2),
+            .eps = self.config.eps,
+            .decay = current_lr * self.config.weight_decay,
+        };
 
-            for (w, dw, m_t, v_t) |*weight, grad, *m_val, *v_val| {
-                // 1. 更新一阶和二阶动量
-                m_val.* = beta1 * m_val.* + (1.0 - beta1) * grad;
-                v_val.* = beta2 * v_val.* + (1.0 - beta2) * (grad * grad);
-
-                // 2. 无偏估计
-                const m_hat = m_val.* / bias_correction1;
-                const v_hat = v_val.* / bias_correction2;
-
-                // 3. 自适应动量项
-                const step_val = m_hat / (@sqrt(v_hat) + eps);
-
-                // 4. 解耦权重衰减更新: w = w - lr * (step_val + wd * w)
-                weight.* -= current_lr * (step_val + wd * weight.*);
-            }
+        for (self.params, self.m, self.v) |param, m_t, v_t| {
+            update.apply(param.data, param.grad, m_t, v_t);
         }
     }
 
@@ -525,18 +561,8 @@ pub const AdamWOptimizer = struct {
         var file_writer = file.writer(io, &buf);
         const writer = &file_writer.interface;
 
-        try writer.writeAll(&OPTIMIZER_MAGIC);
-        try writeU32(writer, OPTIMIZER_VERSION);
-        try writeU32(writer, @intFromEnum(OptimizerTypeTag.adamw));
-        try writeU64(writer, self.step_count);
-        try writeF32(writer, self.config.lr);
-        try writeU64(writer, @as(u64, self.params.len));
-
-        for (self.params, 0..) |param, i| {
-            try writeU64(writer, @as(u64, param.data.len));
-            try writer.writeAll(std.mem.sliceAsBytes(self.m[i]));
-            try writer.writeAll(std.mem.sliceAsBytes(self.v[i]));
-        }
+        try writeCheckpointHeader(writer, .adamw, .{ .step = self.step_count, .lr = self.config.lr }, self.params.len);
+        try writeStateBuffers(writer, self.params, &.{ self.m, self.v });
         try writer.flush();
     }
 
@@ -544,32 +570,20 @@ pub const AdamWOptimizer = struct {
         const cwd = std.Io.Dir.cwd();
         var file = try cwd.openFile(io, file_path, .{});
         defer file.close(io);
+        const file_len = try file.length(io);
 
         var buf: [65536]u8 = undefined;
         var file_reader = file.reader(io, &buf);
         const reader = &file_reader.interface;
 
-        var magic: [4]u8 = undefined;
-        try reader.readSliceAll(&magic);
-        if (!std.mem.eql(u8, &magic, &OPTIMIZER_MAGIC)) return error.InvalidCheckpointMagic;
-
-        const version = try readU32(reader);
-        if (version != OPTIMIZER_VERSION) return error.UnsupportedCheckpointVersion;
-
-        const type_tag = try readU32(reader);
-        if (type_tag != @intFromEnum(OptimizerTypeTag.adamw)) return error.OptimizerTypeMismatch;
-
-        self.step_count = try readU64(reader);
-        self.config.lr = try readF32(reader);
-        const param_count = try readU64(reader);
-        if (param_count != self.params.len) return error.ParamCountMismatch;
-
-        for (self.params, 0..) |param, i| {
-            const param_len = try readU64(reader);
-            if (param_len != param.data.len) return error.BufferSizeMismatch;
-            try reader.readSliceAll(std.mem.sliceAsBytes(self.m[i]));
-            try reader.readSliceAll(std.mem.sliceAsBytes(self.v[i]));
+        const header = try readCheckpointHeader(reader, .adamw, self.params.len);
+        if (file_len != CHECKPOINT_HEADER_BYTES + checkpointStateBytes(self.params, 2)) {
+            return error.CheckpointSizeMismatch;
         }
+        try readStateBuffers(reader, self.params, &.{ self.m, self.v });
+
+        self.step_count = header.step;
+        self.config.lr = header.lr;
     }
 };
 
@@ -645,7 +659,9 @@ pub const StepLRScheduler = struct {
     }
 
     pub fn getLR(self: StepLRScheduler, current_step: u64) f32 {
-        const factor = std.math.pow(f32, self.gamma, @as(f32, @floatFromInt(current_step / self.step_size)));
+        // step_size 为 0 时视为每步衰减一次，避免整数除零
+        const decays = current_step / @max(self.step_size, 1);
+        const factor = std.math.pow(f32, self.gamma, @as(f32, @floatFromInt(decays)));
         return self.base_lr * factor;
     }
 };
@@ -748,13 +764,11 @@ pub const LRScheduler = union(enum) {
 
 /// 全局梯度欧几里得二范数 (L2 Norm) 裁剪 (Gradient Norm Clipping)
 pub fn clipGradNorm(params: []*Tensor, max_norm: f32) f32 {
-    var total_norm_sq: f32 = 0.0;
+    var total_norm_sq: f64 = 0.0;
     for (params) |param| {
-        for (param.grad) |g| {
-            total_norm_sq += g * g;
-        }
+        total_norm_sq += sumSquares(param.grad);
     }
-    const total_norm = @sqrt(total_norm_sq);
+    const total_norm: f32 = @floatCast(@sqrt(total_norm_sq));
     if (total_norm > max_norm and total_norm > 0.0) {
         const scale = max_norm / (total_norm + 1e-6);
         for (params) |param| {
@@ -764,6 +778,35 @@ pub fn clipGradNorm(params: []*Tensor, max_norm: f32) f32 {
         }
     }
     return total_norm;
+}
+
+/// 平方和：块内使用两路 SIMD 向量 (`@Vector`) 部分和并行累加 (严格浮点语义下标量累加无法被自动向量化)，
+/// 每块结果再以 f64 汇总，避免百万级元素在单个 f32 累加器上累积舍入误差
+fn sumSquares(values: []const f32) f64 {
+    const vec_len = std.simd.suggestVectorLength(f32) orelse 4;
+    const Vec = @Vector(vec_len, f32);
+    const block_len = 2 * vec_len * 256;
+
+    var total: f64 = 0.0;
+    var i: usize = 0;
+    while (i + 2 * vec_len <= values.len) {
+        const block_end = i + @min(block_len, (values.len - i) / (2 * vec_len) * (2 * vec_len));
+        var acc0: Vec = @splat(0.0);
+        var acc1: Vec = @splat(0.0);
+        while (i < block_end) : (i += 2 * vec_len) {
+            const a: Vec = values[i..][0..vec_len].*;
+            const b: Vec = values[i + vec_len ..][0..vec_len].*;
+            acc0 += a * a;
+            acc1 += b * b;
+        }
+        const block_sum: @Vector(vec_len, f64) = @floatCast(acc0 + acc1);
+        total += @reduce(.Add, block_sum);
+    }
+    while (i < values.len) : (i += 1) {
+        const x: f64 = values[i];
+        total += x * x;
+    }
+    return total;
 }
 
 /// 梯度分量数值截断 (Gradient Value Clipping)
@@ -1041,7 +1084,7 @@ test "Optimizer checkpoint serialization and resumption" {
         defer opt2.deinit();
 
         try opt2.loadCheckpoint(testing.io, ckpt_path);
-        try testing.expectEqual(opt1.t, opt2.t);
+        try testing.expectEqual(opt1.step_count, opt2.step_count);
         try testing.expectApproxEqAbs(opt1.lr, opt2.lr, 1e-6);
         try testing.expectApproxEqAbs(opt1.m[0][0], opt2.m[0][0], 1e-6);
         try testing.expectApproxEqAbs(opt1.v[0][0], opt2.v[0][0], 1e-6);
@@ -1185,7 +1228,7 @@ test "Optimizer interface uniformity and scheduler stepping" {
     adam.setLR(0.005);
     try testing.expectApproxEqAbs(@as(f32, 0.005), adam.getLR(), 1e-6);
     adam.stepWithLR(0.002);
-    try testing.expectEqual(@as(f32, 1.0), adam.t);
+    try testing.expectEqual(@as(u64, 1), adam.step_count);
 
     var adamw = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.02 });
     defer adamw.deinit();
@@ -1205,5 +1248,200 @@ test "Optimizer interface uniformity and scheduler stepping" {
     try testing.expectApproxEqAbs(@as(f32, 0.05), sgd.getLR(), 1e-6);
 }
 
+test "Adam and AdamW vectorized updates match the scalar reference formulas" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
 
+    // 13 个权重元素：同时覆盖 SIMD 主循环之外的标量尾部
+    var prng = std.Random.DefaultPrng.init(5);
+    var linear = try nn.Linear.init(allocator, 13, 1);
+    linear.resetParameters(prng.random(), .{});
+    defer nn.deinitModel(&linear, allocator);
 
+    const n = linear.weight.data.len;
+    const w0 = try allocator.dupe(f32, linear.weight.data);
+    defer allocator.free(w0);
+    for (linear.weight.grad, 0..) |*g, i| g.* = 0.1 * @as(f32, @floatFromInt(i)) - 0.6;
+
+    const ref_w = try allocator.alloc(f32, n);
+    defer allocator.free(ref_w);
+    const ref_m = try allocator.alloc(f32, n);
+    defer allocator.free(ref_m);
+    const ref_v = try allocator.alloc(f32, n);
+    defer allocator.free(ref_v);
+
+    // 1. AdamW: w -= lr * (m_hat / (sqrt(v_hat) + eps) + wd * w)
+    {
+        const cfg = AdamWConfig{ .lr = 0.01, .beta1 = 0.9, .beta2 = 0.95, .eps = 1e-8, .weight_decay = 0.1 };
+        @memcpy(linear.weight.data, w0);
+        var opt = try AdamWOptimizer.init(allocator, &linear, cfg);
+        defer opt.deinit();
+        @memcpy(ref_w, w0);
+        @memset(ref_m, 0.0);
+        @memset(ref_v, 0.0);
+        for (1..4) |t| {
+            opt.step();
+            const tf: f32 = @floatFromInt(t);
+            const bc1 = 1.0 - std.math.pow(f32, cfg.beta1, tf);
+            const bc2 = 1.0 - std.math.pow(f32, cfg.beta2, tf);
+            for (0..n) |i| {
+                const g = linear.weight.grad[i];
+                ref_m[i] = cfg.beta1 * ref_m[i] + (1.0 - cfg.beta1) * g;
+                ref_v[i] = cfg.beta2 * ref_v[i] + (1.0 - cfg.beta2) * g * g;
+                const step_val = (ref_m[i] / bc1) / (@sqrt(ref_v[i] / bc2) + cfg.eps);
+                ref_w[i] -= cfg.lr * (step_val + cfg.weight_decay * ref_w[i]);
+            }
+        }
+        for (0..n) |i| {
+            try testing.expectApproxEqAbs(ref_w[i], linear.weight.data[i], 1e-5);
+            try testing.expectApproxEqAbs(ref_m[i], opt.m[0][i], 1e-6);
+            try testing.expectApproxEqAbs(ref_v[i], opt.v[0][i], 1e-6);
+        }
+    }
+
+    // 2. Adam: w -= lr * sqrt(1 - beta2^t) / (1 - beta1^t) * m / (sqrt(v) + eps)
+    {
+        const cfg = AdamConfig{ .lr = 0.01, .beta1 = 0.9, .beta2 = 0.999, .eps = 1e-8 };
+        @memcpy(linear.weight.data, w0);
+        var opt = try AdamOptimizer.init(allocator, &linear, cfg);
+        defer opt.deinit();
+        @memcpy(ref_w, w0);
+        @memset(ref_m, 0.0);
+        @memset(ref_v, 0.0);
+        for (1..4) |t| {
+            opt.step();
+            const tf: f32 = @floatFromInt(t);
+            const lr_t = cfg.lr * @sqrt(1.0 - std.math.pow(f32, cfg.beta2, tf)) / (1.0 - std.math.pow(f32, cfg.beta1, tf));
+            for (0..n) |i| {
+                const g = linear.weight.grad[i];
+                ref_m[i] = cfg.beta1 * ref_m[i] + (1.0 - cfg.beta1) * g;
+                ref_v[i] = cfg.beta2 * ref_v[i] + (1.0 - cfg.beta2) * g * g;
+                ref_w[i] -= lr_t * ref_m[i] / (@sqrt(ref_v[i]) + cfg.eps);
+            }
+        }
+        for (0..n) |i| {
+            try testing.expectApproxEqAbs(ref_w[i], linear.weight.data[i], 1e-5);
+        }
+    }
+}
+
+test "AdamOptimizer step counter keeps increasing past 2^24 steps" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var prng = std.Random.DefaultPrng.init(8);
+    var linear = try nn.Linear.init(allocator, 2, 2);
+    linear.resetParameters(prng.random(), .{});
+    defer nn.deinitModel(&linear, allocator);
+
+    var opt = try AdamOptimizer.init(allocator, &linear, .{});
+    defer opt.deinit();
+    // f32 步数在 2^24 处 t + 1 == t，偏差修正会停止推进；整数步数不受影响
+    opt.step_count = 1 << 24;
+    opt.step();
+    opt.step();
+    try testing.expectEqual(@as(u64, (1 << 24) + 2), opt.step_count);
+}
+
+test "Optimizer loadCheckpoint leaves state untouched on mismatch or truncation" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var prng = std.Random.DefaultPrng.init(21);
+    var linear = try nn.Linear.init(allocator, 2, 2);
+    linear.resetParameters(prng.random(), .{});
+    defer nn.deinitModel(&linear, allocator);
+
+    const path = "test_ckpt_untouched.bin";
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    // 1. 参数个数不匹配：学习率与步数不应被检查点中的值覆盖
+    {
+        var src = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.5 });
+        defer src.deinit();
+        src.step();
+        src.step();
+        try src.saveCheckpoint(io, path);
+
+        var seq = nn.sequential(.{
+            try nn.Linear.init(allocator, 2, 2),
+            try nn.Linear.init(allocator, 2, 2),
+        });
+        defer nn.deinitModel(&seq, allocator);
+        for ([_]*Tensor{ seq.layers[0].weight, seq.layers[0].bias, seq.layers[1].weight, seq.layers[1].bias }) |t| {
+            @memset(t.data, 0.1);
+        }
+
+        var dst = try SGDOptimizer.init(allocator, &seq, .{ .lr = 0.01 });
+        defer dst.deinit();
+        try testing.expectError(error.ParamCountMismatch, dst.loadCheckpoint(io, path));
+        try testing.expectEqual(@as(f32, 0.01), dst.lr);
+        try testing.expectEqual(@as(u64, 0), dst.step_count);
+    }
+
+    // 2. 截断的 AdamW 检查点：报告长度不匹配，且一阶/二阶矩与学习率保持原值
+    {
+        var src = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.002 });
+        defer src.deinit();
+        @memset(linear.weight.grad, 0.3);
+        src.step();
+        try src.saveCheckpoint(io, path);
+
+        const full = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+        defer allocator.free(full);
+        {
+            var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+            defer file.close(io);
+            var buf: [256]u8 = undefined;
+            var fw = file.writer(io, &buf);
+            try fw.interface.writeAll(full[0 .. full.len - 4]);
+            try fw.interface.flush();
+        }
+
+        var dst = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.001 });
+        defer dst.deinit();
+        try testing.expectError(error.CheckpointSizeMismatch, dst.loadCheckpoint(io, path));
+        try testing.expectEqual(@as(f32, 0.001), dst.config.lr);
+        try testing.expectEqual(@as(u64, 0), dst.step_count);
+        try testing.expectEqual(@as(f32, 0.0), dst.m[0][0]);
+    }
+
+    // 3. 不含动量缓冲的 SGD 检查点：加载后已有动量缓冲被清零
+    {
+        var src = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.1 });
+        defer src.deinit();
+        try src.saveCheckpoint(io, path);
+
+        var dst = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.1, .momentum = 0.9 });
+        defer dst.deinit();
+        @memset(linear.weight.grad, 1.0);
+        dst.step();
+        try testing.expect(dst.velocities.?[0][0] != 0.0);
+        try dst.loadCheckpoint(io, path);
+        for (dst.velocities.?) |v| {
+            for (v) |x| try testing.expectEqual(@as(f32, 0.0), x);
+        }
+    }
+}
+
+test "clipGradNorm accumulates in higher precision and StepLR tolerates step_size 0" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // 一个大分量 (平方 1e8) 加 1e6 个单位分量：单个 f32 累加器会把每个 +1 舍入掉 (1e8 处的单位最小精度为 8)
+    const n: usize = 1_000_000 + 1;
+    var t = try tensor.zeros(allocator, &.{n});
+    defer tensor.free(allocator, t);
+    t.requires_grad = true;
+    t.grad = try allocator.alloc(f32, n);
+    @memset(t.grad, 1.0);
+    t.grad[0] = 1e4;
+
+    var params = [_]*Tensor{t};
+    const norm = clipGradNorm(&params, 1e9);
+    try testing.expectApproxEqRel(@as(f32, @floatCast(@sqrt(1.01e8))), norm, 1e-5);
+
+    const sched = StepLRScheduler{ .base_lr = 1.0, .step_size = 0, .gamma = 0.5 };
+    try testing.expectApproxEqAbs(@as(f32, 0.25), sched.getLR(2), 1e-6);
+}
