@@ -335,3 +335,356 @@ test "Gemma4E4BModel direct binary weight cache layout and reader verification" 
     try std.testing.expectError(error.InvalidDirectCache, reader.readBytes(1));
 }
 
+
+// ============================================================================
+// 回归测试：Gemma 4 推理路径正确性、资源回收与权重布局
+// ============================================================================
+
+fn fillNormal(data: []f32, random: std.Random, scale: f32) void {
+    for (data) |*v| v.* = random.floatNorm(f32) * scale;
+}
+
+fn randomizeAttention(attn: *gemma4.Gemma4Attention, random: std.Random) void {
+    attn.q_proj.resetParameters(random, .{});
+    attn.k_proj.resetParameters(random, .{});
+    if (attn.v_proj) |*vp| vp.resetParameters(random, .{});
+    attn.o_proj.resetParameters(random, .{});
+}
+
+fn maxAbsDiff(a: []const f32, b: []const f32) f32 {
+    var m: f32 = 0;
+    for (a, b) |x, y| m = @max(m, @abs(x - y));
+    return m;
+}
+
+test "Gemma4DecoderLayer applies layer_scalar identically in forward, prefill and decode" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(1);
+    const random = prng.random();
+
+    var layer = try gemma4.Gemma4DecoderLayer.init(allocator, .sliding_attention, 16, 32, 4, 2, 4, 8, 1e-6);
+    defer nn.deinitModel(&layer, allocator);
+    randomizeAttention(&layer.self_attn, random);
+    layer.mlp.gate_proj.resetParameters(random, .{});
+    layer.mlp.up_proj.resetParameters(random, .{});
+    layer.mlp.down_proj.resetParameters(random, .{});
+    layer.layer_scalar.data[0] = 0.5;
+
+    // 层缩放标量与官方实现一致为不可训练缓冲区
+    try std.testing.expect(layer.layer_scalar.is_buffer);
+    try std.testing.expect(!layer.layer_scalar.requires_grad);
+
+    var cache = try gemma4.Gemma4KVCache.LayerCache.init(allocator, .sliding_attention, 2, 4, 8, 16);
+    defer cache.deinit(allocator);
+
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+    const x = try g.tensorND(&.{ 1, 3, 16 }, false);
+    fillNormal(x.data, random, 0.5);
+
+    const y_fwd = try layer.forward(&g, x);
+    const y_pre = try layer.forwardPrefill(&g, x, &cache);
+    try std.testing.expect(maxAbsDiff(y_fwd.data, y_pre.data) < 1e-5);
+}
+
+fn checkAttentionPrefillDecodeParity(attn_type: gemma4.Gemma4AttentionType, head_dim: usize, n_kv: usize) !void {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+    const C: usize = 16;
+    const T: usize = 7; // 超过滑动窗口 W，覆盖带掩码的分解注意力分支
+    const W: usize = 2;
+
+    var attn = try gemma4.Gemma4Attention.init(allocator, attn_type, C, 4, n_kv, head_dim, W, 1e-6);
+    defer nn.deinitModel(&attn, allocator);
+    randomizeAttention(&attn, random);
+
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+    const x = try g.tensorND(&.{ 1, T, C }, false);
+    fillNormal(x.data, random, 0.5);
+
+    var cache_a = try gemma4.Gemma4KVCache.LayerCache.init(allocator, attn_type, n_kv, head_dim, W, 32);
+    defer cache_a.deinit(allocator);
+    const y_all = try attn.forwardPrefill(&g, x, &cache_a);
+    try std.testing.expectEqual(T, cache_a.curr_len);
+
+    var cache_b = try gemma4.Gemma4KVCache.LayerCache.init(allocator, attn_type, n_kv, head_dim, W, 32);
+    defer cache_b.deinit(allocator);
+    const x0 = try g.tensorNDWithData(&.{ 1, 1, C }, x.data[0..C], false);
+    _ = try attn.forwardPrefill(&g, x0, &cache_b);
+    for (1..T) |t| {
+        const xt = try g.tensorNDWithData(&.{ 1, 1, C }, x.data[t * C .. (t + 1) * C], false);
+        const yt = try attn.forwardDecode(&g, xt, &cache_b);
+        try std.testing.expect(maxAbsDiff(yt.data, y_all.data[t * C .. (t + 1) * C]) < 1e-4);
+    }
+    try std.testing.expectEqualSlices(f32, cache_a.k[0 .. T * head_dim], cache_b.k[0 .. T * head_dim]);
+}
+
+test "Gemma4Attention prefill matches incremental decode beyond the sliding window" {
+    try checkAttentionPrefillDecodeParity(.sliding_attention, 4, 2);
+    try checkAttentionPrefillDecodeParity(.full_attention, 16, 1);
+}
+
+test "Gemma4Q4Attention prefill matches incremental decode beyond the sliding window" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(11);
+    const random = prng.random();
+    const C: usize = 32;
+    const T: usize = 6;
+
+    var attn = try gemma4_q4.Gemma4Q4Attention.init(allocator, .sliding_attention, C, 4, 2, 8, 3, 1e-6);
+    defer attn.deinit(allocator);
+    inline for (.{ &attn.q_proj, &attn.k_proj, &attn.v_proj.?, &attn.o_proj }) |lin| {
+        const w = try allocator.alloc(f32, lin.in_features * lin.out_features);
+        defer allocator.free(w);
+        fillNormal(w, random, 0.2);
+        lin.quantizeFromF32(w);
+    }
+
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+    const x = try g.tensorND(&.{ 1, T, C }, false);
+    fillNormal(x.data, random, 0.5);
+
+    var cache_a = try gemma4.Gemma4KVCache.LayerCache.init(allocator, .sliding_attention, 2, 8, 3, 16);
+    defer cache_a.deinit(allocator);
+    const y_all = try attn.forwardPrefill(&g, x, &cache_a);
+
+    var cache_b = try gemma4.Gemma4KVCache.LayerCache.init(allocator, .sliding_attention, 2, 8, 3, 16);
+    defer cache_b.deinit(allocator);
+    const x0 = try g.tensorNDWithData(&.{ 1, 1, C }, x.data[0..C], false);
+    _ = try attn.forwardPrefill(&g, x0, &cache_b);
+    for (1..T) |t| {
+        const xt = try g.tensorNDWithData(&.{ 1, 1, C }, x.data[t * C .. (t + 1) * C], false);
+        const yt = try attn.forwardDecode(&g, xt, &cache_b);
+        try std.testing.expect(maxAbsDiff(yt.data, y_all.data[t * C .. (t + 1) * C]) < 1e-4);
+    }
+}
+
+test "Gemma 4 inference entry points reject invalid prompts instead of reading out of bounds" {
+    const allocator = std.testing.allocator;
+    var model = try gemma4.TinyGemma4.initInference(allocator);
+    defer nn.deinitModel(&model, allocator);
+
+    var cache = try gemma4.Gemma4KVCache.init(allocator, gemma4.TinyGemma4.config, .{ .max_seq_len = 4 });
+    defer cache.deinit(allocator);
+
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+
+    // 提示词超出键值缓存容量
+    try std.testing.expectError(error.ContextWindowExceeded, model.prefill(&g, &.{ 2, 3, 4, 5, 6 }, &cache, 1.0));
+    // 词元 ID 越界与空提示词
+    try std.testing.expectError(error.InvalidTokenId, model.prefill(&g, &.{ 2, 128 }, &cache, 1.0));
+    try std.testing.expectError(error.EmptyPrompt, model.prefill(&g, &.{}, &cache, 1.0));
+
+    // 缓存写满后增量解码返回错误
+    _ = try model.prefill(&g, &.{ 2, 3, 4 }, &cache, 1.0);
+    _ = try model.decodeStep(&g, 5, &cache, &.{ 2, 3, 4 }, 1.0);
+    try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
+    try std.testing.expectError(error.ContextWindowExceeded, model.decodeStep(&g, 6, &cache, &.{ 2, 3, 4, 5 }, 1.0));
+    try std.testing.expectError(error.InvalidTokenId, model.decodeStep(&g, 1000, &cache, &.{2}, 1.0));
+}
+
+/// 对构造函数的每一次内存分配依次注入失败，断言构造返回 OutOfMemory 且已分配内存全部释放。
+/// 析构使用不注入失败的测试分配器 (nn.deinitModel 内部会分配去重表)。
+fn expectConstructionReleasesOnOom(ctx: anytype) !void {
+    const backing = std.testing.allocator;
+    var counting = std.testing.FailingAllocator.init(backing, .{});
+    var model = try ctx.construct(counting.allocator());
+    const needed = counting.alloc_index;
+    @TypeOf(ctx).destroy(&model, backing);
+
+    for (0..needed) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(backing, .{ .fail_index = fail_index });
+        if (ctx.construct(failing.allocator())) |constructed| {
+            var leaked = constructed;
+            @TypeOf(ctx).destroy(&leaked, backing);
+            return error.SwallowedOutOfMemoryError;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+        }
+    }
+}
+
+const TinyGemma4Ctor = struct {
+    fn construct(_: @This(), allocator: std.mem.Allocator) !gemma4.TinyGemma4 {
+        return gemma4.TinyGemma4.init(allocator);
+    }
+    fn destroy(model: *gemma4.TinyGemma4, allocator: std.mem.Allocator) void {
+        nn.deinitModel(model, allocator);
+    }
+};
+
+const TinyQ4Gemma4Ctor = struct {
+    fn construct(_: @This(), allocator: std.mem.Allocator) !gemma4_q4.TinyQ4Gemma4 {
+        return gemma4_q4.TinyQ4Gemma4.init(allocator);
+    }
+    fn destroy(model: *gemma4_q4.TinyQ4Gemma4, allocator: std.mem.Allocator) void {
+        model.deinit(allocator);
+    }
+};
+
+const TinyQ4MmapCtor = struct {
+    bytes: []const u8,
+    fn construct(self: @This(), allocator: std.mem.Allocator) !gemma4_q4.TinyQ4Gemma4 {
+        return gemma4_q4.TinyQ4Gemma4.loadFromMmapWithOptions(allocator, self.bytes, .{ .warmup = false });
+    }
+    fn destroy(model: *gemma4_q4.TinyQ4Gemma4, allocator: std.mem.Allocator) void {
+        model.deinit(allocator);
+    }
+};
+
+const KVCacheCtor = struct {
+    fn construct(_: @This(), allocator: std.mem.Allocator) !gemma4.Gemma4KVCache {
+        return gemma4.Gemma4KVCache.init(allocator, gemma4.Gemma4Config.tiny_test, .{ .max_seq_len = 8 });
+    }
+    fn destroy(cache: *gemma4.Gemma4KVCache, allocator: std.mem.Allocator) void {
+        cache.deinit(allocator);
+    }
+};
+
+test "Gemma 4 model construction releases every allocation on out-of-memory" {
+    try expectConstructionReleasesOnOom(TinyGemma4Ctor{});
+    try expectConstructionReleasesOnOom(TinyQ4Gemma4Ctor{});
+    try expectConstructionReleasesOnOom(KVCacheCtor{});
+
+    if (backend.offload.isAvailable()) return;
+    const allocator = std.testing.allocator;
+    const M = gemma4_q4.TinyQ4Gemma4;
+    const bytes = try allocator.alloc(u8, M.computeExpectedFileSize());
+    defer allocator.free(bytes);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..8], M.Q4_MAGIC);
+    try expectConstructionReleasesOnOom(TinyQ4MmapCtor{ .bytes = bytes });
+}
+
+test "Gemma4Q4 mmap loader reads per-layer norms and layer_scalar in storage order" {
+    const allocator = std.testing.allocator;
+    const M = gemma4_q4.TinyQ4Gemma4;
+    const cfg = M.config;
+    const bytes = try allocator.alloc(u8, M.computeExpectedFileSize());
+    defer allocator.free(bytes);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..8], M.Q4_MAGIC);
+
+    // 第 1 层：input_layernorm[0] = 2.0 (BF16 0x4000)，layer_scalar = 0.5 (BF16 0x3F00)
+    const offsets = M.computeLayerOffsets().offsets;
+    const layer1 = offsets[1];
+    std.mem.writeInt(u16, bytes[layer1..][0..2], 0x4000, .little);
+    const scalar_off = layer1 + M.layerNormsBytes(1) - 2;
+    std.mem.writeInt(u16, bytes[scalar_off..][0..2], 0x3F00, .little);
+    try std.testing.expectEqual(M.computeExpectedFileSize(), offsets[cfg.num_hidden_layers]);
+
+    var model = try M.loadFromMmapWithOptions(allocator, bytes, .{ .warmup = false });
+    defer model.deinit(allocator);
+    try std.testing.expectEqual(@as(f32, 2.0), model.layers[1].input_layernorm.weight.data[0]);
+    try std.testing.expectEqual(@as(f32, 0.5), model.layers[1].layer_scalar.data[0]);
+    try std.testing.expectEqual(@as(f32, 0.0), model.layers[0].layer_scalar.data[0]);
+    try std.testing.expectEqual(cfg.hidden_size * cfg.num_attention_heads * cfg.head_dim / 32, model.layers[0].self_attn.q_proj.blocks.len);
+
+    // 词元 ID 越界时返回错误而非越界读取嵌入矩阵
+    var cache = try gemma4.Gemma4KVCache.initDefault(allocator, cfg);
+    defer cache.deinit(allocator);
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+    try std.testing.expectError(error.InvalidTokenId, model.prefill(&g, &.{ 2, cfg.vocab_size }, &cache, bytes, 1.0));
+    try std.testing.expectError(error.EmptyPrompt, model.prefill(&g, &.{}, &cache, bytes, 1.0));
+}
+
+test "Gemma4Q4 direct layout keeps packed u32 weights 4-byte aligned" {
+    inline for (.{ gemma4_q4.DefaultGemma4Q4, gemma4_q4.TinyQ4Gemma4 }) |M| {
+        const offsets = M.computeDirectLayerOffsets().offsets;
+        for (0..M.config.num_hidden_layers) |i| {
+            try std.testing.expectEqual(@as(usize, 0), offsets[i] % 4);
+            try std.testing.expectEqual(@as(usize, 0), (offsets[i] + M.directLayerNormsBytes(i)) % 4);
+            try std.testing.expect(M.directLayerNormsBytes(i) >= M.layerNormsBytes(i));
+        }
+        try std.testing.expectEqual(M.computeExpectedDirectFileSize(), offsets[M.config.num_hidden_layers]);
+    }
+}
+
+test "Gemma4Q4 direct layout requires hardware offload and never leaks on rejection" {
+    if (backend.offload.isAvailable()) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const M = gemma4_q4.TinyQ4Gemma4;
+    const bytes = try allocator.alloc(u8, M.computeExpectedDirectFileSize());
+    defer allocator.free(bytes);
+    @memset(bytes, 0);
+    @memcpy(bytes[0..8], M.DIRECT_MAGIC);
+    try std.testing.expectError(error.DirectLayoutRequiresOffload, M.loadFromMmapWithOptions(allocator, bytes, .{ .warmup = false }));
+}
+
+test "promptLookup tolerates a zero minimum n-gram length" {
+    const seq = [_]usize{ 5, 6, 7, 5, 6 };
+    const draft = gemma4.promptLookup(&seq, 0, 3, 2);
+    try std.testing.expect(draft != null);
+    try std.testing.expectEqualSlices(usize, &.{ 7, 5 }, draft.?);
+    try std.testing.expectEqual(@as(?[]const usize, null), gemma4.promptLookup(&.{1}, 0, 3, 2));
+}
+
+test "Gemma 4 SIMD dot kernels match scalar references" {
+    var prng = std.Random.DefaultPrng.init(3);
+    const random = prng.random();
+    var a: [37]f32 = undefined;
+    var b: [37]f32 = undefined;
+    var b_bits: [37]u16 = undefined;
+    fillNormal(&a, random, 1.0);
+    fillNormal(&b, random, 1.0);
+    for (&b_bits, &b) |*bits, *v| {
+        bits.* = @truncate(@as(u32, @bitCast(v.*)) >> 16);
+        v.* = @bitCast(@as(u32, bits.*) << 16);
+    }
+    inline for (.{ 0, 1, 16, 31, 37 }) |n| {
+        var ref: f32 = 0;
+        for (a[0..n], b[0..n]) |x, y| ref += x * y;
+        try std.testing.expectApproxEqAbs(ref, gemma4.dotF32(a[0..n], b[0..n]), 1e-4);
+        try std.testing.expectApproxEqAbs(ref, gemma4.dotF32Bf16(a[0..n], b_bits[0..n]), 1e-4);
+    }
+}
+
+test "Gemma4E4B proportional RoPE frequencies match the F32 proportional RoPE path" {
+    const allocator = std.testing.allocator;
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g.deinit();
+    const hd: usize = 16;
+    const pos: usize = 5;
+    const base: f32 = 1000000.0;
+    const x = try g.tensorND(&.{ 1, 1, 1, hd }, false);
+    for (x.data, 0..) |*v, i| v.* = @as(f32, @floatFromInt(i + 1)) * 0.1;
+    const y_ref = try gemma4.ropeSplitHalf(&g, x, pos, 0.25, base);
+
+    // mlx.fast.rope(dims = hd, freqs) 参考实现：配对 (i, i + hd/2)，theta_i = pos / freqs[i]
+    var freqs: [hd / 2]f32 = undefined;
+    gemma4_e4b.proportionalRopeFreqs(&freqs, hd, hd / 4, base);
+    var y: [hd]f32 = undefined;
+    @memcpy(&y, x.data[0..hd]);
+    for (freqs, 0..) |f, i| {
+        const theta = @as(f32, @floatFromInt(pos)) / f;
+        const a = x.data[i];
+        const b = x.data[i + hd / 2];
+        y[i] = a * @cos(theta) - b * @sin(theta);
+        y[i + hd / 2] = b * @cos(theta) + a * @sin(theta);
+    }
+    try std.testing.expect(maxAbsDiff(y_ref.data[0..hd], &y) < 1e-5);
+    try std.testing.expect(std.math.isInf(freqs[hd / 2 - 1]));
+}
+
+test "Gemma4E4B KV-shared layers reuse the last non-shared layer of the same attention type" {
+    const cfg = gemma4.Gemma4Config.e4b;
+    const expected = [42]usize{
+        0,  1,  2,  3,  4,  5,
+        6,  7,  8,  9,  10, 11,
+        12, 13, 14, 15, 16, 17,
+        18, 19, 20, 21, 22, 23,
+        22, 22, 22, 22, 22, 23,
+        22, 22, 22, 22, 22, 23,
+        22, 22, 22, 22, 22, 23,
+    };
+    for (expected, 0..) |src, idx| try std.testing.expectEqual(src, gemma4_e4b.kvSourceLayer(cfg, idx));
+    for (0..gemma4_e4b.num_kv_layers) |idx| {
+        try std.testing.expectEqual(idx == 22 or idx == 23, gemma4_e4b.isKvSharedSource(cfg, idx));
+    }
+}

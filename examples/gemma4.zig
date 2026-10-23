@@ -62,9 +62,9 @@ pub fn main(init: std.process.Init) !void {
     const file_size_gb = @as(f64, @floatFromInt(stat.size)) / (1024.0 * 1024.0 * 1024.0);
     std.debug.print("1. [模型准备已就绪]:\n", .{});
     if (is_direct_file) {
-        std.debug.print("   - 格式架构: ⚡ 零拷贝直通预重排格式 (ZNNQ4DIR, {d:.2} GB, 1.5 秒秒开)\n", .{file_size_gb});
+        std.debug.print("   - 格式架构: ⚡ 零拷贝直通预重排格式 ({s}, {d:.2} GB, 1.5 秒秒开)\n", .{ gemma4_q4.DefaultGemma4Q4.DIRECT_MAGIC, file_size_gb });
     } else {
-        std.debug.print("   - 格式架构: 4-bit 分块量化格式 (ZNNQ4G02, {d:.2} GB, 多核并发解包)\n", .{file_size_gb});
+        std.debug.print("   - 格式架构: 4-bit 分块量化格式 ({s}, {d:.2} GB, 多核并发解包)\n", .{ gemma4_q4.DefaultGemma4Q4.Q4_MAGIC, file_size_gb });
         std.debug.print("   - 💡 提示: 可运行 `zig build pack-gemma4` 升级为 direct 预重排文件，享受 1.5 秒秒开！\n", .{});
     }
 
@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !void {
     defer std.posix.munmap(mmap_ptr);
 
     const magic = mmap_ptr[0..8];
-    if (!std.mem.eql(u8, magic, "ZNNQ4G02") and !std.mem.eql(u8, magic, "ZNNQ4DIR")) {
+    if (!std.mem.eql(u8, magic, gemma4_q4.DefaultGemma4Q4.Q4_MAGIC) and !std.mem.eql(u8, magic, gemma4_q4.DefaultGemma4Q4.DIRECT_MAGIC)) {
         std.debug.print("❌ 错误: 模型文件魔数校验失败: {s}\n", .{magic});
         return;
     }

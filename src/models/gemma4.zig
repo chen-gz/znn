@@ -3,15 +3,12 @@ const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const nn = @import("../nn.zig");
 const core = nn.core;
-const normalization = nn.normalization;
 const transformer = nn.transformer;
-const serialization = nn.serialization;
 
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
 const Linear = core.Linear;
 const Embedding = transformer.Embedding;
-const RMSNorm = normalization.RMSNorm;
 const createPersistentTensor = core.createPersistentTensor;
 const freePersistentTensor = core.freePersistentTensor;
 const deinitModel = core.deinitModel;
@@ -58,6 +55,182 @@ pub fn ropeSplitHalf(
 }
 
 // ============================================================================
+// 单指令多数据 (Single Instruction Multiple Data, SIMD) 点积内核
+// ============================================================================
+
+const dot_lanes = 16;
+const F32Vec = @Vector(dot_lanes, f32);
+const U32Vec = @Vector(dot_lanes, u32);
+
+/// 单精度浮点 (F32) 向量点积：按 16 路 SIMD 累加，尾部逐元素补齐
+pub fn dotF32(a: []const f32, b: []const f32) f32 {
+    std.debug.assert(a.len == b.len);
+    var acc: F32Vec = @splat(0.0);
+    var i: usize = 0;
+    while (i + dot_lanes <= a.len) : (i += dot_lanes) {
+        const va: F32Vec = a[i..][0..dot_lanes].*;
+        const vb: F32Vec = b[i..][0..dot_lanes].*;
+        acc += va * vb;
+    }
+    var sum = @reduce(.Add, acc);
+    while (i < a.len) : (i += 1) sum += a[i] * b[i];
+    return sum;
+}
+
+/// 单精度浮点 (F32) 与脑浮点 (Brain Floating Point 16, BF16) 原始位向量点积：
+/// BF16 位模式左移 16 位即为等值 F32，整段以 SIMD 完成类型提升与乘加
+pub fn dotF32Bf16(a: []const f32, b_bits: []const u16) f32 {
+    std.debug.assert(a.len == b_bits.len);
+    var acc: F32Vec = @splat(0.0);
+    var i: usize = 0;
+    while (i + dot_lanes <= a.len) : (i += dot_lanes) {
+        const va: F32Vec = a[i..][0..dot_lanes].*;
+        const raw: @Vector(dot_lanes, u16) = b_bits[i..][0..dot_lanes].*;
+        const widened: U32Vec = @as(U32Vec, raw) << @splat(16);
+        const vb: F32Vec = @bitCast(widened);
+        acc += va * vb;
+    }
+    var sum = @reduce(.Add, acc);
+    while (i < a.len) : (i += 1) {
+        const b: tensor.bf16 = .{ .bits = b_bits[i] };
+        sum += a[i] * b.toF32();
+    }
+    return sum;
+}
+
+// ============================================================================
+// Gemma 4 混合注意力共享核心 (F32 与 Q4 两条推理路径共用)
+// ============================================================================
+
+/// 将预填充阶段旋转后的键 (Key, K) 与值 (Value, V) 头张量 ([1, n_kv, T, hd]，行主序连续) 写入层键值缓存
+/// (Key-Value Cache, KVCache)，并将缓存游标设为 T。T 超出缓存容量时返回 `error.ContextWindowExceeded`，不修改缓存。
+pub fn writePrefillKVCache(
+    cache: *Gemma4KVCache.LayerCache,
+    k_rot: []const f32,
+    v: []const f32,
+    batch: usize,
+    seq_len: usize,
+) !void {
+    if (batch != 1) return error.InvalidBatchSize;
+    if (seq_len > cache.max_seq_len) return error.ContextWindowExceeded;
+    const n_kv = cache.num_kv_heads;
+    const hd = cache.head_dim;
+    const max_len = cache.max_seq_len;
+    std.debug.assert(k_rot.len == n_kv * seq_len * hd and v.len == k_rot.len);
+    for (0..n_kv) |kv_h| {
+        const dest = (kv_h * max_len) * hd;
+        const src = (kv_h * seq_len) * hd;
+        @memcpy(cache.k[dest .. dest + seq_len * hd], k_rot[src .. src + seq_len * hd]);
+        @memcpy(cache.v[dest .. dest + seq_len * hd], v[src .. src + seq_len * hd]);
+    }
+    cache.curr_len = seq_len;
+}
+
+/// 预填充阶段因果 / 滑动窗口注意力 (官方实现中 scaling = 1.0)
+/// q_rot、k、v 形状均为 [B, nh, T, hd] (键值已完成分组查询注意力 (Grouped-Query Attention, GQA) 广播)。
+/// 全局注意力层或 T 不超过滑动窗口时等价于标准因果注意力，直接分发至融合缩放点积注意力
+/// (Scaled Dot-Product Attention, SDPA)；否则使用附加滑动窗口掩码的分解计算图。
+pub fn prefillAttention(
+    graph: *autodiff.Graph,
+    attn_type: Gemma4AttentionType,
+    sliding_window: usize,
+    q_rot: *Tensor,
+    k: *Tensor,
+    v: *Tensor,
+) !*Tensor {
+    const T = q_rot.shape.dims[2];
+    const is_pure_causal = (attn_type == .full_attention or T <= sliding_window);
+    if (is_pure_causal) return graph.scaledDotProductAttention(q_rot, k, v, 1.0, true);
+
+    const k_trans = try graph.transposeND(k, 2, 3);
+    const scores = try graph.batchMatMul(q_rot, k_trans);
+
+    const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
+    mask_node.is_buffer = true;
+    for (0..T) |i| {
+        const row = mask_node.data[i * T .. (i + 1) * T];
+        for (row, 0..) |*m, j| {
+            // 未来位置因果遮蔽，以及超出局部滑动窗口的历史位置遮蔽
+            const visible = j <= i and i < j + sliding_window;
+            m.* = if (visible) 0.0 else -1e9;
+        }
+    }
+    const masked = try graph.add(scores, mask_node);
+    const att_sm = try graph.softmax(masked);
+    return graph.batchMatMul(att_sm, v);
+}
+
+/// 单查询增量解码注意力：将当前时间步旋转后的键 (k_rot: [n_kv, hd]) 与值 (v: [n_kv, hd]) 追加写入层键值缓存，
+/// 随后对缓存中可见窗口 (滑动窗口层仅最近 sliding_window 个位置) 执行数值稳定 (减最大值) 的 Softmax 加权聚合。
+/// 返回输出投影前的注意力特征 [1, nh * hd]。缓存已满时返回 `error.ContextWindowExceeded`，不修改缓存。
+pub fn decodeAttention(
+    graph: *autodiff.Graph,
+    cache: *Gemma4KVCache.LayerCache,
+    attn_type: Gemma4AttentionType,
+    sliding_window: usize,
+    num_heads: usize,
+    q_rot: []const f32,
+    k_rot: []const f32,
+    v: []const f32,
+) !*Tensor {
+    const n_kv = cache.num_kv_heads;
+    const hd = cache.head_dim;
+    const max_len = cache.max_seq_len;
+    const pos = cache.curr_len;
+    if (pos >= max_len) return error.ContextWindowExceeded;
+    std.debug.assert(q_rot.len == num_heads * hd and k_rot.len == n_kv * hd and v.len == n_kv * hd);
+    const groups = num_heads / n_kv;
+
+    for (0..n_kv) |kv_h| {
+        const dest = (kv_h * max_len + pos) * hd;
+        @memcpy(cache.k[dest .. dest + hd], k_rot[kv_h * hd .. (kv_h + 1) * hd]);
+        @memcpy(cache.v[dest .. dest + hd], v[kv_h * hd .. (kv_h + 1) * hd]);
+    }
+    cache.curr_len = pos + 1;
+    const curr_len = cache.curr_len;
+
+    const y_2d = try graph.zeros(&.{ 1, num_heads * hd }, false);
+    const start_idx: usize = if (attn_type == .sliding_attention and curr_len > sliding_window)
+        curr_len - sliding_window
+    else
+        0;
+    const scores = try graph.arenaAllocator().alloc(f32, curr_len - start_idx);
+
+    for (0..num_heads) |h| {
+        const kv_base = (h / groups) * max_len;
+        const q_head = q_rot[h * hd .. (h + 1) * hd];
+
+        var max_score: f32 = -std.math.inf(f32);
+        for (scores, start_idx..) |*s, j| {
+            s.* = dotF32(q_head, cache.k[(kv_base + j) * hd .. (kv_base + j + 1) * hd]);
+            max_score = @max(max_score, s.*);
+        }
+
+        var exp_sum: f32 = 0.0;
+        for (scores) |*s| {
+            s.* = @exp(s.* - max_score);
+            exp_sum += s.*;
+        }
+        const inv_sum = 1.0 / exp_sum;
+
+        const y_head = y_2d.data[h * hd .. (h + 1) * hd];
+        for (scores, start_idx..) |s, j| {
+            const weight = s * inv_sum;
+            const v_cached = cache.v[(kv_base + j) * hd .. (kv_base + j + 1) * hd];
+            for (y_head, v_cached) |*yv, vv| yv.* += weight * vv;
+        }
+    }
+    return y_2d;
+}
+
+/// 校验词元 ID 均落在词表范围内，防止嵌入查表越界读取
+pub fn validateTokenIds(tokens: []const usize, vocab_size: usize) !void {
+    for (tokens) |tok| {
+        if (tok >= vocab_size) return error.InvalidTokenId;
+    }
+}
+
+// ============================================================================
 // Gemma 4 架构定义与模型实现
 // ============================================================================
 
@@ -93,6 +266,23 @@ pub const Gemma4Config = struct {
     pub const default: Gemma4Config = .{};
     pub fn defaultConfig() Gemma4Config {
         return .{};
+    }
+
+    /// 单个解码层的注意力几何规格
+    pub const LayerSpec = struct {
+        attn_type: Gemma4AttentionType,
+        head_dim: usize,
+        num_kv_heads: usize,
+    };
+
+    /// 每 6 层中最后一层为全局全注意力 (full_attention)，其余为滑动窗口注意力 (sliding_attention)
+    pub fn layerSpec(self: Gemma4Config, layer_idx: usize) LayerSpec {
+        const is_full = ((layer_idx + 1) % 6 == 0);
+        return .{
+            .attn_type = if (is_full) .full_attention else .sliding_attention,
+            .head_dim = if (is_full) self.global_head_dim else self.head_dim,
+            .num_kv_heads = if (is_full) self.num_global_key_value_heads else self.num_key_value_heads,
+        };
     }
 
     /// Gemma 4 E4B (4B 级高效端侧模型配置，42 层混合架构与逐层嵌入增强)
@@ -206,16 +396,12 @@ pub const Gemma4KVCache = struct {
         }
 
         for (0..config.num_hidden_layers) |i| {
-            const is_full = ((i + 1) % 6 == 0);
-            const attn_type: Gemma4AttentionType = if (is_full) .full_attention else .sliding_attention;
-            const head_dim = if (is_full) config.global_head_dim else config.head_dim;
-            const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
-
+            const spec = config.layerSpec(i);
             layers[i] = try LayerCache.init(
                 allocator,
-                attn_type,
-                num_kv,
-                head_dim,
+                spec.attn_type,
+                spec.num_kv_heads,
+                spec.head_dim,
                 config.sliding_window,
                 options.max_seq_len,
             );
@@ -291,6 +477,8 @@ pub const GemmaUnscaledRMSNorm = struct {
         @memset(weight.data, 1.0);
         weight.shape = Shape.init(&.{dim});
         weight.strides = tensor.computeContiguousStrides(weight.shape);
+        // 恒为 1 的常量权重注册为缓冲区，解冻参数时不会被误转为可训练参数
+        weight.is_buffer = true;
 
         return GemmaUnscaledRMSNorm{
             .weight = weight,
@@ -508,22 +696,7 @@ pub const Gemma4Attention = struct {
         const k_rot = try ropeSplitHalf(graph, k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
 
         // 5. 写入键值缓存 (Key-Value Cache, KVCache)
-        if (layer_cache) |cache| {
-            std.debug.assert(B == 1);
-            std.debug.assert(T <= cache.max_seq_len);
-            const max_len = cache.max_seq_len;
-            for (0..n_kv) |kv_h| {
-                for (0..T) |t| {
-                    const dest_k = cache.k[(kv_h * max_len + t) * hd .. (kv_h * max_len + t + 1) * hd];
-                    const dest_v = cache.v[(kv_h * max_len + t) * hd .. (kv_h * max_len + t + 1) * hd];
-                    const src_k = k_rot.data[(kv_h * T + t) * hd .. (kv_h * T + t + 1) * hd];
-                    const src_v = v.data[(kv_h * T + t) * hd .. (kv_h * T + t + 1) * hd];
-                    @memcpy(dest_k, src_k);
-                    @memcpy(dest_v, src_v);
-                }
-            }
-            cache.curr_len = T;
-        }
+        if (layer_cache) |cache| try writePrefillKVCache(cache, k_rot.data, v.data, B, T);
 
         // 6. GQA 广播扩展至 nh 个头
         var k = k_rot;
@@ -534,31 +707,7 @@ pub const Gemma4Attention = struct {
         }
 
         // 7. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0)
-        const is_pure_causal = (self.attn_type == .full_attention or T <= self.sliding_window);
-        const y_4d = if (is_pure_causal)
-            try graph.scaledDotProductAttention(q_rot, k, v_final, 1.0, true)
-        else blk: {
-            const k_trans = try graph.transposeND(k, 2, 3);
-            var scores = try graph.batchMatMul(q_rot, k_trans);
-
-            const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
-            mask_node.is_buffer = true;
-            for (0..T) |i| {
-                for (0..T) |j| {
-                    if (j > i) {
-                        mask_node.data[i * T + j] = -1e9; // 未来位置因果遮蔽
-                    } else if (self.attn_type == .sliding_attention and i >= j + self.sliding_window) {
-                        mask_node.data[i * T + j] = -1e9; // 超出局部滑动窗口遮蔽
-                    } else {
-                        mask_node.data[i * T + j] = 0.0;
-                    }
-                }
-            }
-            scores = try graph.add(scores, mask_node);
-
-            const att_sm = try graph.softmax(scores);
-            break :blk try graph.batchMatMul(att_sm, v_final);
-        };
+        const y_4d = try prefillAttention(graph, self.attn_type, self.sliding_window, q_rot, k, v_final);
 
         // 8. 转置并融合输出
         const y_trans = try graph.transposeND(y_4d, 1, 2);
@@ -581,10 +730,8 @@ pub const Gemma4Attention = struct {
         const nh = self.num_heads;
         const n_kv = self.num_kv_heads;
         const hd = self.head_dim;
-        const groups = nh / n_kv;
         const pos = layer_cache.curr_len;
-        const max_len = layer_cache.max_seq_len;
-        if (pos >= max_len) return error.ContextWindowExceeded;
+        if (pos >= layer_cache.max_seq_len) return error.ContextWindowExceeded;
 
         const x_2d = if (x.shape.len == 2) x else try graph.reshape(x, &.{ 1, C });
 
@@ -604,61 +751,7 @@ pub const Gemma4Attention = struct {
         const q_rot = try ropeSplitHalf(graph, q_4d, pos, self.partial_rotary_factor, self.rope_theta);
         const k_rot = try ropeSplitHalf(graph, k_4d, pos, self.partial_rotary_factor, self.rope_theta);
 
-        for (0..n_kv) |kv_h| {
-            const dest_k = layer_cache.k[(kv_h * max_len + pos) * hd .. (kv_h * max_len + pos + 1) * hd];
-            const dest_v = layer_cache.v[(kv_h * max_len + pos) * hd .. (kv_h * max_len + pos + 1) * hd];
-            const src_k = k_rot.data[kv_h * hd .. (kv_h + 1) * hd];
-            const src_v = v_normed.data[kv_h * hd .. (kv_h + 1) * hd];
-            @memcpy(dest_k, src_k);
-            @memcpy(dest_v, src_v);
-        }
-        layer_cache.curr_len = pos + 1;
-        const curr_len = layer_cache.curr_len;
-
-        const y_2d = try graph.zeros(&.{ 1, nh * hd }, false);
-        const start_idx: usize = if (self.attn_type == .sliding_attention and curr_len > self.sliding_window)
-            curr_len - self.sliding_window
-        else
-            0;
-        const valid_len = curr_len - start_idx;
-        const scores = try graph.arenaAllocator().alloc(f32, valid_len);
-
-        for (0..nh) |h| {
-            const kv_h = h / groups;
-            const q_head = q_rot.data[h * hd .. (h + 1) * hd];
-            var max_score: f32 = -1e30;
-
-            for (start_idx..curr_len) |j| {
-                const k_cached = layer_cache.k[(kv_h * max_len + j) * hd .. (kv_h * max_len + j + 1) * hd];
-                var dot: f32 = 0.0;
-                for (q_head, k_cached) |qv, kv| {
-                    dot += qv * kv;
-                }
-                scores[j - start_idx] = dot;
-                if (dot > max_score) max_score = dot;
-            }
-
-            var exp_sum: f32 = 0.0;
-            for (scores) |*s| {
-                const e = @exp(s.* - max_score);
-                s.* = e;
-                exp_sum += e;
-            }
-            const inv_sum = 1.0 / exp_sum;
-            for (scores) |*s| {
-                s.* *= inv_sum;
-            }
-
-            const y_head = y_2d.data[h * hd .. (h + 1) * hd];
-            @memset(y_head, 0.0);
-            for (start_idx..curr_len) |j| {
-                const v_cached = layer_cache.v[(kv_h * max_len + j) * hd .. (kv_h * max_len + j + 1) * hd];
-                const weight = scores[j - start_idx];
-                for (y_head, v_cached) |*yv, vv| {
-                    yv.* += weight * vv;
-                }
-            }
-        }
+        const y_2d = try decodeAttention(graph, layer_cache, self.attn_type, self.sliding_window, nh, q_rot.data, k_rot.data, v_normed.data);
 
         const out_2d = try self.o_proj.forward(graph, y_2d);
         return try graph.reshape(out_2d, &.{ 1, 1, C });
@@ -716,11 +809,8 @@ pub const Gemma4DecoderLayer = struct {
         const post_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&post_feedforward_layernorm, allocator);
 
-        const layer_scalar = try createPersistentTensor(allocator, 1, 1, true);
+        const layer_scalar = try createLayerScalar(allocator);
         errdefer freePersistentTensor(allocator, layer_scalar);
-        layer_scalar.data[0] = 1.0;
-        layer_scalar.shape = Shape.init(&.{1});
-        layer_scalar.strides = tensor.computeContiguousStrides(layer_scalar.shape);
 
         return Gemma4DecoderLayer{
             .input_layernorm = input_layernorm,
@@ -733,23 +823,28 @@ pub const Gemma4DecoderLayer = struct {
         };
     }
 
-    pub const formula = "\\begin{aligned} x_1 &= x + \\text{PostAttnLN}(\\text{Attn}(\\text{InputLN}(x))) \\\\ x_2 &= x_1 + \\text{PostMLPLN}(\\text{MLP}(\\text{PreMLPLN}(x_1))) \\end{aligned}";
+    pub const formula = "\\begin{aligned} x_1 &= x + \\text{PostAttnLN}(\\text{Attn}(\\text{InputLN}(x))) \\\\ x_2 &= s \\cdot \\left(x_1 + \\text{PostMLPLN}(\\text{MLP}(\\text{PreMLPLN}(x_1)))\\right) \\end{aligned}";
+
+    /// 注意力之后的公共残差尾部：PostAttnLN -> + x -> PreMLPLN -> MLP -> PostMLPLN -> + x1 -> * layer_scalar
+    /// 训练前向、预填充与增量解码三条路径共用，保证层缩放标量 (layer_scalar) 处处一致地生效
+    fn residualTail(self: *const Gemma4DecoderLayer, graph: *autodiff.Graph, x: *Tensor, attn_out: *Tensor) !*Tensor {
+        const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
+        const x1 = try graph.add(x, post_attn);
+
+        const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
+        const mlp_out = try self.mlp.forward(graph, pre_mlp);
+        const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
+        const x2 = try graph.add(x1, post_mlp);
+        return try graph.mulScalar(x2, self.layer_scalar.data[0]);
+    }
 
     pub fn forward(self: *const Gemma4DecoderLayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        // 1. 注意力分支: InputLN -> Attn -> PostAttnLN -> + x
         const in_norm = try self.input_layernorm.forward(graph, x);
         const attn_out = try self.self_attn.forward(graph, in_norm);
-        const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
-        const x1 = try graph.add(x, post_attn);
-
-        // 2. 前馈网络分支: PreMLPLN -> MLP -> PostMLPLN -> + x1
-        const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
-        const mlp_out = try self.mlp.forward(graph, pre_mlp);
-        const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
-        return try graph.add(x1, post_mlp);
+        return self.residualTail(graph, x, attn_out);
     }
 
     pub fn forwardPrefill(
@@ -763,14 +858,7 @@ pub const Gemma4DecoderLayer = struct {
 
         const in_norm = try self.input_layernorm.forward(graph, x);
         const attn_out = try self.self_attn.forwardPrefill(graph, in_norm, layer_cache);
-        const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
-        const x1 = try graph.add(x, post_attn);
-
-        const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
-        const mlp_out = try self.mlp.forward(graph, pre_mlp);
-        const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
-        const x2 = try graph.add(x1, post_mlp);
-        return try graph.mulScalar(x2, self.layer_scalar.data[0]);
+        return self.residualTail(graph, x, attn_out);
     }
 
     pub fn forwardDecode(
@@ -784,16 +872,20 @@ pub const Gemma4DecoderLayer = struct {
 
         const in_norm = try self.input_layernorm.forward(graph, x);
         const attn_out = try self.self_attn.forwardDecode(graph, in_norm, layer_cache);
-        const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
-        const x1 = try graph.add(x, post_attn);
-
-        const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
-        const mlp_out = try self.mlp.forward(graph, pre_mlp);
-        const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
-        const x2 = try graph.add(x1, post_mlp);
-        return try graph.mulScalar(x2, self.layer_scalar.data[0]);
+        return self.residualTail(graph, x, attn_out);
     }
 };
+
+/// 创建层缩放标量 (layer_scalar, 初值 1.0)：与官方实现一致注册为不可训练缓冲区 (buffer)，
+/// 避免被优化器当作参数参与权重衰减
+pub fn createLayerScalar(allocator: std.mem.Allocator) !*Tensor {
+    const layer_scalar = try createPersistentTensor(allocator, 1, 1, false);
+    layer_scalar.data[0] = 1.0;
+    layer_scalar.shape = Shape.init(&.{1});
+    layer_scalar.strides = tensor.computeContiguousStrides(layer_scalar.shape);
+    layer_scalar.is_buffer = true;
+    return layer_scalar;
+}
 
 /// Gemma 4 语言模型核心架构 (Gemma4ForCausalLM)
 pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
@@ -850,20 +942,15 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             }
 
             for (0..config.num_hidden_layers) |i| {
-                // 每 6 层中最后一层为 full_attention，其余为 sliding_attention
-                const is_full = ((i + 1) % 6 == 0);
-                const attn_type: Gemma4AttentionType = if (is_full) .full_attention else .sliding_attention;
-                const head_dim = if (is_full) config.global_head_dim else config.head_dim;
-                const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
-
+                const spec = config.layerSpec(i);
                 layers[i] = try Gemma4DecoderLayer.init(
                     allocator,
-                    attn_type,
+                    spec.attn_type,
                     config.hidden_size,
                     config.intermediate_size,
                     config.num_attention_heads,
-                    num_kv,
-                    head_dim,
+                    spec.num_kv_heads,
+                    spec.head_dim,
                     config.sliding_window,
                     config.rms_norm_eps,
                 );
@@ -938,11 +1025,7 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
                 for (start_v..end_v) |v| {
                     if (v == 0 or (v >= 258880 and v <= 258884)) continue;
 
-                    const row = ctx.embed_f32[v * hidden .. (v + 1) * hidden];
-                    var dot: f32 = 0.0;
-                    for (0..hidden) |d| {
-                        dot += ctx.h_last[d] * row[d];
-                    }
+                    var dot = dotF32(ctx.h_last, ctx.embed_f32[v * hidden .. (v + 1) * hidden]);
 
                     if (ctx.repetition_penalty > 1.0 and (v / 64) < ctx.recent_bitset.len and (ctx.recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
                         if (dot > 0.0) {
@@ -1004,6 +1087,19 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             return best.id;
         }
 
+        /// 词元嵌入查表并施加 Gemma 嵌入缩放 sqrt(hidden_size)，返回 [1, T, hidden_size]
+        fn embedScaled(self: *const Self, graph: *autodiff.Graph, tokens: []const usize) !*Tensor {
+            const H = config.hidden_size;
+            const tok_emb = try graph.tensorND(&.{ 1, tokens.len, H }, false);
+            const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(H)));
+            const embed_f32 = self.embed_tokens.weight.data;
+            for (tokens, 0..) |tok, t_idx| {
+                const emb_row = embed_f32[tok * H .. (tok + 1) * H];
+                for (tok_emb.data[t_idx * H .. (t_idx + 1) * H], emb_row) |*dst, e| dst.* = e * sqrt_d;
+            }
+            return tok_emb;
+        }
+
         /// 全精度 (F32) 预填充阶段 (Prefill)：处理 Prompt 词元序列并写入 KVCache，返回首个预测词元
         pub fn prefill(
             self: *const Self,
@@ -1013,19 +1109,11 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             repetition_penalty: f32,
         ) !usize {
             const T = prompt_tokens.len;
-            if (T == 0) return 0;
+            if (T == 0) return error.EmptyPrompt;
+            try validateTokenIds(prompt_tokens, config.vocab_size);
             cache.reset();
 
-            const tok_emb = try graph.tensorND(&.{ 1, T, config.hidden_size }, false);
-            const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
-            const embed_f32 = self.embed_tokens.weight.data;
-            for (prompt_tokens, 0..) |tok, t_idx| {
-                const emb_row = embed_f32[tok * config.hidden_size .. (tok + 1) * config.hidden_size];
-                const dest = tok_emb.data[t_idx * config.hidden_size .. (t_idx + 1) * config.hidden_size];
-                for (0..config.hidden_size) |d| {
-                    dest[d] = emb_row[d] * sqrt_d;
-                }
-            }
+            const tok_emb = try self.embedScaled(graph, prompt_tokens);
 
             var h = tok_emb;
             for (self.layers, 0..) |*layer, l_idx| {
@@ -1046,12 +1134,9 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             recent_tokens: []const usize,
             repetition_penalty: f32,
         ) !usize {
-            const tok_emb = try graph.tensorND(&.{ 1, 1, config.hidden_size }, false);
-            const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
-            const emb_row = self.embed_tokens.weight.data[token * config.hidden_size .. (token + 1) * config.hidden_size];
-            for (0..config.hidden_size) |d| {
-                tok_emb.data[d] = emb_row[d] * sqrt_d;
-            }
+            const tokens = [_]usize{token};
+            try validateTokenIds(&tokens, config.vocab_size);
+            const tok_emb = try self.embedScaled(graph, &tokens);
 
             var h = tok_emb;
             for (self.layers, 0..) |*layer, l_idx| {
@@ -1120,6 +1205,7 @@ pub const Gemma4Vocabulary = struct {
             file.handle,
             0,
         );
+        errdefer std.posix.munmap(mmap_ptr);
 
         return loadFromMmap(mmap_ptr);
     }
@@ -1128,6 +1214,7 @@ pub const Gemma4Vocabulary = struct {
     pub fn buildLookupTable(self: *Gemma4Vocabulary, allocator: std.mem.Allocator) !void {
         if (self.lookup_table != null) return;
         var table = std.StringHashMapUnmanaged(usize){};
+        errdefer table.deinit(allocator);
         try table.ensureTotalCapacity(allocator, @intCast(self.count));
         for (0..self.count) |i| {
             const piece = self.decode(i);
@@ -1256,11 +1343,13 @@ pub fn promptLookup(
     max_n: usize,
     max_speculate: usize,
 ) ?[]const usize {
-    if (tokens.len < min_n + 1) return null;
+    // 空模式 (N = 0) 会平凡匹配任意位置，最小匹配长度至少为 1
+    const lo = @max(min_n, 1);
+    if (tokens.len < lo + 1) return null;
     const cur_len = tokens.len;
 
     var n = @min(max_n, cur_len - 1);
-    while (n >= min_n) : (n -= 1) {
+    while (n >= lo) : (n -= 1) {
         const pattern = tokens[cur_len - n .. cur_len];
         var search_idx: usize = cur_len - n;
         while (search_idx > 0) {
