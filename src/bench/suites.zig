@@ -870,8 +870,8 @@ pub fn runOptimizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
 
         var ctx = try AdamWContext.init(allocator);
         defer ctx.deinit();
-        // AdamW updates w, m, v reading grad: ~4 floats read/write per param
-        const bytes: u64 = num_params * 4 * @sizeOf(f32);
+        // AdamW 每个参数读取 w、grad、m、v，写回 w、m、v：共 7 次 f32 访存
+        const bytes: u64 = num_params * 7 * @sizeOf(f32);
         try runner.benchmark("AdamW Step [1M params]", "Optimizers", null, bytes, null, "", &ctx);
     }
 
@@ -916,7 +916,8 @@ pub fn runOptimizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
 
         var ctx = try SgdContext.init(allocator);
         defer ctx.deinit();
-        const bytes: u64 = num_params * 3 * @sizeOf(f32);
+        // 带动量的 SGD 每个参数读取 w、grad、velocity，写回 w、velocity：共 5 次 f32 访存
+        const bytes: u64 = num_params * 5 * @sizeOf(f32);
         try runner.benchmark("SGD Momentum Step [1M params]", "Optimizers", null, bytes, null, "", &ctx);
     }
 }

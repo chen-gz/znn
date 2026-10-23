@@ -81,78 +81,55 @@ pub const ExponentialLRScheduler = optim.ExponentialLRScheduler;
 pub const LRScheduler = optim.LRScheduler;
 pub const GradClipConfig = optim.GradClipConfig;
 
-
+/// 测量一次函数调用的耗时 (单调时钟，纳秒)
 pub fn measureTime(comptime func: anytype, args: anytype) !struct {
     result: @TypeOf(@call(.auto, func, args)),
     elapsed_ns: u64,
 } {
-    const std = @import("std");
-    var start_ts: std.posix.system.timespec = undefined;
-    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &start_ts);
-
+    const start_ns = bench.getTimeNs();
     const result = @call(.auto, func, args);
-
-    var end_ts: std.posix.system.timespec = undefined;
-    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &end_ts);
-
-    const start_ns = @as(u64, @intCast(start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(start_ts.nsec));
-    const end_ns = @as(u64, @intCast(end_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(end_ts.nsec));
     return .{
         .result = result,
-        .elapsed_ns = end_ns - start_ns,
+        .elapsed_ns = bench.getTimeNs() - start_ns,
     };
 }
 
-
+/// 代码块耗时打印：`start` 记录起点，`end` 打印 `[PROFILE] <label> took <ms>`
 pub const ProfileBlock = struct {
     label: []const u8,
-    start_ts: @import("std").posix.system.timespec,
+    start_ns: u64,
 
     pub fn start(label: []const u8) ProfileBlock {
-        const std = @import("std");
-        var start_ts: std.posix.system.timespec = undefined;
-        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &start_ts);
         return .{
             .label = label,
-            .start_ts = start_ts,
+            .start_ns = bench.getTimeNs(),
         };
     }
 
     pub fn end(self: ProfileBlock) void {
         const std = @import("std");
         const builtin = @import("builtin");
-        var end_ts: std.posix.system.timespec = undefined;
-        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &end_ts);
-        const start_ns = @as(u64, @intCast(self.start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(self.start_ts.nsec));
-        const end_ns = @as(u64, @intCast(end_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(end_ts.nsec));
-        const elapsed_ms = @as(f64, @floatFromInt(end_ns - start_ns)) / 1_000_000.0;
+        const elapsed_ms = @as(f64, @floatFromInt(bench.getTimeNs() - self.start_ns)) / 1_000_000.0;
         if (!builtin.is_test) {
             std.debug.print("[PROFILE] {s} took {d:.3}ms\n", .{ self.label, elapsed_ms });
         }
     }
 };
 
+/// 作用域计时器：`end` 把耗时 (纳秒) 写入 `elapsed_ns_ptr`
 pub const ScopeTimer = struct {
-    start_ts: @import("std").posix.system.timespec,
+    start_ns: u64,
     elapsed_ns_ptr: *u64,
 
     pub fn start(elapsed_ns_ptr: *u64) ScopeTimer {
-        const std = @import("std");
-        var start_ts: std.posix.system.timespec = undefined;
-        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &start_ts);
         return .{
-            .start_ts = start_ts,
+            .start_ns = bench.getTimeNs(),
             .elapsed_ns_ptr = elapsed_ns_ptr,
         };
     }
 
     pub fn end(self: ScopeTimer) void {
-        const std = @import("std");
-        var end_ts: std.posix.system.timespec = undefined;
-        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &end_ts);
-        const start_ns = @as(u64, @intCast(self.start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(self.start_ts.nsec));
-        const end_ns = @as(u64, @intCast(end_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(end_ts.nsec));
-        self.elapsed_ns_ptr.* = end_ns - start_ns;
+        self.elapsed_ns_ptr.* = bench.getTimeNs() - self.start_ns;
     }
 };
 

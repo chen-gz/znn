@@ -146,6 +146,7 @@ pub fn main() !void {
         // Step 1: 训练判别器 Discriminator (D)
         // --------------------------------------------------------------------
         var graph_d = autodiff.Graph.initDefault(allocator);
+        defer graph_d.deinit();
 
         // 真实数据样本 (Label = 1)
         const real_data = try sampleRealData(&graph_d, batch_size, random);
@@ -175,12 +176,12 @@ pub fn main() !void {
         opt_d.step();
 
         const d_loss_val = loss_d.data[0];
-        graph_d.deinit();
 
         // --------------------------------------------------------------------
         // Step 2: 训练生成器 Generator (G)
         // --------------------------------------------------------------------
         var graph_g = autodiff.Graph.initDefault(allocator);
+        defer graph_g.deinit();
 
         const noise_g = try graph_g.randomNormal(&.{ batch_size, 2 }, random, 0.0, 1.0, false);
         const g_generated = try net_g.forward(&graph_g, noise_g);
@@ -196,14 +197,13 @@ pub fn main() !void {
         opt_g.step();
 
         const g_loss_val = loss_g.data[0];
-        graph_g.deinit();
 
         // --------------------------------------------------------------------
         // 定期打印 GAN 训练进度与生成样本分布统计信息
         // --------------------------------------------------------------------
         if (epoch % 50 == 0 or epoch == 1) {
             // 计算当前生成器的输出均值与标准差
-            var eval_graph = autodiff.Graph.initDefault(allocator);
+            var eval_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
             defer eval_graph.deinit();
 
             const eval_noise = try eval_graph.randomNormal(&.{ 500, 2 }, random, 0.0, 1.0, false);
