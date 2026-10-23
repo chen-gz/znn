@@ -1384,7 +1384,9 @@ pub const Gemma4Vocabulary = struct {
         return null;
     }
 
-    /// 将任意 UTF-8 文本贪婪切分为 Gemma 4 词元序列 (Greedy Longest Matching Tokenization)
+    /// 将任意 UTF-8 文本贪婪切分为 Gemma 4 词元序列 (Greedy Longest Matching Tokenization)。
+    /// 无法匹配任何词元的字符按 SentencePiece 字节回退规则编码为 `<0xNN>` 字节词元，绝不静默丢弃；
+    /// 词表缺少所需字节词元时返回 `error.UnencodableByte`。
     pub fn encode(self: *const Gemma4Vocabulary, allocator: std.mem.Allocator, text: []const u8) ![]usize {
         var tokens: std.ArrayList(usize) = .empty;
         errdefer tokens.deinit(allocator);
@@ -1433,13 +1435,25 @@ pub const Gemma4Vocabulary = struct {
                 try tokens.append(allocator, tok);
                 idx += best_len;
             } else {
-                // 单字节跳过保底
-                idx += 1;
+                // 字节回退 (Byte Fallback)：与 Gemma / SentencePiece 一致，把无法匹配的整个 UTF-8 字符逐字节编码为 `<0xNN>` 字节词元
+                const char_len: usize = std.unicode.utf8ByteSequenceLength(text[idx]) catch 1;
+                const end = @min(idx + char_len, text.len);
+                for (text[idx..end]) |byte| {
+                    try tokens.append(allocator, try self.byteToken(byte));
+                }
+                idx = end;
             }
             at_start = false;
         }
 
         return tokens.toOwnedSlice(allocator);
+    }
+
+    /// 查找单字节回退词元 `<0xNN>` (两位大写十六进制)；词表不含该字节词元时返回 `error.UnencodableByte`
+    pub fn byteToken(self: *const Gemma4Vocabulary, byte: u8) !usize {
+        var buf: [6]u8 = undefined;
+        const piece = std.fmt.bufPrint(&buf, "<0x{X:0>2}>", .{byte}) catch unreachable;
+        return self.findToken(piece) orelse error.UnencodableByte;
     }
 };
 
