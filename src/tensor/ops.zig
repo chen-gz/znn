@@ -31,71 +31,47 @@ pub const SVDResult = linalg_mod.SVDResult;
 
 pub fn array(allocator: std.mem.Allocator, shape_slice: []const usize, initial_data: []const f32) !*Tensor {
     const shape = try Shape.fromSlice(shape_slice);
-    const strides = computeContiguousStrides(shape);
     var total_size: usize = 1;
     for (shape_slice) |dim| {
         total_size *= dim;
     }
     if (total_size != initial_data.len) return error.ShapeMismatch;
 
-    const t = try allocator.create(Tensor);
-    t.* = Tensor{
-        .data = try allocator.alloc(f32, total_size),
-        .grad = &.{},
-        .shape = shape,
-        .strides = strides,
-        .requires_grad = false,
-        .creator = null,
-    };
+    const t = try allocUninit(allocator, shape);
     @memcpy(t.data, initial_data);
     return t;
 }
 
-pub fn zeros(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
-    const shape = try Shape.fromSlice(shape_slice);
-    const strides = computeContiguousStrides(shape);
+/// 按形状分配未初始化数据的连续张量；任一步分配失败都不会泄漏已分配的张量结构体
+pub fn allocUninit(allocator: std.mem.Allocator, shape: Shape) !*Tensor {
     var total_size: usize = 1;
-    for (shape_slice) |dim| {
+    for (shape.dims[0..shape.len]) |dim| {
         total_size *= dim;
     }
-
     const t = try allocator.create(Tensor);
+    errdefer allocator.destroy(t);
     t.* = Tensor{
         .data = try allocator.alloc(f32, total_size),
         .grad = &.{},
         .shape = shape,
-        .strides = strides,
+        .strides = computeContiguousStrides(shape),
         .requires_grad = false,
         .creator = null,
     };
-    @memset(t.data, 0.0);
     return t;
 }
 
-pub fn ones(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
-    const shape = try Shape.fromSlice(shape_slice);
-    const strides = computeContiguousStrides(shape);
-    var total_size: usize = 1;
-    for (shape_slice) |dim| {
-        total_size *= dim;
-    }
+pub fn zeros(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
+    return full(allocator, shape_slice, 0.0);
+}
 
-    const t = try allocator.create(Tensor);
-    t.* = Tensor{
-        .data = try allocator.alloc(f32, total_size),
-        .grad = &.{},
-        .shape = shape,
-        .strides = strides,
-        .requires_grad = false,
-        .creator = null,
-    };
-    @memset(t.data, 1.0);
-    return t;
+pub fn ones(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
+    return full(allocator, shape_slice, 1.0);
 }
 
 /// 创建所有元素初始化为指定标量值的张量 (np.full)
 pub fn full(allocator: std.mem.Allocator, shape_slice: []const usize, val: f32) !*Tensor {
-    const t = try zeros(allocator, shape_slice);
+    const t = try allocUninit(allocator, try Shape.fromSlice(shape_slice));
     @memset(t.data, val);
     return t;
 }
@@ -214,6 +190,7 @@ pub fn concat(allocator: std.mem.Allocator, inputs: []const *Tensor, dim: usize)
     out_shape.dims[dim] = concat_dim_total;
 
     const out = try zeros(allocator, out_shape.dims[0..rank]);
+    errdefer free(allocator, out);
 
     var outer_size: usize = 1;
     for (0..dim) |d| {
@@ -229,19 +206,20 @@ pub fn concat(allocator: std.mem.Allocator, inputs: []const *Tensor, dim: usize)
     defer allocator.free(contig_inputs);
     const needs_free = try allocator.alloc(bool, inputs.len);
     defer allocator.free(needs_free);
+    @memset(needs_free, false);
+    // 先注册释放逻辑：物化中途失败时，已物化的连续副本同样会被释放
+    defer {
+        for (contig_inputs, 0..) |t, i| {
+            if (needs_free[i]) free(allocator, t);
+        }
+    }
 
     for (inputs, 0..) |t, i| {
         if (t.isContiguous() and !t.is_view) {
             contig_inputs[i] = t;
-            needs_free[i] = false;
         } else {
             contig_inputs[i] = try t.contiguous(allocator);
             needs_free[i] = true;
-        }
-    }
-    defer {
-        for (contig_inputs, 0..) |t, i| {
-            if (needs_free[i]) free(allocator, t);
         }
     }
 
@@ -278,13 +256,15 @@ pub fn stack(allocator: std.mem.Allocator, inputs: []const *Tensor, axis: usize)
     const unsqueezed = try allocator.alloc(*Tensor, inputs.len);
     defer allocator.free(unsqueezed);
 
-    for (inputs, 0..) |t, i| {
-        unsqueezed[i] = try t.unsqueeze(axis, allocator);
-    }
+    var created: usize = 0;
     defer {
-        for (unsqueezed) |u| {
+        for (unsqueezed[0..created]) |u| {
             free(allocator, u);
         }
+    }
+    for (inputs) |t| {
+        unsqueezed[created] = try t.unsqueeze(axis, allocator);
+        created += 1;
     }
 
     // 沿 axis 拼接
@@ -329,8 +309,12 @@ pub fn split(allocator: std.mem.Allocator, input: *Tensor, num_splits: usize, di
     split_shape.dims[dim] = split_dim_size;
 
     const outputs = try allocator.alloc(*Tensor, num_splits);
+    errdefer allocator.free(outputs);
+    var created: usize = 0;
+    errdefer for (outputs[0..created]) |t| free(allocator, t);
     for (0..num_splits) |k| {
         outputs[k] = try zeros(allocator, split_shape.dims[0..rank]);
+        created += 1;
     }
 
     var outer_size: usize = 1;
@@ -531,7 +515,7 @@ pub fn solveRidgeAnalytical(
     if (x.len != n_samples * n_features or y.len != n_samples or out_w.len != n_features) {
         return error.ShapeMismatch;
     }
-
+    if (n_samples == 0) return error.EmptyInputs;
 
     const N = n_samples;
     const D = n_features;
@@ -563,15 +547,24 @@ pub fn solveRidgeAnalytical(
     defer allocator.free(v);
     @memset(v, 0.0);
 
+    // 每个样本的中心化特征行只计算一次；M 对称，只累加上三角再镜像到下三角
+    const dx = try allocator.alloc(f32, D);
+    defer allocator.free(dx);
     for (0..N) |i| {
         const dy = y[i] - mean_y;
+        for (dx, x[i * D ..][0..D], mean_x) |*d, x_val, m| d.* = x_val - m;
         for (0..D) |j| {
-            const dx_j = x[i * D + j] - mean_x[j];
+            const dx_j = dx[j];
             v[j] += dx_j * dy;
-            for (0..D) |k| {
-                const dx_k = x[i * D + k] - mean_x[k];
-                M[j * D + k] += dx_j * dx_k;
+            const m_row = M[j * D ..][0..D];
+            for (j..D) |k| {
+                m_row[k] += dx_j * dx[k];
             }
+        }
+    }
+    for (0..D) |j| {
+        for (0..j) |k| {
+            M[j * D + k] = M[k * D + j];
         }
     }
 
@@ -601,21 +594,31 @@ pub fn applyRoPE(
     head_dim: usize,
     base_freq: f32,
 ) void {
+    rotatePairsInPlace(x, seq_len, n_head, head_dim, base_freq, n_head * head_dim, head_dim);
+}
+
+/// 相邻配对 (2i, 2i+1) 的原地 RoPE 旋转内核：位置 m、头 h 的向量起始偏移为 `m * stride_pos + h * stride_head`。
+/// 频率 `theta_i = base^(-2i / head_dim)` 只依赖 i，在位置循环之外计算一次。
+fn rotatePairsInPlace(
+    x: []f32,
+    seq_len: usize,
+    n_head: usize,
+    head_dim: usize,
+    base_freq: f32,
+    stride_pos: usize,
+    stride_head: usize,
+) void {
     std.debug.assert(head_dim % 2 == 0);
     const half_dim = head_dim / 2;
-
-    for (0..seq_len) |m| {
-        const m_f32 = @as(f32, @floatFromInt(m));
-
-        for (0..half_dim) |i| {
-            const i_f32 = @as(f32, @floatFromInt(i));
-            const theta = 1.0 / std.math.pow(f32, base_freq, (2.0 * i_f32) / @as(f32, @floatFromInt(head_dim)));
-            const freq = m_f32 * theta;
+    for (0..half_dim) |i| {
+        const i_f32 = @as(f32, @floatFromInt(i));
+        const theta = 1.0 / std.math.pow(f32, base_freq, (2.0 * i_f32) / @as(f32, @floatFromInt(head_dim)));
+        for (0..seq_len) |m| {
+            const freq = @as(f32, @floatFromInt(m)) * theta;
             const cos_val = @cos(freq);
             const sin_val = @sin(freq);
-
             for (0..n_head) |h| {
-                const offset = (m * n_head + h) * head_dim + i * 2;
+                const offset = m * stride_pos + h * stride_head + i * 2;
                 const x1 = x[offset];
                 const x2 = x[offset + 1];
 
@@ -627,40 +630,23 @@ pub fn applyRoPE(
     }
 }
 
-/// 对三维 [T, n_head, head_dim] 或四维 [B, n_head, T, head_dim] 张量执行旋转位置编码 (Rotary Position Embedding, RoPE) 旋转
+/// 对三维 [T, n_head, head_dim] 或四维 [B, n_head, T, head_dim] 连续张量原地执行旋转位置编码 (Rotary Position Embedding, RoPE) 旋转
 pub fn applyRoPETensor(t: *Tensor, base_freq: f32) void {
+    std.debug.assert(t.isContiguous());
     if (t.shape.len == 3) {
         const seq_len = t.shape.dims[0];
         const n_head = t.shape.dims[1];
         const head_dim = t.shape.dims[2];
         applyRoPE(t.data, seq_len, n_head, head_dim, base_freq);
     } else if (t.shape.len == 4) {
-        // [B, n_head, T, head_dim] -> 遍历每个 batch
+        // [B, n_head, T, head_dim] -> 逐批次旋转，头跨度为 T * head_dim，位置跨度为 head_dim
         const B = t.shape.dims[0];
         const n_head = t.shape.dims[1];
         const T = t.shape.dims[2];
         const head_dim = t.shape.dims[3];
-        const half_dim = head_dim / 2;
-
+        const batch_len = n_head * T * head_dim;
         for (0..B) |b| {
-            for (0..T) |m| {
-                const m_f32 = @as(f32, @floatFromInt(m));
-                for (0..half_dim) |i| {
-                    const i_f32 = @as(f32, @floatFromInt(i));
-                    const theta = 1.0 / std.math.pow(f32, base_freq, (2.0 * i_f32) / @as(f32, @floatFromInt(head_dim)));
-                    const freq = m_f32 * theta;
-                    const cos_val = @cos(freq);
-                    const sin_val = @sin(freq);
-
-                    for (0..n_head) |h| {
-                        const offset = ((b * n_head + h) * T + m) * head_dim + i * 2;
-                        const x1 = t.data[offset];
-                        const x2 = t.data[offset + 1];
-                        t.data[offset] = x1 * cos_val - x2 * sin_val;
-                        t.data[offset + 1] = x1 * sin_val + x2 * cos_val;
-                    }
-                }
-            }
+            rotatePairsInPlace(t.data[b * batch_len ..][0..batch_len], T, n_head, head_dim, base_freq, head_dim, T * head_dim);
         }
     }
 }

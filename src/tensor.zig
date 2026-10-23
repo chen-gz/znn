@@ -11,6 +11,7 @@ pub const static = @import("tensor/static.zig");
 pub const linalg = @import("tensor/linalg.zig");
 pub const weight_init = @import("tensor/weight_init.zig");
 pub const quant = @import("tensor/quant.zig");
+pub const vec_math = @import("tensor/vec_math.zig");
 pub const Q4Block = quant.Q4Block;
 
 // --- Re-export Linear Algebra Results ---
