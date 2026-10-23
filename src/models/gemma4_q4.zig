@@ -9,6 +9,7 @@ const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const nn = @import("../nn.zig");
 const gemma4 = @import("gemma4.zig");
+const gemma4_gpu = @import("gemma4_gpu.zig");
 
 const Tensor = tensor.Tensor;
 const Q4Block = tensor.quant.Q4Block;
@@ -21,6 +22,9 @@ const Gemma4KVCache = gemma4.Gemma4KVCache;
 const ropeSplitHalf = gemma4.ropeSplitHalf;
 const dotF32Bf16 = gemma4.dotF32Bf16;
 const validateTokenIds = gemma4.validateTokenIds;
+const LmHeadWeights = backend.offload.LmHeadWeights;
+const Gemma4GpuLayer = gemma4_gpu.Gemma4GpuLayer;
+const Gemma4GpuContext = gemma4_gpu.Gemma4GpuContext;
 
 const freePersistentTensor = nn.core.freePersistentTensor;
 const deinitModel = nn.core.deinitModel;
@@ -286,15 +290,6 @@ pub const Gemma4Q4Attention = struct {
         errdefer deinitModel(&k_norm, allocator);
         const v_norm = try GemmaUnscaledRMSNorm.init(allocator, head_dim, rms_norm_eps);
 
-        const rope_theta: f32 = switch (attn_type) {
-            .sliding_attention => 10000.0,
-            .full_attention => 1000000.0,
-        };
-        const partial_rotary_factor: f32 = switch (attn_type) {
-            .sliding_attention => 1.0,
-            .full_attention => 0.25,
-        };
-
         return Gemma4Q4Attention{
             .q_proj = q_proj,
             .k_proj = k_proj,
@@ -309,8 +304,8 @@ pub const Gemma4Q4Attention = struct {
             .num_kv_heads = num_kv_heads,
             .head_dim = head_dim,
             .sliding_window = sliding_window,
-            .rope_theta = rope_theta,
-            .partial_rotary_factor = partial_rotary_factor,
+            .rope_theta = attn_type.ropeTheta(),
+            .partial_rotary_factor = attn_type.partialRotaryFactor(),
         };
     }
 
@@ -339,15 +334,6 @@ pub const Gemma4Q4Attention = struct {
         errdefer deinitModel(&k_norm, allocator);
         const v_norm = try GemmaUnscaledRMSNorm.init(allocator, head_dim, rms_norm_eps);
 
-        const rope_theta: f32 = switch (attn_type) {
-            .sliding_attention => 10000.0,
-            .full_attention => 1000000.0,
-        };
-        const partial_rotary_factor: f32 = switch (attn_type) {
-            .sliding_attention => 1.0,
-            .full_attention => 0.25,
-        };
-
         return Gemma4Q4Attention{
             .q_proj = q_proj,
             .k_proj = k_proj,
@@ -362,8 +348,8 @@ pub const Gemma4Q4Attention = struct {
             .num_kv_heads = num_kv_heads,
             .head_dim = head_dim,
             .sliding_window = sliding_window,
-            .rope_theta = rope_theta,
-            .partial_rotary_factor = partial_rotary_factor,
+            .rope_theta = attn_type.ropeTheta(),
+            .partial_rotary_factor = attn_type.partialRotaryFactor(),
         };
     }
 
@@ -758,9 +744,14 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         embed_u16_mmap: ?[]const u16 = null,
         layers: []Gemma4Q4DecoderLayer,
         norm: GemmaRMSNorm,
-        lm_head_weights: ?backend.offload.LmHeadWeights = null,
-        gpu_context: ?backend.offload.GpuModelContext = null,
-        gpu_needs_sync: bool = true,
+        /// 尚未交给 GPU 解码上下文的独立 LM Head：只在 GPU 上下文不存在 (未启用或构建失败) 时持有；
+        /// GPU 上下文构建成功后所有权转移至 `gpu_context` 并将本字段置空，两者绝不同时持有同一份权重
+        lm_head_weights: ?LmHeadWeights = null,
+        /// 端到端 GPU 解码上下文 (独占持有 GPU 解码层与 LM Head)
+        gpu_context: ?Gemma4GpuContext = null,
+        /// 键值缓存最新内容的所在位置：GPU 路径推进后 CPU 层缓存只更新游标，内容在切回 CPU 解码前从 GPU 同步回来；
+        /// CPU 路径推进后 GPU 缓存在下一次 GPU 解码前从 CPU 同步过去
+        kv_owner: KvOwner = .cpu,
 
         name: ?[]const u8 = null,
         module_type: []const u8 = "Gemma4Q4ForCausalLM",
@@ -799,11 +790,11 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 .embed_tokens = embed_tokens,
                 .layers = layers,
                 .norm = norm,
-                .lm_head_weights = null,
-                .gpu_context = null,
-                .gpu_needs_sync = true,
             };
         }
+
+        /// 键值缓存最新内容的所在设备
+        pub const KvOwner = enum { cpu, gpu };
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             if (self.gpu_context) |*ctx| {
@@ -996,24 +987,40 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             loadBf16Into(layer.layer_scalar.data[0..1], bytes[cursor .. cursor + 2]);
         }
 
-        /// 直通布局中单个投影矩阵的三段式切片 (w_q, scales, biases)
-        const DirectMatrix = struct {
-            wq: []const u8,
-            sc: []const u8,
-            bi: []const u8,
+        /// 从直通布局字节流中切出单个投影矩阵的三段式切片 (w_q, scales, biases) 并推进游标
+        fn takeDirectMatrix(bytes: []const u8, cursor: *usize, blocks: usize) Gemma4GpuLayer.DirectMatrix {
+            const wq_len = blocks * 16;
+            const sb_len = blocks * 2;
+            const start = cursor.*;
+            cursor.* += wq_len + 2 * sb_len;
+            return .{
+                .wq = bytes[start .. start + wq_len],
+                .sc = bytes[start + wq_len .. start + wq_len + sb_len],
+                .bi = bytes[start + wq_len + sb_len .. start + wq_len + 2 * sb_len],
+            };
+        }
 
-            fn take(bytes: []const u8, cursor: *usize, blocks: usize) DirectMatrix {
-                const wq_len = blocks * 16;
-                const sb_len = blocks * 2;
-                const start = cursor.*;
-                cursor.* += wq_len + 2 * sb_len;
-                return .{
-                    .wq = bytes[start .. start + wq_len],
-                    .sc = bytes[start + wq_len .. start + wq_len + sb_len],
-                    .bi = bytes[start + wq_len + sb_len .. start + wq_len + 2 * sb_len],
-                };
-            }
-        };
+        /// 单层 CPU 层归一化参数视图 (供 GPU 解码层复制为常驻显存权重)
+        fn layerNormWeights(layer: *const Gemma4Q4DecoderLayer) Gemma4GpuLayer.NormWeights {
+            const hd = layer.self_attn.head_dim;
+            return .{
+                .input = layer.input_layernorm.weight.data,
+                .q = layer.self_attn.q_norm.weight.data[0..hd],
+                .k = layer.self_attn.k_norm.weight.data[0..hd],
+                .post_attn = layer.post_attention_layernorm.weight.data,
+                .pre_mlp = layer.pre_feedforward_layernorm.weight.data,
+                .post_mlp = layer.post_feedforward_layernorm.weight.data,
+            };
+        }
+
+        /// 由已构建的投影权重组装 GPU 解码层；失败时释放投影权重
+        fn assembleGpuLayer(layer: *const Gemma4Q4DecoderLayer, i: usize, projections: Gemma4GpuLayer.Projections) !Gemma4GpuLayer {
+            var proj = projections;
+            return Gemma4GpuLayer.init(config, i, proj, layerNormWeights(layer), layer.layer_scalar.data[0]) catch |err| {
+                proj.deinit();
+                return err;
+            };
+        }
 
         /// 从直通布局加载单层：CPU 侧仅保留层归一化参数，投影矩阵直接构建为 GPU 常驻量化权重
         fn loadDirectSingleLayer(
@@ -1021,10 +1028,10 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             mmap_bytes: []const u8,
             cursor_start: usize,
             i: usize,
-            out_gpu: *backend.offload.GpuLayerWeights,
+            out_gpu: *Gemma4GpuLayer,
         ) !Gemma4Q4DecoderLayer {
             const spec = config.layerSpec(i);
-            const d = layerDims(i);
+            const d = gemma4_gpu.ProjectionDims.of(config, i);
             const H = config.hidden_size;
 
             var layer = try Gemma4Q4DecoderLayer.initEmpty(
@@ -1042,46 +1049,13 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             loadLayerNorms(&layer, mmap_bytes[cursor_start..], spec.head_dim);
 
             var cursor = cursor_start + directLayerNormsBytes(i);
-            const qkv = DirectMatrix.take(mmap_bytes, &cursor, ((d.q_dim + d.kv_dim + d.v_dim) * H) / Q4Block.QK);
-            const o = DirectMatrix.take(mmap_bytes, &cursor, (H * d.q_dim) / Q4Block.QK);
-            const fgu = DirectMatrix.take(mmap_bytes, &cursor, (config.intermediate_size * 2 * H) / Q4Block.QK);
-            const down = DirectMatrix.take(mmap_bytes, &cursor, (H * config.intermediate_size) / Q4Block.QK);
-
-            out_gpu.* = try backend.offload.GpuLayerWeights.initFromDirect(
-                qkv.wq,
-                qkv.sc,
-                qkv.bi,
-                o.wq,
-                o.sc,
-                o.bi,
-                fgu.wq,
-                fgu.sc,
-                fgu.bi,
-                down.wq,
-                down.sc,
-                down.bi,
-                H,
-                config.intermediate_size,
-                d.q_dim,
-                d.kv_dim,
-                d.v_dim,
-                layer.input_layernorm.weight.data,
-                layer.self_attn.q_norm.weight.data[0..spec.head_dim],
-                layer.self_attn.k_norm.weight.data[0..spec.head_dim],
-                layer.post_attention_layernorm.weight.data,
-                layer.pre_feedforward_layernorm.weight.data,
-                layer.post_feedforward_layernorm.weight.data,
-                layer.layer_scalar.data[0],
-                if (spec.attn_type == .full_attention) 1 else 0,
-                layer.self_attn.sliding_window,
-                layer.self_attn.num_heads,
-                layer.self_attn.num_kv_heads,
-                spec.head_dim,
-                layer.self_attn.rope_theta,
-                layer.self_attn.partial_rotary_factor,
-                config.rms_norm_eps,
-                null,
-            );
+            const direct = Gemma4GpuLayer.DirectSlices{
+                .qkv = takeDirectMatrix(mmap_bytes, &cursor, ((d.q_dim + d.kv_dim + d.v_dim) * H) / Q4Block.QK),
+                .o = takeDirectMatrix(mmap_bytes, &cursor, (H * d.q_dim) / Q4Block.QK),
+                .gate_up = takeDirectMatrix(mmap_bytes, &cursor, (config.intermediate_size * 2 * H) / Q4Block.QK),
+                .down = takeDirectMatrix(mmap_bytes, &cursor, (H * config.intermediate_size) / Q4Block.QK),
+            };
+            out_gpu.* = try assembleGpuLayer(&layer, i, try Gemma4GpuLayer.Projections.fromDirect(config, i, direct));
             return layer;
         }
 
@@ -1090,6 +1064,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             /// 最终层 LM Head (分类头) 量化模式：
             /// 骨干 48 层始终为 Q4 (7.59 GB)，LM Head 默认采用 .q8 (1.07 GB) 保障 100% 精度一致性并降低 50% 显存；
             /// 也可指定为 .bf16 (2.01 GB) 或 .q4 (530 MB)。
+            /// 量化模式与词表形状不兼容 (hidden_size 不整除分组长度) 时加载返回 `error.UnsupportedQuantMode`。
             lm_head_mode: backend.offload.QuantMode = .q8,
             /// 是否在加载阶段自动执行 Metal 计算管线预热，消除推理首字着色器编译延迟 (TTFT)
             warmup: bool = true,
@@ -1103,12 +1078,6 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         /// 支持魔数 ZNNQ4G02 (分块量化格式) 与 ZNNQ4D02 (直通预重排格式)
         pub fn loadFromMmap(allocator: std.mem.Allocator, mmap_bytes: []const u8) !Self {
             return loadFromMmapWithOptions(allocator, mmap_bytes, .{});
-        }
-
-        fn nowNs() u64 {
-            var ts: std.posix.system.timespec = undefined;
-            _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
-            return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
         }
 
         /// 支持自定义选项从 4-bit 量化二进制映射切片 (mmap_bytes) 零拷贝加载全部 48 层权重与层归一化参数
@@ -1127,8 +1096,8 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             const expected_len = if (is_direct) computeExpectedDirectFileSize() else computeExpectedFileSize();
             if (mmap_bytes.len < expected_len) return error.IncompleteModelFile;
+            try LmHeadWeights.validateMode(options.lm_head_mode, config.vocab_size, config.hidden_size);
 
-            const t_start = nowNs();
             _ = std.posix.system.madvise(@alignCast(@ptrCast(@constCast(mmap_bytes.ptr))), mmap_bytes.len, std.posix.MADV.WILLNEED);
 
             // 1. 最终层 RMSNorm 权重 (BF16)
@@ -1144,14 +1113,16 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             if (is_direct) {
                 // 直通零拷贝极速初始化 (Direct Layout Fast Path, 1.5s 秒开)
-                const gpu_layers = try allocator.alloc(backend.offload.GpuLayerWeights, config.num_hidden_layers);
-                errdefer allocator.free(gpu_layers);
+                // GPU 上下文构建成功后接管 gpu_layers 与 LM Head，此后不再由本函数释放
+                var gpu_owned_here = true;
+                const gpu_layers = try allocator.alloc(Gemma4GpuLayer, config.num_hidden_layers);
+                errdefer if (gpu_owned_here) allocator.free(gpu_layers);
                 const layers = try allocator.alloc(Gemma4Q4DecoderLayer, config.num_hidden_layers);
                 errdefer allocator.free(layers);
                 var loaded: usize = 0;
-                errdefer for (layers[0..loaded], gpu_layers[0..loaded]) |*layer, *gl| {
-                    layer.deinit(allocator);
-                    gl.deinit();
+                errdefer for (layers[0..loaded]) |*layer| layer.deinit(allocator);
+                errdefer if (gpu_owned_here) {
+                    for (gpu_layers[0..loaded]) |*gl| gl.deinit();
                 };
 
                 const offsets = computeDirectLayerOffsets();
@@ -1159,52 +1130,39 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     layers[i] = try loadDirectSingleLayer(allocator, mmap_bytes, offsets.offsets[i], i, &gpu_layers[i]);
                     loaded += 1;
                 }
-                const t_layers = nowNs();
 
                 // 创建 LM Head (直通布局下模型完全依赖 GPU 上下文，LM Head 构建失败必须向上传播)
-                var lm_head_weights = try backend.offload.LmHeadWeights.initWithMode(
+                var lm_head_weights = try LmHeadWeights.initWithMode(
                     embed_u16_slice,
                     config.vocab_size,
                     config.hidden_size,
                     options.lm_head_mode,
                     null,
                 );
-                errdefer lm_head_weights.deinit();
-                const t_lm_head = nowNs();
+                errdefer if (gpu_owned_here) lm_head_weights.deinit();
 
-                // GPU 上下文接管 gpu_layers 及其中各层权重的所有权
-                const gpu_context = try backend.offload.GpuModelContext.init(
+                // GPU 上下文成功构建后接管 gpu_layers (及其中各层权重) 与 LM Head 的所有权；失败时由上方 errdefer 释放
+                const gpu_context = try Gemma4GpuContext.init(
                     allocator,
+                    config,
                     gpu_layers,
                     norm.weight.data,
-                    config.rms_norm_eps,
                     lm_head_weights,
-                    config.hidden_size,
-                    config.vocab_size,
                     config.max_position_embeddings,
                 );
+                gpu_owned_here = false;
                 var res = Self{
                     .embed_tokens = embed_tokens,
                     .embed_u16_mmap = embed_u16_slice,
                     .layers = layers,
                     .norm = norm,
-                    .lm_head_weights = lm_head_weights,
                     .gpu_context = gpu_context,
-                    .gpu_needs_sync = true,
                 };
-                const t_gpu_ctx = nowNs();
 
+                // 预热只是可选的着色器预编译，失败不影响推理正确性
                 if (options.warmup) {
                     res.gpu_context.?.warmup(embed_u16_slice, null) catch {};
                 }
-                const t_warmup = nowNs();
-
-                std.debug.print("   ⏱️ [Direct 加载各阶段耗时拆解]:\n", .{});
-                std.debug.print("      - 48 层结构与权重映射耗时: {d:.2} ms\n", .{@as(f64, @floatFromInt(t_layers - t_start)) / 1e6});
-                std.debug.print("      - LM Head 词表矩阵映射耗时: {d:.2} ms\n", .{@as(f64, @floatFromInt(t_lm_head - t_layers)) / 1e6});
-                std.debug.print("      - GPU 上下文与宏内核初始化耗时: {d:.2} ms\n", .{@as(f64, @floatFromInt(t_gpu_ctx - t_lm_head)) / 1e6});
-                std.debug.print("      - 预热阶段耗时: {d:.2} ms\n", .{@as(f64, @floatFromInt(t_warmup - t_gpu_ctx)) / 1e6});
-
                 return res;
             }
 
@@ -1244,10 +1202,10 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 loaded += 1;
             }
 
-            // LM Head 不可用时 sampleNextToken 自动回退至 CPU / 逐块 GPU 投影路径
-            var lm_head_weights: ?backend.offload.LmHeadWeights = null;
+            // 量化模式已在上方校验；GPU 资源不足等运行期失败时 LM Head 不可用，sampleNextToken 自动回退至 CPU 投影路径
+            var lm_head_weights: ?LmHeadWeights = null;
             if (backend.offload.isAvailable()) {
-                lm_head_weights = backend.offload.LmHeadWeights.initWithMode(
+                lm_head_weights = LmHeadWeights.initWithMode(
                     embed_u16_slice,
                     config.vocab_size,
                     config.hidden_size,
@@ -1284,68 +1242,26 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             return res;
         }
 
-        fn initSingleGpuLayer(
-            self: *Self,
-            allocator: std.mem.Allocator,
-            layer: *Gemma4Q4DecoderLayer,
-            i: usize,
-        ) !backend.offload.GpuLayerWeights {
-            _ = self;
-            _ = i;
-            const is_full = (layer.self_attn.attn_type == .full_attention);
-            const q_bytes = std.mem.sliceAsBytes(layer.self_attn.q_proj.blocks);
-            const k_bytes = std.mem.sliceAsBytes(layer.self_attn.k_proj.blocks);
-            const v_bytes = if (!is_full) std.mem.sliceAsBytes(layer.self_attn.v_proj.?.blocks) else null;
-            const o_bytes = std.mem.sliceAsBytes(layer.self_attn.o_proj.blocks);
-            const gate_bytes = std.mem.sliceAsBytes(layer.mlp.gate_proj.blocks);
-            const up_bytes = std.mem.sliceAsBytes(layer.mlp.up_proj.blocks);
-            const down_bytes = std.mem.sliceAsBytes(layer.mlp.down_proj.blocks);
-
-            const hd = layer.self_attn.head_dim;
-            const q_dim = layer.self_attn.num_heads * hd;
-            const kv_dim = layer.self_attn.num_kv_heads * hd;
-
-            return backend.offload.GpuLayerWeights.initFromBlocks(
-                allocator,
-                q_bytes,
-                k_bytes,
-                v_bytes,
-                o_bytes,
-                gate_bytes,
-                up_bytes,
-                down_bytes,
-                config.hidden_size,
-                config.intermediate_size,
-                q_dim,
-                kv_dim,
-                layer.input_layernorm.weight.data,
-                layer.self_attn.q_norm.weight.data[0..hd],
-                layer.self_attn.k_norm.weight.data[0..hd],
-                layer.post_attention_layernorm.weight.data,
-                layer.pre_feedforward_layernorm.weight.data,
-                layer.post_feedforward_layernorm.weight.data,
-                layer.layer_scalar.data[0],
-                if (is_full) 1 else 0,
-                layer.self_attn.sliding_window,
-                layer.self_attn.num_heads,
-                layer.self_attn.num_kv_heads,
-                hd,
-                layer.self_attn.rope_theta,
-                layer.self_attn.partial_rotary_factor,
-                config.rms_norm_eps,
-                null,
-            );
+        fn initSingleGpuLayer(allocator: std.mem.Allocator, layer: *const Gemma4Q4DecoderLayer, i: usize) !Gemma4GpuLayer {
+            const blocks = Gemma4GpuLayer.BlockSlices{
+                .q = std.mem.sliceAsBytes(layer.self_attn.q_proj.blocks),
+                .k = std.mem.sliceAsBytes(layer.self_attn.k_proj.blocks),
+                .v = if (layer.self_attn.v_proj) |vp| std.mem.sliceAsBytes(vp.blocks) else null,
+                .o = std.mem.sliceAsBytes(layer.self_attn.o_proj.blocks),
+                .gate = std.mem.sliceAsBytes(layer.mlp.gate_proj.blocks),
+                .up = std.mem.sliceAsBytes(layer.mlp.up_proj.blocks),
+                .down = std.mem.sliceAsBytes(layer.mlp.down_proj.blocks),
+            };
+            return assembleGpuLayer(layer, i, try Gemma4GpuLayer.Projections.fromBlocks(allocator, config, i, blocks));
         }
 
-        /// 为全模型所有 4-bit 量化层构建常驻 GPU 显存解码上下文 (GPU Model Context)
+        /// 为全模型所有 4-bit 量化层构建常驻 GPU 显存解码上下文 (GPU Model Context)。
+        /// 已存在上下文时直接返回；构建成功后独立持有的 LM Head 所有权转移至上下文，失败时仍由模型持有。
         pub fn initGpuContext(self: *Self, allocator: std.mem.Allocator) !void {
+            if (self.gpu_context != null) return;
             const lm_head = self.lm_head_weights orelse return error.LmHeadUnavailable;
-            if (self.gpu_context != null) {
-                self.gpu_context.?.deinit();
-                self.gpu_context = null;
-            }
 
-            const gpu_layers = try allocator.alloc(backend.offload.GpuLayerWeights, self.layers.len);
+            const gpu_layers = try allocator.alloc(Gemma4GpuLayer, self.layers.len);
             errdefer allocator.free(gpu_layers);
             var init_idx: usize = 0;
             errdefer {
@@ -1359,14 +1275,14 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             if (num_threads <= 1 or self.layers.len <= 2) {
                 for (self.layers, 0..) |*layer, i| {
-                    gpu_layers[i] = try self.initSingleGpuLayer(allocator, layer, i);
+                    gpu_layers[i] = try initSingleGpuLayer(allocator, layer, i);
                     init_idx += 1;
                 }
             } else {
                 const Worker = struct {
                     model: *Self,
                     alloc: std.mem.Allocator,
-                    dest: []backend.offload.GpuLayerWeights,
+                    dest: []Gemma4GpuLayer,
                     start: usize,
                     end: usize,
                     /// 已成功构建的层数 (dest[start .. start + done])，出错时用于精确回收
@@ -1375,7 +1291,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
                     fn run(ctx: *@This()) void {
                         for (ctx.start..ctx.end) |i| {
-                            ctx.dest[i] = ctx.model.initSingleGpuLayer(ctx.alloc, &ctx.model.layers[i], i) catch |err| {
+                            ctx.dest[i] = initSingleGpuLayer(ctx.alloc, &ctx.model.layers[i], i) catch |err| {
                                 ctx.err = err;
                                 return;
                             };
@@ -1424,17 +1340,17 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 init_idx = self.layers.len;
             }
 
-            self.gpu_context = try backend.offload.GpuModelContext.init(
+            self.gpu_context = try Gemma4GpuContext.init(
                 allocator,
+                config,
                 gpu_layers,
                 self.norm.weight.data,
-                config.rms_norm_eps,
                 lm_head,
-                config.hidden_size,
-                config.vocab_size,
                 config.max_position_embeddings,
             );
-            self.gpu_needs_sync = true;
+            // LM Head 所有权已转移至 GPU 上下文
+            self.lm_head_weights = null;
+            self.kv_owner = .cpu;
         }
 
         /// 为全模型所有 4-bit 量化层启用图形处理器 (Graphics Processing Unit, GPU) 硬件加速卸载
@@ -1443,50 +1359,8 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             try self.initGpuContext(allocator);
         }
 
-        const BestToken = struct {
-            id: usize,
-            val: f32,
-        };
-
-        const ArgmaxContext = struct {
-            embed_u16: []const u16,
-            h_last: []const f32,
-            hidden_size: usize,
-            recent_bitset: []const u64,
-            repetition_penalty: f32,
-
-            fn mapFn(ctx: @This(), start_v: usize, end_v: usize) BestToken {
-                var max_val: f32 = -1e30;
-                var max_id: usize = start_v;
-                const hidden = ctx.hidden_size;
-
-                for (start_v..end_v) |v| {
-                    if (v == 0 or (v >= 258880 and v <= 258884)) continue;
-
-                    var dot = dotF32Bf16(ctx.h_last, ctx.embed_u16[v * hidden .. (v + 1) * hidden]);
-
-                    if (ctx.repetition_penalty > 1.0 and (v / 64) < ctx.recent_bitset.len and (ctx.recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
-                        if (dot > 0.0) {
-                            dot /= ctx.repetition_penalty;
-                        } else {
-                            dot *= ctx.repetition_penalty;
-                        }
-                    }
-
-                    if (dot > max_val) {
-                        max_val = dot;
-                        max_id = v;
-                    }
-                }
-
-                return .{ .id = max_id, .val = max_val };
-            }
-
-            fn reduceFn(a: BestToken, b: BestToken) BestToken {
-                return if (b.val > a.val) b else a;
-            }
-        };
-
+        /// 对最终隐状态 h_last 执行词表投影并贪婪选取下一个词元：截断后惩罚 (仅最近 repetition_window 个词元受罚)，
+        /// 排除 `config.sampling_excluded_tokens`
         fn sampleNextToken(
             self: *const Self,
             h_last: []const f32,
@@ -1495,52 +1369,38 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             repetition_penalty: f32,
             graph: *autodiff.Graph,
         ) !usize {
-            const recent_window = if (recent_tokens.len > 64) recent_tokens[recent_tokens.len - 64 ..] else recent_tokens;
-
-            // 1. 优先通过 GPU 卸载执行巨型词表投影与采样 (消除 2.3 秒延迟至 5~10 ms)
+            const recent = gemma4.recentWindow(recent_tokens);
+            // 1. 优先通过 GPU 常驻 LM Head 执行巨型词表投影与采样 (消除 2.3 秒延迟至 5~10 ms)；GPU 执行失败时回退 CPU
             if (graph.options.device == .gpu and backend.offload.isAvailable()) {
-                if (self.lm_head_weights) |weights| {
-                    if (weights.sampleNext(h_last, recent_window, repetition_penalty, graph.options.mlx_stream)) |tok| {
-                        return tok;
-                    } else |_| {}
-                } else {
-                    if (backend.offload.lmHeadArgmax(h_last, embed_u16, config.vocab_size, config.hidden_size, recent_window, repetition_penalty, graph.options.mlx_stream)) |tok| {
-                        return tok;
-                    } else |_| {}
-                }
+                if (self.sampleNextTokenGpu(h_last, embed_u16, recent, repetition_penalty, graph)) |tok| {
+                    return tok;
+                } else |_| {}
             }
 
             // 2. CPU 确定性多核并行回退路径
-            const bitset_words = (config.vocab_size + 63) / 64;
-            var recent_bitset: [bitset_words]u64 = @splat(0);
-            if (repetition_penalty > 1.0) {
-                for (recent_window) |rec| {
-                    if (rec < config.vocab_size) {
-                        recent_bitset[rec / 64] |= (@as(u64, 1) << @intCast(rec % 64));
-                    }
-                }
+            return gemma4.greedyLmHeadCpu(config, u16, graph, embed_u16, h_last, recent, repetition_penalty);
+        }
+
+        fn sampleNextTokenGpu(
+            self: *const Self,
+            h_last: []const f32,
+            embed_u16: []const u16,
+            recent_tokens: []const usize,
+            repetition_penalty: f32,
+            graph: *autodiff.Graph,
+        ) !usize {
+            const stream = graph.options.mlx_stream;
+            if (self.gpu_context) |*ctx| return ctx.sampleHidden(h_last, recent_tokens, repetition_penalty, stream);
+
+            var mask = try backend.offload.TokenExclusionMask.init(graph.arenaAllocator(), config.vocab_size, config.sampling_excluded_tokens);
+            defer mask.deinit();
+            if (self.lm_head_weights) |*w| {
+                return gemma4_gpu.selectTokenFromHidden(w, &mask, config, h_last, recent_tokens, repetition_penalty, stream);
             }
-
-            const ctx = ArgmaxContext{
-                .embed_u16 = embed_u16,
-                .h_last = h_last,
-                .hidden_size = config.hidden_size,
-                .recent_bitset = &recent_bitset,
-                .repetition_penalty = repetition_penalty,
-            };
-
-            const grain: usize = 4096;
-            const best = try graph.executor().parallelReduce(
-                BestToken,
-                config.vocab_size,
-                grain,
-                ctx,
-                ArgmaxContext.mapFn,
-                ArgmaxContext.reduceFn,
-                BestToken{ .id = 0, .val = -1e30 },
-            );
-
-            return best.id;
+            // 未构建常驻 LM Head 时临时构建一次 BF16 词表矩阵
+            var tmp = try LmHeadWeights.init(embed_u16, config.vocab_size, config.hidden_size, stream);
+            defer tmp.deinit();
+            return gemma4_gpu.selectTokenFromHidden(&tmp, &mask, config, h_last, recent_tokens, repetition_penalty, stream);
         }
 
         /// 从模型映射字节中切出 BF16 词表嵌入矩阵 [vocab_size, hidden_size]
@@ -1626,15 +1486,16 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const embed_u16 = try embedSliceFromMmap(mmap_bytes);
 
             if (graph.options.device == .gpu and self.gpu_context != null) {
-                self.gpu_needs_sync = false;
                 const next_tok = try self.gpu_context.?.prefill(prompt_tokens, embed_u16, repetition_penalty, graph.options.mlx_stream);
+                // 键值内容只存在于 GPU：CPU 层缓存仅推进游标，切回 CPU 解码前由 syncCpuCache 写回内容
+                self.kv_owner = .gpu;
                 for (cache.layers) |*cl| {
                     cl.curr_len = T;
                 }
                 return next_tok;
             }
 
-            self.gpu_needs_sync = true;
+            self.kv_owner = .cpu;
 
             // 1. 词表嵌入查表
             const tok_emb = try embedScaledBf16(graph, embed_u16, prompt_tokens);
@@ -1652,6 +1513,23 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             return self.sampleNextToken(last_row, embed_u16, prompt_tokens, repetition_penalty, graph);
         }
 
+        /// GPU 解码前确保 GPU 键值缓存持有最新内容：上一次推进发生在 CPU 时先从 CPU 层缓存同步过去
+        fn syncGpuCache(self: *Self, cache: *const Gemma4KVCache) !*Gemma4GpuContext {
+            const gpu_ctx = &self.gpu_context.?;
+            if (self.kv_owner == .cpu) try gpu_ctx.syncCacheFromCpu(cache);
+            self.kv_owner = .gpu;
+            return gpu_ctx;
+        }
+
+        /// CPU 解码前确保 CPU 层缓存持有最新内容：上一次推进发生在 GPU 时先把 GPU 键值缓存写回 CPU
+        fn syncCpuCache(self: *Self, cache: *Gemma4KVCache) !void {
+            if (self.kv_owner == .gpu) {
+                const gpu_ctx = if (self.gpu_context) |*ctx| ctx else return error.KvCacheUnavailable;
+                try gpu_ctx.syncCacheToCpu(cache);
+            }
+            self.kv_owner = .cpu;
+        }
+
         /// 增量解码阶段 (Decode Step)：输入最新生成的单个词元 ID，基于键值缓存 (Key-Value Cache, KVCache) 高效自回归生成下一个词元
         pub fn decodeStep(
             self: *Self,
@@ -1667,33 +1545,14 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const embed_u16 = try embedSliceFromMmap(mmap_bytes);
 
             if (graph.options.device == .gpu and self.gpu_context != null) {
-                var gpu_ctx = &self.gpu_context.?;
-                if (self.gpu_needs_sync) {
-                    const k_slices = try graph.arenaAllocator().alloc([]const f32, self.layers.len);
-                    const v_slices = try graph.arenaAllocator().alloc([]const f32, self.layers.len);
-                    for (cache.layers, 0..) |*cl, idx| {
-                        k_slices[idx] = cl.k;
-                        v_slices[idx] = cl.v;
-                    }
-                    try gpu_ctx.syncCacheFromCpu(k_slices, v_slices, cache.layers[0].curr_len);
-                    self.gpu_needs_sync = false;
-                }
-
-                const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
-                const emb_row = embed_u16[token * config.hidden_size .. (token + 1) * config.hidden_size];
-                var tok_emb_buf: [config.hidden_size]f32 = undefined;
-                for (0..config.hidden_size) |d| {
-                    const b: tensor.bf16 = .{ .bits = emb_row[d] };
-                    tok_emb_buf[d] = b.toF32() * sqrt_d;
-                }
-
-                const recent_window = if (recent_tokens.len > 64) recent_tokens[recent_tokens.len - 64 ..] else recent_tokens;
-                const next_tok = try gpu_ctx.decodeStep(&tok_emb_buf, recent_window, repetition_penalty, graph.options.mlx_stream);
+                const gpu_ctx = try self.syncGpuCache(cache);
+                const next_tok = try gpu_ctx.decodeStep(token, embed_u16, recent_tokens, repetition_penalty, graph.options.mlx_stream);
                 for (cache.layers) |*cl| {
                     cl.curr_len += 1;
                 }
                 return next_tok;
             }
+            try self.syncCpuCache(cache);
 
             // 1. 单个词元嵌入查表 [1, 1, hidden_size]
             const tok_emb = try embedScaledBf16(graph, embed_u16, &tokens);
@@ -1729,23 +1588,11 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const embed_u16 = try embedSliceFromMmap(mmap_bytes);
 
             if (graph.options.device == .gpu and self.gpu_context != null) {
-                var gpu_ctx = &self.gpu_context.?;
-                if (self.gpu_needs_sync) {
-                    const k_slices = try graph.arenaAllocator().alloc([]const f32, self.layers.len);
-                    const v_slices = try graph.arenaAllocator().alloc([]const f32, self.layers.len);
-                    for (cache.layers, 0..) |*cl, idx| {
-                        k_slices[idx] = cl.k;
-                        v_slices[idx] = cl.v;
-                    }
-                    try gpu_ctx.syncCacheFromCpu(k_slices, v_slices, cache.layers[0].curr_len);
-                    self.gpu_needs_sync = false;
-                }
-
-                const recent_window = if (recent_tokens.len > 64) recent_tokens[recent_tokens.len - 64 ..] else recent_tokens;
+                const gpu_ctx = try self.syncGpuCache(cache);
                 const accepted_count = try gpu_ctx.decodeSpeculative(
                     input_tokens,
                     embed_u16,
-                    recent_window,
+                    gemma4.recentWindow(recent_tokens),
                     repetition_penalty,
                     graph.options.mlx_stream,
                     accepted_buf,

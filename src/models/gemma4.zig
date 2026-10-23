@@ -1,4 +1,5 @@
 const std = @import("std");
+const backend = @import("../backend.zig");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const nn = @import("../nn.zig");
@@ -13,6 +14,8 @@ const createPersistentTensor = core.createPersistentTensor;
 const freePersistentTensor = core.freePersistentTensor;
 const deinitModel = core.deinitModel;
 const enterModuleScope = core.enterModuleScope;
+const sampling = backend.sampling;
+const TokenRange = sampling.TokenRange;
 
 // ============================================================================
 // Gemma 4 专用非通用算子 (Split-Half & Proportional RoPE)
@@ -231,6 +234,119 @@ pub fn validateTokenIds(tokens: []const usize, vocab_size: usize) !void {
 }
 
 // ============================================================================
+// 采样共享核心：最终对数几率截断与重复惩罚 (F32 / Q4 CPU 路径与 GPU 路径共用同一顺序)
+// ============================================================================
+
+/// 最终对数几率截断 (Final Logit Softcapping)：cap * tanh(x / cap)；cap <= 0 时不截断
+pub fn softcapLogit(raw: f32, cap: f32) f32 {
+    if (cap <= 0.0) return raw;
+    return cap * std.math.tanh(raw / cap);
+}
+
+/// 采样使用的最终对数几率：先施加最终对数几率截断，再对最近出现过的词元施加重复惩罚，
+/// 与 Hugging Face (logits 处理器作用于截断后的输出) 及 E4B GPU 路径的顺序一致
+pub fn samplingLogit(raw: f32, cap: f32, penalized: bool, repetition_penalty: f32) f32 {
+    const capped = softcapLogit(raw, cap);
+    return if (penalized) sampling.applyRepetitionPenalty(capped, repetition_penalty) else capped;
+}
+
+/// 参与重复惩罚的最近词元窗口长度
+pub const repetition_window: usize = 64;
+
+/// 取最近 repetition_window 个词元作为重复惩罚窗口
+pub fn recentWindow(tokens: []const usize) []const usize {
+    return if (tokens.len > repetition_window) tokens[tokens.len - repetition_window ..] else tokens;
+}
+
+/// 词表投影、最终对数几率截断、重复惩罚与贪婪采样融合的 CPU 多核并行实现 (Fused LM Head Projection & Greedy Sampling)
+/// embed 为 [vocab_size, hidden_size] 行主序词表嵌入矩阵，元素类型为单精度浮点 (f32) 或脑浮点 16 (Brain Floating Point 16, BF16) 原始位 (u16)。
+/// 每个词元的最终得分为 `samplingLogit(点积)` (截断后惩罚，recent_tokens 中的词元全部受罚，窗口由调用方决定)，
+/// 跳过 `cfg.sampling_excluded_tokens` 中的词元，返回取得最大最终得分的词元 ID (并列时取较小 ID，NaN 被忽略)。
+/// 截断函数单调递增，未受罚词元直接按原始点积比较，每个分块只对块内最优者与受罚词元计算一次截断，避免逐词元 tanh 开销。
+pub fn greedyLmHeadCpu(
+    comptime cfg: Gemma4Config,
+    comptime Elem: type,
+    graph: *autodiff.Graph,
+    embed: []const Elem,
+    h_last: []const f32,
+    recent_tokens: []const usize,
+    repetition_penalty: f32,
+) !usize {
+    comptime std.debug.assert(Elem == f32 or Elem == u16);
+    if (h_last.len != cfg.hidden_size or embed.len < cfg.vocab_size * cfg.hidden_size) return error.ShapeMismatch;
+
+    const BestToken = struct {
+        id: usize,
+        val: f32,
+
+        fn better(a: @This(), b: @This()) @This() {
+            return if (b.val > a.val or (b.val == a.val and b.id < a.id)) b else a;
+        }
+    };
+
+    const Context = struct {
+        embed: []const Elem,
+        h_last: []const f32,
+        recent_bitset: []const u64,
+        apply_penalty: bool,
+        repetition_penalty: f32,
+
+        fn mapFn(ctx: @This(), start_v: usize, end_v: usize) BestToken {
+            // 未受罚词元按原始点积取块内最大值 (val 暂存原始值)，受罚词元直接比较截断并惩罚后的最终得分
+            var best_plain = BestToken{ .id = std.math.maxInt(usize), .val = -std.math.inf(f32) };
+            var best_penalized = BestToken{ .id = std.math.maxInt(usize), .val = -std.math.inf(f32) };
+            const hidden = cfg.hidden_size;
+            for (start_v..end_v) |v| {
+                if (cfg.isSamplingExcluded(v)) continue;
+                const row = ctx.embed[v * hidden ..][0..hidden];
+                const raw = if (Elem == f32) dotF32(ctx.h_last, row) else dotF32Bf16(ctx.h_last, row);
+                const penalized = ctx.apply_penalty and (ctx.recent_bitset[v / 64] >> @intCast(v % 64)) & 1 != 0;
+                if (penalized) {
+                    const val = samplingLogit(raw, cfg.final_logit_softcapping, true, ctx.repetition_penalty);
+                    if (val > best_penalized.val) best_penalized = .{ .id = v, .val = val };
+                } else if (raw > best_plain.val) {
+                    best_plain = .{ .id = v, .val = raw };
+                }
+            }
+            if (best_plain.id != std.math.maxInt(usize)) best_plain.val = softcapLogit(best_plain.val, cfg.final_logit_softcapping);
+            return best_plain.better(best_penalized);
+        }
+
+        fn reduceFn(a: BestToken, b: BestToken) BestToken {
+            return a.better(b);
+        }
+    };
+
+    const bitset_words = (cfg.vocab_size + 63) / 64;
+    var recent_bitset: [bitset_words]u64 = @splat(0);
+    const apply_penalty = sampling.penaltyActive(repetition_penalty);
+    if (apply_penalty) {
+        for (recent_tokens) |rec| {
+            if (rec < cfg.vocab_size) recent_bitset[rec / 64] |= @as(u64, 1) << @intCast(rec % 64);
+        }
+    }
+
+    const ctx = Context{
+        .embed = embed,
+        .h_last = h_last,
+        .recent_bitset = &recent_bitset,
+        .apply_penalty = apply_penalty,
+        .repetition_penalty = repetition_penalty,
+    };
+    const best = try graph.executor().parallelReduce(
+        BestToken,
+        cfg.vocab_size,
+        4096,
+        ctx,
+        Context.mapFn,
+        Context.reduceFn,
+        BestToken{ .id = std.math.maxInt(usize), .val = -std.math.inf(f32) },
+    );
+    // 全部词元均被排除或得分为 NaN 时退回 0 号词元 (与 `sampling.argmaxWithPenalty` 一致)
+    return if (best.id == std.math.maxInt(usize)) 0 else best.id;
+}
+
+// ============================================================================
 // Gemma 4 架构定义与模型实现
 // ============================================================================
 
@@ -238,6 +354,28 @@ pub fn validateTokenIds(tokens: []const usize, vocab_size: usize) !void {
 pub const Gemma4AttentionType = enum {
     sliding_attention,
     full_attention,
+
+    /// 旋转位置编码频率基数 (Rotary Position Embedding Theta, RoPE Theta)
+    pub fn ropeTheta(self: Gemma4AttentionType) f32 {
+        return switch (self) {
+            .sliding_attention => 10000.0,
+            .full_attention => 1000000.0,
+        };
+    }
+
+    /// 部分旋转因子：全局注意力层采用比例旋转位置编码 (Proportional RoPE)，仅前 25% 的旋转角参与旋转
+    pub fn partialRotaryFactor(self: Gemma4AttentionType) f32 {
+        return switch (self) {
+            .sliding_attention => 1.0,
+            .full_attention => 0.25,
+        };
+    }
+};
+
+/// Gemma 4 词表中贪婪采样时始终排除的词元：0 号填充词元 (Padding Token) 与 [258880, 258884] 区间内文本模型不可生成的控制词元
+pub const default_sampling_excluded_tokens = [_]TokenRange{
+    .single(0),
+    .{ .first = 258880, .last = 258884 },
 };
 
 /// Gemma 4 文本模型与主干配置结构体
@@ -263,9 +401,17 @@ pub const Gemma4Config = struct {
     eos_token_id: u32 = 1,
     pad_token_id: u32 = 0,
 
+    /// 贪婪采样时始终排除的词元闭区间：CPU 采样、GPU 掩码 argmax 与重复惩罚路径共用这唯一一份定义
+    sampling_excluded_tokens: []const TokenRange = &default_sampling_excluded_tokens,
+
     pub const default: Gemma4Config = .{};
     pub fn defaultConfig() Gemma4Config {
         return .{};
+    }
+
+    /// 词元 v 是否属于贪婪采样排除集合
+    pub fn isSamplingExcluded(self: Gemma4Config, v: usize) bool {
+        return sampling.isExcluded(self.sampling_excluded_tokens, v);
     }
 
     /// 单个解码层的注意力几何规格
@@ -369,6 +515,51 @@ pub const Gemma4KVCache = struct {
 
         pub fn reset(self: *LayerCache) void {
             self.curr_len = 0;
+        }
+
+        /// 注意力可见的缓存窗口长度：滑动窗口层只读取最近 sliding_window 个位置，全局注意力层读取全部 curr_len 个位置
+        pub fn windowLen(self: *const LayerCache) usize {
+            return switch (self.attn_type) {
+                .sliding_attention => @min(self.curr_len, self.sliding_window),
+                .full_attention => self.curr_len,
+            };
+        }
+
+        /// 将可见窗口 [curr_len - windowLen, curr_len) 内的键值按 [num_kv_heads, windowLen, head_dim] 紧凑打包写入 out_k / out_v
+        pub fn packWindow(self: *const LayerCache, out_k: []f32, out_v: []f32) !void {
+            const win = self.windowLen();
+            const hd = self.head_dim;
+            const n = self.num_kv_heads * win * hd;
+            if (out_k.len != n or out_v.len != n) return error.ShapeMismatch;
+            const start = self.curr_len - win;
+            for (0..self.num_kv_heads) |kv_h| {
+                const src = (kv_h * self.max_seq_len + start) * hd;
+                const dst = kv_h * win * hd;
+                @memcpy(out_k[dst..][0 .. win * hd], self.k[src..][0 .. win * hd]);
+                @memcpy(out_v[dst..][0 .. win * hd], self.v[src..][0 .. win * hd]);
+            }
+        }
+
+        /// 将 [num_kv_heads, win_len, head_dim] 紧凑键值写入位置 [len - win_len, len) 并把游标设为 len。
+        /// 窗口之前的位置保持原样：滑动窗口层此后的增量解码不会再读取它们，全局注意力层要求 win_len == len。
+        pub fn writeWindow(self: *LayerCache, packed_k: []const f32, packed_v: []const f32, win_len: usize, len: usize) !void {
+            if (len > self.max_seq_len) return error.ContextWindowExceeded;
+            const required = switch (self.attn_type) {
+                .sliding_attention => @min(len, self.sliding_window),
+                .full_attention => len,
+            };
+            if (win_len > len or win_len < required) return error.ShapeMismatch;
+            const hd = self.head_dim;
+            const n = self.num_kv_heads * win_len * hd;
+            if (packed_k.len != n or packed_v.len != n) return error.ShapeMismatch;
+            const start = len - win_len;
+            for (0..self.num_kv_heads) |kv_h| {
+                const dst = (kv_h * self.max_seq_len + start) * hd;
+                const src = kv_h * win_len * hd;
+                @memcpy(self.k[dst..][0 .. win_len * hd], packed_k[src..][0 .. win_len * hd]);
+                @memcpy(self.v[dst..][0 .. win_len * hd], packed_v[src..][0 .. win_len * hd]);
+            }
+            self.curr_len = len;
         }
     };
 
@@ -607,15 +798,6 @@ pub const Gemma4Attention = struct {
         const v_norm = try GemmaUnscaledRMSNorm.init(allocator, head_dim, rms_norm_eps);
         errdefer deinitModel(&v_norm, allocator);
 
-        const rope_theta: f32 = switch (attn_type) {
-            .sliding_attention => 10000.0,
-            .full_attention => 1000000.0,
-        };
-        const partial_rotary_factor: f32 = switch (attn_type) {
-            .sliding_attention => 1.0,
-            .full_attention => 0.25,
-        };
-
         return Gemma4Attention{
             .q_proj = q_proj,
             .k_proj = k_proj,
@@ -630,8 +812,8 @@ pub const Gemma4Attention = struct {
             .num_kv_heads = num_kv_heads,
             .head_dim = head_dim,
             .sliding_window = sliding_window,
-            .rope_theta = rope_theta,
-            .partial_rotary_factor = partial_rotary_factor,
+            .rope_theta = attn_type.ropeTheta(),
+            .partial_rotary_factor = attn_type.partialRotaryFactor(),
         };
     }
 
@@ -1005,50 +1187,6 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             return try graph.reshape(capped_logits_2d, &.{ B, T, config.vocab_size });
         }
 
-        const BestToken = struct {
-            id: usize,
-            val: f32,
-        };
-
-        const F32ArgmaxContext = struct {
-            embed_f32: []const f32,
-            h_last: []const f32,
-            hidden_size: usize,
-            recent_bitset: []const u64,
-            repetition_penalty: f32,
-
-            fn mapFn(ctx: @This(), start_v: usize, end_v: usize) BestToken {
-                var max_val: f32 = -1e30;
-                var max_id: usize = start_v;
-                const hidden = ctx.hidden_size;
-
-                for (start_v..end_v) |v| {
-                    if (v == 0 or (v >= 258880 and v <= 258884)) continue;
-
-                    var dot = dotF32(ctx.h_last, ctx.embed_f32[v * hidden .. (v + 1) * hidden]);
-
-                    if (ctx.repetition_penalty > 1.0 and (v / 64) < ctx.recent_bitset.len and (ctx.recent_bitset[v / 64] & (@as(u64, 1) << @intCast(v % 64))) != 0) {
-                        if (dot > 0.0) {
-                            dot /= ctx.repetition_penalty;
-                        } else {
-                            dot *= ctx.repetition_penalty;
-                        }
-                    }
-
-                    if (dot > max_val) {
-                        max_val = dot;
-                        max_id = v;
-                    }
-                }
-
-                return .{ .id = max_id, .val = max_val };
-            }
-
-            fn reduceFn(a: BestToken, b: BestToken) BestToken {
-                return if (b.val > a.val) b else a;
-            }
-        };
-
         fn sampleNextTokenF32(
             self: *const Self,
             h_last: []const f32,
@@ -1056,35 +1194,7 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             repetition_penalty: f32,
             graph: *autodiff.Graph,
         ) !usize {
-            const recent_window = if (recent_tokens.len > 64) recent_tokens[recent_tokens.len - 64 ..] else recent_tokens;
-            const bitset_words = (config.vocab_size + 63) / 64;
-            var recent_bitset: [bitset_words]u64 = @splat(0);
-            if (repetition_penalty > 1.0) {
-                for (recent_window) |rec| {
-                    if (rec < config.vocab_size) {
-                        recent_bitset[rec / 64] |= (@as(u64, 1) << @intCast(rec % 64));
-                    }
-                }
-            }
-
-            const ctx = F32ArgmaxContext{
-                .embed_f32 = self.embed_tokens.weight.data,
-                .h_last = h_last,
-                .hidden_size = config.hidden_size,
-                .recent_bitset = &recent_bitset,
-                .repetition_penalty = repetition_penalty,
-            };
-
-            const best = try graph.executor().parallelReduce(
-                BestToken,
-                config.vocab_size,
-                4096,
-                ctx,
-                F32ArgmaxContext.mapFn,
-                F32ArgmaxContext.reduceFn,
-                BestToken{ .id = 0, .val = -1e30 },
-            );
-            return best.id;
+            return greedyLmHeadCpu(config, f32, graph, self.embed_tokens.weight.data, h_last, recentWindow(recent_tokens), repetition_penalty);
         }
 
         /// 词元嵌入查表并施加 Gemma 嵌入缩放 sqrt(hidden_size)，返回 [1, T, hidden_size]

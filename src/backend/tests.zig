@@ -5,6 +5,7 @@
 const std = @import("std");
 const mlx = @import("mlx.zig");
 const offload = @import("offload.zig");
+const sampling = @import("sampling.zig");
 const cblas = @import("cblas.zig");
 const Executor = @import("executor.zig").Executor;
 
@@ -37,7 +38,7 @@ test "MLX GPU backend matmul and fast kernels" {
     defer c_mat.deinit();
     c_mat.eval();
 
-    const out = c_mat.dataFloat32();
+    const out = try c_mat.dataFloat32();
     try std.testing.expectEqual(@as(usize, 4), out.len);
     try std.testing.expectApproxEqAbs(@as(f32, 7.0), out[0], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 10.0), out[1], 1e-4);
@@ -52,7 +53,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var norm_res = try Array.fastRmsNorm(x_norm, w_norm, 1e-5, stream);
     defer norm_res.deinit();
     norm_res.eval();
-    const norm_out = norm_res.dataFloat32();
+    const norm_out = try norm_res.dataFloat32();
     try std.testing.expectEqual(@as(usize, 4), norm_out.len);
     // mean(x^2) = (1+4+9+16)/4 = 7.5. rsqrt(7.5) = 0.36514837. With weight 2.0: x * 0.7302967
     try std.testing.expectApproxEqAbs(@as(f32, 0.7302967), norm_out[0], 1e-4);
@@ -63,7 +64,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var norm_4d_res = try Array.fastRmsNorm(x_4d_norm, w_norm, 1e-5, stream);
     defer norm_4d_res.deinit();
     norm_4d_res.eval();
-    const norm_4d_out = norm_4d_res.dataFloat32();
+    const norm_4d_out = try norm_4d_res.dataFloat32();
     try std.testing.expectEqual(@as(usize, 8), norm_4d_out.len);
     try std.testing.expectApproxEqAbs(@as(f32, 0.7302967), norm_4d_out[0], 1e-4);
 
@@ -74,7 +75,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var sdpa_res = try Array.fastScaledDotProductAttention(q, q, q, 1.0 / @sqrt(8.0), false, stream);
     defer sdpa_res.deinit();
     sdpa_res.eval();
-    const sdpa_out = sdpa_res.dataFloat32();
+    const sdpa_out = try sdpa_res.dataFloat32();
     try std.testing.expectEqual(@as(usize, 64), sdpa_out.len);
     // 3.1 验证单步增量解码 (Decode Step) 与分组查询注意力 (Grouped-Query Attention, GQA)
     const q_step: [16]f32 = @splat(0.2); // [1, 2 heads, 1, 8 dim]
@@ -90,7 +91,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var gqa_sdpa = try Array.fastScaledDotProductAttention(q_dec, k_dec, v_dec, 1.0 / @sqrt(8.0), false, stream);
     defer gqa_sdpa.deinit();
     gqa_sdpa.eval();
-    const gqa_out = gqa_sdpa.dataFloat32();
+    const gqa_out = try gqa_sdpa.dataFloat32();
     try std.testing.expectEqual(@as(usize, 16), gqa_out.len);
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), gqa_out[0], 1e-4);
 
@@ -106,7 +107,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var pref_sdpa = try Array.fastScaledDotProductAttention(q_pref_arr, k_pref_arr, v_pref_arr, 1.0 / @sqrt(8.0), true, stream);
     defer pref_sdpa.deinit();
     pref_sdpa.eval();
-    const pref_out = pref_sdpa.dataFloat32();
+    const pref_out = try pref_sdpa.dataFloat32();
     try std.testing.expectEqual(@as(usize, 16), pref_out.len);
 
     // 3.2 验证旋转位置编码 (Rotary Position Embedding, RoPE)
@@ -116,7 +117,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var rope_res = try Array.fastRoPE(rope_arr, 4, false, 10000.0, 1.0, 1, stream);
     defer rope_res.deinit();
     rope_res.eval();
-    const rope_out = rope_res.dataFloat32();
+    const rope_out = try rope_res.dataFloat32();
     try std.testing.expectEqual(@as(usize, 4), rope_out.len);
     try std.testing.expectApproxEqAbs(@as(f32, -1.9841107), rope_out[0], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 1.9599), rope_out[1], 1e-4);
@@ -139,7 +140,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var slice_res = try concat_res.sliceAxis(2, 1, 3, stream);
     defer slice_res.deinit();
     slice_res.eval();
-    const slice_out = slice_res.dataFloat32();
+    const slice_out = try slice_res.dataFloat32();
     try std.testing.expectEqual(@as(usize, 4), slice_out.len);
     try std.testing.expectEqual(@as(f32, 3.0), slice_out[0]);
     try std.testing.expectEqual(@as(f32, 4.0), slice_out[1]);
@@ -149,7 +150,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var mul_scalar_res = try slice_res.mulScalar(2.0, stream);
     defer mul_scalar_res.deinit();
     mul_scalar_res.eval();
-    const mul_out = mul_scalar_res.dataFloat32();
+    const mul_out = try mul_scalar_res.dataFloat32();
     try std.testing.expectEqual(@as(f32, 6.0), mul_out[0]);
     try std.testing.expectEqual(@as(f32, 12.0), mul_out[3]);
 
@@ -163,7 +164,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var updated_arr = try zero_base.sliceUpdateAxis(update_piece, 2, 2, 3, stream);
     defer updated_arr.deinit();
     updated_arr.eval();
-    const up_data = updated_arr.dataFloat32();
+    const up_data = try updated_arr.dataFloat32();
     try std.testing.expectEqual(@as(f32, 0.0), up_data[0]); // [0, 0]
     try std.testing.expectEqual(@as(f32, 0.0), up_data[1]); // [0, 1]
     try std.testing.expectEqual(@as(f32, 0.0), up_data[2]); // [1, 0]
@@ -183,7 +184,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var sdpa_sub = try Array.fastScaledDotProductAttention(q_single, k_sub, v_sub, 1.0, false, stream);
     defer sdpa_sub.deinit();
     sdpa_sub.eval();
-    const sdpa_sub_out = sdpa_sub.dataFloat32();
+    const sdpa_sub_out = try sdpa_sub.dataFloat32();
     try std.testing.expectEqual(@as(usize, 2), sdpa_sub_out.len);
 
     // 4. 验证零拷贝创建与形状查询 (Zero-Copy & Shape Query)
@@ -306,7 +307,7 @@ test "MLX GPU backend matmul and fast kernels" {
     qmm_arr.eval();
     stream.synchronize();
 
-    const qmm_out = qmm_arr.dataFloat32();
+    const qmm_out = try qmm_arr.dataFloat32();
     try std.testing.expectEqual(@as(usize, 1), qmm_out.len);
     try std.testing.expectApproxEqAbs(expected_dot, qmm_out[0], 1e-2);
 
@@ -319,7 +320,7 @@ test "MLX GPU backend matmul and fast kernels" {
     defer y_gelu.deinit();
 
     Array.evalMultiple(&.{y_gelu});
-    const gelu_out = y_gelu.dataFloat32();
+    const gelu_out = try y_gelu.dataFloat32();
     try std.testing.expectEqual(@as(usize, 4), gelu_out.len);
     // GELU(0) = 0.0
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), gelu_out[0], 1e-4);
@@ -376,7 +377,7 @@ test "MLX GPU backend matmul and fast kernels" {
     view_c.eval();
     stream.synchronize();
 
-    const view_data = view_c.dataFloat32();
+    const view_data = try view_c.dataFloat32();
     try std.testing.expectEqual(@as(usize, 8), view_data.len);
     // kv=0, t=0 -> 0.0, 0.0
     try std.testing.expectEqual(@as(f32, 0.0), view_data[0]);
@@ -426,7 +427,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var taken = try emb_table.takeAxis(idx_arr, 0, stream);
     defer taken.deinit();
     taken.eval();
-    const taken_out = taken.dataFloat32();
+    const taken_out = try taken.dataFloat32();
     try std.testing.expectEqual(@as(usize, 4), taken_out.len);
     // idx 2 -> 5.0, 6.0; idx 0 -> 1.0, 2.0
     try std.testing.expectEqual(@as(f32, 5.0), taken_out[0]);
@@ -442,7 +443,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var geglu_res = try geglu_arr.geglu(2, stream);
     defer geglu_res.deinit();
     geglu_res.eval();
-    const geglu_out = geglu_res.dataFloat32();
+    const geglu_out = try geglu_res.dataFloat32();
     try std.testing.expectEqual(@as(usize, 2), geglu_out.len);
     // GELU(0) * 2.0 = 0.0
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), geglu_out[0], 1e-4);
@@ -492,7 +493,7 @@ test "MLX GPU backend matmul and fast kernels" {
     defer out_comp_arr.deinit();
     out_comp_arr.eval();
 
-    const out_comp_slice = out_comp_arr.dataFloat32();
+    const out_comp_slice = try out_comp_arr.dataFloat32();
     try std.testing.expectEqual(@as(usize, 4), out_comp_slice.len);
     // x=0: gelu(0) + 1.0 = 0.0 + 1.0 = 1.0
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), out_comp_slice[0], 1e-3);
@@ -549,13 +550,27 @@ test "backend offload infrastructure" {
     defer lm_head.deinit();
 
     const h_last = [_]f32{ 1.0, 1.0 };
+    var h_arr = try mlx.Array.fromSlice(&h_last, &.{ 1, 2 });
+    defer h_arr.deinit();
+    var logits_arr = try lm_head.forwardArray(h_arr, stream);
+    defer logits_arr.deinit();
+    const logits = try logits_arr.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 4), logits.len);
     // 无重复惩罚时，token 2 得分 1.0*3.0 + 1.0*3.0 = 6.0 最高
-    const best_tok = try lm_head.sampleNext(&h_last, &.{}, 1.0, stream);
-    try std.testing.expectEqual(@as(usize, 2), best_tok);
-
+    try std.testing.expectEqual(@as(usize, 2), sampling.argmaxWithPenalty(logits, 4, &.{}, &.{}, 1.0));
     // 对 token 2 施加极端惩罚 10.0，使得分变为 0.6，此时 token 1 得分 2.0 胜出
-    const penalized_tok = try lm_head.sampleNext(&h_last, &.{2}, 10.0, stream);
-    try std.testing.expectEqual(@as(usize, 1), penalized_tok);
+    try std.testing.expectEqual(@as(usize, 1), sampling.argmaxWithPenalty(logits, 4, &.{}, &.{2}, 10.0));
+
+    // GPU 加性排除掩码与 CPU 采样排除同一组词元：排除 token 2 后 token 1 胜出
+    const excluded = [_]sampling.TokenRange{.single(2)};
+    var mask = try offload.TokenExclusionMask.init(std.testing.allocator, 4, &excluded);
+    defer mask.deinit();
+    var logits_bf16 = try lm_head.forwardArrayBf16(h_arr, stream);
+    defer logits_bf16.deinit();
+    var best_arr = try mask.argmax(logits_bf16, stream);
+    defer best_arr.deinit();
+    try std.testing.expectEqual(@as(u32, 1), try best_arr.itemUint32());
+    try std.testing.expectEqual(@as(usize, 1), sampling.argmaxWithPenalty(logits, 4, &excluded, &.{}, 1.0));
 
     // 2. 验证 Q4Weights 硬件量化矩阵乘法卸载
     var raw_block: [18]u8 = undefined;
@@ -643,20 +658,87 @@ test "backend offload infrastructure" {
     defer mul.deinit();
 
     fused_out.eval();
-    const f_data = fused_out.dataFloat32();
+    const f_data = try fused_out.dataFloat32();
     try std.testing.expectApproxEqAbs(@as(f32, 64.0), f_data[0], 1e-2);
     try std.testing.expectApproxEqAbs(@as(f32, 96.0), f_data[1], 1e-2);
 }
 
-test "LmHeadWeights argmaxWithPenalty dynamic vocab and negative logits" {
+test "sampling argmaxWithPenalty dynamic vocab and negative logits" {
+    const pad_only = [_]sampling.TokenRange{.single(0)};
     const logits = [_]f32{ 1.0, 2.0, 6.0, -0.5 };
     // 无重复惩罚时，token 2 (6.0) 最大
-    try std.testing.expectEqual(@as(usize, 2), LmHeadWeights.argmaxWithPenalty(&logits, 4, &.{}, 1.0));
+    try std.testing.expectEqual(@as(usize, 2), sampling.argmaxWithPenalty(&logits, 4, &pad_only, &.{}, 1.0));
     // 对 token 2 施加 10.0 惩罚 -> 6.0 / 10.0 = 0.6，此时 token 1 (2.0) 最大
-    try std.testing.expectEqual(@as(usize, 1), LmHeadWeights.argmaxWithPenalty(&logits, 4, &.{2}, 10.0));
+    try std.testing.expectEqual(@as(usize, 1), sampling.argmaxWithPenalty(&logits, 4, &pad_only, &.{2}, 10.0));
     // 对正数与负数同时施加惩罚，验证负数乘以 penalty 的分支与越界 token 过滤
     const neg_logits = [_]f32{ -2.0, -1.0, -0.5, -3.0 };
-    try std.testing.expectEqual(@as(usize, 1), LmHeadWeights.argmaxWithPenalty(&neg_logits, 4, &.{ 2, 999999 }, 4.0));
+    try std.testing.expectEqual(@as(usize, 1), sampling.argmaxWithPenalty(&neg_logits, 4, &pad_only, &.{ 2, 999999 }, 4.0));
+    // 不排除任何词元时 token 0 同样可以被选中
+    const first_max = [_]f32{ 9.0, 2.0, 6.0, -0.5 };
+    try std.testing.expectEqual(@as(usize, 0), sampling.argmaxWithPenalty(&first_max, 4, &.{}, &.{}, 1.0));
+    try std.testing.expectEqual(@as(usize, 2), sampling.argmaxWithPenalty(&first_max, 4, &pad_only, &.{}, 1.0));
+}
+
+test "sampling exclusion ranges and BF16 additive mask agree" {
+    const excluded = [_]sampling.TokenRange{ .single(0), .{ .first = 5, .last = 7 }, .{ .first = 30, .last = 40 } };
+    var mask: [10]u16 = undefined;
+    sampling.fillExclusionMaskBf16(&mask, &excluded);
+    for (mask, 0..) |bits, v| {
+        const expected: u16 = if (sampling.isExcluded(&excluded, v)) sampling.bf16_neg_inf_bits else sampling.bf16_zero_bits;
+        try std.testing.expectEqual(expected, bits);
+    }
+    // BF16 位模式 0xFF80 即单精度 -inf
+    try std.testing.expect(std.math.isNegativeInf(@as(f32, @bitCast(@as(u32, sampling.bf16_neg_inf_bits) << 16))));
+    try std.testing.expect(sampling.anyExcluded(&excluded, 7, 9));
+    try std.testing.expect(!sampling.anyExcluded(&excluded, 8, 30));
+    try std.testing.expect(sampling.anyExcluded(&excluded, 8, 31));
+    try std.testing.expectEqual(@as(f32, 2.0), sampling.applyRepetitionPenalty(4.0, 2.0));
+    try std.testing.expectEqual(@as(f32, -8.0), sampling.applyRepetitionPenalty(-4.0, 2.0));
+    try std.testing.expect(!sampling.penaltyActive(1.0));
+    try std.testing.expect(!sampling.penaltyActive(0.9));
+}
+
+test "LmHeadWeights rejects quantized modes the vocabulary shape cannot support" {
+    // Q4 (分组 32) 与 Q8 (分组 64) 要求 hidden_size 整除分组长度，不满足时返回错误而不是静默退回 BF16
+    try LmHeadWeights.validateMode(.q4, 128, 64);
+    try LmHeadWeights.validateMode(.q8, 128, 3840);
+    try LmHeadWeights.validateMode(.bf16, 128, 30);
+    try std.testing.expectError(error.UnsupportedQuantMode, LmHeadWeights.validateMode(.q4, 128, 48));
+    try std.testing.expectError(error.UnsupportedQuantMode, LmHeadWeights.validateMode(.q8, 128, 32));
+    try std.testing.expectError(error.UnsupportedQuantMode, LmHeadWeights.validateMode(.q8, 128, 96));
+    try std.testing.expectError(error.InvalidShape, LmHeadWeights.validateMode(.bf16, 0, 32));
+    // 构建入口在任何平台上都先校验形状，再检查硬件加速可用性
+    const embed: [(4 * 48)]u16 = @splat(0);
+    try std.testing.expectError(error.UnsupportedQuantMode, LmHeadWeights.initWithMode(&embed, 4, 48, .q4, null));
+}
+
+test "MLX typed data accessors validate dtype and the default stream is created once" {
+    if (!has_mlx) return;
+    const data = [_]f32{ 1.0, 2.0, 3.0 };
+    var arr = try Array.fromSlice(&data, &.{3});
+    defer arr.deinit();
+    try std.testing.expectEqualSlices(f32, &data, try arr.dataFloat32());
+    try std.testing.expectError(error.DTypeMismatch, arr.dataUint32());
+
+    var as_bf16 = try arr.astype(.bfloat16, null);
+    defer as_bf16.deinit();
+    try std.testing.expectError(error.DTypeMismatch, as_bf16.dataFloat32());
+
+    var idx = try arr.argmax(0, false, null);
+    defer idx.deinit();
+    try std.testing.expectEqual(@as(u32, 2), try idx.itemUint32());
+    var pair = try Array.fromSliceU32(&.{ 1, 2 }, &.{2});
+    defer pair.deinit();
+    try std.testing.expectError(error.InvalidShape, pair.itemUint32());
+
+    // 多次未指定命令流的算子调用复用同一个缓存的默认 GPU 命令流；释放后可再次惰性创建
+    var sum = try Array.add(arr, arr, null);
+    defer sum.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 2.0, 4.0, 6.0 }, try sum.dataFloat32());
+    mlx.releaseDefaultStream();
+    var sum2 = try Array.add(sum, arr, null);
+    defer sum2.deinit();
+    try std.testing.expectEqualSlices(f32, &.{ 3.0, 6.0, 9.0 }, try sum2.dataFloat32());
 }
 
 test "Q4Weights inside compiled closure" {
@@ -714,7 +796,7 @@ test "Q4Weights inside compiled closure" {
     var out_arr = out_vec.get(0).?;
     defer out_arr.deinit();
     out_arr.eval();
-    const data = out_arr.dataFloat32();
+    const data = try out_arr.dataFloat32();
     try std.testing.expectEqual(@as(usize, 1), data.len);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), data[0], 1e-3);
 }
@@ -753,7 +835,7 @@ test "Q4Weights initFromDirectBuffers fast path" {
     var out_arr = try q4_direct.forwardArray(in_arr, stream);
     defer out_arr.deinit();
     out_arr.eval();
-    const data = out_arr.dataFloat32();
+    const data = try out_arr.dataFloat32();
     try std.testing.expectEqual(@as(usize, 1), data.len);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), data[0], 1e-3);
 }
@@ -832,12 +914,15 @@ test "Executor parallelFor and parallelReduce with grain near maxInt(usize) do n
     }
 }
 
+/// 测试用排除集合：0 号填充词元与跨越 64 词块边界的一段闭区间
+const test_excluded = [_]sampling.TokenRange{ .single(0), .{ .first = 258_880, .last = 258_884 } };
+
 /// 逐元素顺序扫描的贪婪采样参考实现：与 `argmaxWithPenalty` 的语义逐位对照
 fn referenceArgmaxWithPenalty(logits: []const f32, vocab_size: usize, recent: []const usize, penalty: f32) usize {
     var best: f32 = -std.math.inf(f32);
     var best_id: usize = 0;
     for (0..vocab_size) |v| {
-        if (v == 0 or (v >= LmHeadWeights.excluded_token_range_lo and v <= LmHeadWeights.excluded_token_range_hi)) continue;
+        if (sampling.isExcluded(&test_excluded, v)) continue;
         var val = logits[v];
         if (penalty > 1.0 and std.mem.indexOfScalar(usize, recent, v) != null) {
             val = if (val > 0.0) val / penalty else val * penalty;
@@ -850,7 +935,7 @@ fn referenceArgmaxWithPenalty(logits: []const f32, vocab_size: usize, recent: []
     return best_id;
 }
 
-test "LmHeadWeights argmaxWithPenalty handles vocabularies larger than one bitset window without heap allocation" {
+test "sampling argmaxWithPenalty handles vocabularies larger than one bitset window without heap allocation" {
     const allocator = std.testing.allocator;
     // 词表超过单个 262,144 词元位图窗口，旧实现在堆分配失败时会越界读取栈上位图
     const vocab: usize = 300_000;
@@ -860,17 +945,17 @@ test "LmHeadWeights argmaxWithPenalty handles vocabularies larger than one bitse
     logits[290_000] = 8.0; // 第二个窗口内的最大值
     logits[1234] = 5.0;
 
-    try std.testing.expectEqual(@as(usize, 290_000), LmHeadWeights.argmaxWithPenalty(logits, vocab, &.{}, 1.0));
+    try std.testing.expectEqual(@as(usize, 290_000), sampling.argmaxWithPenalty(logits, vocab, &test_excluded, &.{}, 1.0));
     // 第二个窗口内的最近词元同样必须被惩罚：8 / 2 = 4 < 5
-    try std.testing.expectEqual(@as(usize, 1234), LmHeadWeights.argmaxWithPenalty(logits, vocab, &.{ 290_000, 290_000, vocab + 7 }, 2.0));
+    try std.testing.expectEqual(@as(usize, 1234), sampling.argmaxWithPenalty(logits, vocab, &test_excluded, &.{ 290_000, 290_000, vocab + 7 }, 2.0));
 
     // 排除词元即使取得最大值也不会被选中
     logits[0] = 100.0;
     logits[258_882] = 50.0;
-    try std.testing.expectEqual(@as(usize, 290_000), LmHeadWeights.argmaxWithPenalty(logits, vocab, &.{}, 1.0));
+    try std.testing.expectEqual(@as(usize, 290_000), sampling.argmaxWithPenalty(logits, vocab, &test_excluded, &.{}, 1.0));
 }
 
-test "LmHeadWeights argmaxWithPenalty matches sequential scan with ties, NaN and penalties" {
+test "sampling argmaxWithPenalty matches sequential scan with ties, NaN and penalties" {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(42);
     const rnd = prng.random();
@@ -892,7 +977,7 @@ test "LmHeadWeights argmaxWithPenalty matches sequential scan with ties, NaN and
             for ([_]f32{ 1.0, 1.3, 4.0 }) |penalty| {
                 try std.testing.expectEqual(
                     referenceArgmaxWithPenalty(logits, vocab, &recent, penalty),
-                    LmHeadWeights.argmaxWithPenalty(logits, vocab, &recent, penalty),
+                    sampling.argmaxWithPenalty(logits, vocab, &test_excluded, &recent, penalty),
                 );
             }
         }

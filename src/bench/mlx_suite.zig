@@ -138,7 +138,7 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
                 defer c.deinit();
                 c.eval();
                 self.stream.synchronize();
-                const out = c.dataFloat32();
+                const out = try c.dataFloat32();
                 std.mem.doNotOptimizeAway(out.ptr);
             }
         };
@@ -155,7 +155,7 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
         c_gpu.eval();
         stream.synchronize();
         var max_diff: f32 = 0.0;
-        for (cpu_ctx.raw_c, c_gpu.dataFloat32()) |vc, vg| {
+        for (cpu_ctx.raw_c, try c_gpu.dataFloat32()) |vc, vg| {
             const diff = @abs(vc - vg);
             if (diff > max_diff) max_diff = diff;
         }
