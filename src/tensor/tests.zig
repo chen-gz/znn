@@ -1299,3 +1299,689 @@ test "Tensor to MLX Array bridge zero-copy and conversion" {
     try std.testing.expectApproxEqAbs(@as(f32, 777.0), t_restored.data[1], 1e-4);
 }
 
+
+// ============================================================================
+// 审计回归测试 (Audit Regression Tests)：内存安全、数值稳定性、视图语义与内核等价性
+// ============================================================================
+
+/// 测试辅助：用确定性伪随机数填充张量
+fn fillDeterministic(t: *Tensor, seed: u64) void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    for (t.data) |*v| v.* = r.float(f32) * 2.0 - 1.0;
+}
+
+/// 测试辅助：按逻辑坐标读取任意跨步张量的元素
+fn atCoord(t: *const Tensor, coord: []const usize) f32 {
+    var idx: usize = 0;
+    for (coord, 0..) |c_, d| idx += c_ * t.strides.dims[d];
+    return t.data[idx];
+}
+
+fn allocFailConcatStackSplit(allocator: std.mem.Allocator) !void {
+    const X = try array(allocator, &.{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer free(allocator, X);
+    const XT = try X.transposeView(0, 1, allocator);
+    defer free(allocator, XT);
+
+    const c_ = try concat(allocator, &.{ X, XT, X }, 1);
+    defer free(allocator, c_);
+    const st = try stack(allocator, &.{ X, XT }, 0);
+    defer free(allocator, st);
+    const parts = try split(allocator, XT, 2, 1);
+    defer {
+        for (parts) |p| free(allocator, p);
+        allocator.free(parts);
+    }
+    const cl = try X.clone(allocator);
+    defer free(allocator, cl);
+    const rs = try XT.reshape(&.{4}, allocator);
+    defer free(allocator, rs);
+    const tr = try X.transpose(0, 1, allocator);
+    defer free(allocator, tr);
+    const rp = try XT.repeat(2, null, allocator);
+    defer free(allocator, rp);
+    const tl = try XT.tile(&.{ 2, 1 }, allocator);
+    defer free(allocator, tl);
+}
+
+test "audit: concat/stack/split/clone/reshape/repeat/tile free everything on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocFailConcatStackSplit, .{});
+}
+
+fn allocFailLosses(allocator: std.mem.Allocator) !void {
+    const X = try array(allocator, &.{ 2, 2 }, &.{ 0.2, 0.8, 0.6, 0.4 });
+    defer free(allocator, X);
+    const XT = try X.transposeView(0, 1, allocator);
+    defer free(allocator, XT);
+    const Y = try array(allocator, &.{ 2, 2 }, &.{ 0, 1, 1, 0 });
+    defer free(allocator, Y);
+
+    const l1 = try XT.bceWithLogitsLoss(Y, allocator);
+    defer free(allocator, l1);
+    const l2 = try XT.bceLoss(Y, 1e-7, allocator);
+    defer free(allocator, l2);
+    const l3 = try XT.softmaxCrossEntropy(&.{ 0, 1 }, allocator);
+    defer free(allocator, l3);
+    const l4 = try XT.mseLoss(Y, allocator);
+    defer free(allocator, l4);
+    const l5 = try XT.l2Loss(0.1, allocator);
+    defer free(allocator, l5);
+    const l6 = try XT.l1Loss(0.1, allocator);
+    defer free(allocator, l6);
+}
+
+test "audit: loss kernels free everything on allocation failure and reject bad labels without leaking" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocFailLosses, .{});
+    const allocator = std.testing.allocator;
+    const X = try zeros(allocator, &.{ 2, 3 });
+    defer free(allocator, X);
+    try std.testing.expectError(error.IndexOutOfBounds, X.softmaxCrossEntropy(&.{ 0, 3 }, allocator));
+    const Y = try zeros(allocator, &.{5});
+    defer free(allocator, Y);
+    try std.testing.expectError(error.ShapeMismatch, X.bceLoss(Y, 1e-7, allocator));
+    try std.testing.expectError(error.ShapeMismatch, X.bceWithLogitsLoss(Y, allocator));
+}
+
+fn allocFailLinalg(allocator: std.mem.Allocator) !void {
+    const A = try array(allocator, &.{ 3, 2 }, &.{ 2, 1, 1, 3, 0.5, -1 });
+    defer free(allocator, A);
+    const q = try A.qr(allocator);
+    defer q.deinit(allocator);
+    const s = try A.svd(allocator);
+    defer s.deinit(allocator);
+    const At = try A.transpose(0, 1, allocator);
+    defer free(allocator, At);
+    const s2 = try At.svd(allocator);
+    defer s2.deinit(allocator);
+    const S = try array(allocator, &.{ 2, 2 }, &.{ 2, 1, 1, 3 });
+    defer free(allocator, S);
+    const e = try S.symeig(allocator);
+    defer e.deinit(allocator);
+}
+
+test "audit: qr/svd/symeig free partial results on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, allocFailLinalg, .{});
+}
+
+test "audit: softmaxCrossEntropy uses log-sum-exp instead of clipping the probability" {
+    const allocator = std.testing.allocator;
+    const X = try array(allocator, &.{ 2, 2 }, &.{ 0.0, 200.0, 1.0, 2.0 });
+    defer free(allocator, X);
+    const loss = try X.softmaxCrossEntropy(&.{ 0, 1 }, allocator);
+    defer free(allocator, loss);
+    // 样本 0：log(1 + e^-200) + 200 - 0 = 200；样本 1：log(1 + e^-1) = 0.3132617
+    const expected = (200.0 + @log(1.0 + @exp(@as(f32, -1.0)))) / 2.0;
+    try std.testing.expectApproxEqRel(expected, loss.data[0], 1e-5);
+}
+
+test "audit: bf16 conversion keeps NaN as NaN" {
+    const nan_payload: f32 = @bitCast(@as(u32, 0x7F800001));
+    try std.testing.expect(std.math.isNan(nan_payload));
+    try std.testing.expect(std.math.isNan(bf16.fromF32(nan_payload).toF32()));
+    const neg_nan: f32 = @bitCast(@as(u32, 0xFF800001));
+    try std.testing.expect(std.math.isNan(bf16.fromF32(neg_nan).toF32()));
+    try std.testing.expect(std.math.isInf(bf16.fromF32(std.math.inf(f32)).toF32()));
+    try std.testing.expectEqual(@as(f32, 1.0), bf16.fromF32(1.0).toF32());
+}
+
+test "audit: rank-0 scalar tensors have one element" {
+    const allocator = std.testing.allocator;
+    const s = try full(allocator, &.{}, 3.5);
+    defer free(allocator, s);
+    try std.testing.expectEqual(@as(usize, 1), s.shape.numel());
+    try std.testing.expectEqual(@as(usize, 1), s.data.len);
+    const total = try s.sum(null, false, allocator);
+    defer free(allocator, total);
+    try std.testing.expectEqual(@as(f32, 3.5), total.data[0]);
+    const doubled = try s.mulScalar(2.0, allocator);
+    defer free(allocator, doubled);
+    try std.testing.expectEqual(@as(f32, 7.0), doubled.data[0]);
+}
+
+test "audit: empty slices at the end of every dimension do not index past the buffer" {
+    const allocator = std.testing.allocator;
+    const X = try zeros(allocator, &.{ 2, 3 });
+    defer free(allocator, X);
+    const v = try X.slice(&.{ .{ .start = 2 }, .{ .start = 3 } }, allocator);
+    defer free(allocator, v);
+    try std.testing.expectEqual(@as(usize, 0), v.shape.numel());
+    const c_ = try v.contiguous(allocator);
+    defer free(allocator, c_);
+    try std.testing.expectEqual(@as(usize, 0), c_.data.len);
+
+    const G = try GenericTensor(i32).zeros(allocator, &.{ 2, 3 });
+    defer G.deinit(allocator);
+    const gv = try G.slice(&.{ .{ .start = 2 }, .{ .start = 3 } }, allocator);
+    defer gv.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), gv.numel());
+}
+
+test "audit: repeat without axis only repeats the visible elements of a view" {
+    const allocator = std.testing.allocator;
+    const X = try array(allocator, &.{ 3, 2 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer free(allocator, X);
+    const v = try X.slice(&.{.{ .start = 1, .end = 2 }}, allocator);
+    defer free(allocator, v);
+    const r = try v.repeat(2, null, allocator);
+    defer free(allocator, r);
+    try std.testing.expectEqualSlices(f32, &.{ 3, 3, 4, 4 }, r.data);
+
+    const r0 = try X.repeat(0, 1, allocator);
+    defer free(allocator, r0);
+    try std.testing.expectEqual(@as(usize, 3), r0.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 0), r0.shape.dims[1]);
+}
+
+test "audit: in-place ops on views only touch the visible elements" {
+    const allocator = std.testing.allocator;
+    const X = try array(allocator, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    defer free(allocator, X);
+
+    // 第 1 列 (跨步视图) 乘以 10
+    const col = try X.slice(&.{ .{}, .{ .start = 1, .end = 2 } }, allocator);
+    defer free(allocator, col);
+    _ = col.mulScalar_(10.0);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 20, 3, 4, 50, 6 }, X.data);
+    _ = col.addScalar_(1.0);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 21, 3, 4, 51, 6 }, X.data);
+    _ = try col.clip_(0.0, 30.0);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 21, 3, 4, 30, 6 }, X.data);
+
+    // 第 0 行 (连续视图，底层 data 更长) 原地加上另一张量
+    const row = try X.slice(&.{.{ .start = 0, .end = 1 }}, allocator);
+    defer free(allocator, row);
+    const other = try array(allocator, &.{ 1, 3 }, &.{ 100, 100, 100 });
+    defer free(allocator, other);
+    _ = try row.add_(other);
+    try std.testing.expectEqualSlices(f32, &.{ 101, 121, 103, 4, 30, 6 }, X.data);
+    const bad = try zeros(allocator, &.{3});
+    defer free(allocator, bad);
+    try std.testing.expectError(error.ShapeMismatch, row.add_(bad));
+}
+
+test "audit: contiguous returns a plain data copy without gradient buffers" {
+    const allocator = std.testing.allocator;
+    const X = try array(allocator, &.{ 2, 2 }, &.{ 1, 2, 3, 4 });
+    defer free(allocator, X);
+    X.grad = try allocator.alloc(f32, 4);
+    @memset(X.grad, 7.0);
+    X.requires_grad = true;
+
+    const c_ = try X.contiguous(allocator);
+    defer free(allocator, c_);
+    try std.testing.expect(!c_.requires_grad);
+    try std.testing.expectEqual(@as(usize, 0), c_.grad.len);
+    try std.testing.expect(c_.creator == null);
+    try std.testing.expectEqualSlices(f32, X.data, c_.data);
+
+    const XT = try X.transposeView(0, 1, allocator);
+    defer free(allocator, XT);
+    const ct = try XT.contiguous(allocator);
+    defer free(allocator, ct);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 3, 2, 4 }, ct.data);
+}
+
+/// 测试辅助：朴素多维广播二元运算参考实现
+fn referenceBroadcast(allocator: std.mem.Allocator, a: *Tensor, b: *Tensor, comptime op: fn (f32, f32) f32) !*Tensor {
+    const out_shape = try broadcastShapes(a.shape, b.shape);
+    const out = try zeros(allocator, out_shape.dims[0..out_shape.len]);
+    var coord: [8]usize = @splat(0);
+    for (out.data) |*o| {
+        var ca: [8]usize = @splat(0);
+        var cb: [8]usize = @splat(0);
+        for (0..a.shape.len) |d| {
+            const od = out_shape.len - a.shape.len + d;
+            ca[d] = if (a.shape.dims[d] == 1) 0 else coord[od];
+        }
+        for (0..b.shape.len) |d| {
+            const od = out_shape.len - b.shape.len + d;
+            cb[d] = if (b.shape.dims[d] == 1) 0 else coord[od];
+        }
+        o.* = op(atCoord(a, ca[0..a.shape.len]), atCoord(b, cb[0..b.shape.len]));
+        out_shape.incrementCoord(&coord);
+    }
+    return out;
+}
+
+fn refSub(x: f32, y: f32) f32 {
+    return x - y;
+}
+
+test "audit: broadcast binary ops match a naive reference for many layouts" {
+    const allocator = std.testing.allocator;
+    const Case = struct { a: []const usize, b: []const usize, transpose_a: bool = false };
+    const cases = [_]Case{
+        .{ .a = &.{ 4, 5 }, .b = &.{5} },
+        .{ .a = &.{ 4, 5 }, .b = &.{ 4, 1 } },
+        .{ .a = &.{ 4, 1 }, .b = &.{ 1, 5 } },
+        .{ .a = &.{ 2, 3, 4 }, .b = &.{ 3, 1 } },
+        .{ .a = &.{ 2, 1, 4 }, .b = &.{ 2, 3, 1 } },
+        .{ .a = &.{ 3, 4 }, .b = &.{ 4, 3 }, .transpose_a = true },
+        .{ .a = &.{ 5, 4 }, .b = &.{ 1, 5 }, .transpose_a = true },
+        .{ .a = &.{1}, .b = &.{ 3, 2 } },
+        .{ .a = &.{ 2, 0, 3 }, .b = &.{3} },
+    };
+    for (cases, 0..) |cs, ci| {
+        const a_base = try zeros(allocator, cs.a);
+        defer free(allocator, a_base);
+        fillDeterministic(a_base, 10 + ci);
+        const a = if (cs.transpose_a) try a_base.transposeView(0, 1, allocator) else a_base;
+        defer if (cs.transpose_a) free(allocator, a);
+        const b = try zeros(allocator, cs.b);
+        defer free(allocator, b);
+        fillDeterministic(b, 100 + ci);
+
+        const got = try a.sub(b, allocator);
+        defer free(allocator, got);
+        const want = try referenceBroadcast(allocator, a, b, refSub);
+        defer free(allocator, want);
+        try std.testing.expect(got.shape.eq(want.shape));
+        try std.testing.expectEqualSlices(f32, want.data, got.data);
+    }
+}
+
+test "audit: sum and arg/extremum reductions match a naive reference along every axis" {
+    const allocator = std.testing.allocator;
+    const X = try zeros(allocator, &.{ 3, 4, 5 });
+    defer free(allocator, X);
+    fillDeterministic(X, 42);
+    X.data[7] = X.data[27]; // 制造相同数值，验证保留首个下标
+    const XT = try X.transposeView(0, 2, allocator);
+    defer free(allocator, XT);
+
+    for ([_]*Tensor{ X, XT }) |t| {
+        for (0..3) |ax| {
+            const s = try t.sum(ax, true, allocator);
+            defer free(allocator, s);
+            const am = try t.argmax(ax, allocator);
+            defer free(allocator, am);
+            const an = try t.argmin(ax, allocator);
+            defer free(allocator, an);
+            const mx = try t.max(ax, allocator);
+            defer free(allocator, mx);
+            const mn = try t.min(ax, allocator);
+            defer free(allocator, mn);
+
+            var coord: [8]usize = @splat(0);
+            for (0..s.data.len) |o| {
+                var acc: f64 = 0.0;
+                var best_max: f32 = -std.math.inf(f32);
+                var best_min: f32 = std.math.inf(f32);
+                var idx_max: usize = 0;
+                var idx_min: usize = 0;
+                var cc = coord;
+                for (0..t.shape.dims[ax]) |k| {
+                    cc[ax] = k;
+                    const v = atCoord(t, cc[0..3]);
+                    acc += v;
+                    if (v > best_max) {
+                        best_max = v;
+                        idx_max = k;
+                    }
+                    if (v < best_min) {
+                        best_min = v;
+                        idx_min = k;
+                    }
+                }
+                try std.testing.expectApproxEqAbs(@as(f32, @floatCast(acc)), s.data[o], 1e-5);
+                try std.testing.expectEqual(@as(f32, @floatFromInt(idx_max)), am.data[o]);
+                try std.testing.expectEqual(@as(f32, @floatFromInt(idx_min)), an.data[o]);
+                try std.testing.expectEqual(best_max, mx.data[o]);
+                try std.testing.expectEqual(best_min, mn.data[o]);
+                s.shape.incrementCoord(&coord);
+            }
+        }
+    }
+
+    const v = try X.variance(1, false, 1, allocator);
+    defer free(allocator, v);
+    try std.testing.expectEqual(@as(usize, 15), v.data.len);
+    for (0..3) |i| {
+        for (0..5) |k| {
+            var m: f64 = 0.0;
+            for (0..4) |j| m += X.data[(i * 4 + j) * 5 + k];
+            m /= 4.0;
+            var ss: f64 = 0.0;
+            for (0..4) |j| {
+                const d = X.data[(i * 4 + j) * 5 + k] - m;
+                ss += d * d;
+            }
+            try std.testing.expectApproxEqAbs(@as(f32, @floatCast(ss / 3.0)), v.data[i * 5 + k], 1e-5);
+        }
+    }
+}
+
+test "audit: batchMatMul handles transposed and strided views" {
+    const allocator = std.testing.allocator;
+    const A = try zeros(allocator, &.{ 2, 3, 4, 5 });
+    defer free(allocator, A);
+    fillDeterministic(A, 1);
+    const Bs = try zeros(allocator, &.{ 2, 3, 6, 5 });
+    defer free(allocator, Bs);
+    fillDeterministic(Bs, 2);
+
+    // B^T 视图：[2, 3, 5, 6]，最后两维列优先
+    const BT = try Bs.transposeView(2, 3, allocator);
+    defer free(allocator, BT);
+    const BT_copy = try BT.contiguous(allocator);
+    defer free(allocator, BT_copy);
+
+    const want = try A.batchMatMul(BT_copy, allocator);
+    defer free(allocator, want);
+    const got = try A.batchMatMul(BT, allocator);
+    defer free(allocator, got);
+    for (want.data, got.data) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-5);
+
+    // 头维与序列维交换的视图：[2, 4, 3, 5] -> 最后两维为跨步行
+    const AT = try A.transposeView(1, 2, allocator);
+    defer free(allocator, AT);
+    const AT_copy = try AT.contiguous(allocator);
+    defer free(allocator, AT_copy);
+    const W = try zeros(allocator, &.{ 2, 4, 5, 2 });
+    defer free(allocator, W);
+    fillDeterministic(W, 3);
+    const want2 = try AT_copy.batchMatMul(W, allocator);
+    defer free(allocator, want2);
+    const got2 = try AT.batchMatMul(W, allocator);
+    defer free(allocator, got2);
+    for (want2.data, got2.data) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-5);
+
+    // 逐元素校验一个输出
+    var acc: f32 = 0.0;
+    for (0..5) |k| acc += A.data[k] * Bs.data[k];
+    try std.testing.expectApproxEqAbs(acc, got.data[0], 1e-5);
+}
+
+test "audit: repeatKV materializes non-contiguous inputs" {
+    const allocator = std.testing.allocator;
+    const X = try zeros(allocator, &.{ 1, 3, 2, 4 });
+    defer free(allocator, X);
+    fillDeterministic(X, 5);
+    const XT = try X.transposeView(1, 2, allocator); // [1, 2, 3, 4]
+    defer free(allocator, XT);
+    const XT_copy = try XT.contiguous(allocator);
+    defer free(allocator, XT_copy);
+    const want = try XT_copy.repeatKV(2, allocator);
+    defer free(allocator, want);
+    const got = try XT.repeatKV(2, allocator);
+    defer free(allocator, got);
+    try std.testing.expectEqualSlices(f32, want.data, got.data);
+}
+
+/// 测试辅助：朴素二维卷积参考实现（一维卷积视为 H = KH = 1）
+fn referenceConv2d(x: *const Tensor, w: *const Tensor, bias: ?*const Tensor, stride: usize, padding: usize, out: *const Tensor) !void {
+    const N = x.shape.dims[0];
+    const C_in = x.shape.dims[1];
+    const H = x.shape.dims[2];
+    const W = x.shape.dims[3];
+    const C_out = w.shape.dims[0];
+    const KH = w.shape.dims[2];
+    const KW = w.shape.dims[3];
+    const H_out = out.shape.dims[2];
+    const W_out = out.shape.dims[3];
+    for (0..N) |n| for (0..C_out) |co| for (0..H_out) |oh| for (0..W_out) |ow| {
+        var acc: f32 = if (bias) |b| b.data[co] else 0.0;
+        for (0..C_in) |ci| for (0..KH) |kh| for (0..KW) |kw| {
+            const ih = @as(isize, @intCast(oh * stride + kh)) - @as(isize, @intCast(padding));
+            const iw = @as(isize, @intCast(ow * stride + kw)) - @as(isize, @intCast(padding));
+            if (ih < 0 or iw < 0 or ih >= H or iw >= W) continue;
+            acc += atCoord(x, &.{ n, ci, @intCast(ih), @intCast(iw) }) * atCoord(w, &.{ co, ci, kh, kw });
+        };
+        try std.testing.expectApproxEqAbs(acc, out.data[((n * C_out + co) * H_out + oh) * W_out + ow], 1e-4);
+    };
+}
+
+/// 测试辅助：朴素二维转置卷积参考实现（散射累加）
+fn referenceConvTranspose2d(allocator: std.mem.Allocator, x: *const Tensor, w: *const Tensor, bias: ?*const Tensor, stride: usize, padding: usize, out: *const Tensor) !void {
+    const N = x.shape.dims[0];
+    const C_in = x.shape.dims[1];
+    const H = x.shape.dims[2];
+    const W = x.shape.dims[3];
+    const C_out = w.shape.dims[1];
+    const KH = w.shape.dims[2];
+    const KW = w.shape.dims[3];
+    const H_out = out.shape.dims[2];
+    const W_out = out.shape.dims[3];
+    const ref = try allocator.alloc(f32, out.data.len);
+    defer allocator.free(ref);
+    for (0..N) |n| for (0..C_out) |co| {
+        const plane = ref[(n * C_out + co) * H_out * W_out ..][0 .. H_out * W_out];
+        @memset(plane, if (bias) |b| b.data[co] else 0.0);
+    };
+    for (0..N) |n| for (0..C_in) |ci| for (0..H) |h| for (0..W) |wi| for (0..C_out) |co| for (0..KH) |kh| for (0..KW) |kw| {
+        const oh = @as(isize, @intCast(h * stride + kh)) - @as(isize, @intCast(padding));
+        const ow = @as(isize, @intCast(wi * stride + kw)) - @as(isize, @intCast(padding));
+        if (oh < 0 or ow < 0 or oh >= H_out or ow >= W_out) continue;
+        const o_idx = ((n * C_out + co) * H_out + @as(usize, @intCast(oh))) * W_out + @as(usize, @intCast(ow));
+        ref[o_idx] += atCoord(x, &.{ n, ci, h, wi }) * atCoord(w, &.{ ci, co, kh, kw });
+    };
+    for (ref, out.data) |r, o| try std.testing.expectApproxEqAbs(r, o, 1e-4);
+}
+
+test "audit: im2col conv and GEMM transposed conv match naive references" {
+    const allocator = std.testing.allocator;
+    const Case = struct { stride: usize, padding: usize, kh: usize, kw: usize, bias: bool, transpose_x: bool };
+    const cases = [_]Case{
+        .{ .stride = 1, .padding = 0, .kh = 3, .kw = 3, .bias = true, .transpose_x = false },
+        .{ .stride = 1, .padding = 1, .kh = 3, .kw = 2, .bias = false, .transpose_x = true },
+        .{ .stride = 2, .padding = 1, .kh = 3, .kw = 3, .bias = true, .transpose_x = false },
+        .{ .stride = 3, .padding = 2, .kh = 2, .kw = 4, .bias = true, .transpose_x = true },
+        .{ .stride = 2, .padding = 0, .kh = 1, .kw = 1, .bias = false, .transpose_x = false },
+    };
+    for (cases, 0..) |cs, ci| {
+        // 输入 [2, 3, 6, 7]（可选：由 [2, 3, 7, 6] 的转置视图得到非连续输入）
+        const x_base = if (cs.transpose_x) try zeros(allocator, &.{ 2, 3, 7, 6 }) else try zeros(allocator, &.{ 2, 3, 6, 7 });
+        defer free(allocator, x_base);
+        fillDeterministic(x_base, 200 + ci);
+        const x = if (cs.transpose_x) try x_base.transposeView(2, 3, allocator) else x_base;
+        defer if (cs.transpose_x) free(allocator, x);
+
+        const w = try zeros(allocator, &.{ 4, 3, cs.kh, cs.kw });
+        defer free(allocator, w);
+        fillDeterministic(w, 300 + ci);
+        const b = try zeros(allocator, &.{4});
+        defer free(allocator, b);
+        fillDeterministic(b, 400 + ci);
+        const bias: ?*Tensor = if (cs.bias) b else null;
+
+        const y = try x.conv2d(w, bias, .{ .stride = cs.stride, .padding = cs.padding }, allocator);
+        defer free(allocator, y);
+        try referenceConv2d(x, w, bias, cs.stride, cs.padding, y);
+
+        // 转置卷积权重 [C_in = 3, C_out = 4, KH, KW]
+        const wt = try zeros(allocator, &.{ 3, 4, cs.kh, cs.kw });
+        defer free(allocator, wt);
+        fillDeterministic(wt, 500 + ci);
+        if ((6 - 1) * cs.stride + cs.kh > 2 * cs.padding and (7 - 1) * cs.stride + cs.kw > 2 * cs.padding) {
+            const yt = try x.convTranspose2d(wt, bias, .{ .stride = cs.stride, .padding = cs.padding }, allocator);
+            defer free(allocator, yt);
+            try referenceConvTranspose2d(allocator, x, wt, bias, cs.stride, cs.padding, yt);
+        }
+
+        // 一维卷积 / 转置卷积：取第 0 行作为 [N, C, L] 输入
+        const x1 = try zeros(allocator, &.{ 2, 3, 7 });
+        defer free(allocator, x1);
+        fillDeterministic(x1, 600 + ci);
+        const w1 = try zeros(allocator, &.{ 4, 3, cs.kw });
+        defer free(allocator, w1);
+        fillDeterministic(w1, 700 + ci);
+        const y1 = try x1.conv1d(w1, bias, .{ .stride = cs.stride, .padding = cs.padding }, allocator);
+        defer free(allocator, y1);
+        const x1_4d = try x1.reshape(&.{ 2, 3, 1, 7 }, allocator);
+        defer free(allocator, x1_4d);
+        const w1_4d = try w1.reshape(&.{ 4, 3, 1, cs.kw }, allocator);
+        defer free(allocator, w1_4d);
+        const y1_4d = try y1.reshape(&.{ 2, 4, 1, y1.shape.dims[2] }, allocator);
+        defer free(allocator, y1_4d);
+        // 一维卷积只在长度方向填充
+        const N = 2;
+        const L_out = y1.shape.dims[2];
+        for (0..N) |n| for (0..4) |co| for (0..L_out) |ol| {
+            var acc: f32 = if (bias) |bb| bb.data[co] else 0.0;
+            for (0..3) |c_in| for (0..cs.kw) |k| {
+                const il = @as(isize, @intCast(ol * cs.stride + k)) - @as(isize, @intCast(cs.padding));
+                if (il < 0 or il >= 7) continue;
+                acc += x1.data[(n * 3 + c_in) * 7 + @as(usize, @intCast(il))] * w1.data[(co * 3 + c_in) * cs.kw + k];
+            };
+            try std.testing.expectApproxEqAbs(acc, y1.data[(n * 4 + co) * L_out + ol], 1e-4);
+        };
+
+        const wt1 = try zeros(allocator, &.{ 3, 4, cs.kw });
+        defer free(allocator, wt1);
+        fillDeterministic(wt1, 800 + ci);
+        if ((7 - 1) * cs.stride + cs.kw > 2 * cs.padding) {
+            const yt1 = try x1.convTranspose1d(wt1, bias, .{ .stride = cs.stride, .padding = cs.padding }, allocator);
+            defer free(allocator, yt1);
+            const Lt = yt1.shape.dims[2];
+            const ref = try allocator.alloc(f32, yt1.data.len);
+            defer allocator.free(ref);
+            for (0..N) |n| for (0..4) |co| @memset(ref[(n * 4 + co) * Lt ..][0..Lt], if (bias) |bb| bb.data[co] else 0.0);
+            for (0..N) |n| for (0..3) |c_in| for (0..7) |l| for (0..4) |co| for (0..cs.kw) |k| {
+                const o = @as(isize, @intCast(l * cs.stride + k)) - @as(isize, @intCast(cs.padding));
+                if (o < 0 or o >= Lt) continue;
+                ref[(n * 4 + co) * Lt + @as(usize, @intCast(o))] += x1.data[(n * 3 + c_in) * 7 + l] * wt1.data[(c_in * 4 + co) * cs.kw + k];
+            };
+            for (ref, yt1.data) |r, o| try std.testing.expectApproxEqAbs(r, o, 1e-4);
+        }
+    }
+}
+
+test "audit: rope matches the per-element reference formula for both pairing modes" {
+    const allocator = std.testing.allocator;
+    const X = try zeros(allocator, &.{ 2, 3, 5, 10 });
+    defer free(allocator, X);
+    fillDeterministic(X, 77);
+    const start_pos: usize = 4;
+    inline for (.{ tensor.RopeOptions.Mode.interleaved, tensor.RopeOptions.Mode.split_half }) |mode| {
+        const opts = tensor.RopeOptions{ .mode = mode, .rotary_offset = 2, .partial_rotary_factor = 0.75 };
+        const Y = try X.rope(start_pos, opts, allocator);
+        defer free(allocator, Y);
+        const D: usize = 10;
+        const rot_dim: usize = D - opts.rotary_offset;
+        const half = rot_dim / 2;
+        const num_angles: usize = @intFromFloat(@as(f32, @floatFromInt(half)) * opts.partial_rotary_factor);
+        for (0..6) |o| for (0..5) |t| {
+            const row_in = X.data[(o * 5 + t) * D ..][0..D];
+            const row_out = Y.data[(o * 5 + t) * D ..][0..D];
+            var expected: [10]f32 = row_in[0..10].*;
+            for (0..num_angles) |i| {
+                const freq = 1.0 / std.math.pow(f32, opts.base, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(rot_dim)));
+                const theta = @as(f32, @floatFromInt(start_pos + t)) * freq;
+                const a_idx = if (mode == .interleaved) opts.rotary_offset + 2 * i else opts.rotary_offset + i;
+                const b_idx = if (mode == .interleaved) a_idx + 1 else a_idx + half;
+                expected[a_idx] = row_in[a_idx] * @cos(theta) - row_in[b_idx] * @sin(theta);
+                expected[b_idx] = row_in[a_idx] * @sin(theta) + row_in[b_idx] * @cos(theta);
+            }
+            for (expected, row_out) |e, g| try std.testing.expectApproxEqAbs(e, g, 1e-5);
+        };
+    }
+}
+
+test "audit: matmul accepts transposed views without materializing and matches the copied result" {
+    const allocator = std.testing.allocator;
+    const A_base = try zeros(allocator, &.{ 5, 3 });
+    defer free(allocator, A_base);
+    fillDeterministic(A_base, 11);
+    const B_base = try zeros(allocator, &.{ 4, 5 });
+    defer free(allocator, B_base);
+    fillDeterministic(B_base, 12);
+    const AT = try A_base.transposeView(0, 1, allocator); // [3, 5]
+    defer free(allocator, AT);
+    const BT = try B_base.transposeView(0, 1, allocator); // [5, 4]
+    defer free(allocator, BT);
+    const AT_c = try AT.contiguous(allocator);
+    defer free(allocator, AT_c);
+    const BT_c = try BT.contiguous(allocator);
+    defer free(allocator, BT_c);
+
+    const want = try AT_c.matmul(BT_c, allocator);
+    defer free(allocator, want);
+    const got = try AT.matmul(BT, allocator);
+    defer free(allocator, got);
+    for (want.data, got.data) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-5);
+
+    // 行切片视图 (连续但带偏移)
+    const rows = try A_base.slice(&.{.{ .start = 1, .end = 4 }}, allocator); // [3, 3]
+    defer free(allocator, rows);
+    const rows_c = try rows.contiguous(allocator);
+    defer free(allocator, rows_c);
+    const want2 = try rows_c.matmul(AT_c, allocator);
+    defer free(allocator, want2);
+    const got2 = try rows.matmul(AT, allocator);
+    defer free(allocator, got2);
+    for (want2.data, got2.data) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-5);
+}
+
+test "audit: applyRoPETensor 4D layout matches the 3D layout" {
+    const allocator = std.testing.allocator;
+    const T: usize = 4;
+    const H: usize = 3;
+    const D: usize = 6;
+    // 四维 [1, H, T, D] 与三维 [T, H, D] 存放同一组向量
+    const x4 = try zeros(allocator, &.{ 1, H, T, D });
+    defer free(allocator, x4);
+    fillDeterministic(x4, 21);
+    const x3 = try zeros(allocator, &.{ T, H, D });
+    defer free(allocator, x3);
+    for (0..H) |h| for (0..T) |t| {
+        @memcpy(x3.data[(t * H + h) * D ..][0..D], x4.data[(h * T + t) * D ..][0..D]);
+    };
+    tensor.applyRoPETensor(x4, 10000.0);
+    tensor.applyRoPETensor(x3, 10000.0);
+    for (0..H) |h| for (0..T) |t| {
+        try std.testing.expectEqualSlices(f32, x3.data[(t * H + h) * D ..][0..D], x4.data[(h * T + t) * D ..][0..D]);
+    };
+}
+
+test "audit: solveRidgeAnalytical recovers multi-feature weights" {
+    const allocator = std.testing.allocator;
+    const N: usize = 40;
+    const Dm: usize = 3;
+    const true_w = [_]f32{ 1.5, -2.0, 0.5 };
+    const true_b: f32 = 0.75;
+    var x: [N * Dm]f32 = undefined;
+    var y: [N]f32 = undefined;
+    var prng = std.Random.DefaultPrng.init(9);
+    for (0..N) |i| {
+        var acc: f32 = true_b;
+        for (0..Dm) |j| {
+            x[i * Dm + j] = prng.random().float(f32) * 4.0 - 2.0;
+            acc += true_w[j] * x[i * Dm + j];
+        }
+        y[i] = acc;
+    }
+    var w: [Dm]f32 = undefined;
+    var b: f32 = 0.0;
+    try tensor.solveRidgeAnalytical(allocator, &x, &y, N, Dm, 0.0, &w, &b);
+    for (true_w, w) |tw, ww| try std.testing.expectApproxEqAbs(tw, ww, 1e-3);
+    try std.testing.expectApproxEqAbs(true_b, b, 1e-3);
+    try std.testing.expectError(error.EmptyInputs, tensor.solveRidgeAnalytical(allocator, x[0..0], y[0..0], 0, Dm, 0.0, &w, &b));
+}
+
+test "audit: softmax rows sum to one, are shift invariant and give exact zeros for -inf logits" {
+    const allocator = std.testing.allocator;
+    const X = try zeros(allocator, &.{ 3, 13 });
+    defer free(allocator, X);
+    fillDeterministic(X, 31);
+    X.data[13 + 5] = -std.math.inf(f32);
+    X.data[26] = 1000.0;
+    const P = try X.softmax(allocator);
+    defer free(allocator, P);
+    for (0..3) |r| {
+        const row = P.data[r * 13 ..][0..13];
+        var total: f32 = 0.0;
+        for (row) |v| total += v;
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), total, 1e-5);
+        for (row, X.data[r * 13 ..][0..13]) |p, xv| {
+            var denom: f64 = 0.0;
+            var mx: f32 = -std.math.inf(f32);
+            for (X.data[r * 13 ..][0..13]) |v| mx = @max(mx, v);
+            for (X.data[r * 13 ..][0..13]) |v| denom += @exp(@as(f64, v - mx));
+            const want: f32 = @floatCast(@exp(@as(f64, xv - mx)) / denom);
+            try std.testing.expectApproxEqAbs(want, p, 1e-6);
+        }
+    }
+    try std.testing.expectEqual(@as(f32, 0.0), P.data[13 + 5]);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), P.data[26], 1e-6);
+}

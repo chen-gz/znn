@@ -154,6 +154,7 @@ pub fn qr(self: Tensor, allocator: std.mem.Allocator) !QRResult {
     }
 
     const Q = try zeros(allocator, &.{ M, K });
+    errdefer free(allocator, Q);
     for (0..M) |i| {
         for (0..K) |j| {
             Q.data[i * K + j] = Q_work[i * M + j];
@@ -190,6 +191,7 @@ pub fn symeig(self: Tensor, allocator: std.mem.Allocator) !SymEigResult {
 
     if (N == 1) {
         const eigenvalues = try zeros(allocator, &.{1});
+        errdefer free(allocator, eigenvalues);
         eigenvalues.data[0] = a_data[0];
         const eigenvectors = try zeros(allocator, &.{ 1, 1 });
         eigenvectors.data[0] = 1.0;
@@ -286,6 +288,7 @@ pub fn symeig(self: Tensor, allocator: std.mem.Allocator) !SymEigResult {
     }
 
     const eigenvalues = try zeros(allocator, &.{N});
+    errdefer free(allocator, eigenvalues);
     for (0..N) |i| {
         eigenvalues.data[i] = D[i * N + i];
     }
@@ -473,9 +476,11 @@ fn svdTall(self: Tensor, allocator: std.mem.Allocator) !SVDResult {
     }
 
     const U = try zeros(allocator, &.{ M, N });
+    errdefer free(allocator, U);
     @memcpy(U.data, B);
 
     const S = try zeros(allocator, &.{N});
+    errdefer free(allocator, S);
     @memcpy(S.data, S_vals);
 
     const Vt = try zeros(allocator, &.{ N, N });
@@ -518,6 +523,7 @@ pub fn svd(self: Tensor, allocator: std.mem.Allocator) !SVDResult {
     defer tall_res.deinit(allocator);
 
     const U = try zeros(allocator, &.{ M, M });
+    errdefer free(allocator, U);
     for (0..M) |i| {
         for (0..M) |j| {
             U.data[i * M + j] = tall_res.Vt.data[j * M + i];
@@ -525,6 +531,7 @@ pub fn svd(self: Tensor, allocator: std.mem.Allocator) !SVDResult {
     }
 
     const S = try zeros(allocator, &.{M});
+    errdefer free(allocator, S);
     @memcpy(S.data, tall_res.S.data);
 
     const Vt = try zeros(allocator, &.{ M, N });

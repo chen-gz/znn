@@ -16,9 +16,13 @@ const free = ops_mod.free;
 
 pub fn clone(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
     const t = try allocator.create(Tensor);
+    errdefer allocator.destroy(t);
+    const data = try allocator.alloc(f32, self.data.len);
+    errdefer allocator.free(data);
+    const grad: []f32 = if (self.requires_grad) try allocator.alloc(f32, self.grad.len) else &.{};
     t.* = Tensor{
-        .data = try allocator.alloc(f32, self.data.len),
-        .grad = if (self.requires_grad) try allocator.alloc(f32, self.grad.len) else &.{},
+        .data = data,
+        .grad = grad,
         .shape = self.shape,
         .strides = self.strides,
         .requires_grad = self.requires_grad,
@@ -31,37 +35,71 @@ pub fn clone(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
     return t;
 }
 
+/// 对张量的每个逻辑元素（视图只覆盖其可见元素，不触碰底层缓冲区的其余部分）原地执行 `f(elem, arg)`
+fn mapInPlace(self: *Tensor, arg: anytype, comptime f: fn (*f32, @TypeOf(arg)) void) void {
+    const count = self.shape.numel();
+    if (self.isContiguous() and self.data.len >= count) {
+        for (self.data[0..count]) |*item| f(item, arg);
+        return;
+    }
+    var it = shape_mod.RowIter(1).init(self.shape, .{self.strides});
+    const s = it.inner_strides[0];
+    while (it.next()) |offs| {
+        for (0..it.inner) |i| f(&self.data[offs[0] + i * s], arg);
+    }
+}
+
 pub fn mulScalar_(self: *Tensor, val: f32) *Tensor {
     std.debug.assert(!self.requires_grad);
     std.debug.assert(self.creator == null);
-    for (self.data) |*item| {
-        item.* *= val;
-    }
+    mapInPlace(self, val, struct {
+        fn f(item: *f32, v: f32) void {
+            item.* *= v;
+        }
+    }.f);
     return self;
 }
 
 pub fn addScalar_(self: *Tensor, val: f32) *Tensor {
     std.debug.assert(!self.requires_grad);
     std.debug.assert(self.creator == null);
-    for (self.data) |*item| {
-        item.* += val;
-    }
+    mapInPlace(self, val, struct {
+        fn f(item: *f32, v: f32) void {
+            item.* += v;
+        }
+    }.f);
     return self;
 }
 
+/// 原地逐元素加法 `self += other`：两者必须同形状，支持任意跨步视图
 pub fn add_(self: *Tensor, other: *Tensor) !*Tensor {
     std.debug.assert(!self.requires_grad);
     std.debug.assert(self.creator == null);
-    std.debug.assert(self.data.len == other.data.len);
-    for (self.data, other.data) |*item, other_val| {
-        item.* += other_val;
+    if (!self.shape.eq(other.shape)) return error.ShapeMismatch;
+    var it = shape_mod.RowIter(2).init(self.shape, .{ self.strides, other.strides });
+    const s_self = it.inner_strides[0];
+    const s_other = it.inner_strides[1];
+    while (it.next()) |offs| {
+        if (s_self == 1 and s_other == 1) {
+            for (self.data[offs[0]..][0..it.inner], other.data[offs[1]..][0..it.inner]) |*item, other_val| {
+                item.* += other_val;
+            }
+        } else {
+            for (0..it.inner) |i| self.data[offs[0] + i * s_self] += other.data[offs[1] + i * s_other];
+        }
     }
     return self;
 }
 
-pub fn argmax(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
-    if (dim >= self.shape.len) return error.DimensionOutOfBounds;
+/// 沿单轴的极值类归约种类
+const ExtremumKind = enum { argmax, argmin, max, min };
+
+/// 沿 `dim` 轴的极值归约通用内核：输出保留被归约轴（大小为 1）。
+/// 相同数值保留最先出现的下标；`inner > 1` 时按 (outer, k, inner) 顺序逐行比较，访存连续且可向量化，
+/// 每个输出元素的比较顺序与逐列扫描完全一致，因此结果逐位相同。
+fn reduceExtremum(self: Tensor, dim: usize, comptime kind: ExtremumKind, allocator: std.mem.Allocator) !*Tensor {
     if (self.shape.len == 0) return error.UnsupportedDimension;
+    if (dim >= self.shape.len) return error.DimensionOutOfBounds;
     const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
     defer if (contig_ptr) |cp| free(allocator, cp);
     const x_data = if (contig_ptr) |cp| cp.data else self.data;
@@ -71,6 +109,7 @@ pub fn argmax(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
         out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
     }
     const C = try zeros(allocator, out_dims[0..self.shape.len]);
+    errdefer free(allocator, C);
 
     const reduce_size = self.shape.dims[dim];
     if (reduce_size == 0) return C;
@@ -84,147 +123,75 @@ pub fn argmax(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
         inner_size *= self.shape.dims[d];
     }
 
-    for (0..outer_size) |outer| {
-        const out_base = outer * inner_size;
-        const src_base = outer * reduce_size * inner_size;
-        for (0..inner_size) |inner| {
+    const want_index = comptime (kind == .argmax or kind == .argmin);
+    const Cmp = struct {
+        inline fn better(a: f32, b: f32) bool {
+            return switch (kind) {
+                .argmax, .max => a > b,
+                .argmin, .min => a < b,
+            };
+        }
+    };
+
+    if (inner_size == 1) {
+        for (0..outer_size) |outer| {
+            const row = x_data[outer * reduce_size ..][0..reduce_size];
             var best_idx: usize = 0;
-            var best_val = x_data[src_base + inner];
-            for (1..reduce_size) |k| {
-                const val = x_data[src_base + k * inner_size + inner];
-                if (val > best_val) {
+            var best_val = row[0];
+            for (row[1..], 1..) |val, k| {
+                if (Cmp.better(val, best_val)) {
                     best_val = val;
                     best_idx = k;
                 }
             }
-            C.data[out_base + inner] = @as(f32, @floatFromInt(best_idx));
+            C.data[outer] = if (want_index) @floatFromInt(best_idx) else best_val;
+        }
+        return C;
+    }
+
+    // 下标类归约需要额外的当前最优值缓冲区；数值类归约直接在输出行上更新
+    const best_buf: []f32 = if (want_index) try allocator.alloc(f32, inner_size) else &.{};
+    defer if (want_index) allocator.free(best_buf);
+
+    for (0..outer_size) |outer| {
+        const out_row = C.data[outer * inner_size ..][0..inner_size];
+        const best_vals = if (want_index) best_buf else out_row;
+        const src_base = outer * reduce_size * inner_size;
+        @memcpy(best_vals, x_data[src_base..][0..inner_size]);
+        for (1..reduce_size) |k| {
+            const src_row = x_data[src_base + k * inner_size ..][0..inner_size];
+            if (want_index) {
+                const k_f: f32 = @floatFromInt(k);
+                for (best_vals, src_row, out_row) |*best, val, *idx| {
+                    if (Cmp.better(val, best.*)) {
+                        best.* = val;
+                        idx.* = k_f;
+                    }
+                }
+            } else {
+                for (best_vals, src_row) |*best, val| {
+                    if (Cmp.better(val, best.*)) best.* = val;
+                }
+            }
         }
     }
     return C;
+}
+
+pub fn argmax(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
+    return reduceExtremum(self, dim, .argmax, allocator);
 }
 
 pub fn argmin(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
-    if (dim >= self.shape.len) return error.DimensionOutOfBounds;
-    if (self.shape.len == 0) return error.UnsupportedDimension;
-    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
-    defer if (contig_ptr) |cp| free(allocator, cp);
-    const x_data = if (contig_ptr) |cp| cp.data else self.data;
-
-    var out_dims: [8]usize = @splat(0);
-    for (0..self.shape.len) |d| {
-        out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
-    }
-    const C = try zeros(allocator, out_dims[0..self.shape.len]);
-
-    const reduce_size = self.shape.dims[dim];
-    if (reduce_size == 0) return C;
-
-    var outer_size: usize = 1;
-    for (0..dim) |d| {
-        outer_size *= self.shape.dims[d];
-    }
-    var inner_size: usize = 1;
-    for ((dim + 1)..self.shape.len) |d| {
-        inner_size *= self.shape.dims[d];
-    }
-
-    for (0..outer_size) |outer| {
-        const out_base = outer * inner_size;
-        const src_base = outer * reduce_size * inner_size;
-        for (0..inner_size) |inner| {
-            var best_idx: usize = 0;
-            var best_val = x_data[src_base + inner];
-            for (1..reduce_size) |k| {
-                const val = x_data[src_base + k * inner_size + inner];
-                if (val < best_val) {
-                    best_val = val;
-                    best_idx = k;
-                }
-            }
-            C.data[out_base + inner] = @as(f32, @floatFromInt(best_idx));
-        }
-    }
-    return C;
+    return reduceExtremum(self, dim, .argmin, allocator);
 }
 
 pub fn max(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
-    if (dim >= self.shape.len) return error.DimensionOutOfBounds;
-    if (self.shape.len == 0) return error.UnsupportedDimension;
-    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
-    defer if (contig_ptr) |cp| free(allocator, cp);
-    const x_data = if (contig_ptr) |cp| cp.data else self.data;
-
-    var out_dims: [8]usize = @splat(0);
-    for (0..self.shape.len) |d| {
-        out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
-    }
-    const C = try zeros(allocator, out_dims[0..self.shape.len]);
-
-    const reduce_size = self.shape.dims[dim];
-    if (reduce_size == 0) return C;
-
-    var outer_size: usize = 1;
-    for (0..dim) |d| {
-        outer_size *= self.shape.dims[d];
-    }
-    var inner_size: usize = 1;
-    for ((dim + 1)..self.shape.len) |d| {
-        inner_size *= self.shape.dims[d];
-    }
-
-    for (0..outer_size) |outer| {
-        const out_base = outer * inner_size;
-        const src_base = outer * reduce_size * inner_size;
-        for (0..inner_size) |inner| {
-            var best_val = x_data[src_base + inner];
-            for (1..reduce_size) |k| {
-                const val = x_data[src_base + k * inner_size + inner];
-                if (val > best_val) best_val = val;
-            }
-            C.data[out_base + inner] = best_val;
-        }
-    }
-    return C;
+    return reduceExtremum(self, dim, .max, allocator);
 }
 
 pub fn min(self: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
-    if (dim >= self.shape.len) return error.DimensionOutOfBounds;
-    if (self.shape.len == 0) return error.UnsupportedDimension;
-    const contig_ptr: ?*Tensor = if (!self.isContiguous() or self.is_view) try self.contiguous(allocator) else null;
-    defer if (contig_ptr) |cp| free(allocator, cp);
-    const x_data = if (contig_ptr) |cp| cp.data else self.data;
-
-    var out_dims: [8]usize = @splat(0);
-    for (0..self.shape.len) |d| {
-        out_dims[d] = if (d == dim) 1 else self.shape.dims[d];
-    }
-    const C = try zeros(allocator, out_dims[0..self.shape.len]);
-
-    const reduce_size = self.shape.dims[dim];
-    if (reduce_size == 0) return C;
-
-    var outer_size: usize = 1;
-    for (0..dim) |d| {
-        outer_size *= self.shape.dims[d];
-    }
-    var inner_size: usize = 1;
-    for ((dim + 1)..self.shape.len) |d| {
-        inner_size *= self.shape.dims[d];
-    }
-
-    for (0..outer_size) |outer| {
-        const out_base = outer * inner_size;
-        const src_base = outer * reduce_size * inner_size;
-        for (0..inner_size) |inner| {
-            var best_val = x_data[src_base + inner];
-            for (1..reduce_size) |k| {
-                const val = x_data[src_base + k * inner_size + inner];
-                if (val < best_val) best_val = val;
-            }
-            C.data[out_base + inner] = best_val;
-        }
-    }
-    return C;
+    return reduceExtremum(self, dim, .min, allocator);
 }
 
 pub fn isContiguous(self: Tensor) bool {
@@ -235,10 +202,78 @@ pub fn numel(self: Tensor) usize {
     return self.shape.numel();
 }
 
+const V8 = @Vector(8, f32);
+
+/// 连续切片求和：8 路向量累加器打破串行加法的依赖链，比逐元素串行累加更快且舍入误差更小
+pub fn sumSlice(values: []const f32) f32 {
+    var acc: V8 = @splat(0.0);
+    var i: usize = 0;
+    while (i + 8 <= values.len) : (i += 8) {
+        acc += values[i..][0..8].*;
+    }
+    var total: f32 = @reduce(.Add, acc);
+    while (i < values.len) : (i += 1) total += values[i];
+    return total;
+}
+
+/// 连续切片的平方和（8 路向量累加）
+pub fn sumSquaresSlice(values: []const f32) f32 {
+    var acc: V8 = @splat(0.0);
+    var i: usize = 0;
+    while (i + 8 <= values.len) : (i += 8) {
+        const v: V8 = values[i..][0..8].*;
+        acc += v * v;
+    }
+    var total: f32 = @reduce(.Add, acc);
+    while (i < values.len) : (i += 1) total += values[i] * values[i];
+    return total;
+}
+
+/// 连续切片相对给定中心的偏差平方和 `sum((x - center)^2)`（8 路向量累加）
+pub fn sumSquaredDeviationsSlice(values: []const f32, center: f32) f32 {
+    const c_vec: V8 = @splat(center);
+    var acc: V8 = @splat(0.0);
+    var i: usize = 0;
+    while (i + 8 <= values.len) : (i += 8) {
+        const d = @as(V8, values[i..][0..8].*) - c_vec;
+        acc += d * d;
+    }
+    var total: f32 = @reduce(.Add, acc);
+    while (i < values.len) : (i += 1) {
+        const d = values[i] - center;
+        total += d * d;
+    }
+    return total;
+}
+
+/// 非空连续切片的最大值（与逐元素 `if (v > m) m = v` 扫描结果一致，含 NaN 时语义可能不同，调用方仅用于数值稳定化平移）
+pub fn maxSlice(values: []const f32) f32 {
+    std.debug.assert(values.len > 0);
+    var i: usize = 0;
+    var m: f32 = values[0];
+    if (values.len >= 8) {
+        var acc: V8 = values[0..8].*;
+        i = 8;
+        while (i + 8 <= values.len) : (i += 8) {
+            acc = @max(acc, @as(V8, values[i..][0..8].*));
+        }
+        m = @reduce(.Max, acc);
+    }
+    while (i < values.len) : (i += 1) m = @max(m, values[i]);
+    return m;
+}
+
 /// 通用多维张量沿指定轴或全局求和归约 (Sum Reduction)
+/// 非连续输入先物化为连续副本；沿轴归约按 (outer, k, inner) 顺序把整行累加到输出行，访存连续且可向量化
 pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
     if (axis) |ax| {
         if (ax >= self.shape.len) return error.DimensionOutOfBounds;
+    }
+    const contig_ptr: ?*Tensor = if (!self.isContiguous()) try self.contiguous(allocator) else null;
+    defer if (contig_ptr) |cp| free(allocator, cp);
+    const x_data = (if (contig_ptr) |cp| cp.data else self.data)[0..self.shape.numel()];
+
+    if (axis) |ax| {
         const reduce_size = self.shape.dims[ax];
 
         var out_shape_dims: [8]usize = @splat(0);
@@ -265,8 +300,7 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
             }
         }
 
-        const out_shape = try Shape.fromSlice(out_shape_dims[0..out_rank]);
-        const C = try zeros(allocator, out_shape.dims[0..out_rank]);
+        const C = try zeros(allocator, out_shape_dims[0..out_rank]);
 
         var outer_size: usize = 1;
         for (0..ax) |d| {
@@ -277,77 +311,27 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
             inner_size *= self.shape.dims[d];
         }
 
-        if (self.isContiguous()) {
+        if (inner_size == 1) {
             for (0..outer_size) |outer| {
-                const out_base = outer * inner_size;
-                const src_base = outer * reduce_size * inner_size;
-                for (0..inner_size) |inner| {
-                    var acc: f32 = 0.0;
-                    for (0..reduce_size) |k| {
-                        acc += self.data[src_base + k * inner_size + inner];
-                    }
-                    C.data[out_base + inner] = acc;
-                }
+                C.data[outer] = sumSlice(x_data[outer * reduce_size ..][0..reduce_size]);
             }
         } else {
-            var out_indices: [8]usize = @splat(0);
-            for (0..C.data.len) |out_idx| {
-                var tmp = out_idx;
-                var d: usize = out_rank;
-                while (d > 0) {
-                    d -= 1;
-                    out_indices[d] = tmp % out_shape.dims[d];
-                    tmp /= out_shape.dims[d];
-                }
-
-                var src_indices: [8]usize = @splat(0);
-                if (keepdims) {
-                    for (0..self.shape.len) |idx_d| {
-                        src_indices[idx_d] = out_indices[idx_d];
-                    }
-                } else {
-                    var src_d: usize = 0;
-                    for (0..self.shape.len) |idx_d| {
-                        if (idx_d == ax) continue;
-                        src_indices[idx_d] = out_indices[src_d];
-                        src_d += 1;
-                    }
-                }
-
-                var acc: f32 = 0.0;
+            for (0..outer_size) |outer| {
+                const out_row = C.data[outer * inner_size ..][0..inner_size];
+                const src_base = outer * reduce_size * inner_size;
                 for (0..reduce_size) |k| {
-                    src_indices[ax] = k;
-                    acc += self.data[self.getFlatIndex(src_indices[0..self.shape.len])];
+                    const src_row = x_data[src_base + k * inner_size ..][0..inner_size];
+                    for (out_row, src_row) |*acc, v| acc.* += v;
                 }
-                C.data[out_idx] = acc;
             }
         }
         return C;
     } else {
         // 全局归约 (Global reduction over all elements)
-        var total: f32 = 0.0;
-        const elem_count = self.shape.numel();
-        if (self.isContiguous() and self.data.len >= elem_count) {
-            for (self.data[0..elem_count]) |v| {
-                total += v;
-            }
-        } else {
-            var coord: [8]usize = @splat(0);
-            const len = self.shape.len;
-            for (0..elem_count) |_| {
-                var src_idx: usize = 0;
-                for (0..len) |d| {
-                    src_idx += coord[d] * self.strides.dims[d];
-                }
-                total += self.data[src_idx];
-                self.shape.incrementCoord(&coord);
-            }
-        }
-
+        const total = sumSlice(x_data);
         if (keepdims) {
             const out_shape_dims: [8]usize = @splat(1);
-            const out_shape = try Shape.fromSlice(out_shape_dims[0..self.shape.len]);
-            const C = try zeros(allocator, out_shape.dims[0..out_shape.len]);
+            const C = try zeros(allocator, out_shape_dims[0..self.shape.len]);
             C.data[0] = total;
             return C;
         } else {
@@ -379,12 +363,12 @@ pub fn variance(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, alloca
     const mean_t = try self.mean(axis, true, allocator);
     defer free(allocator, mean_t);
 
+    // 偏差平方原地写回 diff，避免额外的平方张量分配
     const diff = try self.sub(mean_t, allocator);
     defer free(allocator, diff);
-    const sq = try diff.mul(diff, allocator);
-    defer free(allocator, sq);
+    for (diff.data) |*v| v.* *= v.*;
 
-    const sum_sq = try sq.sum(axis, keepdims, allocator);
+    const sum_sq = try diff.sum(axis, keepdims, allocator);
     const denom = @as(f32, @floatFromInt(count - ddof));
     for (sum_sq.data) |*val| {
         val.* /= denom;
@@ -650,10 +634,17 @@ pub fn slice(self: *Tensor, ranges: []const SliceRange, allocator: std.mem.Alloc
         offset += start * stride;
     }
 
+    // 空切片不引用任何元素：偏移归零，避免 `start == dim_size` 时累加偏移越过缓冲区末尾
+    var is_empty = false;
+    for (new_dims[0..self.shape.len]) |dim| {
+        if (dim == 0) is_empty = true;
+    }
+    if (is_empty) offset = 0;
+
     const out = try allocator.create(Tensor);
     out.* = Tensor{
-        .data = self.data[offset..],
-        .grad = if (self.requires_grad and self.grad.len > offset) self.grad[offset..] else &.{},
+        .data = if (is_empty) self.data[0..0] else self.data[offset..],
+        .grad = if (!is_empty and self.requires_grad and self.grad.len > offset) self.grad[offset..] else &.{},
         .shape = Shape{ .dims = new_dims, .len = self.shape.len },
         .strides = Shape{ .dims = new_strides, .len = self.shape.len },
         .requires_grad = false,
@@ -663,25 +654,12 @@ pub fn slice(self: *Tensor, ranges: []const SliceRange, allocator: std.mem.Alloc
     return out;
 }
 
-/// 连续化内存拷贝 (Contiguous copy)
+/// 连续化内存拷贝 (Contiguous copy)：返回只含逻辑元素、行优先连续布局的独立数据张量。
+/// 结果不携带梯度缓冲区与算子来源 (requires_grad = false, creator = null)，仅作为数值内核的输入副本；
+/// 需要完整复制（含梯度）时使用 `clone`。
 pub fn contiguous(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
-    if (self.isContiguous() and !self.is_view) {
-        return self.clone(allocator);
-    }
-    const out = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-    errdefer free(allocator, out);
-
-    var coord: [8]usize = @splat(0);
-    const len = self.shape.len;
-    for (0..out.data.len) |dest_i| {
-        var src_idx: usize = 0;
-        for (0..len) |d| {
-            src_idx += coord[d] * self.strides.dims[d];
-        }
-        out.data[dest_i] = self.data[src_idx];
-
-        self.shape.incrementCoord(&coord);
-    }
+    const out = try ops_mod.allocUninit(allocator, self.shape);
+    shape_mod.gatherStrided(out.data, self.data, self.shape, self.strides);
     return out;
 }
 
@@ -713,9 +691,11 @@ pub fn clip(self: *Tensor, min_val: f32, max_val: f32, allocator: std.mem.Alloca
 pub fn clip_(self: *Tensor, min_val: f32, max_val: f32) !*Tensor {
     if (self.requires_grad or self.creator != null) return error.InPlaceOpOnGraphTensor;
     if (min_val > max_val) return error.InvalidRange;
-    for (self.data) |*item| {
-        item.* = std.math.clamp(item.*, min_val, max_val);
-    }
+    mapInPlace(self, [2]f32{ min_val, max_val }, struct {
+        fn f(item: *f32, range: [2]f32) void {
+            item.* = std.math.clamp(item.*, range[0], range[1]);
+        }
+    }.f);
     return self;
 }
 

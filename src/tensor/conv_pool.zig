@@ -8,6 +8,109 @@ const PoolOptions = types.PoolOptions;
 const ops_mod = @import("ops.zig");
 const zeros = ops_mod.zeros;
 
+/// 二维卷积几何描述：一维卷积按 `H = KH = 1`、高度方向填充为 0 的二维卷积处理
+const ConvGeometry = struct {
+    N: usize,
+    C_in: usize,
+    H: usize,
+    W: usize,
+    C_out: usize,
+    KH: usize,
+    KW: usize,
+    stride: usize,
+    pad_h: usize,
+    pad_w: usize,
+    H_out: usize,
+    W_out: usize,
+};
+
+/// 输入下标 `i * stride + k - padding` 落在 `[0, limit)` 内的 `i` 取值区间 `[lo, hi)`（`i < count`）
+fn validRange(count: usize, limit: usize, k: usize, stride: usize, padding: usize) [2]usize {
+    const lo = if (k >= padding) 0 else (padding - k + stride - 1) / stride;
+    const bound = limit + padding;
+    const hi = if (bound > k) @min(count, (bound - k + stride - 1) / stride) else 0;
+    return .{ @min(lo, hi), hi };
+}
+
+/// 图像转列 (Image to Column, im2col) + 单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM) 卷积内核：
+/// 输入 `self` 可为任意跨步布局，`w_data` 为连续的 `[C_out, C_in * KH * KW]` 权重矩阵；
+/// 每个样本的感受野窗口展平为 `[C_in * KH * KW, H_out * W_out]` 列矩阵后与权重相乘，偏置预先写入输出再以 beta = 1 累加
+fn convIm2col(self: *const Tensor, w_data: []const f32, bias: ?*Tensor, g: ConvGeometry, out: *Tensor, allocator: std.mem.Allocator) !void {
+    const K_col = g.C_in * g.KH * g.KW;
+    const L_out = g.H_out * g.W_out;
+    if (L_out == 0 or g.C_out == 0) return;
+
+    // 四维 [N, C, H, W] 跨度；一维输入 [N, C, L] 的高度跨度为 0
+    const s_n = self.strides.dims[0];
+    const s_c = self.strides.dims[1];
+    const s_h = if (self.shape.len == 4) self.strides.dims[2] else 0;
+    const s_w = self.strides.dims[self.shape.len - 1];
+
+    const col_buf = try allocator.alloc(f32, K_col * L_out);
+    defer allocator.free(col_buf);
+
+    for (0..g.N) |n| {
+        for (0..g.C_in) |ci| {
+            for (0..g.KH) |kh| {
+                for (0..g.KW) |kw| {
+                    const k_row = (ci * g.KH + kh) * g.KW + kw;
+                    const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
+                    const w_range = validRange(g.W_out, g.W, kw, g.stride, g.pad_w);
+                    for (0..g.H_out) |h_out| {
+                        const dst = col_row[h_out * g.W_out .. (h_out + 1) * g.W_out];
+                        const ih_raw = h_out * g.stride + kh;
+                        if (ih_raw < g.pad_h or ih_raw - g.pad_h >= g.H) {
+                            @memset(dst, 0.0);
+                            continue;
+                        }
+                        const ih = ih_raw - g.pad_h;
+                        @memset(dst[0..w_range[0]], 0.0);
+                        @memset(dst[w_range[1]..], 0.0);
+                        if (w_range[1] > w_range[0]) {
+                            // 有效区间内首个输入列下标
+                            const iw0 = w_range[0] * g.stride + kw - g.pad_w;
+                            const base = n * s_n + ci * s_c + ih * s_h + iw0 * s_w;
+                            const valid = dst[w_range[0]..w_range[1]];
+                            const step = g.stride * s_w;
+                            if (step == 1) {
+                                @memcpy(valid, self.data[base..][0..valid.len]);
+                            } else {
+                                for (valid, 0..) |*v, j| v.* = self.data[base + j * step];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        const out_n = out.data[n * g.C_out * L_out .. (n + 1) * g.C_out * L_out];
+        if (bias) |b| {
+            const b_stride = b.strides.dims[0];
+            for (0..g.C_out) |co| {
+                @memset(out_n[co * L_out .. (co + 1) * L_out], b.data[co * b_stride]);
+            }
+        }
+        if (K_col == 0) continue;
+
+        c.cblas_sgemm(
+            c.CblasRowMajor,
+            c.CblasNoTrans,
+            c.CblasNoTrans,
+            @intCast(g.C_out),
+            @intCast(L_out),
+            @intCast(K_col),
+            1.0,
+            w_data.ptr,
+            @intCast(K_col),
+            col_buf.ptr,
+            @intCast(L_out),
+            if (bias != null) @as(f32, 1.0) else @as(f32, 0.0),
+            out_n.ptr,
+            @intCast(L_out),
+        );
+    }
+}
+
 /// 一维卷积前向计算 (1-Dimensional Convolution, Conv1D)
 /// 输入形状: `[N, C_in, L]`，卷积核形状: `[C_out, C_in, K]`，可选偏置形状: `[C_out]`
 pub fn conv1d(
@@ -45,89 +148,13 @@ pub fn conv1d(
     const out = try zeros(allocator, &.{ N, C_out, L_out });
     errdefer out.deinit(allocator);
 
-    const s_n = self.strides.dims[0];
-    const s_c = self.strides.dims[1];
-    const s_l = self.strides.dims[2];
+    const w = if (weight.isContiguous()) weight else try weight.contiguous(allocator);
+    defer if (w != weight) w.deinit(allocator);
 
-    const K_col = C_in * K;
-
-    if (weight.isContiguous() and K_col > 0 and L_out > 0 and C_out > 0) {
-        const col_buf = try allocator.alloc(f32, K_col * L_out);
-        defer allocator.free(col_buf);
-
-        for (0..N) |n| {
-            // 图像转列 (Image to Column, im2col): 展平当前样本的一维感受野窗口为 [K_col, L_out] 矩阵
-            for (0..C_in) |ci| {
-                for (0..K) |k| {
-                    const k_row = ci * K + k;
-                    const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
-                    for (0..L_out) |l_out| {
-                        const il_signed: isize = @as(isize, @intCast(l_out * stride + k)) - @as(isize, @intCast(padding));
-                        if (il_signed >= 0 and il_signed < @as(isize, @intCast(L))) {
-                            const il: usize = @intCast(il_signed);
-                            col_row[l_out] = self.data[n * s_n + ci * s_c + il * s_l];
-                        } else {
-                            col_row[l_out] = 0.0;
-                        }
-                    }
-                }
-            }
-
-            const out_n = out.data[n * C_out * L_out .. (n + 1) * C_out * L_out];
-            if (bias) |b| {
-                const b_stride = b.strides.dims[0];
-                for (0..C_out) |co| {
-                    @memset(out_n[co * L_out .. (co + 1) * L_out], b.data[co * b_stride]);
-                }
-            }
-
-            c.cblas_sgemm(
-                c.CblasRowMajor,
-                c.CblasNoTrans,
-                c.CblasNoTrans,
-                @intCast(C_out),
-                @intCast(L_out),
-                @intCast(K_col),
-                1.0,
-                weight.data.ptr,
-                @intCast(K_col),
-                col_buf.ptr,
-                @intCast(L_out),
-                if (bias != null) @as(f32, 1.0) else @as(f32, 0.0),
-                out_n.ptr,
-                @intCast(L_out),
-            );
-        }
-        return out;
-    }
-
-    const w_co = weight.strides.dims[0];
-    const w_ci = weight.strides.dims[1];
-    const w_k = weight.strides.dims[2];
-
-    const o_n = out.strides.dims[0];
-    const o_c = out.strides.dims[1];
-    const o_l = out.strides.dims[2];
-
-    for (0..N) |n| {
-        for (0..C_out) |co| {
-            const b_val = if (bias) |b| b.data[co * b.strides.dims[0]] else 0.0;
-            for (0..L_out) |l_out| {
-                var acc: f32 = b_val;
-                for (0..C_in) |ci| {
-                    for (0..K) |k| {
-                        const il_signed: isize = @as(isize, @intCast(l_out * stride + k)) - @as(isize, @intCast(padding));
-                        if (il_signed < 0 or il_signed >= @as(isize, @intCast(L))) continue;
-                        const il: usize = @intCast(il_signed);
-                        const input_val = self.data[n * s_n + ci * s_c + il * s_l];
-                        const weight_val = weight.data[co * w_co + ci * w_ci + k * w_k];
-                        acc += input_val * weight_val;
-                    }
-                }
-                out.data[n * o_n + co * o_c + l_out * o_l] = acc;
-            }
-        }
-    }
+    try convIm2col(self, w.data, bias, .{
+        .N = N, .C_in = C_in, .H = 1, .W = L, .C_out = C_out, .KH = 1, .KW = K,
+        .stride = stride, .pad_h = 0, .pad_w = padding, .H_out = 1, .W_out = L_out,
+    }, out, allocator);
     return out;
 }
 
@@ -172,111 +199,81 @@ pub fn conv2d(
     const out = try zeros(allocator, &.{ N, C_out, H_out, W_out });
     errdefer out.deinit(allocator);
 
-    const s_n = self.strides.dims[0];
-    const s_c = self.strides.dims[1];
-    const s_h = self.strides.dims[2];
-    const s_w = self.strides.dims[3];
+    const w = if (weight.isContiguous()) weight else try weight.contiguous(allocator);
+    defer if (w != weight) w.deinit(allocator);
 
-    const K_col = C_in * KH * KW;
-    const L_out = H_out * W_out;
+    try convIm2col(self, w.data, bias, .{
+        .N = N, .C_in = C_in, .H = H, .W = W, .C_out = C_out, .KH = KH, .KW = KW,
+        .stride = stride, .pad_h = padding, .pad_w = padding, .H_out = H_out, .W_out = W_out,
+    }, out, allocator);
+    return out;
+}
 
-    if (weight.isContiguous() and K_col > 0 and L_out > 0 and C_out > 0) {
-        const col_buf = try allocator.alloc(f32, K_col * L_out);
-        defer allocator.free(col_buf);
+/// 转置卷积 SGEMM + 列转图像 (Column to Image, col2im) 内核：
+/// 对每个样本先计算列矩阵 `cols[C_out * KH * KW, H * W] = W^T * X_n`（权重视为连续的 `[C_in, C_out * KH * KW]` 矩阵），
+/// 再把每一列散射累加回输出平面；输出需预先写入偏置。
+fn convTransposeGemm(x_data: []const f32, w_data: []const f32, g: ConvGeometry, out: *Tensor, allocator: std.mem.Allocator) !void {
+    const HW_in = g.H * g.W;
+    const K_rows = g.C_out * g.KH * g.KW;
+    const plane = g.H_out * g.W_out;
+    if (HW_in == 0 or K_rows == 0 or plane == 0 or g.C_in == 0) return;
 
-        for (0..N) |n| {
-            // 图像转列 (Image to Column, im2col): 展平当前样本的所有感受野窗口为 [K_col, L_out] 矩阵
-            for (0..C_in) |ci| {
-                for (0..KH) |kh| {
-                    for (0..KW) |kw| {
-                        const k_row = (ci * KH + kh) * KW + kw;
-                        const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
-                        for (0..H_out) |h_out| {
-                            const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
-                            if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) {
-                                @memset(col_row[h_out * W_out .. (h_out + 1) * W_out], 0.0);
-                                continue;
-                            }
-                            const ih: usize = @intCast(ih_signed);
-                            for (0..W_out) |w_out| {
-                                const iw_signed: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
-                                if (iw_signed >= 0 and iw_signed < @as(isize, @intCast(W))) {
-                                    const iw: usize = @intCast(iw_signed);
-                                    col_row[h_out * W_out + w_out] = self.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
-                                } else {
-                                    col_row[h_out * W_out + w_out] = 0.0;
-                                }
-                            }
+    const cols = try allocator.alloc(f32, K_rows * HW_in);
+    defer allocator.free(cols);
+
+    for (0..g.N) |n| {
+        c.cblas_sgemm(
+            c.CblasRowMajor,
+            c.CblasTrans,
+            c.CblasNoTrans,
+            @intCast(K_rows),
+            @intCast(HW_in),
+            @intCast(g.C_in),
+            1.0,
+            w_data.ptr,
+            @intCast(K_rows),
+            x_data.ptr + n * g.C_in * HW_in,
+            @intCast(HW_in),
+            0.0,
+            cols.ptr,
+            @intCast(HW_in),
+        );
+
+        const out_n = out.data[n * g.C_out * plane .. (n + 1) * g.C_out * plane];
+        for (0..g.C_out) |co| {
+            const out_plane = out_n[co * plane .. (co + 1) * plane];
+            for (0..g.KH) |kh| {
+                const h_range = validRange(g.H, g.H_out, kh, g.stride, g.pad_h);
+                for (0..g.KW) |kw| {
+                    const w_range = validRange(g.W, g.W_out, kw, g.stride, g.pad_w);
+                    if (w_range[1] <= w_range[0]) continue;
+                    const col_row = cols[((co * g.KH + kh) * g.KW + kw) * HW_in ..][0..HW_in];
+                    for (h_range[0]..h_range[1]) |h| {
+                        const out_h = h * g.stride + kh - g.pad_h;
+                        const src = col_row[h * g.W + w_range[0] .. h * g.W + w_range[1]];
+                        const ow0 = w_range[0] * g.stride + kw - g.pad_w;
+                        const dst_base = out_h * g.W_out + ow0;
+                        if (g.stride == 1) {
+                            for (out_plane[dst_base..][0..src.len], src) |*o, v| o.* += v;
+                        } else {
+                            for (src, 0..) |v, j| out_plane[dst_base + j * g.stride] += v;
                         }
                     }
                 }
             }
-
-            const out_n = out.data[n * C_out * L_out .. (n + 1) * C_out * L_out];
-            if (bias) |b| {
-                const b_stride = b.strides.dims[0];
-                for (0..C_out) |co| {
-                    @memset(out_n[co * L_out .. (co + 1) * L_out], b.data[co * b_stride]);
-                }
-            }
-
-            c.cblas_sgemm(
-                c.CblasRowMajor,
-                c.CblasNoTrans,
-                c.CblasNoTrans,
-                @intCast(C_out),
-                @intCast(L_out),
-                @intCast(K_col),
-                1.0,
-                weight.data.ptr,
-                @intCast(K_col),
-                col_buf.ptr,
-                @intCast(L_out),
-                if (bias != null) @as(f32, 1.0) else @as(f32, 0.0),
-                out_n.ptr,
-                @intCast(L_out),
-            );
         }
-        return out;
     }
+}
 
-    const w_co = weight.strides.dims[0];
-    const w_ci = weight.strides.dims[1];
-    const w_kh = weight.strides.dims[2];
-    const w_kw = weight.strides.dims[3];
-
-    const o_n = out.strides.dims[0];
-    const o_c = out.strides.dims[1];
-    const o_h = out.strides.dims[2];
-    const o_w = out.strides.dims[3];
-
+/// 把 `[N, C_out, ...]` 输出的每个通道平面填充为对应偏置
+fn fillBiasPlanes(out: *Tensor, bias: ?*Tensor, N: usize, C_out: usize, plane: usize) void {
+    const b = bias orelse return;
     for (0..N) |n| {
         for (0..C_out) |co| {
-            const b_val = if (bias) |b| b.data[co * b.strides.dims[0]] else 0.0;
-            for (0..H_out) |h_out| {
-                for (0..W_out) |w_out| {
-                    var acc: f32 = b_val;
-                    for (0..C_in) |ci| {
-                        for (0..KH) |kh| {
-                            const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
-                            if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
-                            const ih: usize = @intCast(ih_signed);
-                            for (0..KW) |kw| {
-                                const iw_signed: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
-                                if (iw_signed < 0 or iw_signed >= @as(isize, @intCast(W))) continue;
-                                const iw: usize = @intCast(iw_signed);
-                                const input_val = self.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
-                                const weight_val = weight.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
-                                acc += input_val * weight_val;
-                            }
-                        }
-                    }
-                    out.data[n * o_n + co * o_c + h_out * o_h + w_out * o_w] = acc;
-                }
-            }
+            const start = (n * C_out + co) * plane;
+            @memset(out.data[start .. start + plane], b.data[co * b.strides.dims[0]]);
         }
     }
-    return out;
 }
 
 /// 一维转置卷积前向计算 (1-Dimensional Transposed Convolution, ConvTranspose1D)
@@ -316,45 +313,17 @@ pub fn convTranspose1d(
 
     const out = try zeros(allocator, &.{ N, C_out, L_out });
     errdefer out.deinit(allocator);
+    fillBiasPlanes(out, bias, N, C_out, L_out);
 
-    const s_n = self.strides.dims[0];
-    const s_c = self.strides.dims[1];
-    const s_l = self.strides.dims[2];
+    const x = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (x != self) x.deinit(allocator);
+    const w = if (weight.isContiguous()) weight else try weight.contiguous(allocator);
+    defer if (w != weight) w.deinit(allocator);
 
-    const w_ci = weight.strides.dims[0];
-    const w_co = weight.strides.dims[1];
-    const w_k = weight.strides.dims[2];
-
-    for (0..N) |n| {
-        for (0..C_out) |co| {
-            const b_val = if (bias) |b| b.data[co * b.strides.dims[0]] else 0.0;
-            if (b_val != 0.0) {
-                @memset(out.data[(n * C_out + co) * L_out .. (n * C_out + co + 1) * L_out], b_val);
-            }
-        }
-    }
-
-    for (0..N) |n| {
-        for (0..C_in) |ci| {
-            for (0..L_in) |l_in| {
-                const input_val = self.data[n * s_n + ci * s_c + l_in * s_l];
-                if (input_val == 0.0) continue;
-
-                for (0..C_out) |co| {
-                    for (0..K) |k| {
-                        const out_l_raw = l_in * stride + k;
-                        if (out_l_raw < padding) continue;
-                        const out_l = out_l_raw - padding;
-                        if (out_l >= L_out) continue;
-
-                        const weight_val = weight.data[ci * w_ci + co * w_co + k * w_k];
-                        out.data[(n * C_out + co) * L_out + out_l] += input_val * weight_val;
-                    }
-                }
-            }
-        }
-    }
-
+    try convTransposeGemm(x.data, w.data, .{
+        .N = N, .C_in = C_in, .H = 1, .W = L_in, .C_out = C_out, .KH = 1, .KW = K,
+        .stride = stride, .pad_h = 0, .pad_w = padding, .H_out = 1, .W_out = L_out,
+    }, out, allocator);
     return out;
 }
 
@@ -399,57 +368,17 @@ pub fn convTranspose2d(
 
     const out = try zeros(allocator, &.{ N, C_out, H_out, W_out });
     errdefer out.deinit(allocator);
+    fillBiasPlanes(out, bias, N, C_out, H_out * W_out);
 
-    const s_n = self.strides.dims[0];
-    const s_c = self.strides.dims[1];
-    const s_h = self.strides.dims[2];
-    const s_w = self.strides.dims[3];
+    const x = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (x != self) x.deinit(allocator);
+    const w = if (weight.isContiguous()) weight else try weight.contiguous(allocator);
+    defer if (w != weight) w.deinit(allocator);
 
-    const w_ci = weight.strides.dims[0];
-    const w_co = weight.strides.dims[1];
-    const w_kh = weight.strides.dims[2];
-    const w_kw = weight.strides.dims[3];
-
-    for (0..N) |n| {
-        for (0..C_out) |co| {
-            const b_val = if (bias) |b| b.data[co * b.strides.dims[0]] else 0.0;
-            if (b_val != 0.0) {
-                const plane_start = (n * C_out + co) * (H_out * W_out);
-                @memset(out.data[plane_start .. plane_start + H_out * W_out], b_val);
-            }
-        }
-    }
-
-    for (0..N) |n| {
-        for (0..C_in) |ci| {
-            for (0..H_in) |h| {
-                for (0..W_in) |w| {
-                    const input_val = self.data[n * s_n + ci * s_c + h * s_h + w * s_w];
-                    if (input_val == 0.0) continue;
-
-                    for (0..C_out) |co| {
-                        for (0..KH) |kh| {
-                            const out_h_raw = h * stride + kh;
-                            if (out_h_raw < padding) continue;
-                            const out_h = out_h_raw - padding;
-                            if (out_h >= H_out) continue;
-
-                            for (0..KW) |kw| {
-                                const out_w_raw = w * stride + kw;
-                                if (out_w_raw < padding) continue;
-                                const out_w = out_w_raw - padding;
-                                if (out_w >= W_out) continue;
-
-                                const weight_val = weight.data[ci * w_ci + co * w_co + kh * w_kh + kw * w_kw];
-                                out.data[n * (C_out * H_out * W_out) + co * (H_out * W_out) + out_h * W_out + out_w] += input_val * weight_val;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    try convTransposeGemm(x.data, w.data, .{
+        .N = N, .C_in = C_in, .H = H_in, .W = W_in, .C_out = C_out, .KH = KH, .KW = KW,
+        .stride = stride, .pad_h = padding, .pad_w = padding, .H_out = H_out, .W_out = W_out,
+    }, out, allocator);
     return out;
 }
 

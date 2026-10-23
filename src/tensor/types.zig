@@ -39,6 +39,8 @@ pub const bf16 = packed struct {
 
     pub fn fromF32(val: f32) bf16 {
         const u: u32 = @bitCast(val);
+        // 非数 (Not a Number, NaN) 直接截断并强制置位静默位：舍入偏置可能把低位尾数进位到指数位而把 NaN 变成无穷大
+        if (std.math.isNan(val)) return .{ .bits = @as(u16, @truncate(u >> 16)) | 0x0040 };
         // Round to nearest even
         const lsb = (u >> 16) & 1;
         const rounding_bias: u32 = 0x7fff + lsb;
@@ -378,9 +380,15 @@ pub fn GenericTensor(comptime T: type) type {
                 offset += start * stride;
             }
 
+            // 空切片不引用任何元素：偏移归零，避免累加偏移越过缓冲区末尾
+            var is_empty = false;
+            for (new_dims[0..self.shape.len]) |dim| {
+                if (dim == 0) is_empty = true;
+            }
+
             const out = try allocator.create(Self);
             out.* = Self{
-                .data = self.data[offset..],
+                .data = if (is_empty) self.data[0..0] else self.data[offset..],
                 .shape = Shape{ .dims = new_dims, .len = self.shape.len },
                 .strides = Shape{ .dims = new_strides, .len = self.shape.len },
                 .is_view = true,

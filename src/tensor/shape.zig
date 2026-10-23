@@ -40,9 +40,8 @@ pub const Shape = struct {
         return true;
     }
 
-    /// 计算张量逻辑元素总数
+    /// 计算张量逻辑元素总数（0 维标量张量含 1 个元素，与 `zeros(&.{})` 分配的缓冲区长度一致）
     pub fn numel(self: Shape) usize {
-        if (self.len == 0) return 0;
         var total: usize = 1;
         for (0..self.len) |i| {
             total *= self.dims[i];
@@ -175,6 +174,117 @@ pub fn computeBroadcastStrides(src_shape: Shape, src_strides: Shape, target_shap
     return b_strides;
 }
 
+/// 维度折叠 (Dimension Coalescing)：去掉大小为 1 的维度，并把对所有操作数都满足
+/// `stride[d] == stride[d + 1] * dims[d + 1]` 的相邻维度合并为一维，
+/// 使逐行遍历的最内层循环尽可能长。返回的形状至少有 1 维（全部为 1 时为 `[1]`）。
+pub fn coalesceDims(comptime n: usize, shape: Shape, strides: *[n]Shape) Shape {
+    var out = Shape{ .dims = @as([8]usize, @splat(0)), .len = 0 };
+    var out_strides: [n]Shape = undefined;
+    for (&out_strides) |*st| st.* = Shape{ .dims = @as([8]usize, @splat(0)), .len = 0 };
+
+    // 从最内层维度向外扫描，结果先逆序存放
+    var d = shape.len;
+    while (d > 0) {
+        d -= 1;
+        const size = shape.dims[d];
+        if (size == 1) continue;
+        if (out.len > 0) {
+            const inner = out.len - 1;
+            var mergeable = true;
+            inline for (0..n) |k| {
+                if (strides[k].dims[d] != out_strides[k].dims[inner] * out.dims[inner]) mergeable = false;
+            }
+            if (mergeable) {
+                out.dims[inner] *= size;
+                continue;
+            }
+        }
+        out.dims[out.len] = size;
+        inline for (0..n) |k| out_strides[k].dims[out.len] = strides[k].dims[d];
+        out.len += 1;
+    }
+    if (out.len == 0) {
+        out.dims[0] = 1;
+        out.len = 1;
+        inline for (0..n) |k| out_strides[k].dims[0] = 0;
+    }
+
+    // 反转为行优先顺序
+    std.mem.reverse(usize, out.dims[0..out.len]);
+    inline for (0..n) |k| {
+        std.mem.reverse(usize, out_strides[k].dims[0..out.len]);
+        out_strides[k].len = out.len;
+        strides[k] = out_strides[k];
+    }
+    return out;
+}
+
+/// 逐行跨步遍历器 (Strided Row Iterator)：在折叠后的形状上按行优先顺序遍历除最内层外的所有坐标，
+/// 每次返回 `n` 个操作数当前行的起始偏移；最内层维度长度为 `inner`，各操作数最内层跨度为 `inner_strides`。
+pub fn RowIter(comptime n: usize) type {
+    return struct {
+        const Self = @This();
+
+        shape: Shape,
+        strides: [n]Shape,
+        coord: [8]usize = @as([8]usize, @splat(0)),
+        offsets: [n]usize = @as([n]usize, @splat(0)),
+        rows_left: usize,
+        inner: usize,
+        inner_strides: [n]usize,
+
+        /// `strides[k]` 为第 k 个操作数在 `shape` 下的（广播）跨度
+        pub fn init(shape: Shape, strides_in: [n]Shape) Self {
+            var strides = strides_in;
+            const folded = coalesceDims(n, shape, &strides);
+            const total = shape.numel();
+            const inner = folded.dims[folded.len - 1];
+            var inner_strides: [n]usize = undefined;
+            inline for (0..n) |k| inner_strides[k] = strides[k].dims[folded.len - 1];
+            return .{
+                .shape = folded,
+                .strides = strides,
+                .rows_left = if (total == 0) 0 else total / inner,
+                .inner = inner,
+                .inner_strides = inner_strides,
+            };
+        }
+
+        pub fn next(self: *Self) ?[n]usize {
+            if (self.rows_left == 0) return null;
+            self.rows_left -= 1;
+            const current = self.offsets;
+            var d = self.shape.len - 1;
+            while (d > 0) {
+                d -= 1;
+                self.coord[d] += 1;
+                inline for (0..n) |k| self.offsets[k] += self.strides[k].dims[d];
+                if (self.coord[d] < self.shape.dims[d]) break;
+                inline for (0..n) |k| self.offsets[k] -= self.strides[k].dims[d] * self.shape.dims[d];
+                self.coord[d] = 0;
+            }
+            return current;
+        }
+    };
+}
+
+/// 把任意跨步源张量按行优先顺序收集到连续目标缓冲区 (Strided Gather)；
+/// `dest.len` 必须等于 `shape.numel()`，最内层连续时整行 `@memcpy`
+pub fn gatherStrided(dest: []f32, src: []const f32, shape: Shape, strides: Shape) void {
+    std.debug.assert(dest.len == shape.numel());
+    var it = RowIter(2).init(shape, .{ computeContiguousStrides(shape), strides });
+    const inner = it.inner;
+    const s_src = it.inner_strides[1];
+    while (it.next()) |offs| {
+        const out_row = dest[offs[0]..][0..inner];
+        if (s_src == 1) {
+            @memcpy(out_row, src[offs[1]..][0..inner]);
+        } else {
+            for (out_row, 0..) |*v, i| v.* = src[offs[1] + i * s_src];
+        }
+    }
+}
+
 /// 底层高效通用广播二元算子执行引擎
 pub fn broadcastBinaryOpRaw(
     C_data: []f32,
@@ -199,23 +309,31 @@ pub fn broadcastBinaryOpRaw(
         return;
     }
 
-    // 广播或非连续跨步路径：基于虚拟跨度执行多维坐标遍历
-    const a_strides = computeBroadcastStrides(A_shape, A_strides, C_shape);
-    const b_strides = computeBroadcastStrides(B_shape, B_strides, C_shape);
-    const len = C_shape.len;
-    var coord: [8]usize = @splat(0);
-
-    for (C_data) |*c_val| {
-        var a_idx: usize = 0;
-        var b_idx: usize = 0;
-        for (0..len) |d| {
-            a_idx += coord[d] * a_strides.dims[d];
-            b_idx += coord[d] * b_strides.dims[d];
+    // 广播或非连续跨步路径：折叠维度后逐行遍历，最内层按跨度组合分派到可向量化的专用循环
+    std.debug.assert(C_data.len == C_shape.numel());
+    var it = RowIter(3).init(C_shape, .{
+        computeContiguousStrides(C_shape),
+        computeBroadcastStrides(A_shape, A_strides, C_shape),
+        computeBroadcastStrides(B_shape, B_strides, C_shape),
+    });
+    const inner = it.inner;
+    const sa = it.inner_strides[1];
+    const sb = it.inner_strides[2];
+    while (it.next()) |offs| {
+        const c_row = C_data[offs[0]..][0..inner];
+        if (sa == 1 and sb == 1) {
+            for (c_row, A_data[offs[1]..][0..inner], B_data[offs[2]..][0..inner]) |*c_val, a_val, b_val| {
+                c_val.* = op(a_val, b_val);
+            }
+        } else if (sa == 1 and sb == 0) {
+            const b_val = B_data[offs[2]];
+            for (c_row, A_data[offs[1]..][0..inner]) |*c_val, a_val| c_val.* = op(a_val, b_val);
+        } else if (sa == 0 and sb == 1) {
+            const a_val = A_data[offs[1]];
+            for (c_row, B_data[offs[2]..][0..inner]) |*c_val, b_val| c_val.* = op(a_val, b_val);
+        } else {
+            for (c_row, 0..) |*c_val, i| c_val.* = op(A_data[offs[1] + i * sa], B_data[offs[2] + i * sb]);
         }
-
-        c_val.* = op(A_data[a_idx], B_data[b_idx]);
-
-        C_shape.incrementCoord(&coord);
     }
 }
 

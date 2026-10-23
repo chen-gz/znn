@@ -10,6 +10,8 @@ const RopeOptions = types.RopeOptions;
 const ops_mod = @import("ops.zig");
 const zeros = ops_mod.zeros;
 const free = ops_mod.free;
+const reductions = @import("reductions.zig");
+const vec_math = @import("vec_math.zig");
 
 pub const conv1d = conv_pool.conv1d;
 pub const conv2d = conv_pool.conv2d;
@@ -22,7 +24,9 @@ pub const avgpool2d = conv_pool.avgpool2d;
 pub const adaptiveAvgPool1d = conv_pool.adaptiveAvgPool1d;
 pub const adaptiveAvgPool2d = conv_pool.adaptiveAvgPool2d;
 
+/// 沿最后一维的数值稳定 Softmax：每行先减去行最大值再求指数，避免上溢
 pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+    if (self.shape.len == 0) return error.IncompatibleDimensions;
     const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
     defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
 
@@ -35,20 +39,13 @@ pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         const row_in = x.data[i * D .. (i + 1) * D];
         const row_out = C.data[i * D .. (i + 1) * D];
 
-        var max_val = row_in[0];
-        for (row_in[1..]) |val| {
-            if (val > max_val) max_val = val;
-        }
+        const max_val = reductions.maxSlice(row_in);
+        vec_math.expShifted(row_in, row_out, max_val);
+        const exp_sum = reductions.sumSlice(row_out);
 
-        var exp_sum: f32 = 0.0;
-        for (row_in, row_out) |val, *p| {
-            const exp_val = @exp(val - max_val);
-            p.* = exp_val;
-            exp_sum += exp_val;
-        }
-
+        const inv_sum = 1.0 / exp_sum;
         for (row_out) |*p| {
-            p.* /= exp_sum;
+            p.* *= inv_sum;
         }
     }
     return C;
@@ -56,6 +53,7 @@ pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
 
 /// 均方根层归一化前向核函数 (Root Mean Square Layer Normalization, RMSNorm)
 pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
+    if (self.shape.len == 0) return error.IncompatibleDimensions;
     const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
     defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
 
@@ -72,14 +70,11 @@ pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator
         const row_in = x.data[i * D .. (i + 1) * D];
         const row_out = Y.data[i * D .. (i + 1) * D];
 
-        var sum_x2: f32 = 0.0;
-        for (row_in) |val| {
-            sum_x2 += val * val;
-        }
-        const rms = @sqrt(sum_x2 / @as(f32, @floatFromInt(D)) + eps);
+        const sum_x2 = reductions.sumSquaresSlice(row_in);
+        const inv_rms = 1.0 / @sqrt(sum_x2 / @as(f32, @floatFromInt(D)) + eps);
 
         for (row_in, row_out, g_c.data[0..D]) |x_val, *y_val, g_val| {
-            y_val.* = x_val / rms * g_val;
+            y_val.* = x_val * inv_rms * g_val;
         }
     }
     return Y;
@@ -87,6 +82,7 @@ pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator
 
 /// 标准层归一化前向核函数 (Layer Normalization, LayerNorm)
 pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
+    if (self.shape.len == 0) return error.IncompatibleDimensions;
     const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
     defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
 
@@ -107,19 +103,12 @@ pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std
         const row_in = x.data[i * D .. (i + 1) * D];
         const row_out = Y.data[i * D .. (i + 1) * D];
 
-        var sum_x: f32 = 0.0;
-        for (row_in) |val| sum_x += val;
-        const mean_val = sum_x / d_f;
-
-        var var_sum: f32 = 0.0;
-        for (row_in) |val| {
-            const diff = val - mean_val;
-            var_sum += diff * diff;
-        }
+        const mean_val = reductions.sumSlice(row_in) / d_f;
+        const var_sum = reductions.sumSquaredDeviationsSlice(row_in, mean_val);
         const inv_std = 1.0 / @sqrt(var_sum / d_f + eps);
 
-        for (0..D) |j| {
-            row_out[j] = (row_in[j] - mean_val) * inv_std * g_c.data[j] + b_c.data[j];
+        for (row_in, row_out, g_c.data[0..D], b_c.data[0..D]) |x_val, *y_val, g_val, b_val| {
+            y_val.* = (x_val - mean_val) * inv_std * g_val + b_val;
         }
     }
     return Y;
@@ -141,77 +130,7 @@ pub fn batchNorm1d(
     allocator: std.mem.Allocator,
 ) !*Tensor {
     if (self.shape.len != 2 and self.shape.len != 3) return error.IncompatibleDimensions;
-    const N = self.shape.dims[0];
-    const C = self.shape.dims[1];
-    const L = if (self.shape.len == 3) self.shape.dims[2] else 1;
-    if (gamma.data.len != C or beta.data.len != C) return error.ShapeMismatch;
-    if (running_mean) |rm| {
-        if (rm.data.len != C) return error.ShapeMismatch;
-    }
-    if (running_var) |rv| {
-        if (rv.data.len != C) return error.ShapeMismatch;
-    }
-
-    const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
-    defer if (!self.isContiguous()) x_contig.deinit(allocator);
-
-    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-    errdefer Y.deinit(allocator);
-
-    const m = N * L;
-    const m_f = @as(f32, @floatFromInt(m));
-
-    for (0..C) |c_| {
-        var mean_val: f32 = 0.0;
-        var inv_std: f32 = 1.0;
-
-        if (training) {
-            var sum_x: f32 = 0.0;
-            for (0..N) |n| {
-                const start_idx = (n * C + c_) * L;
-                for (x_contig.data[start_idx .. start_idx + L]) |val| {
-                    sum_x += val;
-                }
-            }
-            mean_val = sum_x / m_f;
-
-            var var_sum: f32 = 0.0;
-            for (0..N) |n| {
-                const start_idx = (n * C + c_) * L;
-                for (x_contig.data[start_idx .. start_idx + L]) |val| {
-                    const diff = val - mean_val;
-                    var_sum += diff * diff;
-                }
-            }
-            const var_val = var_sum / m_f;
-            inv_std = 1.0 / @sqrt(var_val + eps);
-
-            if (running_mean) |rm| {
-                rm.data[c_] = (1.0 - momentum) * rm.data[c_] + momentum * mean_val;
-            }
-            if (running_var) |rv| {
-                const unbiased_var = if (m > 1) var_sum / @as(f32, @floatFromInt(m - 1)) else var_val;
-                rv.data[c_] = (1.0 - momentum) * rv.data[c_] + momentum * unbiased_var;
-            }
-        } else {
-            mean_val = if (running_mean) |rm| rm.data[c_] else if (saved_mean_out) |sm| sm[c_] else 0.0;
-            const var_val = if (running_var) |rv| rv.data[c_] else 1.0;
-            inv_std = if (running_var != null) 1.0 / @sqrt(var_val + eps) else if (saved_inv_std_out) |si| si[c_] else 1.0 / @sqrt(1.0 + eps);
-        }
-
-        if (saved_mean_out) |sm| sm[c_] = mean_val;
-        if (saved_inv_std_out) |si| si[c_] = inv_std;
-
-        const g = gamma.data[c_];
-        const b = beta.data[c_];
-        for (0..N) |n| {
-            const start_idx = (n * C + c_) * L;
-            for (0..L) |i| {
-                Y.data[start_idx + i] = (x_contig.data[start_idx + i] - mean_val) * inv_std * g + b;
-            }
-        }
-    }
-    return Y;
+    return batchNormChannels(self, gamma, beta, running_mean, running_var, training, eps, momentum, saved_mean_out, saved_inv_std_out, allocator);
 }
 
 /// 二维批量归一化统一前向核函数 (2-Dimensional Batch Normalization, BatchNorm2d)
@@ -230,10 +149,28 @@ pub fn batchNorm2d(
     allocator: std.mem.Allocator,
 ) !*Tensor {
     if (self.shape.len != 4) return error.IncompatibleDimensions;
+    return batchNormChannels(self, gamma, beta, running_mean, running_var, training, eps, momentum, saved_mean_out, saved_inv_std_out, allocator);
+}
+
+/// 批量归一化 (Batch Normalization, BatchNorm) 共享内核：输入视为 `[N, C, S]`，
+/// 其中 `S` 为第 2 维之后所有空间维度之积（BatchNorm1d 的 `L` 或 BatchNorm2d 的 `H * W`），按通道 `C` 统计
+fn batchNormChannels(
+    self: *Tensor,
+    gamma: *Tensor,
+    beta: *Tensor,
+    running_mean: ?*Tensor,
+    running_var: ?*Tensor,
+    training: bool,
+    eps: f32,
+    momentum: f32,
+    saved_mean_out: ?[]f32,
+    saved_inv_std_out: ?[]f32,
+    allocator: std.mem.Allocator,
+) !*Tensor {
     const N = self.shape.dims[0];
     const C = self.shape.dims[1];
-    const H = self.shape.dims[2];
-    const W = self.shape.dims[3];
+    var spatial_size: usize = 1;
+    for (2..self.shape.len) |d| spatial_size *= self.shape.dims[d];
     if (gamma.data.len != C or beta.data.len != C) return error.ShapeMismatch;
     if (running_mean) |rm| {
         if (rm.data.len != C) return error.ShapeMismatch;
@@ -241,14 +178,19 @@ pub fn batchNorm2d(
     if (running_var) |rv| {
         if (rv.data.len != C) return error.ShapeMismatch;
     }
+    if (saved_mean_out) |sm| {
+        if (sm.len < C) return error.ShapeMismatch;
+    }
+    if (saved_inv_std_out) |si| {
+        if (si.len < C) return error.ShapeMismatch;
+    }
 
     const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (!self.isContiguous()) x_contig.deinit(allocator);
 
-    const Y = try zeros(allocator, &.{ N, C, H, W });
+    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
     errdefer Y.deinit(allocator);
 
-    const spatial_size = H * W;
     const m = N * spatial_size;
     const m_f = @as(f32, @floatFromInt(m));
 
@@ -260,19 +202,14 @@ pub fn batchNorm2d(
             var sum_x: f32 = 0.0;
             for (0..N) |n| {
                 const start_idx = (n * C + c_) * spatial_size;
-                for (x_contig.data[start_idx .. start_idx + spatial_size]) |val| {
-                    sum_x += val;
-                }
+                sum_x += reductions.sumSlice(x_contig.data[start_idx .. start_idx + spatial_size]);
             }
             mean_val = sum_x / m_f;
 
             var var_sum: f32 = 0.0;
             for (0..N) |n| {
                 const start_idx = (n * C + c_) * spatial_size;
-                for (x_contig.data[start_idx .. start_idx + spatial_size]) |val| {
-                    const diff = val - mean_val;
-                    var_sum += diff * diff;
-                }
+                var_sum += reductions.sumSquaredDeviationsSlice(x_contig.data[start_idx .. start_idx + spatial_size], mean_val);
             }
             const var_val = var_sum / m_f;
             inv_std = 1.0 / @sqrt(var_val + eps);
@@ -342,15 +279,8 @@ pub fn groupNorm(
             const group_offset = (n * num_groups + g) * group_elems;
             const group_slice = x_contig.data[group_offset .. group_offset + group_elems];
 
-            var sum_x: f32 = 0.0;
-            for (group_slice) |val| sum_x += val;
-            const mean_val = sum_x / group_elems_f;
-
-            var var_sum: f32 = 0.0;
-            for (group_slice) |val| {
-                const diff = val - mean_val;
-                var_sum += diff * diff;
-            }
+            const mean_val = reductions.sumSlice(group_slice) / group_elems_f;
+            const var_sum = reductions.sumSquaredDeviationsSlice(group_slice, mean_val);
             const inv_std = 1.0 / @sqrt(var_sum / group_elems_f + eps);
 
             const ng_idx = n * num_groups + g;
@@ -392,12 +322,12 @@ pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: st
     const x = if (self.isContiguous() and !self.is_view) self else try self.contiguous(allocator);
     defer if (!self.isContiguous() or self.is_view) x.deinit(allocator);
 
+    if (self.shape.len == 0) return error.IncompatibleDimensions;
     const rotary_offset = options.rotary_offset;
     const base = options.base;
     const D = x.shape.dims[x.shape.len - 1];
     if (rotary_offset > D) return error.DimensionOutOfBounds;
     const T = if (x.shape.len >= 2) x.shape.dims[x.shape.len - 2] else 1;
-    const outer = x.shape.numel() / (T * D);
     const rot_dim = D - rotary_offset;
     const half = rot_dim / 2;
     const rot_dim_f = @as(f32, @floatFromInt(rot_dim));
@@ -406,22 +336,38 @@ pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: st
     const num_angles = @as(usize, @intFromFloat(@as(f32, @floatFromInt(half)) * factor));
 
     const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-    for (0..outer) |o| {
-        for (0..T) |t| {
+    errdefer free(allocator, Y);
+    if (T * D == 0) return Y;
+    const outer = x.shape.numel() / (T * D);
+
+    // 频率与各位置的 cos / sin 只依赖 (t, i)：每个位置只计算一次三角函数表并复用于全部 outer 行（批次与注意力头）
+    const tables = try allocator.alloc(f32, 3 * num_angles);
+    defer allocator.free(tables);
+    const inv_freq = tables[0..num_angles];
+    const cos_tab = tables[num_angles .. 2 * num_angles];
+    const sin_tab = tables[2 * num_angles .. 3 * num_angles];
+    for (inv_freq, 0..) |*f, i| {
+        f.* = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
+    }
+
+    for (0..T) |t| {
+        const pos_f = @as(f32, @floatFromInt(start_pos + t));
+        for (inv_freq, cos_tab, sin_tab) |freq, *cos_t, *sin_t| {
+            const theta = pos_f * freq;
+            cos_t.* = @cos(theta);
+            sin_t.* = @sin(theta);
+        }
+
+        for (0..outer) |o| {
             const row_in = x.data[(o * T + t) * D .. (o * T + t + 1) * D];
             const row_out = Y.data[(o * T + t) * D .. (o * T + t + 1) * D];
 
             // 先复制整行，后续仅更新参与旋转的维度
             @memcpy(row_out, row_in);
 
-            const pos_f = @as(f32, @floatFromInt(start_pos + t));
             switch (options.mode) {
                 .interleaved => {
-                    for (0..num_angles) |i| {
-                        const freq = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
-                        const theta = pos_f * freq;
-                        const cos_t = @cos(theta);
-                        const sin_t = @sin(theta);
+                    for (cos_tab, sin_tab, 0..) |cos_t, sin_t, i| {
                         const x0 = row_in[rotary_offset + 2 * i];
                         const x1 = row_in[rotary_offset + 2 * i + 1];
                         row_out[rotary_offset + 2 * i] = x0 * cos_t - x1 * sin_t;
@@ -429,11 +375,7 @@ pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: st
                     }
                 },
                 .split_half => {
-                    for (0..num_angles) |i| {
-                        const freq = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
-                        const theta = pos_f * freq;
-                        const cos_t = @cos(theta);
-                        const sin_t = @sin(theta);
+                    for (cos_tab, sin_tab, 0..) |cos_t, sin_t, i| {
                         const x0 = row_in[rotary_offset + i];
                         const x1 = row_in[rotary_offset + i + half];
                         row_out[rotary_offset + i] = x0 * cos_t - x1 * sin_t;
@@ -446,8 +388,11 @@ pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: st
     return Y;
 }
 
+/// 分组查询注意力 (Grouped-Query Attention, GQA) 键值头复制：`[B, n_kv, T, hs]` -> `[B, n_kv * groups, T, hs]`
 pub fn repeatKV(self: *Tensor, groups: usize, allocator: std.mem.Allocator) !*Tensor {
     if (self.shape.len != 4) return error.IncompatibleDimensions;
+    const x = if (self.isContiguous()) self else try self.contiguous(allocator);
+    defer if (x != self) x.deinit(allocator);
     const B = self.shape.dims[0];
     const n_kv = self.shape.dims[1];
     const T = self.shape.dims[2];
@@ -458,7 +403,7 @@ pub fn repeatKV(self: *Tensor, groups: usize, allocator: std.mem.Allocator) !*Te
     const head_bytes = T * hs;
     for (0..B) |b| {
         for (0..n_kv) |kv_h| {
-            const src = self.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
+            const src = x.data[((b * n_kv + kv_h) * head_bytes) .. ((b * n_kv + kv_h + 1) * head_bytes)];
             for (0..groups) |g| {
                 const h = kv_h * groups + g;
                 const dest = Y.data[((b * nh + h) * head_bytes) .. ((b * nh + h + 1) * head_bytes)];
@@ -469,6 +414,27 @@ pub fn repeatKV(self: *Tensor, groups: usize, allocator: std.mem.Allocator) !*Te
     return Y;
 }
 
+/// 二维矩阵块在基础线性代数子程序 (Basic Linear Algebra Subprograms, BLAS) 中的行优先描述：
+/// 是否以转置方式读取，以及主维跨度 (Leading Dimension, ld)
+pub const BlasMatrix = struct { trans: c_int, ld: usize };
+
+/// 判断跨度为 (`s_row`, `s_col`) 的 `[rows, cols]` 矩阵块能否直接交给 BLAS：
+/// 行优先连续行（列跨度为 1）按非转置读取，列优先连续列（如 `transposeView` 得到的转置视图，行跨度为 1）按转置读取；
+/// 两者都不满足时返回 null，由调用方物化为连续副本
+pub fn blasMatrix(rows: usize, cols: usize, s_row: usize, s_col: usize) ?BlasMatrix {
+    if (cols <= 1 or s_col == 1) {
+        if (rows <= 1) return .{ .trans = c.CblasNoTrans, .ld = @max(cols, 1) };
+        if (s_row >= cols) return .{ .trans = c.CblasNoTrans, .ld = @max(s_row, 1) };
+    }
+    if (rows <= 1 or s_row == 1) {
+        if (cols <= 1) return .{ .trans = c.CblasTrans, .ld = @max(rows, 1) };
+        if (s_col >= rows) return .{ .trans = c.CblasTrans, .ld = @max(s_col, 1) };
+    }
+    return null;
+}
+
+/// 四维批量矩阵乘法 `[B, H, M, K] x [B, H, K, N] -> [B, H, M, N]`：
+/// 支持任意批次/头跨度，以及最后两维为行优先或转置（列优先）布局的视图；其余布局先物化为连续副本
 pub fn batchMatMul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) !*Tensor {
     if (self.shape.len != 4 or other.shape.len != 4) {
         return error.IncompatibleDimensions;
@@ -483,33 +449,43 @@ pub fn batchMatMul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) 
     const K = self.shape.dims[3];
     const N = other.shape.dims[3];
 
-    const C = try zeros(allocator, &.{ batch_size, num_heads, M, N });
+    const a_layout = blasMatrix(M, K, self.strides.dims[2], self.strides.dims[3]);
+    const a = if (a_layout != null) self else try self.contiguous(allocator);
+    defer if (a != self) a.deinit(allocator);
+    const b_layout = blasMatrix(K, N, other.strides.dims[2], other.strides.dims[3]);
+    const b = if (b_layout != null) other else try other.contiguous(allocator);
+    defer if (b != other) b.deinit(allocator);
+    const a_mat = a_layout orelse BlasMatrix{ .trans = c.CblasNoTrans, .ld = @max(K, 1) };
+    const b_mat = b_layout orelse BlasMatrix{ .trans = c.CblasNoTrans, .ld = @max(N, 1) };
 
-    const sA_b = self.strides.dims[0];
-    const sA_h = self.strides.dims[1];
-    const sB_b = other.strides.dims[0];
-    const sB_h = other.strides.dims[1];
+    const C = try zeros(allocator, &.{ batch_size, num_heads, M, N });
+    if (M == 0 or N == 0) return C;
+
+    const sA_b = a.strides.dims[0];
+    const sA_h = a.strides.dims[1];
+    const sB_b = b.strides.dims[0];
+    const sB_h = b.strides.dims[1];
     const sC_b = C.strides.dims[0];
     const sC_h = C.strides.dims[1];
 
-    for (0..batch_size) |b| {
+    for (0..batch_size) |bi| {
         for (0..num_heads) |h| {
-            const ptrA = self.data.ptr + b * sA_b + h * sA_h;
-            const ptrB = other.data.ptr + b * sB_b + h * sB_h;
-            const ptrC = C.data.ptr + b * sC_b + h * sC_h;
+            const ptrA = a.data.ptr + bi * sA_b + h * sA_h;
+            const ptrB = b.data.ptr + bi * sB_b + h * sB_h;
+            const ptrC = C.data.ptr + bi * sC_b + h * sC_h;
 
             c.cblas_sgemm(
                 c.CblasRowMajor,
-                c.CblasNoTrans,
-                c.CblasNoTrans,
+                a_mat.trans,
+                b_mat.trans,
                 @intCast(M),
                 @intCast(N),
                 @intCast(K),
                 1.0,
                 ptrA,
-                @intCast(K),
+                @intCast(a_mat.ld),
                 ptrB,
-                @intCast(N),
+                @intCast(b_mat.ld),
                 0.0,
                 ptrC,
                 @intCast(N),
