@@ -121,6 +121,7 @@ pub const CausalSelfAttention = transformer.CausalSelfAttention;
 pub const RopeOptions = tensor.RopeOptions;
 pub const RoPEOptions = tensor.RoPEOptions;
 pub const applyRope1D = transformer.applyRope1D;
+pub const rope1DAngles = transformer.rope1DAngles;
 pub const MLACache = transformer.MLACache;
 pub const MLALayer = transformer.MLALayer;
 pub const TransformerBlock = transformer.TransformerBlock;
