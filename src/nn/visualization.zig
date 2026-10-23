@@ -159,23 +159,24 @@ fn firstDataInput(op: *const Op) ?*Tensor {
     return null;
 }
 
-fn formatShapeAlloc(allocator: std.mem.Allocator, s: Shape) ![]const u8 {
-    var buf: [64]u8 = undefined;
-    var len: usize = 0;
-    buf[0] = '[';
-    len += 1;
-    for (0..s.len) |d| {
-        if (d > 0) {
-            buf[len] = ',';
-            buf[len + 1] = ' ';
-            len += 2;
-        }
-        const part = std.fmt.bufPrint(buf[len..], "{d}", .{s.dims[d]}) catch "";
-        len += part.len;
+/// 形状字符串 (如 "[2, 3, 4]") 的最大字节数：最多 8 维、每维至多 20 位十进制数字、7 个 ", " 分隔符与一对方括号
+const max_shape_str_len = 8 * 20 + 7 * 2 + 2;
+
+/// 将形状格式化到定长缓冲区 (缓冲区足以容纳任意 8 维形状)
+fn formatShape(buf: *[max_shape_str_len]u8, s: Shape) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    w.writeByte('[') catch unreachable;
+    for (s.dims[0..s.len], 0..) |d, i| {
+        if (i > 0) w.writeAll(", ") catch unreachable;
+        w.print("{d}", .{d}) catch unreachable;
     }
-    buf[len] = ']';
-    len += 1;
-    return try allocator.dupe(u8, buf[0..len]);
+    w.writeByte(']') catch unreachable;
+    return w.buffered();
+}
+
+fn formatShapeAlloc(allocator: std.mem.Allocator, s: Shape) ![]const u8 {
+    var buf: [max_shape_str_len]u8 = undefined;
+    return allocator.dupe(u8, formatShape(&buf, s));
 }
 
 fn shapeEql(a: Shape, b: Shape) bool {
@@ -195,28 +196,24 @@ pub fn collectGraphNodes(graph: *Graph, allocator: std.mem.Allocator) !std.Array
     var nodes: std.ArrayList(NodeData) = .empty;
     errdefer freeGraphNodes(&nodes, allocator);
 
-    const arena_alloc = graph.arena.allocator();
-    var visited = std.AutoHashMap(*Tensor, void).init(arena_alloc);
+    var visited = std.AutoHashMap(*Tensor, void).init(allocator);
     defer visited.deinit();
 
     var counters = NodeCounters{};
 
     for (graph.ops.items) |op| {
         for (op.inputs) |t| {
-            if (visited.contains(t)) continue;
-            try visited.put(t, {});
+            if ((try visited.getOrPut(t)).found_existing) continue;
             try appendNodeData(graph, t, &counters, &nodes, allocator);
         }
         for (op.outputs) |t| {
-            if (visited.contains(t)) continue;
-            try visited.put(t, {});
+            if ((try visited.getOrPut(t)).found_existing) continue;
             try appendNodeData(graph, t, &counters, &nodes, allocator);
         }
     }
 
     for (graph.tensors.items) |t| {
-        if (visited.contains(t)) continue;
-        try visited.put(t, {});
+        if ((try visited.getOrPut(t)).found_existing) continue;
         try appendNodeData(graph, t, &counters, &nodes, allocator);
     }
 
@@ -392,31 +389,15 @@ pub fn collectGraphOps(graph: *Graph, allocator: std.mem.Allocator) !std.ArrayLi
         defer param_shape_list.deinit(allocator);
 
         for (op.inputs) |inp| {
-            var s_buf: [64]u8 = undefined;
-            var s_len: usize = 0;
-            s_buf[0] = '[';
-            s_len += 1;
-            for (0..inp.shape.len) |d| {
-                if (d > 0) {
-                    s_buf[s_len] = ',';
-                    s_buf[s_len + 1] = ' ';
-                    s_len += 2;
-                }
-                const part = std.fmt.bufPrint(s_buf[s_len..], "{d}", .{inp.shape.dims[d]}) catch "";
-                s_len += part.len;
-            }
-            s_buf[s_len] = ']';
-            s_len += 1;
-            const single_shape = s_buf[0..s_len];
+            var s_buf: [max_shape_str_len]u8 = undefined;
+            const single_shape = formatShape(&s_buf, inp.shape);
 
             if (isParam(inp)) {
                 const p_name = if (inp.name) |pn| (if (std.mem.lastIndexOf(u8, pn, ".")) |dot| pn[dot + 1 ..] else pn) else "param";
                 if (param_shape_list.items.len > 0) {
                     try param_shape_list.appendSlice(allocator, ", ");
                 }
-                const formatted = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ p_name, single_shape });
-                defer allocator.free(formatted);
-                try param_shape_list.appendSlice(allocator, formatted);
+                try param_shape_list.print(allocator, "{s}: {s}", .{ p_name, single_shape });
             } else {
                 if (inp_shape_list.items.len > 0) {
                     try inp_shape_list.appendSlice(allocator, ", ");
@@ -921,3 +902,14 @@ pub const ModelHierarchyGraph = struct {
         self.arena.deinit();
     }
 };
+
+test "formatShape renders the widest 8-dimensional shape without overflowing" {
+    var buf: [max_shape_str_len]u8 = undefined;
+    const max = std.math.maxInt(usize);
+    const widest = Shape.init(&.{ max, max, max, max, max, max, max, max });
+    const text = formatShape(&buf, widest);
+    try std.testing.expectEqual(max_shape_str_len, text.len);
+    try std.testing.expect(std.mem.startsWith(u8, text, "[18446744073709551615, "));
+    try std.testing.expectEqualStrings("[2, 3]", formatShape(&buf, Shape.init(&.{ 2, 3 })));
+    try std.testing.expectEqualStrings("[]", formatShape(&buf, Shape.init(&.{})));
+}
