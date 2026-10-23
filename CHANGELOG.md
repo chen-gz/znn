@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **全仓分包代码审计：正确性修复、内存安全与热点加速 (`src/backend/`, `src/tensor/`, `src/autodiff/`, `src/nn/`, `src/optim.zig`, `src/dataset.zig`, `src/regression.zig`, `src/manifold.zig`, `src/cross_validation.zig`, `src/engine.zig`, `src/bench/`, `src/models/`, `examples/`, `tools/`)**:
+  - **后端 (`backend`)**：纯 Zig 后备单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM) 改为 GotoBLAS 式打包分块与 6×16 寄存器微内核（1024³ 约 34 → 76 GFLOPS），不再跳过 `a == 0` 而丢失 NaN / Inf 传播，并正确支持列主序；`Executor.parallelFor` / `parallelReduce` 修复超大粒度下的整数溢出；MLX 卸载路径修复 `argmaxWithPenalty` 越界读、滑动窗口键值缓存 (Key-Value Cache, KVCache) 裁剪丢失最新词元、投机解码 (Speculative Decoding) 窗口掩码与回滚错误、`Q4Weights` 未校验长度、`copyToSlice` 非连续视图越界、`VectorArray` 超过 64 个数组被截断以及多处错误路径泄漏（MLX 改动仅在 Linux 上做 aarch64-macos 类型检查，需在 Apple Silicon 上实测）。
+  - **张量 (`tensor`)**：修复 `zeros` / `concat` / `reshape` / 即时损失 / `qr` / `svd` 等分配失败泄漏；`softmaxCrossEntropy` 改用对数求和指数 (Log-Sum-Exp, LSE)，不再把损失截断在 34.5；原地算子与 `repeat` 只作用于视图可见元素，`batchMatMul` / `matmul` 正确处理转置视图；0 维张量 `numel` 为 1；`bf16.fromF32` 保留 NaN；混合专家 (Mixture of Experts, MoE) 内核校验形状与非法专家下标。性能：广播运算维度折叠（约 3×）、按行归约（约 20×）、向量化指数 `vec_math.exp8` 加速 `softmax`（约 5.4×）、旋转位置编码 (Rotary Position Embedding, RoPE) 三角表复用（约 16×）、转置卷积改为 SGEMM + 列转图像 (Column to Image, col2im)（约 16×）。
+  - **自动微分 (`autodiff`)**：新增覆盖全部可微算子与损失的有限差分梯度检查 (Finite-Difference Gradient Check)；`Graph.backward` 每次反向前清零中间梯度（修复重复反向导致的梯度重复累加）、只遍历需要梯度的子图、拓扑排序改为迭代式且不再占用计算图 Arena；MatMul 反向支持跨步视图，新增 `Graph.contiguous` 为仅支持连续布局的算子物化视图输入；BatchNorm 重演时重新计算批统计量；交叉熵统一使用 LSE；`Graph.q4MatMul` 支持对输入求梯度（可在 4-bit 骨干上训练低秩自适应 (Low-Rank Adaptation, LoRA)）。性能：广播 / 转置反向逐行遍历（自注意力训练约快 17%），转置卷积反向改为 im2col + SGEMM（约 18×）。
+  - **神经网络 (`nn`)**：修复 `sampleTopP` 未按概率排序取核 (Nucleus) 的错误；多头潜在注意力 (Multi-head Latent Attention, MLA) 增量推理补上 `b_uv` 偏置并支持二维输入；KVCache / MLACache 写满返回 `error.ContextWindowExceeded`；Safetensors 头部全面校验并支持非对齐 BF16 / F16；非法配置与空序列返回错误而非断言；模型图形状字符串缓冲区越界；`deinitModel` 去重集合无法分配时退化为按遍历顺序回扫，权重共享下既不重复释放也不泄漏。增量注意力内层循环使用单指令多数据 (Single Instruction Multiple Data, SIMD) 向量化（约 8×）。
+  - **训练与数据 (`optim`, `dataset`, `regression`, `manifold`, `cross_validation`, `engine`)**：检查点加载先校验头部与文件长度再写入状态（新增 `CheckpointSizeMismatch`）；`AdamOptimizer.t` 改为整数 `step_count`；`clipGradNorm` 以 f64 汇总；Adam / AdamW 共享 SIMD 内核（AdamW 1M 参数单步 16.3 ms → 约 1.0 ms）；字节对编码 (Byte Pair Encoding, BPE) 训练使用正确的合并 Token ID；`DataLoader` 校验空数据集、批大小与标签数；t 分布随机邻域嵌入 (t-Distributed Stochastic Neighbor Embedding, t-SNE) 困惑度搜索避免亲和度下溢；交叉验证 (Cross-Validation, CV) 一倍标准误 (One-Standard-Error, 1-SE) 规则与网格顺序无关；分类训练 / 评估按样本数加权平均；下载工具先写临时文件再重命名。
+  - **模型 (`models`)**：`Gemma4DecoderLayer.forward` 施加 `layer_scalar`，`layer_scalar` / `v_norm` 改为不可训练缓冲区；预填充超出 KVCache 容量与词元 ID 越界返回错误；Gemma 4 E4B 全局注意力改用比例旋转位置编码 (Proportional RoPE) 频率表；修复 E4B 加载与前向错误路径的重复释放和 Q4 构造泄漏；直通格式按 4 字节对齐（魔数 `ZNNQ4DIR` → `ZNNQ4D02`，需重新运行 `zig build pack-gemma4`）；`quantize-gemma4` 校验张量形状；解码注意力与 CPU 词表投影改用 SIMD 点积（约 10×）。
+  - **接口变化**：`AdamOptimizer.t` → `step_count: u64`；`BPETokenizer.addMerge` 返回合并 ID；`ClassificationEpochResult` 新增 `num_samples`；删除 `engine` 兼容别名（`StepResult`、`EpochResult`、`trainStep`、`evalStep`、`trainEpoch`、`evaluate`）、`BinaryMmapDataset.close`、`Tensor.sigmoidCrossEntropy`、`Nonlinearity.defaultNonlinearity`、`InitMethod.defaultConfig` 与 `Graph.convTranspose2D` 重复别名。
+
 - **全面适配 Zig 0.17 编译器标准与语言重大语法升级 (`src/`)**:
   - **移除废弃重复算子 `**` 并迁移至 `@splat` 与编译期内存复制**：针对 Zig 0.17 废弃的数组重复操作符 `**`，将全库张量维度、形状元数据、静态掩码及测试数据初始化统一重构为原生 `@splat(...)`；字符串与语料复用改用编译期静态块内 `@memcpy` 复制。
   - **适配 `@typeInfo` 类型反射并行数组化与属性重构 (`src/nn/module.zig`, `src/tensor/static.zig`, `src/nn/tests_vis.zig`, `src/nn/graph_ir.zig`, `src/nn/core.zig`)**：
@@ -21,7 +30,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **标准库 API 迁移 (`src/nn/core.zig`, `src/nn/graph_ir.zig`, `src/nn/tests_vis.zig`)**：
     - 内存分配器哨兵复制由 `allocator.dupeZ` 迁移至 `allocator.dupeSentinel(u8, ..., 0)`；
     - 元组类型构造由已废弃的 `std.meta.Tuple` 迁移至编译器原生内置函数 `@Tuple(&.{...})`。
-
 
 - **重构 `MoELayer` 为无分支 `TopK` + `GatherMatMul` 索引专家算子架构：零 `if` 分支实现 $O(N \cdot K)$ 稀疏激活与静态图重演 (`src/tensor/nn_kernels.zig`, `src/tensor/core.zig`, `src/autodiff/types.zig`, `src/autodiff/op.zig`, `src/autodiff/graph_nn.zig`, `src/autodiff/backward_nn.zig`, `src/autodiff/graph_init.zig`, `src/nn/transformer.zig`, `src/nn/visualization.zig`, `examples/models/deepseek_moe.json`)**:
   - **新增无分支前 K 项选择算子 (`OpType.TopK`, `Tensor.topKInto` / `Graph.topK`)**：通过纯算术比较排名累加（`@intFromBool(v_m > v_j) | @intFromBool((v_m == v_j) and (m < j))` 与 `@floatFromInt(@intFromBool(rank == r))`）从 `[N, E]` 门控概率中直接输出 `(values: [N, K], indices: [N, K])`，全程零数据依赖 `if` 跳转，反向传播将 `values.grad` 按 `indices` 路由回原专家列。

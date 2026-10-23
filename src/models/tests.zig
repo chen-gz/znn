@@ -418,7 +418,8 @@ fn checkAttentionPrefillDecodeParity(attn_type: gemma4.Gemma4AttentionType, head
         const yt = try attn.forwardDecode(&g, xt, &cache_b);
         try std.testing.expect(maxAbsDiff(yt.data, y_all.data[t * C .. (t + 1) * C]) < 1e-4);
     }
-    try std.testing.expectEqualSlices(f32, cache_a.k[0 .. T * head_dim], cache_b.k[0 .. T * head_dim]);
+    // 预填充 (M = T) 与逐词元解码 (M = 1) 走不同的矩阵乘法分块路径，累加顺序不同，只要求浮点容差内一致
+    try std.testing.expect(maxAbsDiff(cache_a.k[0 .. T * head_dim], cache_b.k[0 .. T * head_dim]) < 1e-5);
 }
 
 test "Gemma4Attention prefill matches incremental decode beyond the sliding window" {
