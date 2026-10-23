@@ -159,14 +159,10 @@ pub const VectorArray = struct {
         return .{ .handle = c.mlx_vector_array_new() };
     }
 
+    /// 由任意数量的数组构建向量容器（逐个追加句柄，不截断、不在 Zig 侧分配内存）；构建失败时返回空句柄，后续调用将报错
     pub fn fromArrays(arrays: []const Array) VectorArray {
         if (!has_mlx) return .{ .handle = null };
-        var raw_handles: [64]c.mlx_array = undefined;
-        const count = @min(arrays.len, raw_handles.len);
-        for (0..count) |i| {
-            raw_handles[i] = arrays[i].handle;
-        }
-        return .{ .handle = c.mlx_vector_array_new_data(&raw_handles, count) };
+        return .{ .handle = newVectorFromArrays(arrays) catch .{ .ctx = null } };
     }
 
     pub fn deinit(self: *VectorArray) void {
@@ -191,6 +187,17 @@ pub const VectorArray = struct {
     }
 };
 
+/// 逐个追加数组句柄构建原生 `mlx_vector_array`（调用方负责以 `mlx_vector_array_free` 释放）
+fn newVectorFromArrays(arrays: []const Array) MlxError!c.mlx_vector_array {
+    const vec = c.mlx_vector_array_new();
+    if (vec.ctx == null) return error.MlxOperationFailed;
+    errdefer _ = c.mlx_vector_array_free(vec);
+    for (arrays) |arr| {
+        if (c.mlx_vector_array_append_value(vec, arr.handle) != 0) return error.MlxOperationFailed;
+    }
+    return vec;
+}
+
 /// MLX 计算图静态编译闭包 (Closure)
 pub const Closure = struct {
     handle: if (has_mlx) c.mlx_closure else ?*anyopaque,
@@ -206,6 +213,7 @@ pub const Closure = struct {
     pub fn apply(self: Closure, inputs: VectorArray) !VectorArray {
         if (!has_mlx or self.handle.ctx == null) return error.MlxNotSupported;
         var res = VectorArray.init();
+        errdefer res.deinit();
         if (c.mlx_closure_apply(&res.handle, self.handle, inputs.handle) != 0 or res.handle.ctx == null) {
             return error.MlxOperationFailed;
         }
@@ -268,7 +276,10 @@ pub fn compile(
 
     var compiled_cls = c.mlx_closure_new();
     const rc = c.mlx_compile(&compiled_cls, raw_cls, shapeless);
-    if (rc != 0 or compiled_cls.ctx == null) return error.MlxOperationFailed;
+    if (rc != 0 or compiled_cls.ctx == null) {
+        if (compiled_cls.ctx != null) _ = c.mlx_closure_free(compiled_cls);
+        return error.MlxOperationFailed;
+    }
     return .{ .handle = compiled_cls };
 }
 
@@ -525,58 +536,54 @@ pub const Array = struct {
         return res;
     }
 
-    /// 将 GPU 计算完毕后的浮点数据安全复制到目标切片中（自动感知并处理非连续与转置布局）
+    /// 将 GPU 计算完毕后的浮点数据安全复制到目标切片中（自动感知并处理非连续、转置与广播布局；非单精度数组先转换为单精度）
     pub fn copyToSlice(self: Array, dest: []f32) !void {
-        const src = self.dataFloat32();
-        if (dest.len != src.len) return error.ShapeMismatch;
+        if (!has_mlx) return error.MlxNotSupported;
+        if (self.dtype() != .float32) {
+            var converted = try self.astype(.float32, null);
+            defer converted.deinit();
+            return converted.copyToSlice(dest);
+        }
+        const numel = self.size();
+        if (dest.len != numel) return error.ShapeMismatch;
+        if (numel == 0) return;
+
+        self.eval();
+        // 非连续视图的元素按步长分布在底层缓冲区中，跨度可能大于 numel（切片视图）也可能小于 numel（广播视图），
+        // 因此以多元素指针按步长寻址，而不是截取长度为 numel 的切片
+        const src: [*]const f32 = c.mlx_array_data_float32(self.handle) orelse return error.MlxOperationFailed;
 
         if (self.isContiguousRowMajor()) {
-            @memcpy(dest, src);
+            @memcpy(dest, src[0..numel]);
             return;
         }
 
         const n = self.ndim();
+        if (n > 8) return error.InvalidShape;
         const c_shape = c.mlx_array_shape(self.handle);
         const c_strides = c.mlx_array_strides(self.handle);
 
-        // 针对注意力算子常见的 4D 张量 (Batch, Head, SeqLen, HeadDim) 极速分块复制 (底层 HeadDim 连续)
-        if (n == 4 and c_strides[3] == 1) {
-            const B = @as(usize, @intCast(c_shape[0]));
-            const H = @as(usize, @intCast(c_shape[1]));
-            const T = @as(usize, @intCast(c_shape[2]));
-            const D = @as(usize, @intCast(c_shape[3]));
-            const sB = c_strides[0];
-            const sH = c_strides[1];
-            const sT = c_strides[2];
-
-            for (0..B) |b| {
-                for (0..H) |h| {
-                    for (0..T) |t| {
-                        const in_off = b * sB + h * sH + t * sT;
-                        const out_off = b * (H * T * D) + h * (T * D) + t * D;
-                        @memcpy(dest[out_off .. out_off + D], src[in_off .. in_off + D]);
-                    }
-                }
-            }
-            return;
-        }
-
-        // 通用 N 维非连续步长重排回写
+        // 最内层维度连续时按行整块复制（覆盖注意力算子常见的 (Batch, Head, SeqLen, HeadDim) 转置视图）
+        const inner: usize = @intCast(c_shape[n - 1]);
+        const inner_contiguous = c_strides[n - 1] == 1;
+        const rows = numel / inner;
         var coord: [8]usize = @splat(0);
-        for (0..src.len) |out_idx| {
-            var in_idx: usize = 0;
-            for (0..n) |d| {
-                in_idx += coord[d] * c_strides[d];
+        for (0..rows) |row| {
+            var in_off: usize = 0;
+            for (0..n - 1) |d| in_off += coord[d] * c_strides[d];
+            const out_row = dest[row * inner ..][0..inner];
+            if (inner_contiguous) {
+                @memcpy(out_row, src[in_off..][0..inner]);
+            } else {
+                for (out_row, 0..) |*o, e| o.* = src[in_off + e * c_strides[n - 1]];
             }
-            dest[out_idx] = src[in_idx];
 
-            var dim_idx = n;
+            // 按行主序递增除最内层外的多维坐标
+            var dim_idx = n - 1;
             while (dim_idx > 0) {
                 dim_idx -= 1;
                 coord[dim_idx] += 1;
-                if (coord[dim_idx] < @as(usize, @intCast(c_shape[dim_idx]))) {
-                    break;
-                }
+                if (coord[dim_idx] < @as(usize, @intCast(c_shape[dim_idx]))) break;
                 coord[dim_idx] = 0;
             }
         }
@@ -632,6 +639,7 @@ pub const Array = struct {
         if (!has_mlx or self.handle.ctx == null) return &.{};
         self.eval();
         const ptr = c.mlx_array_data_float32(self.handle);
+        if (ptr == null) return &.{};
         const len = c.mlx_array_size(self.handle);
         return ptr[0..len];
     }
@@ -641,6 +649,7 @@ pub const Array = struct {
         if (!has_mlx or self.handle.ctx == null) return &.{};
         self.eval();
         const ptr = c.mlx_array_data_uint32(self.handle);
+        if (ptr == null) return &.{};
         const len = c.mlx_array_size(self.handle);
         return ptr[0..len];
     }
@@ -724,17 +733,7 @@ pub const Array = struct {
         if (!has_mlx) return error.MlxNotSupported;
         if (arrays.len == 0) return error.InvalidShape;
 
-        var handles_buf: [16]c.mlx_array = undefined;
-        const raw_handles = if (arrays.len <= 16)
-            handles_buf[0..arrays.len]
-        else
-            try std.heap.c_allocator.alloc(c.mlx_array, arrays.len);
-        defer if (arrays.len > 16) std.heap.c_allocator.free(raw_handles);
-
-        for (arrays, 0..) |arr, i| {
-            raw_handles[i] = arr.handle;
-        }
-        const vec = c.mlx_vector_array_new_data(raw_handles.ptr, raw_handles.len);
+        const vec = try newVectorFromArrays(arrays);
         defer _ = c.mlx_vector_array_free(vec);
 
         var res = Array.init();
@@ -959,6 +958,7 @@ pub const Array = struct {
     pub fn split(self: Array, num_splits: i32, axis: i32, stream: ?Stream) !VectorArray {
         if (!has_mlx) return error.MlxNotSupported;
         var res = VectorArray.init();
+        errdefer res.deinit();
         const s = if (stream) |st| st.handle else c.mlx_default_gpu_stream_new();
         defer maybeFreeStream(s, stream);
 
@@ -1098,9 +1098,15 @@ pub const Array = struct {
                 var gate_h: c.mlx_array = .{ .ctx = null };
                 var up_h: c.mlx_array = .{ .ctx = null };
                 if (c.mlx_vector_array_get(&gate_h, in, 0) != 0 or gate_h.ctx == null) return 1;
-                if (c.mlx_vector_array_get(&up_h, in, 1) != 0 or up_h.ctx == null) return 1;
-                const gate = Array{ .handle = gate_h };
-                const up = Array{ .handle = up_h };
+                if (c.mlx_vector_array_get(&up_h, in, 1) != 0 or up_h.ctx == null) {
+                    _ = c.mlx_array_free(gate_h);
+                    return 1;
+                }
+                // mlx_vector_array_get 为取出的元素分配了新的数组句柄，用完后需释放
+                var gate = Array{ .handle = gate_h };
+                defer gate.deinit();
+                var up = Array{ .handle = up_h };
+                defer up.deinit();
 
                 var act = gate.gelu(null) catch return 1;
                 defer act.deinit();
@@ -1139,15 +1145,16 @@ pub const Array = struct {
             fn compute(vres: [*c]c.mlx_vector_array, in: c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
                 if (!has_mlx) return 1;
                 _ = payload;
-                var a_h: c.mlx_array = .{ .ctx = null };
-                var b_h: c.mlx_array = .{ .ctx = null };
-                var s_h: c.mlx_array = .{ .ctx = null };
-                if (c.mlx_vector_array_get(&a_h, in, 0) != 0 or a_h.ctx == null) return 1;
-                if (c.mlx_vector_array_get(&b_h, in, 1) != 0 or b_h.ctx == null) return 1;
-                if (c.mlx_vector_array_get(&s_h, in, 2) != 0 or s_h.ctx == null) return 1;
-                const a_arr = Array{ .handle = a_h };
-                const b_arr = Array{ .handle = b_h };
-                const s_arr = Array{ .handle = s_h };
+                // mlx_vector_array_get 为取出的元素分配了新的数组句柄，用完后需释放（deinit 对空句柄无操作）
+                var a_arr = Array.init();
+                defer a_arr.deinit();
+                var b_arr = Array.init();
+                defer b_arr.deinit();
+                var s_arr = Array.init();
+                defer s_arr.deinit();
+                if (c.mlx_vector_array_get(&a_arr.handle, in, 0) != 0 or a_arr.handle.ctx == null) return 1;
+                if (c.mlx_vector_array_get(&b_arr.handle, in, 1) != 0 or b_arr.handle.ctx == null) return 1;
+                if (c.mlx_vector_array_get(&s_arr.handle, in, 2) != 0 or s_arr.handle.ctx == null) return 1;
 
                 var sum = add(a_arr, b_arr, null) catch return 1;
                 defer sum.deinit();
@@ -1177,19 +1184,13 @@ pub const Array = struct {
     }
 
     /// 批量评估多个 MLX 数组 (多算子并行批处理调度，消除重复的主机-设备同步开销)
+    /// 构建向量容器失败时逐个求值，保证返回后所有数组均已就绪
     pub fn evalMultiple(arrays: []const Array) void {
         if (!has_mlx or arrays.len == 0) return;
-        var buf: [32]c.mlx_array = undefined;
-        const raw_handles = if (arrays.len <= buf.len)
-            buf[0..arrays.len]
-        else
-            std.heap.c_allocator.alloc(c.mlx_array, arrays.len) catch return;
-        defer if (arrays.len > buf.len) std.heap.c_allocator.free(raw_handles);
-
-        for (arrays, 0..) |arr, i| {
-            raw_handles[i] = arr.handle;
-        }
-        const vec = c.mlx_vector_array_new_data(raw_handles.ptr, raw_handles.len);
+        const vec = newVectorFromArrays(arrays) catch {
+            for (arrays) |arr| arr.eval();
+            return;
+        };
         defer _ = c.mlx_vector_array_free(vec);
         _ = c.mlx_eval(vec);
     }
@@ -1411,24 +1412,27 @@ pub const Array = struct {
         const sz = c.mlx_vector_array_size(vec);
         if (sz < 2) return error.MlxOperationFailed;
 
-        var w_arr = c.mlx_array{ .ctx = null };
-        _ = c.mlx_vector_array_get(&w_arr, vec, 0);
+        var w_arr = Array.init();
+        errdefer w_arr.deinit();
+        if (c.mlx_vector_array_get(&w_arr.handle, vec, 0) != 0 or w_arr.handle.ctx == null) return error.MlxOperationFailed;
 
-        var s_arr = c.mlx_array{ .ctx = null };
-        _ = c.mlx_vector_array_get(&s_arr, vec, 1);
+        var s_arr = Array.init();
+        errdefer s_arr.deinit();
+        if (c.mlx_vector_array_get(&s_arr.handle, vec, 1) != 0 or s_arr.handle.ctx == null) return error.MlxOperationFailed;
 
         var b_arr_opt: ?Array = null;
         if (sz >= 3) {
-            var b_arr = c.mlx_array{ .ctx = null };
-            _ = c.mlx_vector_array_get(&b_arr, vec, 2);
-            if (b_arr.ctx != null) {
-                b_arr_opt = Array{ .handle = b_arr };
+            var b_arr = Array.init();
+            if (c.mlx_vector_array_get(&b_arr.handle, vec, 2) != 0 or b_arr.handle.ctx == null) {
+                b_arr.deinit();
+                return error.MlxOperationFailed;
             }
+            b_arr_opt = b_arr;
         }
 
         return .{
-            .weights = .{ .handle = w_arr },
-            .scales = .{ .handle = s_arr },
+            .weights = w_arr,
+            .scales = s_arr,
             .biases = b_arr_opt,
         };
     }
