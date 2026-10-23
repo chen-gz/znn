@@ -17,6 +17,71 @@ pub const GpuKvCache = backend.offload.GpuKvCache;
 pub const TensorMeta = nn.TensorMeta;
 pub const SafetensorsArchive = nn.SafetensorsArchive;
 
+/// 滑动窗口注意力层与全局注意力层的旋转位置编码频率基数 (RoPE Theta)
+const sliding_attention_rope_theta: f32 = 10000.0;
+const full_attention_rope_theta: f32 = 1000000.0;
+
+/// 持有独立键值缓存的解码层数 (其余 num_kv_shared_layers 层复用前层缓存)
+pub const num_kv_layers: usize = Gemma4Config.e4b.num_hidden_layers - Gemma4Config.e4b.num_kv_shared_layers;
+
+/// 键值共享层 (KV-Shared Layers) 复用的源层索引：前 num_hidden_layers - num_kv_shared_layers 层各自持有键值缓存，
+/// 其后各层复用最后一个同类型 (滑动窗口 / 全局) 非共享层的键值缓存
+pub fn kvSourceLayer(cfg: Gemma4Config, layer_idx: usize) usize {
+    const first_shared = cfg.num_hidden_layers - cfg.num_kv_shared_layers;
+    if (layer_idx < first_shared) return layer_idx;
+    const attn_type = cfg.layerSpec(layer_idx).attn_type;
+    var j = first_shared;
+    while (j > 0) {
+        j -= 1;
+        if (cfg.layerSpec(j).attn_type == attn_type) return j;
+    }
+    unreachable;
+}
+
+/// 判断某个持有键值缓存的层是否被后续键值共享层复用
+pub fn isKvSharedSource(cfg: Gemma4Config, layer_idx: usize) bool {
+    const first_shared = cfg.num_hidden_layers - cfg.num_kv_shared_layers;
+    for (first_shared..cfg.num_hidden_layers) |shared_idx| {
+        if (kvSourceLayer(cfg, shared_idx) == layer_idx) return true;
+    }
+    return false;
+}
+
+/// 计算比例旋转位置编码 (Proportional Rotary Position Embedding, Proportional RoPE) 的周期表，
+/// 与 mlx-lm `ProportionalRoPE` 及 Hugging Face `proportional` RoPE 一致：在完整 head_dim 上以 (i, i + head_dim / 2) 配对，
+/// freqs[i] = base^(2i / head_dim) (i < rotated_dims / 2)，其余角度周期为 +inf (旋转角恒为 0，保持恒等)。
+/// `mlx.fast.rope` 以 theta_i = pos / freqs[i] 计算旋转角。
+pub fn proportionalRopeFreqs(out: []f32, head_dim: usize, rotated_dims: usize, base: f32) void {
+    std.debug.assert(out.len == head_dim / 2 and rotated_dims <= head_dim);
+    const hd_f: f32 = @floatFromInt(head_dim);
+    for (out, 0..) |*f, i| {
+        f.* = if (2 * i < rotated_dims)
+            std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / hd_f)
+        else
+            std.math.inf(f32);
+    }
+}
+
+/// 以自定义周期表调用 `mlx.fast.rope` (base 置空，dims 为完整 head_dim，非交错半切分配对)
+fn fastRopeWithFreqs(x: mlx.Array, dims: usize, freqs: mlx.Array, offset: usize, s: Stream) !mlx.Array {
+    if (!mlx.has_mlx) return error.MlxNotSupported;
+    var res = mlx.Array.init();
+    const no_base = mlx.c.mlx_optional_float{ .value = 0.0, .has_value = false };
+    const rc = mlx.c.mlx_fast_rope(
+        &res.handle,
+        x.handle,
+        @intCast(dims),
+        false,
+        no_base,
+        1.0,
+        @intCast(offset),
+        freqs.handle,
+        s.handle,
+    );
+    if (rc != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
+    return res;
+}
+
 /// 逐层嵌入输入结构 (Per-Layer Inputs, PLE)
 pub const PleWeights = struct {
     embed_tokens_per_layer: Q4Weights,
@@ -153,6 +218,8 @@ pub const GpuLayerE4B = struct {
 
     has_kv: bool,
     prev_kv_idx: usize,
+    /// 当前层的键值缓存是否被后续键值共享层复用 (需保留本步有效键值切片)
+    is_kv_shared_source: bool,
     layer_scalar: f32,
     layer_scalar_w: ?mlx.Array = null,
     is_sliding: bool,
@@ -160,10 +227,18 @@ pub const GpuLayerE4B = struct {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    rot_dim: usize,
     rope_theta: f32,
+    /// 全局注意力层的比例旋转位置编码周期表 [head_dim / 2] (滑动窗口层为 null，使用标准 RoPE)
+    rope_freqs: ?mlx.Array = null,
     rms_norm_eps: f32,
     compiled_tail: ?mlx.Closure = null,
+
+    /// 对 [B, heads, T, head_dim] 张量施加旋转位置编码：滑动窗口层为标准半切分 RoPE (base = rope_theta)，
+    /// 全局注意力层为比例旋转位置编码 (Proportional RoPE)
+    fn applyRope(self: *const GpuLayerE4B, x: mlx.Array, offset: usize, s: Stream) !mlx.Array {
+        if (self.rope_freqs) |freqs| return fastRopeWithFreqs(x, self.head_dim, freqs, offset, s);
+        return mlx.Array.fastRoPE(x, self.head_dim, false, self.rope_theta, 1.0, offset, s);
+    }
 
     /// 静态编译当前解码层单步解码阶段 (`seq_len == 1`) 注意力投影之后的全尾部计算图 (Post-Attention + Gated MLP + PLE + LayerScalar)
     /// 将每层 20+ 个独立 C API 调度节点收拢为单一预编译静态闭包，由 MLX JIT 自动跨算子融合所有逐元素激活与残差连接
@@ -262,6 +337,7 @@ pub const GpuLayerE4B = struct {
         self.ple_proj.deinit();
         self.ple_norm_w.deinit();
         if (self.layer_scalar_w) |*sw| sw.deinit();
+        if (self.rope_freqs) |*rf| rf.deinit();
     }
 };
 
@@ -278,8 +354,8 @@ pub const Gemma4E4BModel = struct {
     config: Gemma4Config,
     stream: Stream,
 
-    // 24 个独立 KV 层的块式预分配显存键值缓存 (Pre-allocated Chunked GPU Key-Value Cache)
-    gpu_kv: [24]?GpuKvCache = @splat(null),
+    // 全部独立 KV 层 (num_kv_layers 个) 的块式预分配显存键值缓存 (Pre-allocated Chunked GPU Key-Value Cache)
+    gpu_kv: [num_kv_layers]?GpuKvCache = @splat(null),
     curr_len: usize = 0,
     sqrt_hidden: f32,
     sqrt_hidden_arr: mlx.Array,
@@ -319,8 +395,7 @@ pub const Gemma4E4BModel = struct {
         total += cfg.hidden_size_per_layer_input * @sizeOf(u16);
 
         for (0..cfg.num_hidden_layers) |idx| {
-            const is_full = ((idx + 1) % 6 == 0);
-            const hd = if (is_full) cfg.global_head_dim else cfg.head_dim;
+            const hd = cfg.layerSpec(idx).head_dim;
             const out_q = cfg.num_attention_heads * hd;
             const out_kv = cfg.num_key_value_heads * hd;
             const has_kv = (idx < cfg.num_hidden_layers - cfg.num_kv_shared_layers);
@@ -412,6 +487,14 @@ pub const Gemma4E4BModel = struct {
         dir_path: []const u8,
         options: LoadOptions,
     ) !Gemma4E4BModel {
+        var model = try loadWeights(allocator, io, dir_path);
+        errdefer model.deinit();
+        if (options.warmup) try model.warmup();
+        return model;
+    }
+
+    /// 加载全部权重并构建模型 (不含预热)：任一步骤失败时精确回收此前已构建的全部资源
+    fn loadWeights(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8) !Gemma4E4BModel {
         const cfg = Gemma4Config.e4b;
         const expected_cache_bytes = computeExpectedDirectCacheSize(cfg);
         const cache_path = try std.fs.path.join(allocator, &.{ dir_path, DIRECT_CACHE_FILENAME });
@@ -476,11 +559,8 @@ pub const Gemma4E4BModel = struct {
         }
         defer if (cache_out_file_opt) |*cf_out| cf_out.close(io);
 
-        const stream = try Stream.defaultGpu();
-        errdefer {
-            var s_tmp = stream;
-            s_tmp.deinit();
-        }
+        var stream = try Stream.defaultGpu();
+        errdefer stream.deinit();
 
         _ = mlx.configureOptimalWiredMemory();
         mlx.enableCompile();
@@ -491,131 +571,33 @@ pub const Gemma4E4BModel = struct {
         else
             .{ .data = &.{} };
 
-        // 1. 词表嵌入与 LM Head 权重
-        var embed_tokens: Q4Weights = undefined;
-        var norm_w: mlx.Array = undefined;
-        var ple_tokens: Q4Weights = undefined;
-        var ple_model_proj: Q4Weights = undefined;
-        var ple_pnorm_w: mlx.Array = undefined;
+        // 若命中顺序直通缓存则无需分配 52MB 拼接缓冲并消除 2.3GB 内存拷贝
+        const max_fused_bytes = (cfg.intermediate_size * 2) * (cfg.hidden_size / 4) * @sizeOf(u32);
+        const fuse_scratch: []u8 = if (direct_mmap_opt == null) try allocator.alloc(u8, max_fused_bytes) else &.{};
+        defer if (direct_mmap_opt == null) allocator.free(fuse_scratch);
 
-        if (direct_mmap_opt != null) {
-            embed_tokens = try direct_reader.readQ4(cfg.hidden_size, cfg.vocab_size, 64, 4, stream);
-            errdefer embed_tokens.deinit();
-            norm_w = try direct_reader.readNorm(cfg.hidden_size);
-            errdefer norm_w.deinit();
-            ple_tokens = try direct_reader.readQ4(cfg.num_hidden_layers * cfg.hidden_size_per_layer_input, cfg.vocab_size, 64, 4, stream);
-            errdefer ple_tokens.deinit();
-            ple_model_proj = try direct_reader.readQ4(cfg.hidden_size, cfg.num_hidden_layers * cfg.hidden_size_per_layer_input, 64, 4, stream);
-            errdefer ple_model_proj.deinit();
-            ple_pnorm_w = try direct_reader.readNorm(cfg.hidden_size_per_layer_input);
-        } else {
-            const archive = archive_opt.?;
-            const emb_wq = archive.getTensorBytes("language_model.model.embed_tokens.weight") orelse return error.TensorNotFound;
-            const emb_sc = archive.getTensorBytes("language_model.model.embed_tokens.scales") orelse return error.TensorNotFound;
-            const emb_bi = archive.getTensorBytes("language_model.model.embed_tokens.biases") orelse return error.TensorNotFound;
-            if (cache_writer_opt) |w| {
-                w.writeAll(emb_wq) catch {
-                    cache_write_ok = false;
-                };
-                w.writeAll(emb_sc) catch {
-                    cache_write_ok = false;
-                };
-                w.writeAll(emb_bi) catch {
-                    cache_write_ok = false;
-                };
-            }
+        var src = WeightSource{
+            .direct = if (direct_mmap_opt != null) &direct_reader else null,
+            .archive = archive_opt,
+            .cache_writer = cache_writer_opt,
+            .cache_write_ok = &cache_write_ok,
+            .scratch = fuse_scratch,
+            .stream = stream,
+        };
 
-            embed_tokens = try Q4Weights.initFromDirectBuffersCustom(
-                emb_wq,
-                emb_sc,
-                emb_bi,
-                cfg.hidden_size,
-                cfg.vocab_size,
-                64,
-                4,
-                .bfloat16,
-                stream,
-            );
-            errdefer embed_tokens.deinit();
-
-            const norm_bytes = archive.getTensorBytes("language_model.model.norm.weight") orelse return error.TensorNotFound;
-            if (cache_writer_opt) |w| {
-                w.writeAll(norm_bytes[0 .. cfg.hidden_size * @sizeOf(u16)]) catch {
-                    cache_write_ok = false;
-                };
-            }
-            norm_w = try mlx.Array.fromRawData(@ptrCast(norm_bytes.ptr), &.{cfg.hidden_size}, .bfloat16);
-            errdefer norm_w.deinit();
-
-            // 2. 逐层嵌入输入结构 (Per-Layer Embeddings, PLE)
-            const ple_tokens_wq = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.weight") orelse return error.TensorNotFound;
-            const ple_tokens_sc = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.scales") orelse return error.TensorNotFound;
-            const ple_tokens_bi = archive.getTensorBytes("language_model.model.embed_tokens_per_layer.biases") orelse return error.TensorNotFound;
-            if (cache_writer_opt) |w| {
-                w.writeAll(ple_tokens_wq) catch {
-                    cache_write_ok = false;
-                };
-                w.writeAll(ple_tokens_sc) catch {
-                    cache_write_ok = false;
-                };
-                w.writeAll(ple_tokens_bi) catch {
-                    cache_write_ok = false;
-                };
-            }
-
-            ple_tokens = try Q4Weights.initFromDirectBuffersCustom(
-                ple_tokens_wq,
-                ple_tokens_sc,
-                ple_tokens_bi,
-                cfg.num_hidden_layers * cfg.hidden_size_per_layer_input,
-                cfg.vocab_size,
-                64,
-                4,
-                .bfloat16,
-                stream,
-            );
-            errdefer ple_tokens.deinit();
-
-            const ple_proj_wq = archive.getTensorBytes("language_model.model.per_layer_model_projection.weight") orelse return error.TensorNotFound;
-            const ple_proj_sc = archive.getTensorBytes("language_model.model.per_layer_model_projection.scales") orelse return error.TensorNotFound;
-            const ple_proj_bi = archive.getTensorBytes("language_model.model.per_layer_model_projection.biases") orelse return error.TensorNotFound;
-            if (cache_writer_opt) |w| {
-                w.writeAll(ple_proj_wq) catch {
-                    cache_write_ok = false;
-                };
-                w.writeAll(ple_proj_sc) catch {
-                    cache_write_ok = false;
-                };
-                w.writeAll(ple_proj_bi) catch {
-                    cache_write_ok = false;
-                };
-            }
-
-            ple_model_proj = try Q4Weights.initFromDirectBuffersCustom(
-                ple_proj_wq,
-                ple_proj_sc,
-                ple_proj_bi,
-                cfg.hidden_size,
-                cfg.num_hidden_layers * cfg.hidden_size_per_layer_input,
-                64,
-                4,
-                .bfloat16,
-                stream,
-            );
-            errdefer ple_model_proj.deinit();
-
-            const ple_pnorm_bytes = archive.getTensorBytes("language_model.model.per_layer_projection_norm.weight") orelse return error.TensorNotFound;
-            if (cache_writer_opt) |w| {
-                w.writeAll(ple_pnorm_bytes[0 .. cfg.hidden_size_per_layer_input * @sizeOf(u16)]) catch {
-                    cache_write_ok = false;
-                };
-            }
-            ple_pnorm_w = try mlx.Array.fromRawData(@ptrCast(ple_pnorm_bytes.ptr), &.{cfg.hidden_size_per_layer_input}, .bfloat16);
-        }
+        // 1. 词表嵌入 (与 LM Head 权重绑定) 与最终层归一化
+        var embed_tokens = try src.q4("language_model.model.embed_tokens", cfg.hidden_size, cfg.vocab_size, 64, 4);
         errdefer embed_tokens.deinit();
+        var norm_w = try src.norm("language_model.model.norm.weight", cfg.hidden_size);
         errdefer norm_w.deinit();
+
+        // 2. 逐层嵌入输入结构 (Per-Layer Embeddings, PLE)
+        const ple_total = cfg.num_hidden_layers * cfg.hidden_size_per_layer_input;
+        var ple_tokens = try src.q4("language_model.model.embed_tokens_per_layer", ple_total, cfg.vocab_size, 64, 4);
         errdefer ple_tokens.deinit();
+        var ple_model_proj = try src.q4("language_model.model.per_layer_model_projection", cfg.hidden_size, ple_total, 64, 4);
         errdefer ple_model_proj.deinit();
+        var ple_pnorm_w = try src.norm("language_model.model.per_layer_projection_norm.weight", cfg.hidden_size_per_layer_input);
         errdefer ple_pnorm_w.deinit();
 
         const embed_scale_val: f32 = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size_per_layer_input)));
@@ -629,7 +611,8 @@ pub const Gemma4E4BModel = struct {
         var input_scale_arr = try mlx.Array.fromScalarBf16(input_scale_val);
         errdefer input_scale_arr.deinit();
 
-        var ple = PleWeights{
+        // PleWeights 仅聚合上方各自带 errdefer 的句柄，此处不再重复注册整体释放，避免出错时二次释放
+        const ple = PleWeights{
             .embed_tokens_per_layer = ple_tokens,
             .model_proj = ple_model_proj,
             .proj_norm_w = ple_pnorm_w,
@@ -642,189 +625,20 @@ pub const Gemma4E4BModel = struct {
             .proj_scale_arr = proj_scale_arr,
             .input_scale_arr = input_scale_arr,
         };
-        errdefer ple.deinit();
 
         const sqrt_hidden_val: f32 = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size)));
         var sqrt_hidden_arr = try mlx.Array.fromScalarBf16(sqrt_hidden_val);
         errdefer sqrt_hidden_arr.deinit();
 
-        // 3. 构建 42 个解码层（若命中顺序直通缓存则无需分配 52MB 拼接缓冲并消除 2.3GB 内存拷贝）
+        // 3. 构建全部解码层
         const layers = try allocator.alloc(GpuLayerE4B, cfg.num_hidden_layers);
         errdefer allocator.free(layers);
-
-        const max_fused_bytes = (cfg.intermediate_size * 2) * (cfg.hidden_size / 4) * @sizeOf(u32);
-        const fuse_scratch: []u8 = if (direct_mmap_opt == null)
-            try allocator.alloc(u8, max_fused_bytes)
-        else
-            &.{};
-        defer if (direct_mmap_opt == null) allocator.free(fuse_scratch);
-
-        // 预设键值缓存共享映射表 (Key-Value Cache Shared Mapping Table)
-        // 当 num_kv_shared_layers = 18 时，前 24 层 (0..23) 具备独立的 K/V 投影；后 18 层 (24..41) 共享复用层 22 (局部滑动窗口) 与层 23 (全局全注意力) 的键值缓存。
-        const PREVIOUS_KVS = [42]usize{
-            0,  1,  2,  3,  4,  5,
-            6,  7,  8,  9,  10, 11,
-            12, 13, 14, 15, 16, 17,
-            18, 19, 20, 21, 22, 23,
-            22, 22, 22, 22, 22, 23,
-            22, 22, 22, 22, 22, 23,
-            22, 22, 22, 22, 22, 23,
-        };
+        var built_layers: usize = 0;
+        errdefer for (layers[0..built_layers]) |*l| l.deinit();
 
         for (0..cfg.num_hidden_layers) |idx| {
-            var name_buf: [128]u8 = undefined;
-            const is_full = ((idx + 1) % 6 == 0);
-            const hd = if (is_full) cfg.global_head_dim else cfg.head_dim;
-            const out_q = cfg.num_attention_heads * hd;
-            const out_kv = cfg.num_key_value_heads * hd;
-            const rope_theta: f32 = if (is_full) 1000000.0 else 10000.0;
-            const rot_dim: usize = if (is_full) hd / 4 else hd; // full attention 采用 0.25 partial rotary factor
-            const has_kv = (idx < cfg.num_hidden_layers - cfg.num_kv_shared_layers);
-            const prev_kv_idx = PREVIOUS_KVS[idx];
-
-            var kn_w: ?mlx.Array = null;
-            var qkv_proj: Q4Weights = undefined;
-            var o_proj: Q4Weights = undefined;
-            var fused_gate_up: Q4Weights = undefined;
-            var down_proj: Q4Weights = undefined;
-            var ple_gate: Q4Weights = undefined;
-            var ple_proj: Q4Weights = undefined;
-            var in_w: mlx.Array = undefined;
-            var qn_w: mlx.Array = undefined;
-            var pa_w: mlx.Array = undefined;
-            var pm_w: mlx.Array = undefined;
-            var pom_w: mlx.Array = undefined;
-            var pln_w: mlx.Array = undefined;
-            var l_scalar: f32 = 1.0;
-            var l_scalar_w: ?mlx.Array = null;
-
-            if (direct_mmap_opt != null) {
-                if (has_kv) {
-                    kn_w = try direct_reader.readNorm(hd);
-                    qkv_proj = try direct_reader.readQ4(cfg.hidden_size, out_q + 2 * out_kv, 64, 4, stream);
-                } else {
-                    qkv_proj = try direct_reader.readQ4(cfg.hidden_size, out_q, 64, 4, stream);
-                }
-                o_proj = try direct_reader.readQ4(out_q, cfg.hidden_size, 64, 4, stream);
-                fused_gate_up = try direct_reader.readQ4(cfg.hidden_size, cfg.intermediate_size * 2, 64, 8, stream);
-                down_proj = try direct_reader.readQ4(cfg.intermediate_size, cfg.hidden_size, 64, 8, stream);
-                ple_gate = try direct_reader.readQ4(cfg.hidden_size, cfg.hidden_size_per_layer_input, 64, 4, stream);
-                ple_proj = try direct_reader.readQ4(cfg.hidden_size_per_layer_input, cfg.hidden_size, 64, 4, stream);
-
-                in_w = try direct_reader.readNorm(cfg.hidden_size);
-                qn_w = try direct_reader.readNorm(hd);
-                pa_w = try direct_reader.readNorm(cfg.hidden_size);
-                pm_w = try direct_reader.readNorm(cfg.hidden_size);
-                pom_w = try direct_reader.readNorm(cfg.hidden_size);
-                pln_w = try direct_reader.readNorm(cfg.hidden_size);
-
-                const sb = try direct_reader.readBytes(2);
-                const u16_val = std.mem.readInt(u16, sb[0..2], .little);
-                const f32_val: f32 = @bitCast(@as(u32, u16_val) << 16);
-                l_scalar = f32_val;
-                if (l_scalar != 1.0) {
-                    l_scalar_w = try mlx.Array.fromRawData(@ptrCast(sb.ptr), &.{1}, .bfloat16);
-                }
-            } else {
-                const archive = archive_opt.?;
-                // 注意力投影权重绑定：前 24 层将 Q/K/V 融合为单一矩阵，每步减少 48 次 QMV 内核派发
-                qkv_proj = if (has_kv) blk: {
-                    kn_w = try loadNorm(archive, &name_buf, idx, "self_attn.k_norm.weight", hd, cache_writer_opt, &cache_write_ok);
-                    break :blk try loadFusedQ4(
-                        archive,
-                        &name_buf,
-                        fuse_scratch,
-                        idx,
-                        &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" },
-                        cfg.hidden_size,
-                        out_q + 2 * out_kv,
-                        64,
-                        4,
-                        stream,
-                        cache_writer_opt,
-                        &cache_write_ok,
-                    );
-                } else try loadQ4(archive, &name_buf, idx, "self_attn.q_proj", cfg.hidden_size, out_q, 64, 4, stream, cache_writer_opt, &cache_write_ok);
-
-                o_proj = try loadQ4(archive, &name_buf, idx, "self_attn.o_proj", out_q, cfg.hidden_size, 64, 4, stream, cache_writer_opt, &cache_write_ok);
-
-                // 门控前馈网络 (8-bit Quantized MLP)：将 gate_proj 与 up_proj 沿输出维度融合为单一矩阵，每步减少 42 次 QMV 内核派发
-                fused_gate_up = try loadFusedQ4(
-                    archive,
-                    &name_buf,
-                    fuse_scratch,
-                    idx,
-                    &.{ "mlp.gate_proj", "mlp.up_proj" },
-                    cfg.hidden_size,
-                    cfg.intermediate_size * 2,
-                    64,
-                    8,
-                    stream,
-                    cache_writer_opt,
-                    &cache_write_ok,
-                );
-                down_proj = try loadQ4(archive, &name_buf, idx, "mlp.down_proj", cfg.intermediate_size, cfg.hidden_size, 64, 8, stream, cache_writer_opt, &cache_write_ok);
-
-                // 逐层嵌入门控与上投影 (PLE Gating & Projection)
-                ple_gate = try loadQ4(archive, &name_buf, idx, "per_layer_input_gate", cfg.hidden_size, cfg.hidden_size_per_layer_input, 64, 4, stream, cache_writer_opt, &cache_write_ok);
-                ple_proj = try loadQ4(archive, &name_buf, idx, "per_layer_projection", cfg.hidden_size_per_layer_input, cfg.hidden_size, 64, 4, stream, cache_writer_opt, &cache_write_ok);
-
-                // 均方根层归一化权重 (RMSNorm Weights)
-                in_w = try loadNorm(archive, &name_buf, idx, "input_layernorm.weight", cfg.hidden_size, cache_writer_opt, &cache_write_ok);
-                qn_w = try loadNorm(archive, &name_buf, idx, "self_attn.q_norm.weight", hd, cache_writer_opt, &cache_write_ok);
-                pa_w = try loadNorm(archive, &name_buf, idx, "post_attention_layernorm.weight", cfg.hidden_size, cache_writer_opt, &cache_write_ok);
-                pm_w = try loadNorm(archive, &name_buf, idx, "pre_feedforward_layernorm.weight", cfg.hidden_size, cache_writer_opt, &cache_write_ok);
-                pom_w = try loadNorm(archive, &name_buf, idx, "post_feedforward_layernorm.weight", cfg.hidden_size, cache_writer_opt, &cache_write_ok);
-                pln_w = try loadNorm(archive, &name_buf, idx, "post_per_layer_input_norm.weight", cfg.hidden_size, cache_writer_opt, &cache_write_ok);
-
-                // 层缩放标量 (Layer Scalar, 直接绑定 BF16 标量张量以消除每步标量创建与类型提升)
-                const scalar_name = std.fmt.bufPrint(&name_buf, "language_model.model.layers.{}.layer_scalar", .{idx}) catch unreachable;
-                var scalar_bf16_bytes = [2]u8{ 0x80, 0x3F }; // 1.0 in BF16 little-endian
-                if (archive.getTensorBytes(scalar_name)) |sb| {
-                    if (sb.len >= 2) {
-                        scalar_bf16_bytes = sb[0..2].*;
-                        const u16_val = std.mem.readInt(u16, sb[0..2], .little);
-                        const f32_val: f32 = @bitCast(@as(u32, u16_val) << 16);
-                        l_scalar = f32_val;
-                        if (l_scalar != 1.0) {
-                            l_scalar_w = try mlx.Array.fromRawData(@ptrCast(sb.ptr), &.{1}, .bfloat16);
-                        }
-                    }
-                }
-                if (cache_writer_opt) |w| {
-                    w.writeAll(&scalar_bf16_bytes) catch {
-                        cache_write_ok = false;
-                    };
-                }
-            }
-
-            layers[idx] = .{
-                .qkv_proj = qkv_proj,
-                .o_proj = o_proj,
-                .input_norm_w = in_w,
-                .q_norm_w = qn_w,
-                .k_norm_w = kn_w,
-                .post_attn_w = pa_w,
-                .pre_mlp_w = pm_w,
-                .post_mlp_w = pom_w,
-                .fused_gate_up = fused_gate_up,
-                .down_proj = down_proj,
-                .ple_gate = ple_gate,
-                .ple_proj = ple_proj,
-                .ple_norm_w = pln_w,
-                .has_kv = has_kv,
-                .prev_kv_idx = prev_kv_idx,
-                .layer_scalar = l_scalar,
-                .layer_scalar_w = l_scalar_w,
-                .is_sliding = !is_full,
-                .sliding_window = cfg.sliding_window,
-                .num_heads = cfg.num_attention_heads,
-                .num_kv_heads = cfg.num_key_value_heads,
-                .head_dim = hd,
-                .rot_dim = rot_dim,
-                .rope_theta = rope_theta,
-                .rms_norm_eps = cfg.rms_norm_eps,
-            };
+            layers[idx] = try loadLayer(&src, cfg, idx);
+            built_layers += 1;
             layers[idx].initCompiledTail();
         }
 
@@ -841,8 +655,10 @@ pub const Gemma4E4BModel = struct {
             }
         }
 
-        const compiled_gelu_mul = mlx.Array.compileGeluMul() catch null;
-        const compiled_add_mul = mlx.Array.compileAddMul() catch null;
+        var compiled_gelu_mul: ?mlx.Closure = mlx.Array.compileGeluMul() catch null;
+        errdefer if (compiled_gelu_mul) |*cls| cls.deinit();
+        var compiled_add_mul: ?mlx.Closure = mlx.Array.compileAddMul() catch null;
+        errdefer if (compiled_add_mul) |*cls| cls.deinit();
 
         var ple_prep_ctx: ?*PlePrepContext = null;
         var compiled_ple_prep: ?mlx.Closure = null;
@@ -864,20 +680,19 @@ pub const Gemma4E4BModel = struct {
             if (ple_prep_ctx) |ctx_ptr| allocator.destroy(ctx_ptr);
         }
 
-        // 4. 在加载期预分配 24 个独立 KV 层的显存缓冲区，消除 Prefill 首字延迟中的 48 次 zeros 内核分配开销
-        var gpu_kv: [24]?GpuKvCache = @splat(null);
+        // 4. 在加载期预分配全部独立 KV 层的显存缓冲区，消除 Prefill 首字延迟中的 zeros 内核分配开销
+        var gpu_kv: [num_kv_layers]?GpuKvCache = @splat(null);
         errdefer {
             for (&gpu_kv) |*kv_opt| {
                 if (kv_opt.*) |*c| c.deinit();
             }
         }
-        for (0..24) |kv_idx| {
-            const l_ref = layers[kv_idx];
+        for (&gpu_kv, layers[0..num_kv_layers]) |*kv_slot, l_ref| {
             const init_cap: usize = if (l_ref.is_sliding) l_ref.sliding_window else 256;
-            gpu_kv[kv_idx] = try GpuKvCache.init(init_cap, l_ref.num_kv_heads, l_ref.head_dim, stream);
+            kv_slot.* = try GpuKvCache.init(init_cap, l_ref.num_kv_heads, l_ref.head_dim, stream);
         }
 
-        var model = Gemma4E4BModel{
+        return Gemma4E4BModel{
             .allocator = allocator,
             .layers = layers,
             .ple = ple,
@@ -895,13 +710,98 @@ pub const Gemma4E4BModel = struct {
             .ple_prep_ctx = ple_prep_ctx,
             .compiled_ple_prep = compiled_ple_prep,
         };
-        errdefer model.deinit();
+    }
 
-        if (options.warmup) {
-            try model.warmup();
+    /// 按直通缓存的存储顺序加载单个解码层：
+    /// [k_norm] -> qkv -> o -> gate_up -> down -> ple_gate -> ple_proj -> 6 个层归一化 -> layer_scalar
+    fn loadLayer(src: *WeightSource, cfg: Gemma4Config, idx: usize) !GpuLayerE4B {
+        const spec = cfg.layerSpec(idx);
+        const hd = spec.head_dim;
+        const is_full = spec.attn_type == .full_attention;
+        const H = cfg.hidden_size;
+        const ple_dim = cfg.hidden_size_per_layer_input;
+        const out_q = cfg.num_attention_heads * hd;
+        const out_kv = cfg.num_key_value_heads * hd;
+        const has_kv = idx < num_kv_layers;
+
+        var kn_w: ?mlx.Array = if (has_kv) try src.layerNorm(idx, "self_attn.k_norm.weight", hd) else null;
+        errdefer if (kn_w) |*kn| kn.deinit();
+        // 注意力投影：持有键值缓存的层将 Q/K/V 融合为单一矩阵，每步减少 QMV 内核派发；共享 KV 层仅需独立 Q 矩阵
+        var qkv_proj = if (has_kv)
+            try src.layerFusedQ4(idx, &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" }, H, out_q + 2 * out_kv, 64, 4)
+        else
+            try src.layerQ4(idx, "self_attn.q_proj", H, out_q, 64, 4);
+        errdefer qkv_proj.deinit();
+        var o_proj = try src.layerQ4(idx, "self_attn.o_proj", out_q, H, 64, 4);
+        errdefer o_proj.deinit();
+
+        // 门控前馈网络 (8-bit Quantized MLP)：将 gate_proj 与 up_proj 沿输出维度融合为单一矩阵
+        var fused_gate_up = try src.layerFusedQ4(idx, &.{ "mlp.gate_proj", "mlp.up_proj" }, H, cfg.intermediate_size * 2, 64, 8);
+        errdefer fused_gate_up.deinit();
+        var down_proj = try src.layerQ4(idx, "mlp.down_proj", cfg.intermediate_size, H, 64, 8);
+        errdefer down_proj.deinit();
+
+        // 逐层嵌入门控与上投影 (PLE Gating & Projection)
+        var ple_gate = try src.layerQ4(idx, "per_layer_input_gate", H, ple_dim, 64, 4);
+        errdefer ple_gate.deinit();
+        var ple_proj = try src.layerQ4(idx, "per_layer_projection", ple_dim, H, 64, 4);
+        errdefer ple_proj.deinit();
+
+        // 均方根层归一化权重 (RMSNorm Weights)
+        var in_w = try src.layerNorm(idx, "input_layernorm.weight", H);
+        errdefer in_w.deinit();
+        var qn_w = try src.layerNorm(idx, "self_attn.q_norm.weight", hd);
+        errdefer qn_w.deinit();
+        var pa_w = try src.layerNorm(idx, "post_attention_layernorm.weight", H);
+        errdefer pa_w.deinit();
+        var pm_w = try src.layerNorm(idx, "pre_feedforward_layernorm.weight", H);
+        errdefer pm_w.deinit();
+        var pom_w = try src.layerNorm(idx, "post_feedforward_layernorm.weight", H);
+        errdefer pom_w.deinit();
+        var pln_w = try src.layerNorm(idx, "post_per_layer_input_norm.weight", H);
+        errdefer pln_w.deinit();
+
+        // 层缩放标量 (Layer Scalar, 非 1.0 时直接绑定 BF16 标量张量以消除每步标量创建与类型提升)
+        var scalar = try src.layerScalar(idx);
+        errdefer if (scalar.arr) |*arr| arr.deinit();
+
+        // 全局注意力层采用 partial_rotary_factor = 0.25 的比例旋转位置编码
+        var rope_freqs: ?mlx.Array = null;
+        if (is_full) {
+            var freqs_buf: [Gemma4Config.e4b.global_head_dim / 2]f32 = undefined;
+            const freqs = freqs_buf[0 .. hd / 2];
+            proportionalRopeFreqs(freqs, hd, hd / 4, full_attention_rope_theta);
+            rope_freqs = try mlx.Array.fromSlice(freqs, &.{hd / 2});
         }
 
-        return model;
+        return .{
+            .qkv_proj = qkv_proj,
+            .o_proj = o_proj,
+            .input_norm_w = in_w,
+            .q_norm_w = qn_w,
+            .k_norm_w = kn_w,
+            .post_attn_w = pa_w,
+            .pre_mlp_w = pm_w,
+            .post_mlp_w = pom_w,
+            .fused_gate_up = fused_gate_up,
+            .down_proj = down_proj,
+            .ple_gate = ple_gate,
+            .ple_proj = ple_proj,
+            .ple_norm_w = pln_w,
+            .has_kv = has_kv,
+            .prev_kv_idx = kvSourceLayer(cfg, idx),
+            .is_kv_shared_source = has_kv and isKvSharedSource(cfg, idx),
+            .layer_scalar = scalar.value,
+            .layer_scalar_w = scalar.arr,
+            .is_sliding = !is_full,
+            .sliding_window = cfg.sliding_window,
+            .num_heads = cfg.num_attention_heads,
+            .num_kv_heads = cfg.num_key_value_heads,
+            .head_dim = hd,
+            .rope_theta = if (is_full) full_attention_rope_theta else sliding_attention_rope_theta,
+            .rope_freqs = rope_freqs,
+            .rms_norm_eps = cfg.rms_norm_eps,
+        };
     }
 
     pub fn deinit(self: *Gemma4E4BModel) void {
@@ -966,124 +866,127 @@ pub const Gemma4E4BModel = struct {
         mlx.clearCache();
     }
 
-    fn loadQ4(
-        archive: SafetensorsArchive,
-        buf: *[128]u8,
-        l_idx: usize,
-        sub: []const u8,
-        in_f: usize,
-        out_f: usize,
-        group_size: i32,
-        bits: i32,
+    /// 解码层与全局权重来源：顺序直通缓存 (Direct Cache)，或 Safetensors 归档 (同时按相同顺序回写直通缓存)
+    const WeightSource = struct {
+        direct: ?*DirectCacheReader,
+        archive: ?SafetensorsArchive,
+        cache_writer: ?*std.Io.Writer,
+        cache_write_ok: *bool,
+        scratch: []u8,
         stream: Stream,
-        cache_writer_opt: ?*std.Io.Writer,
-        cache_write_ok: *bool,
-    ) !Q4Weights {
-        const w_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.weight", .{ l_idx, sub });
-        const w_bytes = archive.getTensorBytes(w_name) orelse return error.TensorNotFound;
-        const s_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.scales", .{ l_idx, sub });
-        const s_bytes = archive.getTensorBytes(s_name) orelse return error.TensorNotFound;
-        const b_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.biases", .{ l_idx, sub });
-        const b_bytes = archive.getTensorBytes(b_name) orelse return error.TensorNotFound;
+        name_buf: [128]u8 = undefined,
 
-        if (cache_writer_opt) |w| {
-            w.writeAll(w_bytes) catch {
-                cache_write_ok.* = false;
-            };
-            w.writeAll(s_bytes) catch {
-                cache_write_ok.* = false;
-            };
-            w.writeAll(b_bytes) catch {
-                cache_write_ok.* = false;
-            };
+        const LayerScalar = struct {
+            value: f32,
+            arr: ?mlx.Array,
+        };
+
+        fn writeCache(self: *WeightSource, bytes: []const u8) void {
+            if (self.cache_writer) |w| {
+                w.writeAll(bytes) catch {
+                    self.cache_write_ok.* = false;
+                };
+            }
         }
 
-        return Q4Weights.initFromDirectBuffersCustom(
-            w_bytes,
-            s_bytes,
-            b_bytes,
-            in_f,
-            out_f,
-            group_size,
-            bits,
-            .bfloat16,
-            stream,
-        );
-    }
-
-    fn loadFusedQ4(
-        archive: SafetensorsArchive,
-        buf: *[128]u8,
-        scratch_buf: []u8,
-        l_idx: usize,
-        subs: []const []const u8,
-        in_f: usize,
-        total_out_f: usize,
-        group_size: i32,
-        bits: i32,
-        stream: Stream,
-        cache_writer_opt: ?*std.Io.Writer,
-        cache_write_ok: *bool,
-    ) !Q4Weights {
-        var w_slices: [3][]const u8 = undefined;
-        var s_slices: [3][]const u8 = undefined;
-        var b_slices: [3][]const u8 = undefined;
-
-        for (subs, 0..) |sub, i| {
-            const w_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.weight", .{ l_idx, sub });
-            w_slices[i] = archive.getTensorBytes(w_name) orelse return error.TensorNotFound;
-            const s_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.scales", .{ l_idx, sub });
-            s_slices[i] = archive.getTensorBytes(s_name) orelse return error.TensorNotFound;
-            const b_name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}.biases", .{ l_idx, sub });
-            b_slices[i] = archive.getTensorBytes(b_name) orelse return error.TensorNotFound;
+        fn tensorBytes(self: *WeightSource, comptime fmt: []const u8, args: anytype) ![]const u8 {
+            const name = try std.fmt.bufPrint(&self.name_buf, fmt, args);
+            return self.archive.?.getTensorBytes(name) orelse error.TensorNotFound;
         }
 
-        if (cache_writer_opt) |w| {
-            for (w_slices[0..subs.len]) |ws| w.writeAll(ws) catch {
-                cache_write_ok.* = false;
-            };
-            for (s_slices[0..subs.len]) |ss| w.writeAll(ss) catch {
-                cache_write_ok.* = false;
-            };
-            for (b_slices[0..subs.len]) |bs| w.writeAll(bs) catch {
-                cache_write_ok.* = false;
-            };
+        /// 读取以 `prefix` 命名的量化矩阵 (prefix.weight / prefix.scales / prefix.biases)
+        fn q4(self: *WeightSource, prefix: []const u8, in_f: usize, out_f: usize, group_size: i32, bits: i32) !Q4Weights {
+            if (self.direct) |r| return r.readQ4(in_f, out_f, group_size, bits, self.stream);
+            const w_bytes = try self.tensorBytes("{s}.weight", .{prefix});
+            const s_bytes = try self.tensorBytes("{s}.scales", .{prefix});
+            const b_bytes = try self.tensorBytes("{s}.biases", .{prefix});
+            self.writeCache(w_bytes);
+            self.writeCache(s_bytes);
+            self.writeCache(b_bytes);
+            return Q4Weights.initFromDirectBuffersCustom(w_bytes, s_bytes, b_bytes, in_f, out_f, group_size, bits, .bfloat16, self.stream);
         }
 
-        return Q4Weights.initFusedFromDirectBuffersCustom(
-            w_slices[0..subs.len],
-            s_slices[0..subs.len],
-            b_slices[0..subs.len],
-            scratch_buf,
-            in_f,
-            total_out_f,
-            group_size,
-            bits,
-            .bfloat16,
-            stream,
-        );
-    }
-
-    fn loadNorm(
-        archive: SafetensorsArchive,
-        buf: *[128]u8,
-        l_idx: usize,
-        sub: []const u8,
-        dim: usize,
-        cache_writer_opt: ?*std.Io.Writer,
-        cache_write_ok: *bool,
-    ) !mlx.Array {
-        const name = try std.fmt.bufPrint(buf, "language_model.model.layers.{}.{s}", .{ l_idx, sub });
-        const bytes = archive.getTensorBytes(name) orelse return error.TensorNotFound;
-        if (cache_writer_opt) |w| {
-            w.writeAll(bytes[0 .. dim * @sizeOf(u16)]) catch {
-                cache_write_ok.* = false;
+        /// 读取以 `name` 命名的 BF16 归一化权重 [dim]
+        fn norm(self: *WeightSource, name: []const u8, dim: usize) !mlx.Array {
+            const bytes = if (self.direct) |r| try r.readBytes(dim * @sizeOf(u16)) else blk: {
+                const raw = try self.tensorBytes("{s}", .{name});
+                if (raw.len < dim * @sizeOf(u16)) return error.InvalidTensorShape;
+                self.writeCache(raw[0 .. dim * @sizeOf(u16)]);
+                break :blk raw;
             };
+            return mlx.Array.fromRawData(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
         }
-        return mlx.Array.fromRawData(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
-    }
+
+        fn layerQ4(self: *WeightSource, l_idx: usize, sub: []const u8, in_f: usize, out_f: usize, group_size: i32, bits: i32) !Q4Weights {
+            var prefix_buf: [128]u8 = undefined;
+            const prefix = try std.fmt.bufPrint(&prefix_buf, "language_model.model.layers.{}.{s}", .{ l_idx, sub });
+            return self.q4(prefix, in_f, out_f, group_size, bits);
+        }
+
+        fn layerNorm(self: *WeightSource, l_idx: usize, sub: []const u8, dim: usize) !mlx.Array {
+            var name_buf: [128]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buf, "language_model.model.layers.{}.{s}", .{ l_idx, sub });
+            return self.norm(name, dim);
+        }
+
+        /// 读取多个同输入维度的量化矩阵并沿输出维度融合为单一矩阵 (直通缓存中已按融合布局存储)
+        fn layerFusedQ4(
+            self: *WeightSource,
+            l_idx: usize,
+            comptime subs: []const []const u8,
+            in_f: usize,
+            total_out_f: usize,
+            group_size: i32,
+            bits: i32,
+        ) !Q4Weights {
+            if (self.direct) |r| return r.readQ4(in_f, total_out_f, group_size, bits, self.stream);
+            var w_slices: [subs.len][]const u8 = undefined;
+            var s_slices: [subs.len][]const u8 = undefined;
+            var b_slices: [subs.len][]const u8 = undefined;
+            inline for (subs, 0..) |sub, i| {
+                w_slices[i] = try self.tensorBytes("language_model.model.layers.{}.{s}.weight", .{ l_idx, sub });
+                s_slices[i] = try self.tensorBytes("language_model.model.layers.{}.{s}.scales", .{ l_idx, sub });
+                b_slices[i] = try self.tensorBytes("language_model.model.layers.{}.{s}.biases", .{ l_idx, sub });
+            }
+            for (w_slices) |ws| self.writeCache(ws);
+            for (s_slices) |ss| self.writeCache(ss);
+            for (b_slices) |bs| self.writeCache(bs);
+            return Q4Weights.initFusedFromDirectBuffersCustom(
+                &w_slices,
+                &s_slices,
+                &b_slices,
+                self.scratch,
+                in_f,
+                total_out_f,
+                group_size,
+                bits,
+                .bfloat16,
+                self.stream,
+            );
+        }
+
+        /// 读取层缩放标量 (缺省为 1.0)，非 1.0 时同时构建 BF16 标量张量
+        fn layerScalar(self: *WeightSource, l_idx: usize) !LayerScalar {
+            var bits: [2]u8 = .{ 0x80, 0x3F }; // 1.0 in BF16 little-endian
+            if (self.direct) |r| {
+                bits = (try r.readBytes(2))[0..2].*;
+            } else {
+                if (self.tensorBytes("language_model.model.layers.{}.layer_scalar", .{l_idx})) |sb| {
+                    if (sb.len >= 2) bits = sb[0..2].*;
+                } else |err| switch (err) {
+                    error.TensorNotFound => {},
+                    else => return err,
+                }
+                self.writeCache(&bits);
+            }
+            const value: f32 = @bitCast(@as(u32, std.mem.readInt(u16, &bits, .little)) << 16);
+            const arr: ?mlx.Array = if (value != 1.0) try mlx.Array.fromRawData(@ptrCast(&bits), &.{1}, .bfloat16) else null;
+            return .{ .value = value, .arr = arr };
+        }
+    };
 
     fn createTokenIndicesArray(self: *const Gemma4E4BModel, tokens: []const usize) !mlx.Array {
+        try gemma4.validateTokenIds(tokens, self.config.vocab_size);
         const T = tokens.len;
         const single_tok = [_]i32{if (T > 0) @intCast(tokens[0]) else 0};
         if (T == 1) {
@@ -1219,8 +1122,10 @@ pub const Gemma4E4BModel = struct {
             // 融合逐层输入: (proj + tokens) * input_scale (保持纯 BF16，通过静态编译闭包融合加法与缩放)
             ple_inputs = try mlx.Array.fusedAddMul(ple_proj_normed, ple_tokens_arr, self.ple.input_scale_arr, self.compiled_add_mul, s);
         }
-        errdefer x_cur.deinit();
+        // x_cur 在逐层循环中被替换为新层输出，defer 在作用域退出时释放其最终持有的数组 (成功与出错路径各一次)
+        defer x_cur.deinit();
         defer ple_inputs.deinit();
+        const num_layers: i32 = @intCast(self.config.num_hidden_layers);
 
         // 3. 执行 42 层 Transformer 前向传播：
         // - 当 T == 1 时重塑为 [1, 42, 256] 并沿 axis 1 切分，直接获得 [1, 1, 256] 切片；
@@ -1228,7 +1133,7 @@ pub const Gemma4E4BModel = struct {
         if (T == 1) {
             var ple_3d = try ple_inputs.reshape(&.{ 1, self.config.num_hidden_layers, self.config.hidden_size_per_layer_input }, s);
             defer ple_3d.deinit();
-            var ple_vec = try ple_3d.split(42, 1, s);
+            var ple_vec = try ple_3d.split(num_layers, 1, s);
             defer ple_vec.deinit();
 
             for (self.layers, 0..) |*l, idx| {
@@ -1240,7 +1145,7 @@ pub const Gemma4E4BModel = struct {
                 x_cur = x_next;
             }
         } else {
-            var ple_vec = try ple_inputs.split(42, 2, s);
+            var ple_vec = try ple_inputs.split(num_layers, 2, s);
             defer ple_vec.deinit();
 
             for (self.layers, 0..) |*l, idx| {
@@ -1252,7 +1157,6 @@ pub const Gemma4E4BModel = struct {
                 x_cur = x_next;
             }
         }
-        defer x_cur.deinit();
 
         // 4. 最终层归一化与词表投影
         var h_norm = try mlx.Array.fastRmsNorm(x_cur, self.norm_w, self.config.rms_norm_eps, s);
@@ -1365,8 +1269,7 @@ pub const Gemma4E4BModel = struct {
         const s = self.stream;
         const pos = self.curr_len;
 
-        const single_tok = [_]i32{@intCast(tok)};
-        var indices_arr = try mlx.Array.fromSliceI32(&single_tok, &.{1});
+        var indices_arr = try self.createTokenIndicesArray(&.{tok});
         defer indices_arr.deinit();
 
         if (repetition_penalty == 1.0) {
@@ -1418,8 +1321,9 @@ pub const Gemma4E4BModel = struct {
         var qkv_raw = try l.qkv_proj.forwardArray(in_norm, s);
         defer qkv_raw.deinit();
 
-        var q_rot: mlx.Array = undefined;
-        errdefer q_rot.deinit();
+        // 旋转后的查询张量仅在成功构建后登记，作用域退出 (成功或出错) 时恰好释放一次
+        var q_rot_opt: ?mlx.Array = null;
+        defer if (q_rot_opt) |*q| q.deinit();
         var eff_k: mlx.Array = undefined;
         var eff_v: mlx.Array = undefined;
         var eff_k_free: ?mlx.Array = null;
@@ -1447,14 +1351,14 @@ pub const Gemma4E4BModel = struct {
 
                 var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
                 defer q_normed.deinit();
-                q_rot = try mlx.Array.fastRoPE(q_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+                q_rot_opt = try l.applyRope(q_normed, pos, s);
 
                 var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
                 defer k_normed.deinit();
                 v_4d = try mlx.Array.fastRmsNorm(v_4d_raw, null, l.rms_norm_eps, s);
                 errdefer v_4d.deinit();
 
-                k_rot = try mlx.Array.fastRoPE(k_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+                k_rot = try l.applyRope(k_normed, pos, s);
             } else {
                 var qkv_4d = try qkv_raw.reshape(&.{ 1, seq_len, total_heads, l.head_dim }, s);
                 defer qkv_4d.deinit();
@@ -1470,7 +1374,7 @@ pub const Gemma4E4BModel = struct {
                 defer q_normed.deinit();
                 var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
                 defer q_4d.deinit();
-                q_rot = try mlx.Array.fastRoPE(q_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+                q_rot_opt = try l.applyRope(q_4d, pos, s);
 
                 var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
                 defer k_normed.deinit();
@@ -1482,7 +1386,7 @@ pub const Gemma4E4BModel = struct {
                 v_4d = try v_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
                 errdefer v_4d.deinit();
 
-                k_rot = try mlx.Array.fastRoPE(k_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+                k_rot = try l.applyRope(k_4d, pos, s);
             }
             defer v_4d.deinit();
             defer k_rot.deinit();
@@ -1495,29 +1399,34 @@ pub const Gemma4E4BModel = struct {
             const cache = &self.gpu_kv[l_idx].?;
             const range = GpuKvCache.computeWriteRange(cache.capacity, l.is_sliding, l.sliding_window, pos, seq_len);
             try cache.ensureCapacity(range.write_stop, s);
-            const next_k = try cache.k.sliceUpdate4dAxis2(k_rot, l.num_kv_heads, range.write_start, range.write_stop, l.head_dim, s);
-            const next_v = try cache.v.sliceUpdate4dAxis2(v_4d, l.num_kv_heads, range.write_start, range.write_stop, l.head_dim, s);
-            cache.k.deinit();
-            cache.v.deinit();
-            cache.k = next_k;
-            cache.v = next_v;
+            {
+                var next_k = try cache.k.sliceUpdate4dAxis2(k_rot, l.num_kv_heads, range.write_start, range.write_stop, l.head_dim, s);
+                errdefer next_k.deinit();
+                const next_v = try cache.v.sliceUpdate4dAxis2(v_4d, l.num_kv_heads, range.write_start, range.write_stop, l.head_dim, s);
+                cache.k.deinit();
+                cache.v.deinit();
+                cache.k = next_k;
+                cache.v = next_v;
+            }
 
             if (range.use_full_buffer) {
                 eff_k = cache.k;
                 eff_v = cache.v;
-                if (l_idx == 22 or l_idx == 23) {
-                    cache.clearStepSlices();
-                }
+                if (l.is_kv_shared_source) cache.clearStepSlices();
             } else {
-                eff_k = try cache.k.slice4dAxis2(l.num_kv_heads, range.slice_start, range.slice_stop, l.head_dim, s);
-                eff_v = try cache.v.slice4dAxis2(l.num_kv_heads, range.slice_start, range.slice_stop, l.head_dim, s);
-                if (l_idx == 22 or l_idx == 23) {
+                var sliced_k = try cache.k.slice4dAxis2(l.num_kv_heads, range.slice_start, range.slice_stop, l.head_dim, s);
+                errdefer sliced_k.deinit();
+                const sliced_v = try cache.v.slice4dAxis2(l.num_kv_heads, range.slice_start, range.slice_stop, l.head_dim, s);
+                eff_k = sliced_k;
+                eff_v = sliced_v;
+                if (l.is_kv_shared_source) {
+                    // 本步有效键值切片交由缓存持有，供后续键值共享层复用
                     cache.clearStepSlices();
-                    cache.step_eff_k = eff_k;
-                    cache.step_eff_v = eff_v;
+                    cache.step_eff_k = sliced_k;
+                    cache.step_eff_v = sliced_v;
                 } else {
-                    eff_k_free = eff_k;
-                    eff_v_free = eff_v;
+                    eff_k_free = sliced_k;
+                    eff_v_free = sliced_v;
                 }
             }
         } else {
@@ -1526,7 +1435,7 @@ pub const Gemma4E4BModel = struct {
                 defer q_4d_raw.deinit();
                 var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
                 defer q_normed.deinit();
-                q_rot = try mlx.Array.fastRoPE(q_normed, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+                q_rot_opt = try l.applyRope(q_normed, pos, s);
             } else {
                 var q_4d_raw = try qkv_raw.reshape(&.{ 1, seq_len, l.num_heads, l.head_dim }, s);
                 defer q_4d_raw.deinit();
@@ -1534,14 +1443,14 @@ pub const Gemma4E4BModel = struct {
                 defer q_normed.deinit();
                 var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
                 defer q_4d.deinit();
-                q_rot = try mlx.Array.fastRoPE(q_4d, l.rot_dim, false, l.rope_theta, 1.0, pos, s);
+                q_rot_opt = try l.applyRope(q_4d, pos, s);
             }
 
             const cache = &self.gpu_kv[l.prev_kv_idx].?;
             eff_k = cache.step_eff_k orelse cache.k;
             eff_v = cache.step_eff_v orelse cache.v;
         }
-        defer q_rot.deinit();
+        const q_rot = q_rot_opt.?;
 
         // 缩放点积注意力 (Scaled Dot-Product Attention, SDPA, scaling = 1.0)
         const is_causal = (seq_len > 1);
@@ -1602,7 +1511,7 @@ pub const Gemma4E4BModel = struct {
         var ple_gate_raw = try l.ple_gate.forwardArray(x2, s);
         defer ple_gate_raw.deinit();
 
-        // 当 seq_len > 1 时，ple_slice 来自 ple_inputs.split(42, 2)，形状为非连续 4D 视图 [1, T, 1, 256]；
+        // 当 seq_len > 1 时，ple_slice 来自 ple_inputs.split(num_hidden_layers, 2)，形状为非连续 4D 视图 [1, T, 1, 256]；
         // 将连续的 ple_gate_raw [1, T, 256] 以 O(1) 零拷贝视图重塑为 [1, T, 1, 256]，使 fusedGeluMul 直接融合读取步进视图并输出连续张量，
         // 随后以 O(1) 零拷贝视图恢复为 [1, T, 256]，彻底消除 42 层非连续 reshape 触发的 GPU 拷贝内核！
         var ple_modulated = if (seq_len == 1)

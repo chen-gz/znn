@@ -5,8 +5,8 @@ const Q4Weights = znn.backend.offload.Q4Weights;
 const DefaultGemma4Q4 = znn.models.gemma4_q4.DefaultGemma4Q4;
 const config = DefaultGemma4Q4.config;
 
-const MAGIC_IN = "ZNNQ4G02";
-const MAGIC_OUT = "ZNNQ4DIR";
+const MAGIC_IN = DefaultGemma4Q4.Q4_MAGIC;
+const MAGIC_OUT = DefaultGemma4Q4.DIRECT_MAGIC;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -96,47 +96,6 @@ pub fn main(init: std.process.Init) !void {
     const cpu_count = @max(1, std.Thread.getCpuCount() catch 1);
     const num_threads = @min(cpu_count, config.num_hidden_layers);
 
-    const LayerOffsets = struct {
-        in_offsets: [49]usize,
-        out_offsets: [49]usize,
-    };
-
-    const computeLayerOffsets = struct {
-        fn compute() LayerOffsets {
-            var res: LayerOffsets = undefined;
-            const base = 8 + config.hidden_size * 2 + config.vocab_size * config.hidden_size * 2;
-            res.in_offsets[0] = base;
-            res.out_offsets[0] = base;
-
-            for (0..config.num_hidden_layers) |i| {
-                const is_full = ((i + 1) % 6 == 0);
-                const head_dim = if (is_full) config.global_head_dim else config.head_dim;
-                const num_kv = if (is_full) config.num_global_key_value_heads else config.num_key_value_heads;
-                const q_dim = config.num_attention_heads * head_dim;
-                const kv_dim = num_kv * head_dim;
-                const v_dim = if (is_full) 0 else kv_dim;
-
-                const norms_len = (config.hidden_size * 4 + head_dim * 2 + 1) * 2;
-                const q_blocks = (q_dim * config.hidden_size) / 32;
-                const k_blocks = (kv_dim * config.hidden_size) / 32;
-                const v_blocks = (v_dim * config.hidden_size) / 32;
-                const o_blocks = (config.hidden_size * q_dim) / 32;
-                const gate_blocks = (config.intermediate_size * config.hidden_size) / 32;
-                const up_blocks = (config.intermediate_size * config.hidden_size) / 32;
-                const down_blocks = (config.hidden_size * config.intermediate_size) / 32;
-
-                const raw_layer_bytes = norms_len + (q_blocks + k_blocks + v_blocks + o_blocks + gate_blocks + up_blocks + down_blocks) * 18;
-
-                const qkv_direct_blocks = ((q_dim + kv_dim + v_dim) * config.hidden_size) / 32;
-                const direct_layer_bytes = norms_len + (qkv_direct_blocks + o_blocks + gate_blocks * 2 + down_blocks) * 20;
-
-                res.in_offsets[i + 1] = res.in_offsets[i] + raw_layer_bytes;
-                res.out_offsets[i + 1] = res.out_offsets[i] + direct_layer_bytes;
-            }
-            return res;
-        }
-    }.compute;
-
     const Worker = struct {
         in_mmap: []const u8,
         out_mmap: []u8,
@@ -144,7 +103,9 @@ pub fn main(init: std.process.Init) !void {
         end_layer: usize,
 
         fn run(ctx: *@This()) void {
-            const offsets = computeLayerOffsets();
+            // 输入 (ZNNQ4G02) 与输出 (ZNNQ4D02) 布局的逐层偏移量均由模型定义统一给出，生产端与消费端保持一致
+            const in_offsets = DefaultGemma4Q4.computeLayerOffsets().offsets;
+            const out_offsets = DefaultGemma4Q4.computeDirectLayerOffsets().offsets;
 
             for (ctx.start_layer..ctx.end_layer) |i| {
                 const is_full = ((i + 1) % 6 == 0);
@@ -154,18 +115,18 @@ pub fn main(init: std.process.Init) !void {
                 const kv_dim = num_kv * head_dim;
                 const v_dim = if (is_full) 0 else kv_dim;
 
-                const in_cursor_start = offsets.in_offsets[i];
-                const out_cursor_start = offsets.out_offsets[i];
-                const norms_bytes_len = (config.hidden_size * 4 + head_dim * 2 + 1) * 2;
+                const in_cursor_start = in_offsets[i];
+                const out_cursor_start = out_offsets[i];
+                const norms_bytes_len = DefaultGemma4Q4.layerNormsBytes(i);
 
-                // 1. 复制 Layernorm 与 scalar 权重
+                // 1. 复制 Layernorm 与 scalar 权重 (输出区段尾部的 4 字节对齐填充保持为零)
                 @memcpy(
                     ctx.out_mmap[out_cursor_start .. out_cursor_start + norms_bytes_len],
                     ctx.in_mmap[in_cursor_start .. in_cursor_start + norms_bytes_len],
                 );
 
                 var in_c = in_cursor_start + norms_bytes_len;
-                var out_c = out_cursor_start + norms_bytes_len;
+                var out_c = out_cursor_start + DefaultGemma4Q4.directLayerNormsBytes(i);
 
                 // 2. 重排并写入 fused_qkv (w_q, scales, biases)
                 const q_num_blocks = (q_dim * config.hidden_size) / 32;
@@ -239,6 +200,7 @@ pub fn main(init: std.process.Init) !void {
 
                 Q4Weights.packBlocksToDirectBuffers(&.{down_slice}, &.{config.hidden_size}, config.intermediate_size, down_wq_out, down_sc_out, down_bi_out);
                 out_c += down_wq_len + down_sc_len + down_bi_len;
+                std.debug.assert(in_c == in_offsets[i + 1] and out_c == out_offsets[i + 1]);
             }
         }
     };
