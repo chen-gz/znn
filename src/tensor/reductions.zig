@@ -694,7 +694,7 @@ pub fn clip_(self: *Tensor, min_val: f32, max_val: f32) !*Tensor {
     return self;
 }
 
-/// 沿指定轴对张量进行排序 (Sort)
+/// 沿指定轴对张量进行稳定排序 (Sort)，比较规则见 `totalLessThan`（升序时非数 (Not a Number, NaN) 排在末尾）
 pub fn sort(self: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.Allocator) !*Tensor {
     const ax = axis orelse (if (self.shape.len > 0) self.shape.len - 1 else 0);
     if (ax >= self.shape.len) return error.DimensionOutOfBounds;
@@ -722,38 +722,13 @@ pub fn sort(self: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.All
         for (0..inner_size) |inner| {
             const base = outer * dim_size * inner_size + inner;
             if (stride == 1) {
-                const cur_slice = out.data[base .. base + dim_size];
-                if (ascending) {
-                    std.mem.sort(f32, cur_slice, {}, struct {
-                        fn asc(_: void, a: f32, b: f32) bool {
-                            return a < b;
-                        }
-                    }.asc);
-                } else {
-                    std.mem.sort(f32, cur_slice, {}, struct {
-                        fn desc(_: void, a: f32, b: f32) bool {
-                            return a > b;
-                        }
-                    }.desc);
-                }
+                sortValues(out.data[base .. base + dim_size], ascending);
             } else {
                 const buf = temp_buf.?;
                 for (0..dim_size) |k| {
                     buf[k] = out.data[base + k * stride];
                 }
-                if (ascending) {
-                    std.mem.sort(f32, buf, {}, struct {
-                        fn asc(_: void, a: f32, b: f32) bool {
-                            return a < b;
-                        }
-                    }.asc);
-                } else {
-                    std.mem.sort(f32, buf, {}, struct {
-                        fn desc(_: void, a: f32, b: f32) bool {
-                            return a > b;
-                        }
-                    }.desc);
-                }
+                sortValues(buf, ascending);
                 for (0..dim_size) |k| {
                     out.data[base + k * stride] = buf[k];
                 }
@@ -763,7 +738,24 @@ pub fn sort(self: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.All
     return out;
 }
 
-/// 沿指定轴返回排序后的索引 (Argsort)
+/// 浮点数全序比较 (Total Order Comparison)：非数 (Not a Number, NaN) 视为大于一切非 NaN 数值（含 +Inf），
+/// 所有 NaN 彼此等价，其余数值按 `<` 比较。由此得到严格弱序 (Strict Weak Ordering)，
+/// 升序排序时 NaN 排在末尾，降序排序与前 K 大选择 (Top-K) 时 NaN 排在最前，三者彼此一致
+pub inline fn totalLessThan(a: f32, b: f32) bool {
+    return !std.math.isNan(a) and (std.math.isNan(b) or a < b);
+}
+
+/// 按 `totalLessThan` 全序对连续切片做稳定排序（降序即按全序逆序，等价元素保持原有相对顺序）
+fn sortValues(values: []f32, ascending: bool) void {
+    const Cmp = struct {
+        fn lessThan(asc: bool, a: f32, b: f32) bool {
+            return if (asc) totalLessThan(a, b) else totalLessThan(b, a);
+        }
+    };
+    std.mem.sort(f32, values, ascending, Cmp.lessThan);
+}
+
+/// 沿指定轴返回稳定排序后的索引 (Argsort)，比较规则与 `sort` 相同（见 `totalLessThan`）
 pub fn argsort(self: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.Allocator) !*GenericTensor(usize) {
     const ax = axis orelse (if (self.shape.len > 0) self.shape.len - 1 else 0);
     if (ax >= self.shape.len) return error.DimensionOutOfBounds;
@@ -798,11 +790,7 @@ pub fn argsort(self: *Tensor, axis: ?usize, ascending: bool, allocator: std.mem.
         fn cmp(ctx: @This(), a: usize, b: usize) bool {
             const val_a = ctx.vals[ctx.base + a * ctx.stride];
             const val_b = ctx.vals[ctx.base + b * ctx.stride];
-            if (ctx.asc) {
-                return val_a < val_b;
-            } else {
-                return val_a > val_b;
-            }
+            return if (ctx.asc) totalLessThan(val_a, val_b) else totalLessThan(val_b, val_a);
         }
     };
 

@@ -11,6 +11,7 @@ const ops_mod = @import("ops.zig");
 const zeros = ops_mod.zeros;
 const free = ops_mod.free;
 const reductions = @import("reductions.zig");
+const shape_mod = @import("shape.zig");
 const vec_math = @import("vec_math.zig");
 
 pub const conv1d = conv_pool.conv1d;
@@ -569,39 +570,55 @@ pub const TopKResult = struct {
 };
 
 /// 无分支前 K 大元素原地选择内核 (Branchless Top-K Selection In-Place Kernel)：
-/// 沿最后一维 `E` 选出最大的 `k` 个元素及其下标，全程使用无分支比较算术累加（零数据依赖 `if` 跳转），
-/// 相同数值按较小列下标优先打破平局，确保每个排名 `r in 0..k` 严格对应唯一专家下标。
+/// 沿最后一维 `E` 选出最大的 `k` 个元素及其下标。元素按 `reductions.totalLessThan` 全序比较
+/// （非数 (Not a Number, NaN) 视为大于一切数值，与降序 `sort` 一致），相同数值按较小列下标优先打破平局，
+/// 因此每行的排名构成 `0..E` 的一个排列，每个排名 `r in 0..k` 严格对应唯一下标。
+/// 排名由无分支比较计数得到，结果以条件选择写入对应槽位（不使用乘以 0/1 掩码的累加，Inf 与 NaN 不会污染其他槽位）。
+/// 输入可为任意跨步视图；输出 `values_out` / `indices_out` 须为连续张量。
 pub fn topKInto(self: *const Tensor, k: usize, values_out: *Tensor, indices_out: *Tensor) !void {
     if (self.shape.len == 0) return error.IncompatibleDimensions;
     const E = self.shape.dims[self.shape.len - 1];
     if (k == 0 or k > E) return error.InvalidArgument;
-    if (!self.isContiguous()) return error.NonContiguousTensor;
     const N = self.shape.numel() / E;
     if (values_out.shape.numel() != N * k or indices_out.shape.numel() != N * k) return error.ShapeMismatch;
     if (!values_out.isContiguous() or !indices_out.isContiguous()) return error.NonContiguousTensor;
 
-    @memset(values_out.data[0 .. N * k], 0.0);
-    @memset(indices_out.data[0 .. N * k], 0.0);
+    // 按行优先顺序遍历除最后一维外的所有坐标，每行的元素 `j` 位于 `base + j * s_last`
+    const s_last = self.strides.dims[self.shape.len - 1];
+    var outer_shape = self.shape;
+    outer_shape.len -= 1;
+    var outer_strides = self.strides;
+    outer_strides.len -= 1;
+    var it = shape_mod.RowIter(1).init(outer_shape, .{outer_strides});
+    const s_outer = it.inner_strides[0];
+    var n: usize = 0;
+    while (it.next()) |offs| {
+        for (0..it.inner) |i| {
+            topKRow(self.data, offs[0] + i * s_outer, s_last, E, values_out.data[n * k ..][0..k], indices_out.data[n * k ..][0..k]);
+            n += 1;
+        }
+    }
+}
 
-    for (0..N) |n| {
-        const row_in = self.data[n * E .. (n + 1) * E];
-        const row_vals = values_out.data[n * k .. (n + 1) * k];
-        const row_idxs = indices_out.data[n * k .. (n + 1) * k];
-
-        for (0..E) |j| {
-            const v_j = row_in[j];
-            var rank: usize = 0;
-            for (0..E) |m| {
-                const v_m = row_in[m];
-                const greater: usize = @intFromBool(v_m > v_j);
-                const tie_earlier: usize = @intFromBool((v_m == v_j) and (m < j));
-                rank += greater | tie_earlier;
-            }
-            for (0..k) |r| {
-                const match_f: f32 = @floatFromInt(@intFromBool(rank == r));
-                row_vals[r] += v_j * match_f;
-                row_idxs[r] += @as(f32, @floatFromInt(j)) * match_f;
-            }
+/// 单行前 K 大选择：行内元素 `j` 位于 `data[base + j * stride]`
+fn topKRow(data: []const f32, base: usize, stride: usize, E: usize, row_vals: []f32, row_idxs: []f32) void {
+    for (0..E) |j| {
+        const v_j = data[base + j * stride];
+        const nan_j: usize = @intFromBool(std.math.isNan(v_j));
+        var rank: usize = 0;
+        for (0..E) |m| {
+            const v_m = data[base + m * stride];
+            const nan_m: usize = @intFromBool(std.math.isNan(v_m));
+            // 全序下 v_m 严格大于 v_j，或两者等价（同为 NaN 或数值相等）且 m 更靠前
+            const greater = (1 - nan_j) & (nan_m | @intFromBool(v_m > v_j));
+            const equivalent = @intFromBool(v_m == v_j) | (nan_m & nan_j);
+            rank += greater | (equivalent & @intFromBool(m < j));
+        }
+        const j_f: f32 = @floatFromInt(j);
+        for (row_vals, row_idxs, 0..) |*val, *idx, r| {
+            const hit = rank == r;
+            val.* = if (hit) v_j else val.*;
+            idx.* = if (hit) j_f else idx.*;
         }
     }
 }

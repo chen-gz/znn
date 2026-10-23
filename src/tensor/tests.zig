@@ -2259,3 +2259,55 @@ test "fix: StaticTensor.matmul propagates NaN from 0 * Inf like BLAS" {
     try std.testing.expect(std.math.isNan(D.data[1]));
 }
 
+test "fix: sort, argsort and topK order NaN as the largest value consistently" {
+    const allocator = std.testing.allocator;
+    const nan = std.math.nan(f32);
+    const inf = std.math.inf(f32);
+    const X = try array(allocator, &.{6}, &.{ 3.0, nan, -1.0, inf, nan, 0.0 });
+    defer free(allocator, X);
+
+    const asc = try X.sort(null, true, allocator);
+    defer free(allocator, asc);
+    try std.testing.expectEqualSlices(f32, &.{ -1.0, 0.0, 3.0, inf }, asc.data[0..4]);
+    try std.testing.expect(std.math.isNan(asc.data[4]) and std.math.isNan(asc.data[5]));
+
+    const desc = try X.sort(null, false, allocator);
+    defer free(allocator, desc);
+    try std.testing.expect(std.math.isNan(desc.data[0]) and std.math.isNan(desc.data[1]));
+    try std.testing.expectEqualSlices(f32, &.{ inf, 3.0, 0.0, -1.0 }, desc.data[2..6]);
+
+    const idx_asc = try X.argsort(null, true, allocator);
+    defer idx_asc.deinit(allocator);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 5, 0, 3, 1, 4 }, idx_asc.data);
+    const idx_desc = try X.argsort(null, false, allocator);
+    defer idx_desc.deinit(allocator);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 4, 3, 0, 5, 2 }, idx_desc.data);
+
+    // 前 K 大选择与降序排序一致；Inf 不再把其他槽位污染为 NaN
+    const top = try X.topK(4, allocator);
+    defer free(allocator, top.values);
+    defer free(allocator, top.indices);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 4, 3, 0 }, top.indices.data);
+    try std.testing.expect(std.math.isNan(top.values.data[0]) and std.math.isNan(top.values.data[1]));
+    try std.testing.expectEqualSlices(f32, &.{ inf, 3.0 }, top.values.data[2..4]);
+
+    const Y = try array(allocator, &.{4}, &.{ inf, 1.0, -inf, 2.0 });
+    defer free(allocator, Y);
+    const top_y = try Y.topK(2, allocator);
+    defer free(allocator, top_y.values);
+    defer free(allocator, top_y.indices);
+    try std.testing.expectEqualSlices(f32, &.{ inf, 2.0 }, top_y.values.data);
+    try std.testing.expectEqualSlices(f32, &.{ 0, 3 }, top_y.indices.data);
+
+    // 跨步排序路径 (axis = 0)
+    const M = try array(allocator, &.{ 3, 2 }, &.{ nan, 1.0, 2.0, nan, -3.0, 0.0 });
+    defer free(allocator, M);
+    const m_sorted = try M.sort(0, true, allocator);
+    defer free(allocator, m_sorted);
+    try std.testing.expectEqual(@as(f32, -3.0), m_sorted.data[0]);
+    try std.testing.expectEqual(@as(f32, 0.0), m_sorted.data[1]);
+    try std.testing.expectEqual(@as(f32, 2.0), m_sorted.data[2]);
+    try std.testing.expectEqual(@as(f32, 1.0), m_sorted.data[3]);
+    try std.testing.expect(std.math.isNan(m_sorted.data[4]) and std.math.isNan(m_sorted.data[5]));
+}
+
