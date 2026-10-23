@@ -284,7 +284,6 @@ pub const MoELayer = struct {
         num_shared_experts: usize,
         top_k: usize,
     ) !MoELayer {
-        std.debug.assert(top_k > 0 and top_k <= num_routed_experts);
         if (dim == 0 or hidden_dim == 0 or num_routed_experts == 0 or top_k == 0 or top_k > num_routed_experts) {
             return error.InvalidConfiguration;
         }

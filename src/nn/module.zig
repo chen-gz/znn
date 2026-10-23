@@ -42,6 +42,15 @@ pub fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: u
     return t;
 }
 
+/// 分配一维 `[len]` 持久化张量并以 `fill` 填充 (用于偏置、归一化缩放 γ / 平移 β 与滑动统计量)
+pub fn createVectorTensor(allocator: std.mem.Allocator, len: usize, fill: f32, requires_grad: bool) !*Tensor {
+    const t = try createPersistentTensor(allocator, 1, len, requires_grad);
+    @memset(t.data, fill);
+    t.shape = Shape.init(&.{len});
+    t.strides = tensor.computeContiguousStrides(t.shape);
+    return t;
+}
+
 /// 释放 `createPersistentTensor` 分配的张量；梯度缓冲只要存在即释放（参数被冻结后 `requires_grad` 可能为 false）
 pub fn freePersistentTensor(allocator: std.mem.Allocator, t: *Tensor) void {
     allocator.free(t.data);
@@ -175,8 +184,9 @@ pub fn deinitModel(model: anytype, allocator: std.mem.Allocator) void {
         seen: std.AutoHashMap(*Tensor, void),
 
         pub fn visitTensor(self: *@This(), _: []const u8, t: *Tensor) !void {
-            if (self.seen.contains(t)) return;
-            self.seen.put(t, {}) catch {};
+            // 无法登记去重信息时宁可泄漏该张量，也不冒权重共享导致重复释放 (Double Free) 的风险
+            const gop = self.seen.getOrPut(t) catch return;
+            if (gop.found_existing) return;
             freePersistentTensor(self.allocator, t);
         }
         pub fn visitOwnedSlice(self: *@This(), s: anytype) !void {

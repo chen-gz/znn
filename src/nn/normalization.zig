@@ -4,9 +4,28 @@ const autodiff = @import("../autodiff.zig");
 const core = @import("core.zig");
 const enterModuleScope = core.enterModuleScope;
 const Tensor = tensor.Tensor;
-const Shape = tensor.Shape;
-const createPersistentTensor = core.createPersistentTensor;
+const createVectorTensor = core.createVectorTensor;
 const freePersistentTensor = core.freePersistentTensor;
+
+/// 批量归一化 (Batch Normalization, BatchNorm) 的可学习参数与滑动统计缓冲区：
+/// γ = 1、β = 0、滑动均值 = 0、滑动方差 = 1
+const BatchNormTensors = struct {
+    gamma: *Tensor,
+    beta: *Tensor,
+    running_mean: *Tensor,
+    running_var: *Tensor,
+
+    fn init(allocator: std.mem.Allocator, num_features: usize) !BatchNormTensors {
+        const gamma = try createVectorTensor(allocator, num_features, 1.0, true);
+        errdefer freePersistentTensor(allocator, gamma);
+        const beta = try createVectorTensor(allocator, num_features, 0.0, true);
+        errdefer freePersistentTensor(allocator, beta);
+        const running_mean = try createVectorTensor(allocator, num_features, 0.0, false);
+        errdefer freePersistentTensor(allocator, running_mean);
+        const running_var = try createVectorTensor(allocator, num_features, 1.0, false);
+        return .{ .gamma = gamma, .beta = beta, .running_mean = running_mean, .running_var = running_var };
+    }
+};
 
 /// 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)
 pub const RMSNorm = struct {
@@ -16,13 +35,7 @@ pub const RMSNorm = struct {
     module_type: []const u8 = "RMSNorm",
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !RMSNorm {
-        const weight = try createPersistentTensor(allocator, 1, dim, true);
-        errdefer freePersistentTensor(allocator, weight);
-        @memset(weight.data, 1.0);
-
-        weight.shape = Shape.init(&.{dim});
-        weight.strides = tensor.computeContiguousStrides(weight.shape);
-
+        const weight = try createVectorTensor(allocator, dim, 1.0, true);
         return RMSNorm{
             .weight = weight,
             .eps = eps,
@@ -48,17 +61,9 @@ pub const LayerNorm = struct {
     module_type: []const u8 = "LayerNorm",
 
     pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !LayerNorm {
-        const weight = try createPersistentTensor(allocator, 1, dim, true);
+        const weight = try createVectorTensor(allocator, dim, 1.0, true);
         errdefer freePersistentTensor(allocator, weight);
-        @memset(weight.data, 1.0);
-        weight.shape = Shape.init(&.{dim});
-        weight.strides = tensor.computeContiguousStrides(weight.shape);
-
-        const bias = try createPersistentTensor(allocator, 1, dim, true);
-        errdefer freePersistentTensor(allocator, bias);
-        @memset(bias.data, 0.0);
-        bias.shape = Shape.init(&.{dim});
-        bias.strides = tensor.computeContiguousStrides(bias.shape);
+        const bias = try createVectorTensor(allocator, dim, 0.0, true);
 
         return LayerNorm{
             .weight = weight,
@@ -108,39 +113,17 @@ pub const BatchNorm1d = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, num_features: usize, options: Options) !BatchNorm1d {
-        const gamma = try createPersistentTensor(allocator, 1, num_features, true);
-        errdefer freePersistentTensor(allocator, gamma);
-        @memset(gamma.data, 1.0);
-        gamma.shape = Shape.init(&.{num_features});
-        gamma.strides = tensor.computeContiguousStrides(gamma.shape);
-
-        const beta = try createPersistentTensor(allocator, 1, num_features, true);
-        errdefer freePersistentTensor(allocator, beta);
-        @memset(beta.data, 0.0);
-        beta.shape = Shape.init(&.{num_features});
-        beta.strides = tensor.computeContiguousStrides(beta.shape);
-
-        const running_mean = try createPersistentTensor(allocator, 1, num_features, false);
-        errdefer freePersistentTensor(allocator, running_mean);
-        @memset(running_mean.data, 0.0);
-        running_mean.shape = Shape.init(&.{num_features});
-        running_mean.strides = tensor.computeContiguousStrides(running_mean.shape);
-
-        const running_var = try createPersistentTensor(allocator, 1, num_features, false);
-        errdefer freePersistentTensor(allocator, running_var);
-        @memset(running_var.data, 1.0);
-        running_var.shape = Shape.init(&.{num_features});
-        running_var.strides = tensor.computeContiguousStrides(running_var.shape);
+        const t = try BatchNormTensors.init(allocator, num_features);
 
         return BatchNorm1d{
             .num_features = num_features,
             .eps = options.eps,
             .momentum = options.momentum,
             .training = true,
-            .gamma = gamma,
-            .beta = beta,
-            .running_mean = running_mean,
-            .running_var = running_var,
+            .gamma = t.gamma,
+            .beta = t.beta,
+            .running_mean = t.running_mean,
+            .running_var = t.running_var,
         };
     }
 
@@ -174,39 +157,17 @@ pub const BatchNorm2d = struct {
     module_type: []const u8 = "BatchNorm2d",
 
     pub fn init(allocator: std.mem.Allocator, num_features: usize, eps: f32, momentum: f32) !BatchNorm2d {
-        const gamma = try createPersistentTensor(allocator, 1, num_features, true);
-        errdefer freePersistentTensor(allocator, gamma);
-        @memset(gamma.data, 1.0);
-        gamma.shape = Shape.init(&.{num_features});
-        gamma.strides = tensor.computeContiguousStrides(gamma.shape);
-
-        const beta = try createPersistentTensor(allocator, 1, num_features, true);
-        errdefer freePersistentTensor(allocator, beta);
-        @memset(beta.data, 0.0);
-        beta.shape = Shape.init(&.{num_features});
-        beta.strides = tensor.computeContiguousStrides(beta.shape);
-
-        const running_mean = try createPersistentTensor(allocator, 1, num_features, false);
-        errdefer freePersistentTensor(allocator, running_mean);
-        @memset(running_mean.data, 0.0);
-        running_mean.shape = Shape.init(&.{num_features});
-        running_mean.strides = tensor.computeContiguousStrides(running_mean.shape);
-
-        const running_var = try createPersistentTensor(allocator, 1, num_features, false);
-        errdefer freePersistentTensor(allocator, running_var);
-        @memset(running_var.data, 1.0);
-        running_var.shape = Shape.init(&.{num_features});
-        running_var.strides = tensor.computeContiguousStrides(running_var.shape);
+        const t = try BatchNormTensors.init(allocator, num_features);
 
         return BatchNorm2d{
             .num_features = num_features,
             .eps = eps,
             .momentum = momentum,
             .training = true,
-            .gamma = gamma,
-            .beta = beta,
-            .running_mean = running_mean,
-            .running_var = running_var,
+            .gamma = t.gamma,
+            .beta = t.beta,
+            .running_mean = t.running_mean,
+            .running_var = t.running_var,
         };
     }
 
@@ -259,17 +220,9 @@ pub const GroupNorm = struct {
         if (num_groups == 0 or num_channels == 0 or num_channels % num_groups != 0) {
             return error.ShapeMismatch;
         }
-        const weight = try createPersistentTensor(allocator, 1, num_channels, true);
+        const weight = try createVectorTensor(allocator, num_channels, 1.0, true);
         errdefer freePersistentTensor(allocator, weight);
-        @memset(weight.data, 1.0);
-        weight.shape = Shape.init(&.{num_channels});
-        weight.strides = tensor.computeContiguousStrides(weight.shape);
-
-        const bias = try createPersistentTensor(allocator, 1, num_channels, true);
-        errdefer freePersistentTensor(allocator, bias);
-        @memset(bias.data, 0.0);
-        bias.shape = Shape.init(&.{num_channels});
-        bias.strides = tensor.computeContiguousStrides(bias.shape);
+        const bias = try createVectorTensor(allocator, num_channels, 0.0, true);
 
         return GroupNorm{
             .num_groups = num_groups,

@@ -2014,3 +2014,59 @@ test "loadModel reads half-precision tensors at unaligned offsets" {
     try writeRawSafetensors(path, std.math.maxInt(u64), "", "");
     try std.testing.expectError(error.InvalidSafetensorsHeader, loadModel(&m, std.testing.io, path, std.testing.allocator));
 }
+
+test "module constructors report invalid configurations as errors" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidConfiguration, MoELayer.init(allocator, 4, 8, 2, 0, 0));
+    try std.testing.expectError(error.InvalidConfiguration, MoELayer.init(allocator, 4, 8, 2, 0, 3));
+    try std.testing.expectError(error.InvalidConfiguration, CausalSelfAttention.initGQA(allocator, 10, 4, 4));
+    try std.testing.expectError(error.InvalidConfiguration, CausalSelfAttention.initGQA(allocator, 8, 4, 3));
+}
+
+test "recurrent modules reject empty sequences and mismatched layer states" {
+    const allocator = std.testing.allocator;
+    var graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer graph.deinit();
+    const empty: []const *Tensor = &.{};
+
+    var rnn = try RNN.init(allocator, 2, 3);
+    defer nn.deinitModel(&rnn, allocator);
+    try std.testing.expectError(error.EmptyInputs, rnn.forward(&graph, empty, null));
+    var lstm = try LSTM.init(allocator, 2, 3);
+    defer nn.deinitModel(&lstm, allocator);
+    try std.testing.expectError(error.EmptyInputs, lstm.forward(&graph, empty, null, null));
+    var gru = try GRU.init(allocator, 2, 3);
+    defer nn.deinitModel(&gru, allocator);
+    try std.testing.expectError(error.EmptyInputs, gru.forward(&graph, empty, null));
+
+    var stacked = try StackedLSTM.init(allocator, 2, 3, 2);
+    defer nn.deinitModel(&stacked, allocator);
+    try std.testing.expectError(error.EmptyInputs, stacked.forwardSequence(&graph, empty, null, null));
+    const x = try graph.zeros(&.{ 1, 2 }, false);
+    const h = try graph.zeros(&.{ 1, 3 }, false);
+    const one_state: []const *Tensor = &.{h};
+    try std.testing.expectError(error.ShapeMismatch, stacked.forwardSequence(&graph, &.{x}, one_state, null));
+    var outs: [1]*Tensor = undefined;
+    try std.testing.expectError(error.ShapeMismatch, stacked.forwardStep(&graph, x, one_state, one_state, &outs, &outs));
+}
+
+test "normalization constructors release partial allocations on failure" {
+    // 每个带梯度向量张量分配三次 (结构体、数据、梯度)，无梯度缓冲区分配两次
+    for (1..10) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, nn.BatchNorm1d.init(failing.allocator(), 3, .{}));
+    }
+    for (1..6) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, LayerNorm.init(failing.allocator(), 3, 1e-5));
+    }
+
+    const allocator = std.testing.allocator;
+    var bn = try BatchNorm2d.init(allocator, 2, 1e-5, 0.1);
+    defer nn.deinitModel(&bn, allocator);
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, 1.0 }, bn.gamma.data);
+    try std.testing.expectEqualSlices(f32, &.{ 0.0, 0.0 }, bn.beta.data);
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, 1.0 }, bn.running_var.data);
+    try std.testing.expectEqual(@as(usize, 1), bn.running_mean.shape.len);
+    try std.testing.expect(!bn.running_mean.requires_grad);
+}
