@@ -2102,3 +2102,23 @@ test "LoRALinear accepts 3D inputs like Linear" {
     try std.testing.expect(grad_norm > 0);
     try std.testing.expectError(error.ShapeMismatch, lora.forward(&graph, try graph.tensorND(&.{ 2, 3, 5 }, false)));
 }
+
+test "Sequential accepts BatchNorm layers whose forward takes a const receiver" {
+    const allocator = std.testing.allocator;
+    var linear = try Linear.init(allocator, 3, 2);
+    defer nn.deinitModel(&linear, allocator);
+    var bn = try nn.BatchNorm1d.init(allocator, 2, .{});
+    defer nn.deinitModel(&bn, allocator);
+    @memcpy(linear.weight.data, &[_]f32{ 1, 0, 0, 1, 1, 1 });
+
+    var model = sequential(.{ linear, bn, ReLU{} });
+    model.eval();
+    var graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer graph.deinit();
+    const x = try graph.tensorNDWithData(&.{ 2, 3 }, &[_]f32{ 1, 2, 3, -4, -5, -6 }, false);
+    const y = try model.forward(&graph, x);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, y.shape.dims[0..y.shape.len]);
+    // 推理模式下 BatchNorm 使用初始滑动统计量 (均值 0、方差 1)，近似恒等变换
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), y.data[0], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), y.data[2], 1e-6);
+}
