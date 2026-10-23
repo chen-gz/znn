@@ -503,6 +503,12 @@ pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator) 
     if (self.shape.len != 2) return error.IncompatibleDimensions;
     const VocabSize = self.shape.dims[0];
     const D = self.shape.dims[1];
+    // 按 `idx * D` 整行拷贝要求嵌入表行优先连续
+    if (!self.isContiguous()) {
+        const table = try self.contiguous(allocator);
+        defer free(allocator, table);
+        return embedding(table, indices, allocator);
+    }
 
     const IdxT = @TypeOf(indices);
     const idx_info = @typeInfo(IdxT);
@@ -569,10 +575,13 @@ pub fn topKInto(self: *const Tensor, k: usize, values_out: *Tensor, indices_out:
     if (self.shape.len == 0) return error.IncompatibleDimensions;
     const E = self.shape.dims[self.shape.len - 1];
     if (k == 0 or k > E) return error.InvalidArgument;
+    if (!self.isContiguous()) return error.NonContiguousTensor;
     const N = self.shape.numel() / E;
+    if (values_out.shape.numel() != N * k or indices_out.shape.numel() != N * k) return error.ShapeMismatch;
+    if (!values_out.isContiguous() or !indices_out.isContiguous()) return error.NonContiguousTensor;
 
-    @memset(values_out.data, 0.0);
-    @memset(indices_out.data, 0.0);
+    @memset(values_out.data[0 .. N * k], 0.0);
+    @memset(indices_out.data[0 .. N * k], 0.0);
 
     for (0..N) |n| {
         const row_in = self.data[n * E .. (n + 1) * E];
@@ -640,17 +649,32 @@ pub fn gatherMatMulInto(
 
     if (self.shape.dims[0] != N or self.shape.dims[self.shape.len - 1] != in_dim) return error.ShapeMismatch;
     if (self.shape.len == 3 and self.shape.dims[1] != K) return error.ShapeMismatch;
+    // 每个词元 (及槽位) 的输入向量必须连续存放，批次维与槽位维可为任意跨度
+    if (self.strides.dims[self.shape.len - 1] != 1 and in_dim > 1) return error.NonContiguousTensor;
+    if (!indices.isContiguous() or !out.isContiguous()) return error.NonContiguousTensor;
+    if (out.shape.numel() != N * K * out_dim) return error.ShapeMismatch;
+    for (weights) |w| {
+        if (w.shape.len != 2 or w.shape.dims[0] != in_dim or w.shape.dims[1] != out_dim or !w.isContiguous()) return error.ShapeMismatch;
+    }
     if (biases) |bs| {
         if (bs.len != E) return error.ShapeMismatch;
+        for (bs) |b| {
+            if (b.shape.numel() != out_dim or !b.isContiguous()) return error.ShapeMismatch;
+        }
+    }
+    // 下标须为有限非负数；越界下标按设计截断到最后一个专家（与 `topKInto` 的输出范围一致）
+    for (indices.data[0 .. N * K]) |raw| {
+        if (!std.math.isFinite(raw) or raw < 0.0) return error.IndexOutOfBounds;
     }
 
     const x_n_stride: usize = self.strides.dims[0];
-    const x_k_stride: usize = (self.shape.len - 2) * in_dim;
+    const x_k_stride: usize = if (self.shape.len == 3) self.strides.dims[1] else 0;
 
+    const e_max: f32 = @floatFromInt(E - 1);
     for (0..N) |n| {
         for (0..K) |k| {
-            const e_raw: usize = @intFromFloat(indices.data[n * K + k]);
-            const e: usize = @min(e_raw, E - 1);
+            // 先在浮点域截断再转换，避免超出 usize 范围的下标触发非法转换
+            const e: usize = @intFromFloat(@min(indices.data[n * K + k], e_max));
             const x_ptr = self.data.ptr + n * x_n_stride + k * x_k_stride;
             const w_ptr = weights[e].data.ptr;
             const y_offset = (n * K + k) * out_dim;
