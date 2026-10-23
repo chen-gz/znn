@@ -10,15 +10,41 @@ pub const ClassificationStepResult = struct {
     batch_size: usize,
 };
 
+/// 整个 Epoch 的统计结果：`loss` 与 `accuracy` 按样本数加权平均
+/// (`drop_last = false` 时最后一个不满的批次不会被当作完整批次计权)
 pub const ClassificationEpochResult = struct {
     loss: f32,
     accuracy: f32,
     num_batches: usize,
+    num_samples: usize = 0,
 };
 
-// 兼容别名
-pub const StepResult = ClassificationStepResult;
-pub const EpochResult = ClassificationEpochResult;
+/// 按样本数加权累计各批次的损失与准确率
+const EpochAccumulator = struct {
+    weighted_loss: f64 = 0.0,
+    correct: f64 = 0.0,
+    num_batches: usize = 0,
+    num_samples: usize = 0,
+
+    fn add(self: *EpochAccumulator, step: ClassificationStepResult) void {
+        const n: f64 = @floatFromInt(step.batch_size);
+        self.weighted_loss += @as(f64, step.loss) * n;
+        self.correct += @as(f64, step.accuracy) * n;
+        self.num_batches += 1;
+        self.num_samples += step.batch_size;
+    }
+
+    fn result(self: EpochAccumulator) ClassificationEpochResult {
+        if (self.num_samples == 0) return .{ .loss = 0, .accuracy = 0, .num_batches = 0, .num_samples = 0 };
+        const n: f64 = @floatFromInt(self.num_samples);
+        return .{
+            .loss = @floatCast(self.weighted_loss / n),
+            .accuracy = @floatCast(self.correct / n),
+            .num_batches = self.num_batches,
+            .num_samples = self.num_samples,
+        };
+    }
+};
 
 /// 计算多分类批次的预测准确率 (Top-1 Accuracy)
 pub fn computeAccuracy(logits: *tensor.Tensor, targets: []const u8, allocator: std.mem.Allocator) !f32 {
@@ -130,9 +156,7 @@ pub fn trainClassificationEpoch(
     progress_callback: ?*const fn (batch_idx: usize, loss: f32, acc: f32) void,
 ) !ClassificationEpochResult {
     loader.reset();
-    var total_loss: f32 = 0.0;
-    var total_acc: f32 = 0.0;
-    var num_batches: usize = 0;
+    var acc: EpochAccumulator = .{};
 
     const input_dim = loader.dataset.images.rows * loader.dataset.images.cols;
     const max_batch_size = loader.batch_size;
@@ -141,12 +165,7 @@ pub fn trainClassificationEpoch(
     const y_buffer = try allocator.alloc(u8, max_batch_size);
     defer allocator.free(y_buffer);
 
-    while (true) {
-        const actual_batch_size = loader.peekNextBatchSize();
-        if (actual_batch_size == 0) break;
-
-        _ = loader.nextInto(x_buffer, y_buffer);
-
+    while (loader.nextInto(x_buffer, y_buffer)) |actual_batch_size| {
         const step_res = try trainClassificationStep(
             allocator,
             model,
@@ -154,23 +173,14 @@ pub fn trainClassificationEpoch(
             x_buffer[0 .. actual_batch_size * input_dim],
             y_buffer[0..actual_batch_size],
         );
-
-        total_loss += step_res.loss;
-        total_acc += step_res.accuracy;
-        num_batches += 1;
+        acc.add(step_res);
 
         if (progress_callback) |cb| {
-            cb(num_batches, step_res.loss, step_res.accuracy);
+            cb(acc.num_batches, step_res.loss, step_res.accuracy);
         }
     }
 
-    if (num_batches == 0) return ClassificationEpochResult{ .loss = 0, .accuracy = 0, .num_batches = 0 };
-
-    return ClassificationEpochResult{
-        .loss = total_loss / @as(f32, @floatFromInt(num_batches)),
-        .accuracy = total_acc / @as(f32, @floatFromInt(num_batches)),
-        .num_batches = num_batches,
-    };
+    return acc.result();
 }
 
 /// 评估整个 DataLoader (Classification)
@@ -181,9 +191,7 @@ pub fn evaluateClassification(
     loader: *dataset.DataLoader,
 ) !ClassificationEpochResult {
     loader.reset();
-    var total_loss: f32 = 0.0;
-    var total_acc: f32 = 0.0;
-    var num_batches: usize = 0;
+    var acc: EpochAccumulator = .{};
 
     const input_dim = loader.dataset.images.rows * loader.dataset.images.cols;
     const max_batch_size = loader.batch_size;
@@ -192,38 +200,17 @@ pub fn evaluateClassification(
     const y_buffer = try allocator.alloc(u8, max_batch_size);
     defer allocator.free(y_buffer);
 
-    while (true) {
-        const actual_batch_size = loader.peekNextBatchSize();
-        if (actual_batch_size == 0) break;
-
-        _ = loader.nextInto(x_buffer, y_buffer);
-
-        const step_res = try evalClassificationStep(
+    while (loader.nextInto(x_buffer, y_buffer)) |actual_batch_size| {
+        acc.add(try evalClassificationStep(
             allocator,
             model,
             x_buffer[0 .. actual_batch_size * input_dim],
             y_buffer[0..actual_batch_size],
-        );
-
-        total_loss += step_res.loss;
-        total_acc += step_res.accuracy;
-        num_batches += 1;
+        ));
     }
 
-    if (num_batches == 0) return ClassificationEpochResult{ .loss = 0, .accuracy = 0, .num_batches = 0 };
-
-    return ClassificationEpochResult{
-        .loss = total_loss / @as(f32, @floatFromInt(num_batches)),
-        .accuracy = total_acc / @as(f32, @floatFromInt(num_batches)),
-        .num_batches = num_batches,
-    };
+    return acc.result();
 }
-
-// 别名导出
-pub const trainStep = trainClassificationStep;
-pub const evalStep = evalClassificationStep;
-pub const trainEpoch = trainClassificationEpoch;
-pub const evaluate = evaluateClassification;
 
 test "engine trainClassificationStep and evalClassificationStep" {
     const arena = std.testing.allocator;
@@ -508,4 +495,44 @@ test "engine evaluateClassification empty dataloader" {
     try std.testing.expectEqual(@as(usize, 0), eval_res.num_batches);
     try std.testing.expectEqual(@as(f32, 0.0), eval_res.loss);
     try std.testing.expectEqual(@as(f32, 0.0), eval_res.accuracy);
+}
+
+test "engine evaluateClassification weights batches by sample count" {
+    const allocator = std.testing.allocator;
+
+    // 恒等模型：logits 直接取输入，便于构造确定的预测结果
+    const Identity = struct {
+        pub fn forward(_: *const @This(), _: *autodiff.Graph, x: *tensor.Tensor) !*tensor.Tensor {
+            return x;
+        }
+    };
+    const model = Identity{};
+
+    // 样本 0 预测正确、样本 1 错误、样本 2 正确；batch_size = 2 时批次准确率为 0.5 与 1.0，
+    // 按批次平均得 0.75，按样本加权才是 2/3
+    var img_data = [_]f32{
+        1, 0, // 预测 0
+        1, 0, // 预测 0
+        0, 1, // 预测 1
+    };
+    var lbl_data = [_]u8{ 0, 1, 1 };
+    const ds = dataset.Dataset{
+        .images = .{ .num_images = 3, .rows = 1, .cols = 2, .data = &img_data },
+        .labels = .{ .num_items = 3, .data = &lbl_data },
+    };
+    var loader = try dataset.DataLoader.init(allocator, ds, 2, .{});
+    defer loader.deinit(allocator);
+
+    const res = try evaluateClassification(allocator, &model, &loader);
+    try std.testing.expectEqual(@as(usize, 2), res.num_batches);
+    try std.testing.expectEqual(@as(usize, 3), res.num_samples);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0 / 3.0), res.accuracy, 1e-6);
+
+    // 损失同样按样本加权：与逐样本单独评估的平均值一致
+    var expected_loss: f32 = 0.0;
+    for (0..3) |i| {
+        const step = try evalClassificationStep(allocator, &model, img_data[i * 2 .. i * 2 + 2], lbl_data[i .. i + 1]);
+        expected_loss += step.loss / 3.0;
+    }
+    try std.testing.expectApproxEqAbs(expected_loss, res.loss, 1e-5);
 }
