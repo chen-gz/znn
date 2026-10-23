@@ -126,18 +126,18 @@ pub const LoRALinear = struct {
     }
 
     /// 零推理延迟融合：将低秩自适应 (Low-Rank Adaptation, LoRA) 旁路权重融合至主干 W_0 = W_0 + scaling * (A * B)
+    /// 按 i -> k -> j 顺序累加秩一更新 W_0[i, :] += (scaling * A[i, k]) * B[k, :]，最内层连续访问 W_0 与 B 的整行
     pub fn fuse(self: *LoRALinear) void {
         const in_f = self.in_features;
         const r_dim = self.r;
         const out_f = self.out_features;
 
         for (0..in_f) |i| {
-            for (0..out_f) |j| {
-                var delta: f32 = 0.0;
-                for (0..r_dim) |k| {
-                    delta += self.lora_a.data[i * r_dim + k] * self.lora_b.data[k * out_f + j];
-                }
-                self.weight.data[i * out_f + j] += delta * self.scaling;
+            const w_row = self.weight.data[i * out_f .. (i + 1) * out_f];
+            for (0..r_dim) |k| {
+                const a_scaled = self.lora_a.data[i * r_dim + k] * self.scaling;
+                const b_row = self.lora_b.data[k * out_f .. (k + 1) * out_f];
+                for (w_row, b_row) |*w, b| w.* += a_scaled * b;
             }
         }
         @memset(self.lora_b.data, 0.0);
@@ -156,60 +156,47 @@ pub fn maskedCrossEntropyLoss(
     mask: []const f32,
     allocator: std.mem.Allocator,
 ) !f32 {
+    if (logits.shape.len != 2) return error.IncompatibleDimensions;
     const N = logits.shape.dims[0];
     const V = logits.shape.dims[1];
     if (targets.len != N or mask.len != N) return error.ShapeMismatch;
+    if (V == 0 or logits.data.len < N * V) return error.ShapeMismatch;
     _ = allocator;
 
-    var total_loss: f32 = 0.0;
+    // 1. 先校验目标下标并累计总权重：梯度缩放 w_i / total_weight 需要在单遍前向中直接使用
     var total_weight: f32 = 0.0;
+    for (targets, mask) |target, w| {
+        if (w <= 0.0) continue;
+        if (target >= V) return error.IndexOutOfBounds;
+        total_weight += w;
+    }
+    if (total_weight <= 0.0) return 0.0;
 
+    // 2. 单遍计算每行的对数和指数 (Log-Sum-Exp, LSE) 损失与归一化指数函数 (Softmax) 梯度
+    const write_grad = logits.requires_grad and logits.grad.len == N * V;
+    var total_loss: f32 = 0.0;
     for (0..N) |i| {
-        if (mask[i] <= 0.0) continue;
-        if (targets[i] >= V) return error.IndexOutOfBounds;
+        const w = mask[i];
+        if (w <= 0.0) continue;
 
         const row = logits.data[i * V .. (i + 1) * V];
         var max_v = row[0];
-        for (row) |v| if (v > max_v) {
-            max_v = v;
-        };
+        for (row) |v| max_v = @max(max_v, v);
 
         var sum_exp: f32 = 0.0;
-        for (row) |v| {
-            sum_exp += @exp(v - max_v);
-        }
-        const log_sum_exp = max_v + @log(sum_exp);
-        const target_logit = row[targets[i]];
-        const loss_i = log_sum_exp - target_logit;
+        for (row) |v| sum_exp += @exp(v - max_v);
+        const label: usize = targets[i];
+        total_loss += (max_v + @log(sum_exp) - row[label]) * w;
 
-        total_loss += loss_i * mask[i];
-        total_weight += mask[i];
-    }
-
-    if (total_weight > 0.0) {
-        if (logits.requires_grad and logits.grad.len == N * V) {
-            for (0..N) |i| {
-                const w = mask[i];
-                if (w <= 0.0) continue;
-                const scale = w / total_weight;
-                const row = logits.data[i * V .. (i + 1) * V];
-                const grad_row = logits.grad[i * V .. (i + 1) * V];
-                var max_v = row[0];
-                for (row) |v| if (v > max_v) {
-                    max_v = v;
-                };
-                var sum_exp: f32 = 0.0;
-                for (row) |v| sum_exp += @exp(v - max_v);
-                const label: usize = targets[i];
-                for (0..V) |j| {
-                    const p = @exp(row[j] - max_v) / sum_exp;
-                    grad_row[j] += scale * (p - (if (j == label) @as(f32, 1.0) else 0.0));
-                }
-            }
+        if (write_grad) {
+            const scale = w / total_weight;
+            const inv_sum = 1.0 / sum_exp;
+            const grad_row = logits.grad[i * V .. (i + 1) * V];
+            for (grad_row, row) |*g, v| g.* += scale * @exp(v - max_v) * inv_sum;
+            grad_row[label] -= scale;
         }
-        return total_loss / total_weight;
     }
-    return 0.0;
+    return total_loss / total_weight;
 }
 
 /// 监督微调 (Supervised Fine-Tuning, SFT) 掩码交叉熵损失 (自动微分 (Automatic Differentiation, Autograd) 计算图节点版本)
@@ -277,8 +264,7 @@ pub fn computeGroupAdvantages(
     group_size: usize,
     eps: f32,
 ) ![]f32 {
-    std.debug.assert(group_size > 0);
-    std.debug.assert(rewards.len % group_size == 0);
+    if (group_size == 0 or rewards.len % group_size != 0) return error.InvalidArgument;
 
     const advantages = try allocator.alloc(f32, rewards.len);
     const num_groups = rewards.len / group_size;
@@ -428,7 +414,53 @@ pub fn grpoLossGraph(
 // 3. 采样与生成策略 (Sampling Strategies)
 // ============================================================================
 
-/// 核采样 / 累积概率阈值采样 (Nucleus Sampling, Top-P，带温度系数 Temperature)
+/// 采样候选词元：词元标识符 (Token ID) 与未归一化的温度缩放概率权重 exp(logit / T - max)
+const SampleCandidate = struct {
+    id: u32,
+    weight: f32,
+
+    /// 按权重降序排列，权重相同时较小的词元标识符在前，保证排序结果确定
+    fn greaterThan(_: void, a: SampleCandidate, b: SampleCandidate) bool {
+        return a.weight > b.weight or (a.weight == b.weight and a.id < b.id);
+    }
+};
+
+/// 计算带温度系数 (Temperature) 的归一化指数函数 (Softmax) 未归一化权重 (减去最大值保证数值稳定)，并按权重降序排序。
+/// 返回的切片由调用方用同一分配器释放。
+fn sortedCandidates(
+    logits: []const f32,
+    vocab_size: usize,
+    temperature: f32,
+    allocator: std.mem.Allocator,
+) ![]SampleCandidate {
+    if (vocab_size == 0 or logits.len < vocab_size) return error.InvalidArgument;
+    const inv_temp = 1.0 / @max(temperature, 1e-4);
+
+    var max_scaled: f32 = -std.math.inf(f32);
+    for (logits[0..vocab_size]) |l| max_scaled = @max(max_scaled, l * inv_temp);
+
+    const candidates = try allocator.alloc(SampleCandidate, vocab_size);
+    for (candidates, logits[0..vocab_size], 0..) |*c, l, i| {
+        c.* = .{ .id = @intCast(i), .weight = @exp(l * inv_temp - max_scaled) };
+    }
+    std.mem.sortUnstable(SampleCandidate, candidates, {}, SampleCandidate.greaterThan);
+    return candidates;
+}
+
+/// 在降序排列的候选前缀 `prefix` (总权重 `mass`) 内按权重比例随机抽取一个词元
+fn sampleFromPrefix(prefix: []const SampleCandidate, mass: f32, random: std.Random) u32 {
+    const r = random.float(f32) * mass;
+    var cum: f32 = 0.0;
+    for (prefix) |c| {
+        cum += c.weight;
+        if (r < cum) return c.id;
+    }
+    return prefix[prefix.len - 1].id;
+}
+
+/// 核采样 / 累积概率阈值采样 (Nucleus Sampling, Top-P，带温度系数 Temperature)：
+/// 按概率降序取累积概率首次达到 `top_p` 的最小词元集合 (核)，在核内按重新归一化的概率采样；
+/// `top_p <= 0` 时退化为贪心解码 (Greedy Decoding)，`top_p >= 1` 时在全词表上采样
 pub fn sampleTopP(
     logits: []const f32,
     vocab_size: usize,
@@ -437,38 +469,24 @@ pub fn sampleTopP(
     random: std.Random,
     allocator: std.mem.Allocator,
 ) !u32 {
-    std.debug.assert(logits.len >= vocab_size);
-    const scaled = try allocator.alloc(f32, vocab_size);
-    defer allocator.free(scaled);
+    const candidates = try sortedCandidates(logits, vocab_size, temperature, allocator);
+    defer allocator.free(candidates);
 
-    const temp = @max(temperature, 1e-4);
-    var max_logit: f32 = -1e9;
-    for (0..vocab_size) |i| {
-        scaled[i] = logits[i] / temp;
-        if (scaled[i] > max_logit) max_logit = scaled[i];
-    }
+    var total: f32 = 0.0;
+    for (candidates) |c| total += c.weight;
+    const threshold = std.math.clamp(top_p, 0.0, 1.0) * total;
 
-    var sum_exp: f32 = 0.0;
-    for (scaled) |*s| {
-        s.* = @exp(s.* - max_logit);
-        sum_exp += s.*;
+    var nucleus_len: usize = 0;
+    var nucleus_mass: f32 = 0.0;
+    while (nucleus_len < candidates.len) {
+        nucleus_mass += candidates[nucleus_len].weight;
+        nucleus_len += 1;
+        if (nucleus_mass >= threshold) break;
     }
-    for (scaled) |*s| {
-        s.* /= sum_exp;
-    }
-
-    var cum_sum: f32 = 0.0;
-    const rand_val = random.float(f32);
-    for (scaled, 0..) |p, i| {
-        cum_sum += p;
-        if (cum_sum >= rand_val or cum_sum >= top_p) {
-            return @as(u32, @intCast(i));
-        }
-    }
-    return @as(u32, @intCast(vocab_size - 1));
+    return sampleFromPrefix(candidates[0..nucleus_len], nucleus_mass, random);
 }
 
-/// Top-K 截断采样 (带 Temperature)
+/// Top-K 截断采样 (带温度系数 Temperature)：只在概率最大的 `k` 个词元内按重新归一化的概率采样，`k` 必须大于 0
 pub fn sampleTopK(
     logits: []const f32,
     vocab_size: usize,
@@ -477,45 +495,12 @@ pub fn sampleTopK(
     random: std.Random,
     allocator: std.mem.Allocator,
 ) !u32 {
-    std.debug.assert(logits.len >= vocab_size);
-    const effective_k = @min(k, vocab_size);
-    const temp = @max(temperature, 1e-4);
+    if (k == 0) return error.InvalidArgument;
+    const candidates = try sortedCandidates(logits, vocab_size, temperature, allocator);
+    defer allocator.free(candidates);
 
-    const Item = struct { id: u32, val: f32 };
-    const items = try allocator.alloc(Item, vocab_size);
-    defer allocator.free(items);
-
-    for (0..vocab_size) |i| {
-        items[i] = .{ .id = @as(u32, @intCast(i)), .val = logits[i] / temp };
-    }
-
-    std.mem.sort(Item, items, {}, struct {
-        fn lessThan(_: void, a: Item, b: Item) bool {
-            return a.val > b.val;
-        }
-    }.lessThan);
-
-    var max_v = items[0].val;
-    for (items[0..effective_k]) |it| if (it.val > max_v) {
-        max_v = it.val;
-    };
-
-    var sum_exp: f32 = 0.0;
-    for (items[0..effective_k]) |*it| {
-        it.val = @exp(it.val - max_v);
-        sum_exp += it.val;
-    }
-    for (items[0..effective_k]) |*it| {
-        it.val /= sum_exp;
-    }
-
-    var cum: f32 = 0.0;
-    const r = random.float(f32);
-    for (items[0..effective_k]) |it| {
-        cum += it.val;
-        if (cum >= r) {
-            return it.id;
-        }
-    }
-    return items[effective_k - 1].id;
+    const top = candidates[0..@min(k, vocab_size)];
+    var mass: f32 = 0.0;
+    for (top) |c| mass += c.weight;
+    return sampleFromPrefix(top, mass, random);
 }

@@ -1711,4 +1711,109 @@ test "Linear forward supports 3D and 1D inputs with autograd" {
     try std.testing.expectApproxEqAbs(@as(f32, 12.2), y_1d.data[1], 1e-5);
 }
 
+test "sampleTopP samples from the nucleus of highest-probability tokens" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(1);
+    const random = prng.random();
 
+    // p ≈ [0.043, 0.043, 0.043, 0.87]：top_p = 0.05 时核只含词元 3
+    const peaked = [_]f32{ 0, 0, 0, 3 };
+    for (0..200) |_| {
+        try std.testing.expectEqual(@as(u32, 3), try sampleTopP(&peaked, 4, 1.0, 0.05, random, allocator));
+    }
+
+    // 均匀分布 + top_p = 0.5：核为下标最小的两个词元，二者近似各占一半
+    const uniform = [_]f32{ 0, 0, 0, 0 };
+    var counts: [4]usize = @splat(0);
+    for (0..4000) |_| counts[try sampleTopP(&uniform, 4, 1.0, 0.5, random, allocator)] += 1;
+    try std.testing.expectEqual(@as(usize, 0), counts[2] + counts[3]);
+    try std.testing.expect(counts[0] > 1600 and counts[1] > 1600);
+
+    // top_p = 1.0：全词表采样，每个词元都会出现
+    @memset(&counts, 0);
+    for (0..4000) |_| counts[try sampleTopP(&uniform, 4, 1.0, 1.0, random, allocator)] += 1;
+    for (counts) |c| try std.testing.expect(c > 700);
+
+    // top_p = 0：贪心解码
+    const logits = [_]f32{ 0.1, 1.0, 2.0, 10.0, 0.5 };
+    try std.testing.expectEqual(@as(u32, 3), try sampleTopP(&logits, 5, 1.0, 0.0, random, allocator));
+    try std.testing.expectError(error.InvalidArgument, sampleTopP(&logits, 0, 1.0, 0.9, random, allocator));
+}
+
+test "sampleTopK restricts sampling to the k most likely tokens and rejects k = 0" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(3);
+    const random = prng.random();
+
+    const logits = [_]f32{ 0.1, 1.0, 2.0, 10.0, 0.5 };
+    var counts: [5]usize = @splat(0);
+    // 高温使前两名概率接近，确保两者都会被采到且其余词元从不出现
+    for (0..2000) |_| counts[try sampleTopK(&logits, 5, 100.0, 2, random, allocator)] += 1;
+    try std.testing.expectEqual(@as(usize, 0), counts[0] + counts[1] + counts[4]);
+    try std.testing.expect(counts[2] > 500 and counts[3] > 500);
+
+    try std.testing.expectError(error.InvalidArgument, sampleTopK(&logits, 5, 1.0, 0, random, allocator));
+}
+
+test "maskedCrossEntropyLoss eager gradient matches the graph version" {
+    const allocator = std.testing.allocator;
+    const values = [_]f32{
+        2.0, 1.0, 0.1, 0.0,
+        0.5, 3.0, 0.2, 0.1,
+        0.1, 0.2, 4.0, 0.1,
+    };
+    const targets = [_]u32{ 0, 3, 2 };
+    const mask = [_]f32{ 0.0, 0.5, 1.5 };
+
+    const logits = try createPersistentTensor(allocator, 3, 4, true);
+    defer freePersistentTensor(allocator, logits);
+    @memcpy(logits.data, &values);
+    const loss = try maskedCrossEntropyLoss(logits, &targets, &mask, allocator);
+
+    var graph = autodiff.Graph.initDefault(allocator);
+    defer graph.deinit();
+    const g_logits = try graph.tensorNDWithData(&.{ 3, 4 }, &values, true);
+    const g_loss = try maskedCrossEntropyLossGraph(&graph, g_logits, &targets, &mask);
+    try graph.backward(g_loss);
+
+    try std.testing.expectApproxEqAbs(g_loss.data[0], loss, 1e-5);
+    for (g_logits.grad, logits.grad) |expected, actual| {
+        try std.testing.expectApproxEqAbs(expected, actual, 1e-5);
+    }
+
+    // 越界目标下标在写入任何梯度之前报错
+    @memset(logits.grad, 0.0);
+    const bad_targets = [_]u32{ 0, 1, 4 };
+    try std.testing.expectError(error.IndexOutOfBounds, maskedCrossEntropyLoss(logits, &bad_targets, &mask, allocator));
+    for (logits.grad) |g| try std.testing.expectEqual(@as(f32, 0.0), g);
+}
+
+test "LoRALinear fuse preserves the adapted forward output" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(11);
+    const random = prng.random();
+
+    var lora = try LoRALinear.init(allocator, 5, 3, 2, 4.0);
+    defer nn.deinitModel(&lora, allocator);
+    for (lora.weight.data) |*v| v.* = random.floatNorm(f32);
+    for (lora.lora_a.data) |*v| v.* = random.floatNorm(f32);
+    for (lora.lora_b.data) |*v| v.* = random.floatNorm(f32);
+
+    var graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer graph.deinit();
+    const x = try graph.tensorND(&.{ 2, 5 }, false);
+    for (x.data) |*v| v.* = random.floatNorm(f32);
+
+    const before = try lora.forward(&graph, x);
+    lora.fuse();
+    for (lora.lora_b.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
+    const after = try lora.forward(&graph, x);
+    for (before.data, after.data) |b, a| try std.testing.expectApproxEqAbs(b, a, 1e-4);
+}
+
+test "computeGroupAdvantages rejects invalid group sizes" {
+    const allocator = std.testing.allocator;
+    const rewards = [_]f32{ 1.0, 2.0, 3.0 };
+    try std.testing.expectError(error.InvalidArgument, computeGroupAdvantages(allocator, &rewards, 0, 1e-6));
+    try std.testing.expectError(error.InvalidArgument, computeGroupAdvantages(allocator, &rewards, 2, 1e-6));
+}
