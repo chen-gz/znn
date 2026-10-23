@@ -2244,3 +2244,18 @@ test "fix: fillNormal, fillUniform and GenericTensor.fill only write the visible
     try std.testing.expectEqualSlices(i32, &.{ 7, 7, 7, 7, -1, 7, 7, -1, -1, 7, 7, -1 }, gparent.data);
 }
 
+test "fix: StaticTensor.matmul propagates NaN from 0 * Inf like BLAS" {
+    const StaticTensor = @import("static.zig").StaticTensor;
+    const inf = std.math.inf(f32);
+    const A = StaticTensor(f32, .{ 1, 2 }).fromSlice(&.{ 0.0, 1.0 });
+    const B = StaticTensor(f32, .{ 2, 2 }).fromSlice(&.{ inf, 2.0, 1.0, std.math.nan(f32) });
+    const C = A.matmul(B);
+    try std.testing.expect(std.math.isNan(C.data[0])); // 0 * Inf + 1 * 1
+    try std.testing.expect(std.math.isNan(C.data[1])); // 0 * 2 + 1 * NaN
+
+    const Z = StaticTensor(f32, .{ 1, 2 }).fromSlice(&.{ 0.0, 0.0 });
+    const D = Z.matmul(B);
+    try std.testing.expect(std.math.isNan(D.data[0]));
+    try std.testing.expect(std.math.isNan(D.data[1]));
+}
+
