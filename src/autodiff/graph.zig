@@ -45,7 +45,7 @@ pub const Graph = struct {
     ops: std.ArrayList(*Op), // 追踪计算图中的所有算子指针
     enable_grad: bool, // 梯度使能开关（类似 torch.set_grad_enabled），为 false 时不分配梯度缓冲区亦不记录 Op 节点
     options: GraphOptions, // 计算图运行选项配置
-    module_formulas: std.StringHashMap([]const u8), // 存储模块在代码中声明的显式数学运算公式 (如 "y = x W^T + b")
+    module_formulas: std.StringHashMap([]const u8), // 存储模块在代码中声明的显式数学运算公式 (如 "y = x W + b")
     module_types: std.StringHashMap([]const u8), // 存储模块在代码中声明的显式模块类型 (如 "Linear", "RMSNorm", "GPT")
     scope_stack: std.ArrayList([]const u8), // 当前正在执行 forward 的模块作用域栈 (栈顶为最内层模块的完整路径)
 

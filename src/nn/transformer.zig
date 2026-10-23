@@ -133,7 +133,7 @@ pub const MLP = struct {
     }
 
     /// 模块标准数学变换公式
-    pub const formula = "y = \\text{GELU}(x W_{fc}^T + b_{fc}) W_{proj}^T + b_{proj}";
+    pub const formula = "y = \\text{GELU}(x W_{fc} + b_{fc}) W_{proj} + b_{proj}";
 
     /// 前向传播逻辑
     /// 支持输入二维张量 (2-Dimensional Tensor, 2D) [B*T, D] 或三维张量 (3-Dimensional Tensor, 3D) [B, T, D]
