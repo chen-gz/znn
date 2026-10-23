@@ -36,6 +36,10 @@ pub fn kFoldSplit(
     }
 
     const folds = try allocator.alloc(Fold, k_splits);
+    errdefer allocator.free(folds);
+    var built: usize = 0;
+    errdefer for (folds[0..built]) |*f| f.deinit(allocator);
+
     const base_size = n_samples / k_splits;
     const remainder = n_samples % k_splits;
 
@@ -45,29 +49,31 @@ pub fn kFoldSplit(
         const train_size = n_samples - val_size;
 
         const val_indices = try allocator.alloc(usize, val_size);
+        errdefer allocator.free(val_indices);
         const train_indices = try allocator.alloc(usize, train_size);
 
         @memcpy(val_indices, indices[current_idx..(current_idx + val_size)]);
-
-        var tr_cnt: usize = 0;
-        for (0..current_idx) |idx| {
-            train_indices[tr_cnt] = indices[idx];
-            tr_cnt += 1;
-        }
-        for ((current_idx + val_size)..n_samples) |idx| {
-            train_indices[tr_cnt] = indices[idx];
-            tr_cnt += 1;
-        }
+        @memcpy(train_indices[0..current_idx], indices[0..current_idx]);
+        @memcpy(train_indices[current_idx..], indices[(current_idx + val_size)..]);
 
         folds[fold_idx] = Fold{
             .train_indices = train_indices,
             .val_indices = val_indices,
         };
+        built += 1;
 
         current_idx += val_size;
     }
 
     return folds;
+}
+
+/// Copies the rows `indices` of the row-major `X` / `y` into contiguous `X_out` / `y_out`
+fn gatherRows(X: []const f32, y: []const f32, n_features: usize, indices: []const usize, X_out: []f32, y_out: []f32) void {
+    for (indices, 0..) |orig_i, local_i| {
+        y_out[local_i] = y[orig_i];
+        @memcpy(X_out[local_i * n_features .. (local_i + 1) * n_features], X[orig_i * n_features .. (orig_i + 1) * n_features]);
+    }
 }
 
 /// Standardizes features to mean=0, std=1 (Leakage-free inside each fold)
@@ -78,6 +84,7 @@ pub const StandardScaler = struct {
 
     pub fn init(allocator: std.mem.Allocator, n_features: usize) !StandardScaler {
         const mean_ = try allocator.alloc(f32, n_features);
+        errdefer allocator.free(mean_);
         const std_ = try allocator.alloc(f32, n_features);
         @memset(mean_, 0.0);
         @memset(std_, 1.0);
@@ -110,16 +117,18 @@ pub const StandardScaler = struct {
             self.mean_[j] /= N_f;
         }
 
-        // 2. Standard deviation
-        for (0..n_features) |j| {
-            var sum_sq: f32 = 0.0;
-            for (0..n_samples) |i| {
-                const diff = X[i * n_features + j] - self.mean_[j];
-                sum_sq += diff * diff;
+        // 2. Standard deviation (row-major sweep: contiguous reads, std_ used as the accumulator)
+        @memset(self.std_, 0.0);
+        for (0..n_samples) |i| {
+            const row = X[i * n_features .. (i + 1) * n_features];
+            for (self.std_, self.mean_, row) |*acc, m, v| {
+                const diff = v - m;
+                acc.* += diff * diff;
             }
-            var s = @sqrt(sum_sq / N_f);
-            if (s < 1e-7) s = 1.0;
-            self.std_[j] = s;
+        }
+        for (self.std_) |*s| {
+            const sd = @sqrt(s.* / N_f);
+            s.* = if (sd < 1e-7) 1.0 else sd;
         }
 
         // 3. Transform
@@ -194,7 +203,9 @@ pub const CrossValidationGridSearch = struct {
         self.results.deinit(self.allocator);
     }
 
-    /// Evaluates Least Absolute Shrinkage and Selection Operator (LASSO) across a list of candidate alpha values
+    /// Evaluates Least Absolute Shrinkage and Selection Operator (LASSO) across a list of candidate alpha values.
+    /// Results of a previous search are discarded, so `results`, `best_min_index` and `best_1se_index`
+    /// always describe the latest grid.
     pub fn searchLasso(
         self: *CrossValidationGridSearch,
         X: []const f32,
@@ -204,6 +215,12 @@ pub const CrossValidationGridSearch = struct {
         alphas: []const f32,
         random_seed: u64,
     ) !void {
+        std.debug.assert(alphas.len > 0);
+        for (self.results.items) |*res| res.deinit();
+        self.results.clearRetainingCapacity();
+        self.best_min_index = 0;
+        self.best_1se_index = 0;
+
         var prng = std.Random.DefaultPrng.init(random_seed);
         const random = prng.random();
 
@@ -213,14 +230,35 @@ pub const CrossValidationGridSearch = struct {
             self.allocator.free(folds);
         }
 
-        var min_mse: f32 = 1e12;
-
+        // Ownership of each fold_mses slice moves to `results` once appended; until then it is freed here on error
         const all_fold_mses = try self.allocator.alloc([]f32, alphas.len);
         defer self.allocator.free(all_fold_mses);
-
-        for (alphas, 0..) |_, a_idx| {
-            all_fold_mses[a_idx] = try self.allocator.alloc(f32, self.k_splits);
+        var allocated: usize = 0;
+        var moved: usize = 0;
+        errdefer for (all_fold_mses[moved..allocated]) |m| self.allocator.free(m);
+        for (all_fold_mses) |*m| {
+            m.* = try self.allocator.alloc(f32, self.k_splits);
+            allocated += 1;
         }
+
+        // Per-fold buffers sized for the largest fold, reused across folds
+        const max_tr = n_samples - n_samples / self.k_splits;
+        const max_va = (n_samples + self.k_splits - 1) / self.k_splits;
+        const X_tr = try self.allocator.alloc(f32, max_tr * n_features);
+        defer self.allocator.free(X_tr);
+        const y_tr = try self.allocator.alloc(f32, max_tr);
+        defer self.allocator.free(y_tr);
+        const X_va = try self.allocator.alloc(f32, max_va * n_features);
+        defer self.allocator.free(X_va);
+        const y_va = try self.allocator.alloc(f32, max_va);
+        defer self.allocator.free(y_va);
+        const X_tr_scaled = try self.allocator.alloc(f32, max_tr * n_features);
+        defer self.allocator.free(X_tr_scaled);
+        const X_va_scaled = try self.allocator.alloc(f32, max_va * n_features);
+        defer self.allocator.free(X_va_scaled);
+
+        var scaler = try StandardScaler.init(self.allocator, n_features);
+        defer scaler.deinit();
 
         for (0..self.k_splits) |k| {
             const tr_indices = folds[k].train_indices;
@@ -228,54 +266,25 @@ pub const CrossValidationGridSearch = struct {
             const N_tr = tr_indices.len;
             const N_va = va_indices.len;
 
-            // Extract train data
-            const X_tr = try self.allocator.alloc(f32, N_tr * n_features);
-            defer self.allocator.free(X_tr);
-            const y_tr = try self.allocator.alloc(f32, N_tr);
-            defer self.allocator.free(y_tr);
-
-            for (tr_indices, 0..) |orig_i, local_i| {
-                y_tr[local_i] = y[orig_i];
-                for (0..n_features) |j| {
-                    X_tr[local_i * n_features + j] = X[orig_i * n_features + j];
-                }
-            }
-
-            // Extract val data
-            const X_va = try self.allocator.alloc(f32, N_va * n_features);
-            defer self.allocator.free(X_va);
-            const y_va = try self.allocator.alloc(f32, N_va);
-            defer self.allocator.free(y_va);
-
-            for (va_indices, 0..) |orig_i, local_i| {
-                y_va[local_i] = y[orig_i];
-                for (0..n_features) |j| {
-                    X_va[local_i * n_features + j] = X[orig_i * n_features + j];
-                }
-            }
+            gatherRows(X, y, n_features, tr_indices, X_tr[0 .. N_tr * n_features], y_tr[0..N_tr]);
+            gatherRows(X, y, n_features, va_indices, X_va[0 .. N_va * n_features], y_va[0..N_va]);
 
             // Standardize strictly inside fold
-            var scaler = try StandardScaler.init(self.allocator, n_features);
-            defer scaler.deinit();
-
-            const X_tr_scaled = try self.allocator.alloc(f32, N_tr * n_features);
-            defer self.allocator.free(X_tr_scaled);
-            scaler.fitTransform(X_tr, N_tr, n_features, X_tr_scaled);
-
-            const X_va_scaled = try self.allocator.alloc(f32, N_va * n_features);
-            defer self.allocator.free(X_va_scaled);
-            scaler.transform(X_va, N_va, n_features, X_va_scaled);
+            scaler.fitTransform(X_tr[0 .. N_tr * n_features], N_tr, n_features, X_tr_scaled[0 .. N_tr * n_features]);
+            scaler.transform(X_va[0 .. N_va * n_features], N_va, n_features, X_va_scaled[0 .. N_va * n_features]);
 
             for (alphas, 0..) |alpha, a_idx| {
                 // Fit Least Absolute Shrinkage and Selection Operator (LASSO)
-                var model = try regression.solveLasso(self.allocator, X_tr_scaled, y_tr, N_tr, n_features, alpha, 1000, 1e-4);
+                var model = try regression.solveLasso(self.allocator, X_tr_scaled[0 .. N_tr * n_features], y_tr[0..N_tr], N_tr, n_features, alpha, 1000, 1e-4);
                 defer model.deinit();
 
                 // Compute validation Mean Squared Error (MSE)
-                all_fold_mses[a_idx][k] = model.computeMSE(X_va_scaled, y_va, N_va, n_features);
+                all_fold_mses[a_idx][k] = model.computeMSE(X_va_scaled[0 .. N_va * n_features], y_va[0..N_va], N_va, n_features);
             }
         }
 
+        try self.results.ensureUnusedCapacity(self.allocator, alphas.len);
+        var min_mse = std.math.inf(f32);
         for (alphas, 0..) |alpha, a_idx| {
             const fold_mses = all_fold_mses[a_idx];
             var sum_mse: f32 = 0.0;
@@ -289,16 +298,15 @@ pub const CrossValidationGridSearch = struct {
             }
             const se_mse = @sqrt(var_sum / @as(f32, @floatFromInt(self.k_splits - 1))) / @sqrt(@as(f32, @floatFromInt(self.k_splits)));
 
-            const res = CVResult{
+            self.results.appendAssumeCapacity(.{
                 .alpha = alpha,
                 .l1_ratio = 1.0,
                 .mean_mse = mean_mse,
                 .se_mse = se_mse,
                 .fold_mses = fold_mses,
                 .allocator = self.allocator,
-            };
-
-            try self.results.append(self.allocator, res);
+            });
+            moved += 1;
 
             if (mean_mse < min_mse) {
                 min_mse = mean_mse;
@@ -306,11 +314,13 @@ pub const CrossValidationGridSearch = struct {
             }
         }
 
-        // Determine One-Standard-Error (1-SE) Rule
-        const threshold_1se = self.results.items[self.best_min_index].mean_mse + self.results.items[self.best_min_index].se_mse;
+        // One-Standard-Error (1-SE) Rule: the most regularized (largest alpha) model whose
+        // mean MSE lies within one standard error of the minimum; independent of the grid order
+        const best = self.results.items[self.best_min_index];
+        const threshold_1se = best.mean_mse + best.se_mse;
         self.best_1se_index = self.best_min_index;
         for (self.results.items, 0..) |res, idx| {
-            if (res.mean_mse <= threshold_1se) {
+            if (res.mean_mse <= threshold_1se and res.alpha > self.results.items[self.best_1se_index].alpha) {
                 self.best_1se_index = idx;
             }
         }
@@ -411,3 +421,51 @@ test "StandardScaler zero-variance constant feature safety" {
     }
 }
 
+fn makeLinearData(comptime N: usize, comptime P: usize, seed: u64, X: *[N * P]f32, y: *[N]f32) void {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    for (0..N) |i| {
+        for (0..P) |j| X[i * P + j] = r.floatNorm(f32);
+        y[i] = 2.0 * X[i * P] - X[i * P + 1] + 0.1 * r.floatNorm(f32);
+    }
+}
+
+test "searchLasso replaces previous results and the 1-SE choice ignores grid order" {
+    const allocator = std.testing.allocator;
+    const N = 40;
+    const P = 3;
+    var X: [N * P]f32 = undefined;
+    var y: [N]f32 = undefined;
+    makeLinearData(N, P, 3, &X, &y);
+
+    var search = CrossValidationGridSearch.init(allocator, 5);
+    defer search.deinit();
+
+    try search.searchLasso(&X, &y, N, P, &.{ 0.001, 0.01, 0.1 }, 1);
+    const ascending_1se = search.getBest1SEAlpha();
+
+    // 第二次搜索：结果只包含新网格，最优下标指向新网格
+    try search.searchLasso(&X, &y, N, P, &.{ 5.0, 10.0, 0.001 }, 1);
+    try std.testing.expectEqual(@as(usize, 3), search.results.items.len);
+    try std.testing.expectEqual(@as(f32, 0.001), search.getBestMinAlpha());
+
+    // 同一网格倒序：1-SE 规则选择的 alpha 不随顺序改变
+    try search.searchLasso(&X, &y, N, P, &.{ 0.1, 0.01, 0.001 }, 1);
+    try std.testing.expectEqual(ascending_1se, search.getBest1SEAlpha());
+    try std.testing.expectEqual(@as(f32, 0.001), search.getBestMinAlpha());
+}
+
+fn searchLassoForAllocationFailures(allocator: std.mem.Allocator) !void {
+    const N = 12;
+    const P = 2;
+    var X: [N * P]f32 = undefined;
+    var y: [N]f32 = undefined;
+    makeLinearData(N, P, 9, &X, &y);
+    var search = CrossValidationGridSearch.init(allocator, 3);
+    defer search.deinit();
+    try search.searchLasso(&X, &y, N, P, &.{ 0.01, 0.1 }, 2);
+}
+
+test "kFoldSplit, StandardScaler and searchLasso do not leak on allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, searchLassoForAllocationFailures, .{});
+}
