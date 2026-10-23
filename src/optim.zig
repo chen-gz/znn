@@ -4,7 +4,7 @@ const tensor = @import("tensor.zig");
 const Tensor = tensor.Tensor;
 
 pub const OPTIMIZER_MAGIC = [4]u8{ 'Z', 'N', 'N', 'O' };
-pub const OPTIMIZER_VERSION: u32 = 1;
+pub const OPTIMIZER_VERSION: u32 = 2;
 
 pub const OptimizerTypeTag = enum(u32) {
     sgd = 0,
@@ -19,19 +19,21 @@ pub const CheckpointError = error{
     ParamCountMismatch,
     BufferSizeMismatch,
     CheckpointSizeMismatch,
+    InvalidCheckpointFlag,
 };
 
 // =========================================================================
 // 检查点 (Checkpoint) 公共读写
 // =========================================================================
 //
-// 文件布局 (头部为小端序)：
+// 文件布局 (所有多字节字段均为小端序，f32 按其 IEEE 754 位模式写成小端 u32)：
 //   magic[4] | version u32 | type_tag u32 | step u64 | lr f32 | param_count u64
-//   [仅 SGD: has_velocity u8]
+//   [仅 SGD: has_velocity u8 (0 或 1)]
 //   每个参数: param_len u64 | 状态缓冲 0 (param_len 个 f32) | 状态缓冲 1 | ...
 //
-// 加载时先校验头部与文件总长度，全部通过后才写入优化器状态，避免损坏或不匹配的
-// 检查点只更新一半状态 (例如学习率、步数已被覆盖却随后报错)。
+// 加载是事务式的：先校验头部与文件总长度，再把全部状态缓冲读入新分配的临时缓冲并逐参数
+// 校验长度，所有可能失败的步骤 (读取、校验、分配) 都完成后才一次性替换优化器状态。
+// 任何错误都让优化器保持加载前的状态，不会出现学习率、步数或部分缓冲已被覆盖的半更新。
 
 /// 公共头部字节数：magic + version + type_tag + step + lr + param_count
 const CHECKPOINT_HEADER_BYTES: u64 = 4 + 4 + 4 + 8 + 4 + 8;
@@ -111,24 +113,117 @@ fn checkpointStateBytes(params: []const *Tensor, buffers_per_param: usize) u64 {
     return total;
 }
 
-/// 逐参数写入长度字段与各状态缓冲 (`states[k][i]` 为第 i 个参数的第 k 个状态缓冲)
+/// 逐参数写入长度字段与各状态缓冲 (`states[k][i]` 为第 i 个参数的第 k 个状态缓冲)，f32 一律按小端序写出
 fn writeStateBuffers(writer: *std.Io.Writer, params: []const *Tensor, states: []const []const []f32) !void {
     for (params, 0..) |param, i| {
         try writeU64(writer, @as(u64, param.data.len));
         for (states) |state| {
-            try writer.writeAll(std.mem.sliceAsBytes(state[i]));
+            const bits: []const u32 = @ptrCast(state[i]);
+            try writer.writeSliceEndian(u32, bits, .little);
         }
     }
 }
 
-fn readStateBuffers(reader: *std.Io.Reader, params: []const *Tensor, states: []const []const []f32) !void {
+/// 写出完整检查点文件；`states` 的个数必须与 `readCheckpoint` 对该类型推断出的缓冲个数一致
+fn writeCheckpoint(
+    io: std.Io,
+    file_path: []const u8,
+    tag: OptimizerTypeTag,
+    header: CheckpointHeader,
+    params: []const *Tensor,
+    states: []const []const []f32,
+) !void {
+    var file = try std.Io.Dir.cwd().createFile(io, file_path, .{});
+    defer file.close(io);
+
+    var buf: [65536]u8 = undefined;
+    var file_writer = file.writer(io, &buf);
+    const writer = &file_writer.interface;
+
+    try writeCheckpointHeader(writer, tag, header, params.len);
+    if (tag == .sgd) {
+        const has_vel: u8 = if (states.len == 1) 1 else 0;
+        try writer.writeAll(&[_]u8{has_vel});
+    }
+    try writeStateBuffers(writer, params, states);
+    try writer.flush();
+}
+
+/// 单个检查点最多携带的状态缓冲组数 (Adam/AdamW 的一阶矩与二阶矩)
+const MAX_STATE_BUFFERS = 2;
+
+/// 已完整读取并校验的检查点：状态缓冲存放在新分配的内存中，由调用方在提交阶段接管
+const LoadedCheckpoint = struct {
+    header: CheckpointHeader,
+    /// 有效状态缓冲组数：SGD 由动量标志决定 (0 或 1)，Adam/AdamW 固定为 2
+    buffer_count: usize,
+    states: [MAX_STATE_BUFFERS][][]f32,
+
+    fn deinit(self: *LoadedCheckpoint, allocator: std.mem.Allocator) void {
+        for (self.states[0..self.buffer_count]) |s| freeStates(allocator, s);
+        self.buffer_count = 0;
+    }
+};
+
+/// 读取整个检查点文件并完成全部校验，不修改任何优化器状态。
+/// 返回的状态缓冲为新分配的内存 (加载期间峰值内存约为两份优化器状态)，所有权交给调用方；
+/// 任何错误都会释放已分配部分。
+fn readCheckpoint(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    file_path: []const u8,
+    tag: OptimizerTypeTag,
+    params: []const *Tensor,
+) !LoadedCheckpoint {
+    var file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
+    defer file.close(io);
+    const file_len = try file.length(io);
+
+    var buf: [65536]u8 = undefined;
+    var file_reader = file.reader(io, &buf);
+    const reader = &file_reader.interface;
+
+    const header = try readCheckpointHeader(reader, tag, params.len);
+    var prefix_bytes: u64 = CHECKPOINT_HEADER_BYTES;
+    const buffer_count: usize = switch (tag) {
+        .sgd => blk: {
+            var flag: [1]u8 = undefined;
+            try reader.readSliceAll(&flag);
+            prefix_bytes += 1;
+            break :blk switch (flag[0]) {
+                0 => 0,
+                1 => 1,
+                else => return error.InvalidCheckpointFlag,
+            };
+        },
+        .adam, .adamw => 2,
+    };
+    if (file_len != prefix_bytes + checkpointStateBytes(params, buffer_count)) {
+        return error.CheckpointSizeMismatch;
+    }
+
+    var loaded = LoadedCheckpoint{ .header = header, .buffer_count = 0, .states = undefined };
+    errdefer loaded.deinit(allocator);
+    for (0..buffer_count) |k| {
+        loaded.states[k] = try allocZeroedStates(allocator, params);
+        loaded.buffer_count += 1;
+    }
+
     for (params, 0..) |param, i| {
         const param_len = try readU64(reader);
         if (param_len != param.data.len) return error.BufferSizeMismatch;
-        for (states) |state| {
-            try reader.readSliceAll(std.mem.sliceAsBytes(state[i]));
+        for (loaded.states[0..buffer_count]) |state| {
+            const bits: []u32 = @ptrCast(state[i]);
+            try reader.readSliceEndian(u32, bits, .little);
         }
     }
+    return loaded;
+}
+
+/// 用新状态替换旧状态并释放旧缓冲 (不会失败，供事务式加载的提交阶段使用)
+fn replaceStates(allocator: std.mem.Allocator, target: *[][]f32, new_states: [][]f32) void {
+    freeStates(allocator, target.*);
+    target.* = new_states;
 }
 
 /// 为每个参数分配一块与参数等长、清零的状态缓冲；失败时释放已分配部分
@@ -228,58 +323,31 @@ pub const SGDOptimizer = struct {
     }
 
     pub fn saveCheckpoint(self: SGDOptimizer, io: std.Io, file_path: []const u8) !void {
-        const cwd = std.Io.Dir.cwd();
-        var file = try cwd.createFile(io, file_path, .{});
-        defer file.close(io);
-
-        var buf: [65536]u8 = undefined;
-        var file_writer = file.writer(io, &buf);
-        const writer = &file_writer.interface;
-
-        try writeCheckpointHeader(writer, .sgd, .{ .step = self.step_count, .lr = self.lr }, self.params.len);
-        const has_vel: u8 = if (self.velocities != null) 1 else 0;
-        try writer.writeAll(&[_]u8{has_vel});
+        const header: CheckpointHeader = .{ .step = self.step_count, .lr = self.lr };
         if (self.velocities) |v_list| {
-            try writeStateBuffers(writer, self.params, &.{v_list});
+            try writeCheckpoint(io, file_path, .sgd, header, self.params, &.{v_list});
         } else {
-            try writeStateBuffers(writer, self.params, &.{});
+            try writeCheckpoint(io, file_path, .sgd, header, self.params, &.{});
         }
-        try writer.flush();
     }
 
+    /// 事务式加载：任何错误都让优化器保持加载前的状态
     pub fn loadCheckpoint(self: *SGDOptimizer, io: std.Io, file_path: []const u8) !void {
-        const cwd = std.Io.Dir.cwd();
-        var file = try cwd.openFile(io, file_path, .{});
-        defer file.close(io);
-        const file_len = try file.length(io);
+        const loaded = try readCheckpoint(self.allocator, io, file_path, .sgd, self.params);
 
-        var buf: [65536]u8 = undefined;
-        var file_reader = file.reader(io, &buf);
-        const reader = &file_reader.interface;
-
-        const header = try readCheckpointHeader(reader, .sgd, self.params.len);
-        var has_vel_byte: [1]u8 = undefined;
-        try reader.readSliceAll(&has_vel_byte);
-        const has_vel = has_vel_byte[0] == 1;
-
-        const buffers: usize = if (has_vel) 1 else 0;
-        if (file_len != CHECKPOINT_HEADER_BYTES + 1 + checkpointStateBytes(self.params, buffers)) {
-            return error.CheckpointSizeMismatch;
-        }
-
-        if (has_vel) {
-            if (self.velocities == null) self.velocities = try allocZeroedStates(self.allocator, self.params);
-            try readStateBuffers(reader, self.params, &.{self.velocities.?});
-        } else {
-            try readStateBuffers(reader, self.params, &.{});
-            // 检查点不含动量缓冲：清零现有缓冲，使恢复后的状态与检查点一致
-            if (self.velocities) |v_list| {
-                for (v_list) |v| @memset(v, 0.0);
+        // 提交阶段：以下操作均不会失败
+        if (loaded.buffer_count == 1) {
+            if (self.velocities) |*v_list| {
+                replaceStates(self.allocator, v_list, loaded.states[0]);
+            } else {
+                self.velocities = loaded.states[0];
             }
+        } else if (self.velocities) |v_list| {
+            // 检查点不含动量缓冲：清零现有缓冲，使恢复后的状态与检查点一致
+            for (v_list) |v| @memset(v, 0.0);
         }
-
-        self.step_count = header.step;
-        self.lr = header.lr;
+        self.step_count = loaded.header.step;
+        self.lr = loaded.header.lr;
     }
 };
 
@@ -427,37 +495,19 @@ pub const AdamOptimizer = struct {
     }
 
     pub fn saveCheckpoint(self: AdamOptimizer, io: std.Io, file_path: []const u8) !void {
-        const cwd = std.Io.Dir.cwd();
-        var file = try cwd.createFile(io, file_path, .{});
-        defer file.close(io);
-
-        var buf: [65536]u8 = undefined;
-        var file_writer = file.writer(io, &buf);
-        const writer = &file_writer.interface;
-
-        try writeCheckpointHeader(writer, .adam, .{ .step = self.step_count, .lr = self.lr }, self.params.len);
-        try writeStateBuffers(writer, self.params, &.{ self.m, self.v });
-        try writer.flush();
+        const header: CheckpointHeader = .{ .step = self.step_count, .lr = self.lr };
+        try writeCheckpoint(io, file_path, .adam, header, self.params, &.{ self.m, self.v });
     }
 
+    /// 事务式加载：任何错误都让优化器保持加载前的状态
     pub fn loadCheckpoint(self: *AdamOptimizer, io: std.Io, file_path: []const u8) !void {
-        const cwd = std.Io.Dir.cwd();
-        var file = try cwd.openFile(io, file_path, .{});
-        defer file.close(io);
-        const file_len = try file.length(io);
+        const loaded = try readCheckpoint(self.allocator, io, file_path, .adam, self.params);
 
-        var buf: [65536]u8 = undefined;
-        var file_reader = file.reader(io, &buf);
-        const reader = &file_reader.interface;
-
-        const header = try readCheckpointHeader(reader, .adam, self.params.len);
-        if (file_len != CHECKPOINT_HEADER_BYTES + checkpointStateBytes(self.params, 2)) {
-            return error.CheckpointSizeMismatch;
-        }
-        try readStateBuffers(reader, self.params, &.{ self.m, self.v });
-
-        self.step_count = header.step;
-        self.lr = header.lr;
+        // 提交阶段：以下操作均不会失败
+        replaceStates(self.allocator, &self.m, loaded.states[0]);
+        replaceStates(self.allocator, &self.v, loaded.states[1]);
+        self.step_count = loaded.header.step;
+        self.lr = loaded.header.lr;
     }
 };
 
@@ -553,37 +603,19 @@ pub const AdamWOptimizer = struct {
     }
 
     pub fn saveCheckpoint(self: AdamWOptimizer, io: std.Io, file_path: []const u8) !void {
-        const cwd = std.Io.Dir.cwd();
-        var file = try cwd.createFile(io, file_path, .{});
-        defer file.close(io);
-
-        var buf: [65536]u8 = undefined;
-        var file_writer = file.writer(io, &buf);
-        const writer = &file_writer.interface;
-
-        try writeCheckpointHeader(writer, .adamw, .{ .step = self.step_count, .lr = self.config.lr }, self.params.len);
-        try writeStateBuffers(writer, self.params, &.{ self.m, self.v });
-        try writer.flush();
+        const header: CheckpointHeader = .{ .step = self.step_count, .lr = self.config.lr };
+        try writeCheckpoint(io, file_path, .adamw, header, self.params, &.{ self.m, self.v });
     }
 
+    /// 事务式加载：任何错误都让优化器保持加载前的状态
     pub fn loadCheckpoint(self: *AdamWOptimizer, io: std.Io, file_path: []const u8) !void {
-        const cwd = std.Io.Dir.cwd();
-        var file = try cwd.openFile(io, file_path, .{});
-        defer file.close(io);
-        const file_len = try file.length(io);
+        const loaded = try readCheckpoint(self.allocator, io, file_path, .adamw, self.params);
 
-        var buf: [65536]u8 = undefined;
-        var file_reader = file.reader(io, &buf);
-        const reader = &file_reader.interface;
-
-        const header = try readCheckpointHeader(reader, .adamw, self.params.len);
-        if (file_len != CHECKPOINT_HEADER_BYTES + checkpointStateBytes(self.params, 2)) {
-            return error.CheckpointSizeMismatch;
-        }
-        try readStateBuffers(reader, self.params, &.{ self.m, self.v });
-
-        self.step_count = header.step;
-        self.config.lr = header.lr;
+        // 提交阶段：以下操作均不会失败
+        replaceStates(self.allocator, &self.m, loaded.states[0]);
+        replaceStates(self.allocator, &self.v, loaded.states[1]);
+        self.step_count = loaded.header.step;
+        self.config.lr = loaded.header.lr;
     }
 };
 
@@ -1422,6 +1454,159 @@ test "Optimizer loadCheckpoint leaves state untouched on mismatch or truncation"
         for (dst.velocities.?) |v| {
             for (v) |x| try testing.expectEqual(@as(f32, 0.0), x);
         }
+    }
+}
+
+/// 测试辅助：把字节内容整体写入文件
+fn writeTestFile(io: std.Io, path: []const u8, bytes: []const u8) !void {
+    var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+    defer file.close(io);
+    var buf: [256]u8 = undefined;
+    var fw = file.writer(io, &buf);
+    try fw.interface.writeAll(bytes);
+    try fw.interface.flush();
+}
+
+test "Optimizer checkpoint is fully little-endian and round-trips exactly" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var prng = std.Random.DefaultPrng.init(31);
+    var linear = try nn.Linear.init(allocator, 3, 2);
+    linear.resetParameters(prng.random(), .{});
+    defer nn.deinitModel(&linear, allocator);
+
+    const path = "test_ckpt_little_endian.bin";
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    var src = try AdamOptimizer.init(allocator, &linear, .{ .lr = 0.25 });
+    defer src.deinit();
+    for (src.m, src.v, 0..) |m_p, v_p, p| {
+        for (m_p, v_p, 0..) |*m, *v, j| {
+            m.* = @as(f32, @floatFromInt(p * 100 + j)) * 0.5 - 1.25;
+            v.* = std.math.floatEps(f32) * @as(f32, @floatFromInt(j + 1));
+        }
+    }
+    // 第一个参数的一阶矩首元素设为 1.5，其 IEEE 754 位模式为 0x3FC00000
+    src.m[0][0] = 1.5;
+    src.step_count = 0x0102030405060708;
+    try src.saveCheckpoint(io, path);
+
+    // 字节布局与主机字节序无关：版本、步数、学习率与状态缓冲都按小端序写出
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+    defer allocator.free(bytes);
+    try testing.expectEqualSlices(u8, &OPTIMIZER_MAGIC, bytes[0..4]);
+    try testing.expectEqualSlices(u8, &.{ 2, 0, 0, 0 }, bytes[4..8]);
+    try testing.expectEqual(OPTIMIZER_VERSION, std.mem.readInt(u32, bytes[4..8], .little));
+    try testing.expectEqualSlices(u8, &.{ 8, 7, 6, 5, 4, 3, 2, 1 }, bytes[12..20]);
+    try testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0x80, 0x3E }, bytes[20..24]); // 0.25
+    const first_state = CHECKPOINT_HEADER_BYTES + 8;
+    try testing.expectEqualSlices(u8, &.{ 0x00, 0x00, 0xC0, 0x3F }, bytes[first_state..][0..4]);
+
+    // 往返恢复：所有状态按位一致
+    var dst = try AdamOptimizer.init(allocator, &linear, .{});
+    defer dst.deinit();
+    try dst.loadCheckpoint(io, path);
+    try testing.expectEqual(src.step_count, dst.step_count);
+    try testing.expectEqual(src.lr, dst.lr);
+    for (src.m, dst.m, src.v, dst.v) |sm, dm, sv, dv| {
+        try testing.expectEqualSlices(f32, sm, dm);
+        try testing.expectEqualSlices(f32, sv, dv);
+    }
+}
+
+test "Optimizer loadCheckpoint is transactional on per-parameter length mismatch" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const io = testing.io;
+
+    var prng = std.Random.DefaultPrng.init(37);
+    var linear = try nn.Linear.init(allocator, 2, 2);
+    linear.resetParameters(prng.random(), .{});
+    defer nn.deinitModel(&linear, allocator);
+
+    const path = "test_ckpt_transactional.bin";
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    // 1. AdamW：头部与文件总长度都正确，但第二个参数的长度字段被篡改。
+    //    第一个参数的状态缓冲在文件中完好，也不得被写入优化器。
+    {
+        var src = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.002 });
+        defer src.deinit();
+        @memset(linear.weight.grad, 0.3);
+        @memset(linear.bias.grad, -0.2);
+        src.step();
+        src.step();
+        try src.saveCheckpoint(io, path);
+
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+        defer allocator.free(bytes);
+        const second_len_offset = CHECKPOINT_HEADER_BYTES + 8 + 2 * src.params[0].data.len * @sizeOf(f32);
+        const second_len = std.mem.readInt(u64, bytes[second_len_offset..][0..8], .little);
+        try testing.expectEqual(@as(u64, src.params[1].data.len), second_len);
+        std.mem.writeInt(u64, bytes[second_len_offset..][0..8], second_len + 1, .little);
+        try writeTestFile(io, path, bytes);
+
+        var dst = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.001 });
+        defer dst.deinit();
+        @memset(linear.weight.grad, 1.0);
+        @memset(linear.bias.grad, 1.0);
+        dst.step();
+        const m_before = try allocator.dupe(f32, dst.m[0]);
+        defer allocator.free(m_before);
+        const v_before = try allocator.dupe(f32, dst.v[0]);
+        defer allocator.free(v_before);
+        const m_ptr = dst.m.ptr;
+
+        try testing.expectError(error.BufferSizeMismatch, dst.loadCheckpoint(io, path));
+        try testing.expectEqual(@as(f32, 0.001), dst.config.lr);
+        try testing.expectEqual(@as(u64, 1), dst.step_count);
+        try testing.expectEqual(m_ptr, dst.m.ptr);
+        try testing.expectEqualSlices(f32, m_before, dst.m[0]);
+        try testing.expectEqualSlices(f32, v_before, dst.v[0]);
+    }
+
+    // 2. SGD：无动量缓冲的优化器加载被篡改的带动量检查点，失败后仍不分配动量缓冲
+    {
+        var src = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.1, .momentum = 0.9 });
+        defer src.deinit();
+        src.step();
+        try src.saveCheckpoint(io, path);
+
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+        defer allocator.free(bytes);
+        const second_len_offset = CHECKPOINT_HEADER_BYTES + 1 + 8 + src.params[0].data.len * @sizeOf(f32);
+        std.mem.writeInt(u64, bytes[second_len_offset..][0..8], 0, .little);
+        try writeTestFile(io, path, bytes);
+
+        var dst = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.01 });
+        defer dst.deinit();
+        try testing.expectError(error.BufferSizeMismatch, dst.loadCheckpoint(io, path));
+        try testing.expect(dst.velocities == null);
+        try testing.expectEqual(@as(f32, 0.01), dst.lr);
+        try testing.expectEqual(@as(u64, 0), dst.step_count);
+    }
+
+    // 3. SGD：动量标志只能是 0 或 1
+    {
+        var src = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.1 });
+        defer src.deinit();
+        try src.saveCheckpoint(io, path);
+
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
+        defer allocator.free(bytes);
+        bytes[CHECKPOINT_HEADER_BYTES] = 2;
+        try writeTestFile(io, path, bytes);
+
+        var dst = try SGDOptimizer.init(allocator, &linear, .{ .lr = 0.01, .momentum = 0.9 });
+        defer dst.deinit();
+        @memset(linear.weight.grad, 1.0);
+        dst.step();
+        const vel_before = dst.velocities.?[0][0];
+        try testing.expectError(error.InvalidCheckpointFlag, dst.loadCheckpoint(io, path));
+        try testing.expectEqual(vel_before, dst.velocities.?[0][0]);
+        try testing.expectEqual(@as(u64, 1), dst.step_count);
     }
 }
 
