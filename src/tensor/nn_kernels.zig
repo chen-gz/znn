@@ -628,15 +628,19 @@ pub fn topK(self: *Tensor, k: usize, allocator: std.mem.Allocator) !TopKResult {
 }
 
 /// 索引收集矩阵乘法原地内核 (Indexed Gather Matrix Multiplication In-Place Kernel, GatherMatMul)：
-/// 针对每个词元 `n in 0..N` 与选中的前 `K` 个槽位 `k in 0..K`，直接通过下标 `e = indices[n, k]`
-/// 寻址第 `e` 个专家的权重矩阵 `weights[e]`（及可选偏置 `biases[e]`）并调用基础线性代数子程序 (Basic Linear Algebra Subprograms, BLAS)
-/// 单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM)，仅激活每词元选中的 `K` 个专家且无数据依赖分支。
+/// 对每个词元 `n in 0..N` 与选中的前 `K` 个槽位 `k in 0..K`，计算 `out[n, k] = x[n, k] * weights[e] (+ biases[e])`，
+/// 其中 `e = indices[n, k]`，仅激活每词元选中的 `K` 个专家。
+/// 实现按专家分组：先以稳定计数排序把 `N * K` 个 (词元, 槽位) 行按专家归并，再把每组输入行收集到暂存缓冲区，
+/// 对每个专家只调用一次基础线性代数子程序 (Basic Linear Algebra Subprograms, BLAS) 单精度通用矩阵乘法
+/// (Single-precision General Matrix Multiply, SGEMM)，最后把结果行（加上偏置）散射回 `out` 的原位置。
+/// `allocator` 只用于分组下标与暂存缓冲区（大小为最大专家组行数 * (in_dim + out_dim)），返回前全部释放。
 pub fn gatherMatMulInto(
     self: *const Tensor,
     indices: *const Tensor,
     weights: []const *Tensor,
     biases: ?[]const *Tensor,
     out: *Tensor,
+    allocator: std.mem.Allocator,
 ) !void {
     if (indices.shape.len != 2 or weights.len == 0) return error.IncompatibleDimensions;
     if (self.shape.len != 2 and self.shape.len != 3) return error.IncompatibleDimensions;
@@ -667,44 +671,81 @@ pub fn gatherMatMulInto(
         if (!std.math.isFinite(raw) or raw < 0.0) return error.IndexOutOfBounds;
     }
 
+    const rows = N * K;
+    if (rows == 0 or out_dim == 0) return;
+
     const x_n_stride: usize = self.strides.dims[0];
     const x_k_stride: usize = if (self.shape.len == 3) self.strides.dims[1] else 0;
-
     const e_max: f32 = @floatFromInt(E - 1);
-    for (0..N) |n| {
-        for (0..K) |k| {
-            // 先在浮点域截断再转换，避免超出 usize 范围的下标触发非法转换
-            const e: usize = @intFromFloat(@min(indices.data[n * K + k], e_max));
-            const x_ptr = self.data.ptr + n * x_n_stride + k * x_k_stride;
-            const w_ptr = weights[e].data.ptr;
-            const y_offset = (n * K + k) * out_dim;
-            const y_slice = out.data[y_offset .. y_offset + out_dim];
 
-            c.cblas_sgemm(
-                c.CblasRowMajor,
-                c.CblasNoTrans,
-                c.CblasNoTrans,
-                1,
-                @intCast(out_dim),
-                @intCast(in_dim),
-                1.0,
-                x_ptr,
-                @intCast(in_dim),
-                w_ptr,
-                @intCast(out_dim),
-                0.0,
-                y_slice.ptr,
-                @intCast(out_dim),
-            );
+    // 1. 稳定计数排序：`order` 按专家升序存放行号 `r = n * K + k`（同一专家内保持词元顺序）。
+    //    填充时把 `bounds[e]` 当作写游标，填充完毕后 `bounds[e]` 恰为专家 `e` 的结束位置（即专家 `e + 1` 的起始位置）
+    const meta = try allocator.alloc(usize, E + 1 + rows);
+    defer allocator.free(meta);
+    const bounds = meta[0 .. E + 1];
+    const order = meta[E + 1 ..];
+    @memset(bounds, 0);
+    for (indices.data[0..rows]) |raw| bounds[expertOf(raw, e_max) + 1] += 1;
+    var max_group: usize = 0;
+    for (1..E + 1) |e| {
+        max_group = @max(max_group, bounds[e]);
+        bounds[e] += bounds[e - 1];
+    }
+    for (indices.data[0..rows], 0..) |raw, r| {
+        const e = expertOf(raw, e_max);
+        order[bounds[e]] = r;
+        bounds[e] += 1;
+    }
 
+    // 2. 每个专家：收集输入行 -> 一次 SGEMM -> 散射结果行并加偏置
+    const scratch = try allocator.alloc(f32, max_group * (in_dim + out_dim));
+    defer allocator.free(scratch);
+    const x_buf = scratch[0 .. max_group * in_dim];
+    const y_buf = scratch[max_group * in_dim ..];
+
+    for (0..E) |e| {
+        const begin = if (e == 0) 0 else bounds[e - 1];
+        const group = order[begin..bounds[e]];
+        if (group.len == 0) continue;
+
+        for (group, 0..) |r, g| {
+            const x_ptr = self.data.ptr + (r / K) * x_n_stride + (r % K) * x_k_stride;
+            @memcpy(x_buf[g * in_dim ..][0..in_dim], x_ptr[0..in_dim]);
+        }
+
+        c.cblas_sgemm(
+            c.CblasRowMajor,
+            c.CblasNoTrans,
+            c.CblasNoTrans,
+            @intCast(group.len),
+            @intCast(out_dim),
+            @intCast(in_dim),
+            1.0,
+            x_buf.ptr,
+            @intCast(@max(in_dim, 1)),
+            weights[e].data.ptr,
+            @intCast(out_dim),
+            0.0,
+            y_buf.ptr,
+            @intCast(out_dim),
+        );
+
+        for (group, 0..) |r, g| {
+            const y_row = out.data[r * out_dim ..][0..out_dim];
+            const src_row = y_buf[g * out_dim ..][0..out_dim];
             if (biases) |bs| {
-                const b_slice = bs[e].data[0..out_dim];
-                for (y_slice, b_slice) |*y_val, b_val| {
-                    y_val.* += b_val;
-                }
+                for (y_row, src_row, bs[e].data[0..out_dim]) |*y_val, s_val, b_val| y_val.* = s_val + b_val;
+            } else {
+                @memcpy(y_row, src_row);
             }
         }
     }
+}
+
+/// 把已校验为有限非负的浮点专家下标转换为专家序号：先在浮点域截断到最后一个专家再转换，
+/// 避免超出 usize 范围的下标触发非法转换
+inline fn expertOf(raw: f32, e_max: f32) usize {
+    return @intFromFloat(@min(raw, e_max));
 }
 
 /// 索引收集矩阵乘法 (Indexed Gather Matrix Multiplication, GatherMatMul)：
@@ -723,7 +764,7 @@ pub fn gatherMatMul(
 
     const Y = try zeros(allocator, &.{ N, K, out_dim });
     errdefer free(allocator, Y);
-    try gatherMatMulInto(self, indices, weights, biases, Y);
+    try gatherMatMulInto(self, indices, weights, biases, Y, allocator);
     return Y;
 }
 

@@ -2072,3 +2072,85 @@ test "audit: embedding gathers rows from a transposed (non-contiguous) table" {
     defer free(allocator, out);
     try std.testing.expectEqualSlices(f32, &.{ 3, 6, 1, 4 }, out.data);
 }
+
+// ============================================================================
+// 后续修复回归测试 (Follow-up Fix Regression Tests)：专家分组收集矩阵乘法、跨步归约与填充、NaN 全序与视图读取
+// ============================================================================
+
+/// 测试辅助：朴素索引收集矩阵乘法参考实现，`x_row(n, k)` 为第 (n, k) 行输入向量
+fn expectGatherMatMulMatchesReference(X: *const Tensor, indices: *const Tensor, ws: []const *Tensor, bs: ?[]const *Tensor, Y: *const Tensor) !void {
+    const N = indices.shape.dims[0];
+    const K = indices.shape.dims[1];
+    const in_dim = ws[0].shape.dims[0];
+    const out_dim = ws[0].shape.dims[1];
+    for (0..N) |n| for (0..K) |k| {
+        const e: usize = @min(@as(usize, @intFromFloat(indices.data[n * K + k])), ws.len - 1);
+        for (0..out_dim) |j| {
+            var acc: f32 = if (bs) |b| b[e].data[j] else 0.0;
+            for (0..in_dim) |i| {
+                const x_val = if (X.shape.len == 3) atCoord(X, &.{ n, k, i }) else atCoord(X, &.{ n, i });
+                acc += x_val * ws[e].data[i * out_dim + j];
+            }
+            try std.testing.expectApproxEqAbs(acc, Y.data[(n * K + k) * out_dim + j], 1e-4);
+        }
+    };
+}
+
+test "fix: gatherMatMul groups rows by expert and matches the per-row reference" {
+    const allocator = std.testing.allocator;
+    const N: usize = 37;
+    const K: usize = 3;
+    const E: usize = 5;
+    const in_dim: usize = 7;
+    const out_dim: usize = 11;
+
+    var ws: [E]*Tensor = undefined;
+    var bs: [E]*Tensor = undefined;
+    for (&ws, &bs, 0..) |*w, *b, e| {
+        w.* = try zeros(allocator, &.{ in_dim, out_dim });
+        fillDeterministic(w.*, 900 + e);
+        b.* = try zeros(allocator, &.{out_dim});
+        fillDeterministic(b.*, 950 + e);
+    }
+    defer for (ws, bs) |w, b| {
+        free(allocator, w);
+        free(allocator, b);
+    };
+
+    // 专家 2 不被任何词元选中；越界下标 9 截断为最后一个专家
+    const sel = try zeros(allocator, &.{ N, K });
+    defer free(allocator, sel);
+    var prng = std.Random.DefaultPrng.init(17);
+    for (sel.data, 0..) |*v, i| {
+        const choices = [_]f32{ 0, 1, 3, 4, 9 };
+        v.* = if (i % 7 == 0) 9 else choices[prng.random().uintLessThan(usize, choices.len)];
+    }
+
+    // 二维共享输入 [N, in_dim]
+    const X2 = try zeros(allocator, &.{ N, in_dim });
+    defer free(allocator, X2);
+    fillDeterministic(X2, 901);
+    const Y2 = try X2.gatherMatMul(sel, &ws, &bs, allocator);
+    defer free(allocator, Y2);
+    try expectGatherMatMulMatchesReference(X2, sel, &ws, &bs, Y2);
+
+    // 三维逐槽位输入：由 [K, N, in_dim] 交换前两维得到的跨步视图 [N, K, in_dim]（行内连续）
+    const X3_base = try zeros(allocator, &.{ K, N, in_dim });
+    defer free(allocator, X3_base);
+    fillDeterministic(X3_base, 902);
+    const X3 = try X3_base.transposeView(0, 1, allocator);
+    defer free(allocator, X3);
+    const Y3 = try zeros(allocator, &.{ N, K, out_dim });
+    defer free(allocator, Y3);
+    try X3.gatherMatMulInto(sel, &ws, null, Y3, allocator);
+    try expectGatherMatMulMatchesReference(X3, sel, &ws, null, Y3);
+
+    // 分配失败时不泄漏
+    try std.testing.checkAllAllocationFailures(allocator, struct {
+        fn run(a: std.mem.Allocator, x: *Tensor, s: *Tensor, w: []const *Tensor, b: []const *Tensor) !void {
+            const y = try x.gatherMatMul(s, w, b, a);
+            free(a, y);
+        }
+    }.run, .{ X2, sel, @as([]const *Tensor, &ws), @as([]const *Tensor, &bs) });
+}
+

@@ -338,7 +338,7 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             const E = ctx.num_experts;
             const weights = self.inputs[2 .. 2 + E];
             const biases: ?[]const *Tensor = if (ctx.has_bias) self.inputs[2 + E .. 2 + 2 * E] else null;
-            try self.inputs[0].gatherMatMulInto(self.inputs[1], weights, biases, self.outputs[0]);
+            try self.inputs[0].gatherMatMulInto(self.inputs[1], weights, biases, self.outputs[0], allocator);
         },
         .L2Loss => {
             copyFromEager(self.outputs[0], try self.inputs[0].l2Loss(self.context.L2Loss.lambda, allocator), allocator);
