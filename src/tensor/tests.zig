@@ -2419,3 +2419,37 @@ test "fix: topKInto, batchMatMul and contiguous-only kernels read strided and of
     defer free(allocator, max_got);
     try std.testing.expectEqualSlices(f32, max_want.data, max_got.data);
 }
+
+extern fn erf(x: f64) f64;
+
+test "tensor gelu exact and tanh-approximate forms match double-precision references" {
+    const allocator = std.testing.allocator;
+
+    // [-6, 6] 上步长 0.01 的网格，外加大幅值正负输入
+    const grid_len = 1201;
+    const extra = [_]f32{ -1e20, -1e3, -30.0, -10.0, 10.0, 30.0, 1e3, 1e20 };
+    var values: [grid_len + extra.len]f32 = undefined;
+    for (values[0..grid_len], 0..) |*v, i| v.* = -6.0 + @as(f32, @floatFromInt(i)) * 0.01;
+    @memcpy(values[grid_len..], &extra);
+
+    const x = try array(allocator, &.{values.len}, &values);
+    defer free(allocator, x);
+    const exact = try x.gelu(.none, allocator);
+    defer free(allocator, exact);
+    const approx = try x.gelu(.tanh, allocator);
+    defer free(allocator, approx);
+
+    var max_form_diff: f32 = 0.0;
+    for (values, exact.data, approx.data, 0..) |v, e, a, i| {
+        const xd: f64 = v;
+        const ref_exact = 0.5 * xd * (1.0 + erf(xd / @sqrt(2.0)));
+        const ref_tanh = 0.5 * xd * (1.0 + std.math.tanh(@sqrt(2.0 / std.math.pi) * (xd + 0.044715 * xd * xd * xd)));
+        const tol: f64 = 1e-6 * @max(1.0, @abs(xd));
+        try std.testing.expectApproxEqAbs(ref_exact, @as(f64, e), tol);
+        try std.testing.expectApproxEqAbs(ref_tanh, @as(f64, a), tol);
+        if (i < grid_len) max_form_diff = @max(max_form_diff, @abs(e - a));
+    }
+    // 双曲正切近似与精确形式在 [-6, 6] 上的最大偏差约为 4.73e-4 (x ≈ ±2.7)：足够接近但并不相同
+    try std.testing.expect(max_form_diff < 5e-4);
+    try std.testing.expect(max_form_diff > 1e-4);
+}

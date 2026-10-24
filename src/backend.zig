@@ -3,6 +3,9 @@
 
 const std = @import("std");
 
+pub const activation = @import("backend/activation.zig");
+pub const GeluApproximation = activation.GeluApproximation;
+
 pub const executor = @import("backend/executor.zig");
 pub const Executor = executor.Executor;
 
@@ -16,6 +19,7 @@ pub const sampling = @import("backend/sampling.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("backend/activation.zig");
     _ = @import("backend/executor.zig");
     _ = @import("backend/cblas.zig");
     _ = @import("backend/mlx.zig");

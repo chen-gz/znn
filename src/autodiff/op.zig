@@ -33,8 +33,8 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         .Relu => {
             copyFromEager(self.outputs[0], try self.inputs[0].relu(allocator), allocator);
         },
-        .Gelu => {
-            copyFromEager(self.outputs[0], try self.inputs[0].gelu(allocator), allocator);
+        .Gelu, .GeluTanh => {
+            copyFromEager(self.outputs[0], try self.inputs[0].gelu(self.op_type.geluApproximation().?, allocator), allocator);
         },
         .Sigmoid => {
             copyFromEager(self.outputs[0], try self.inputs[0].sigmoid(allocator), allocator);
@@ -424,6 +424,7 @@ pub fn backward(self: *Op) !void {
         .MatMul,
         .Relu,
         .Gelu,
+        .GeluTanh,
         .Sigmoid,
         .Tanh,
         .LeakyRelu,

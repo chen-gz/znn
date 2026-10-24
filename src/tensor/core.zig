@@ -31,8 +31,6 @@ pub const QRResult = linalg.QRResult;
 pub const SymEigResult = linalg.SymEigResult;
 pub const SVDResult = linalg.SVDResult;
 
-extern fn erff(x: f32) f32;
-
 // ============================================================================
 // 3. 基础张量（Tensor）核心定义与元数据
 // ============================================================================
@@ -369,14 +367,15 @@ pub const Tensor = struct {
         }.op);
     }
 
-    pub fn gelu(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
-        return self.unaryMathEager(allocator, struct {
-            fn op(x: f32) f32 {
-                const sqrt_2: f32 = @sqrt(@as(f32, 2.0));
-                const erf_val = erff(x / sqrt_2);
-                return 0.5 * x * (1.0 + erf_val);
-            }
-        }.op);
+    /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU)：按 `approximation` 选择精确 (erf) 形式或双曲正切 (Hyperbolic Tangent, Tanh) 近似形式
+    pub fn gelu(self: *Tensor, approximation: backend.GeluApproximation, allocator: std.mem.Allocator) !*Tensor {
+        return switch (approximation) {
+            inline else => |approx| self.unaryMathEager(allocator, struct {
+                fn op(x: f32) f32 {
+                    return backend.activation.gelu(approx, x);
+                }
+            }.op),
+        };
     }
 
     pub fn sigmoid(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {

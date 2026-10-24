@@ -377,7 +377,7 @@ pub fn runActivationBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allo
             const out = switch (self.act_type) {
                 .relu => try self.A.relu(alloc),
                 .silu => try self.A.silu(alloc),
-                .gelu => try self.A.gelu(alloc),
+                .gelu => try self.A.gelu(.none, alloc),
                 .sigmoid => try self.A.sigmoid(alloc),
             };
             std.mem.doNotOptimizeAway(out.data.ptr);

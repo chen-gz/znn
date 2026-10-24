@@ -294,7 +294,7 @@ test "gradcheck: relu/leakyRelu/gelu/silu/sigmoid/tanh" {
         fn build(g: *Graph, t: []const *Tensor) !*Tensor {
             const r = try g.relu(t[0]);
             const lr = try g.leakyRelu(t[0], 0.1);
-            const ge = try g.gelu(t[1]);
+            const ge = try g.gelu(t[1], .none);
             const si = try g.silu(t[1]);
             const sg = try g.sigmoid(t[1]);
             const th = try g.tanh(t[1]);
@@ -308,6 +308,27 @@ test "gradcheck: relu/leakyRelu/gelu/silu/sigmoid/tanh" {
         .{ .shape = &.{ 2, 5 }, .fill = .distinct, .scale = 0.2, .offset = -0.9 },
         .{ .shape = &.{ 2, 5 }, .scale = 2.0 },
     }, .{});
+}
+
+test "gradcheck: gelu exact and tanh-approximate forms" {
+    // 两种近似方式各自独立校验 (输入覆盖 [-4, 4]，包含负半轴与较大幅值)，并校验二者组合后的梯度
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.gelu(t[0], .none);
+        }
+    }, &.{.{ .shape = &.{ 3, 6 }, .scale = 4.0 }}, .{});
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.gelu(t[0], .tanh);
+        }
+    }, &.{.{ .shape = &.{ 3, 6 }, .scale = 4.0 }}, .{});
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            const exact = try g.gelu(t[0], .none);
+            const approx = try g.gelu(t[0], .tanh);
+            return g.mul(exact, approx);
+        }
+    }, &.{.{ .shape = &.{ 2, 5 }, .fill = .distinct, .scale = 0.7, .offset = -3.2 }}, .{});
 }
 
 test "gradcheck: softmax over last dimension" {

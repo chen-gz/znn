@@ -1,3 +1,4 @@
+const backend = @import("../backend.zig");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const Tensor = tensor.Tensor;
@@ -9,10 +10,23 @@ pub const ReLU = struct {
     }
 };
 
-/// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活层
+/// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活层：默认精确 (erf) 形式，
+/// `.approximation = .tanh` 时使用双曲正切 (Hyperbolic Tangent, Tanh) 近似形式 (如 Gemma 系列的 `gelu_pytorch_tanh`)
 pub const GELU = struct {
-    pub fn forward(_: *const GELU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        return try graph.gelu(x);
+    approximation: backend.GeluApproximation = .none,
+
+    pub const default: GELU = .{};
+
+    pub fn defaultOptions() GELU {
+        return .{};
+    }
+
+    pub fn initDefault() GELU {
+        return .{};
+    }
+
+    pub fn forward(self: *const GELU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        return try graph.gelu(x, self.approximation);
     }
 };
 

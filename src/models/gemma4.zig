@@ -463,6 +463,9 @@ pub const Gemma4Config = struct {
     max_position_embeddings: usize = 262144,
     hidden_size_per_layer_input: usize = 0,
     num_kv_shared_layers: usize = 0,
+    /// 前馈网络与逐层输入门控的激活函数：Gemma 4 官方配置为 `hidden_activation: gelu_pytorch_tanh`，
+    /// 即高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 的双曲正切 (Hyperbolic Tangent, Tanh) 近似形式
+    hidden_activation: backend.GeluApproximation = .tanh,
 
     // 特殊词元 ID
     bos_token_id: u32 = 2,
@@ -762,15 +765,21 @@ pub const GemmaUnscaledRMSNorm = struct {
 };
 
 /// Gemma 4 门控前馈多层感知机 (Gemma4MLP: gate_proj, up_proj, down_proj)
-/// 结构：(GELU_tanh(x * W_gate) * (x * W_up)) * W_down
+/// 结构：(GELU(x * W_gate) * (x * W_up)) * W_down，GELU 形式由 `hidden_activation` 指定 (Gemma 4 为双曲正切近似形式)
 pub const Gemma4MLP = struct {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
+    hidden_activation: backend.GeluApproximation,
     name: ?[]const u8 = null,
     module_type: []const u8 = "Gemma4MLP",
 
-    pub fn init(allocator: std.mem.Allocator, hidden_size: usize, intermediate_size: usize) !Gemma4MLP {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        hidden_size: usize,
+        intermediate_size: usize,
+        hidden_activation: backend.GeluApproximation,
+    ) !Gemma4MLP {
         const gate_proj = try Linear.init(allocator, hidden_size, intermediate_size);
         errdefer deinitModel(&gate_proj, allocator);
         const up_proj = try Linear.init(allocator, hidden_size, intermediate_size);
@@ -782,6 +791,7 @@ pub const Gemma4MLP = struct {
             .gate_proj = gate_proj,
             .up_proj = up_proj,
             .down_proj = down_proj,
+            .hidden_activation = hidden_activation,
         };
     }
 
@@ -803,7 +813,7 @@ pub const Gemma4MLP = struct {
 
         const gate = try self.gate_proj.forward(graph, x_2d);
         const up = try self.up_proj.forward(graph, x_2d);
-        const gelu_gate = try graph.gelu(gate);
+        const gelu_gate = try graph.gelu(gate, self.hidden_activation);
         const hidden = try graph.mul(gelu_gate, up);
         const out = try self.down_proj.forward(graph, hidden);
 
@@ -1033,6 +1043,7 @@ pub const Gemma4DecoderLayer = struct {
         head_dim: usize,
         sliding_window: usize,
         rms_norm_eps: f32,
+        hidden_activation: backend.GeluApproximation,
     ) !Gemma4DecoderLayer {
         const input_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&input_layernorm, allocator);
@@ -1055,7 +1066,7 @@ pub const Gemma4DecoderLayer = struct {
         const pre_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&pre_feedforward_layernorm, allocator);
 
-        const mlp = try Gemma4MLP.init(allocator, hidden_size, intermediate_size);
+        const mlp = try Gemma4MLP.init(allocator, hidden_size, intermediate_size, hidden_activation);
         errdefer deinitModel(&mlp, allocator);
 
         const post_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
@@ -1205,6 +1216,7 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
                     spec.head_dim,
                     config.sliding_window,
                     config.rms_norm_eps,
+                    config.hidden_activation,
                 );
                 if (!keep_grad) releaseModuleGrads(&layers[i], allocator);
                 initialized_layers += 1;

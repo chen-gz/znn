@@ -178,6 +178,7 @@ pub fn describeAutoGraphParam(self: *Graph, t: *Tensor, strat_buf: *[64]u8) Auto
         .tanh => "Tanh",
         .sigmoid => "Sigmoid",
         .gelu => "GELU",
+        .gelu_tanh => "GELU (tanh)",
         .silu => "SiLU",
         .selu => "SELU",
         .leaky_relu => "LeakyReLU",
@@ -460,6 +461,7 @@ pub fn detectConsumerActivation(self: *Graph, target: *Tensor) init_mod.Nonlinea
                         .Tanh => return .tanh,
                         .Sigmoid => return .sigmoid,
                         .Gelu => return .gelu,
+                        .GeluTanh => return .gelu_tanh,
                         .Silu => return .silu,
                         .LeakyRelu => return .{ .leaky_relu = op.context.LeakyRelu.alpha },
                         .MatMul, .GatherMatMul, .Conv1D, .Conv2D, .ConvTranspose1D, .ConvTranspose2D => {

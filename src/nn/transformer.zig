@@ -157,7 +157,7 @@ pub const MLP = struct {
         const h1 = try self.c_fc.forward(graph, x_2d);
 
         // 3. 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数引入非线性
-        const a1 = try graph.gelu(h1);
+        const a1 = try graph.gelu(h1, .none);
         if (self.name) |mod_name| a1.setNameFormatted("{s}.gelu", .{mod_name});
 
         // 4. 降维投射回原始特征维度: [B*T, hidden_dim] -> [B*T, D]
@@ -393,7 +393,7 @@ pub const MoELayer = struct {
             const routed_scope = try graph.enterChildScope("routed_experts", "ModuleList");
             defer routed_scope.exit();
             const h1 = try graph.gatherMatMul(x_2d, topk.indices, fc_weights, fc_biases); // [N, K, hidden_dim]
-            const a1 = try graph.gelu(h1); // [N, K, hidden_dim]
+            const a1 = try graph.gelu(h1, .none); // [N, K, hidden_dim]
             break :blk try graph.gatherMatMul(a1, topk.indices, proj_weights, proj_biases); // [N, K, D]
         };
 

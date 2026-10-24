@@ -12,8 +12,10 @@ pub const Nonlinearity = union(enum) {
     tanh,
     /// S 型激活函数 (Sigmoid)
     sigmoid,
-    /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU)
+    /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU，精确 erf 形式)
     gelu,
+    /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 的双曲正切 (Hyperbolic Tangent, Tanh) 近似形式
+    gelu_tanh,
     /// Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU / Swish)
     silu,
     /// 缩放指数线性单元 (Scaled Exponential Linear Unit, SELU)
@@ -34,7 +36,7 @@ pub fn calculateGain(nonlinearity: Nonlinearity) f32 {
         .relu => @sqrt(2.0), // ~1.41421356
         .leaky_relu => |alpha| @sqrt(2.0 / (1.0 + alpha * alpha)),
         .tanh => 5.0 / 3.0, // ~1.66666667
-        .gelu, .silu => 1.0,
+        .gelu, .gelu_tanh, .silu => 1.0,
         .selu => 3.0 / 4.0, // 0.75
     };
 }

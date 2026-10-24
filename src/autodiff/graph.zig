@@ -552,15 +552,21 @@ pub const Graph = struct {
         );
     }
 
-    pub fn gelu(self: *Graph, A_in: *Tensor) !*Tensor {
+    /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 算子族：`.none` 记录为精确形式算子 `Gelu`，
+    /// `.tanh` 记录为双曲正切 (Hyperbolic Tangent, Tanh) 近似形式算子 `GeluTanh`
+    pub fn gelu(self: *Graph, A_in: *Tensor, approximation: backend.GeluApproximation) !*Tensor {
         const allocator = self.arena.allocator();
         const A = try self.contiguous(A_in);
-        const C = try A.gelu(allocator);
+        const C = try A.gelu(approximation, allocator);
+        const context: types.OpContext = switch (approximation) {
+            .none => .{ .Gelu = {} },
+            .tanh => .{ .GeluTanh = {} },
+        };
         return self.registerSingleOutputOp(
             C,
             &.{A},
-            .Gelu,
-            .{ .Gelu = {} },
+            types.OpType.forGelu(approximation),
+            context,
             self.enable_grad and A.requires_grad,
         );
     }

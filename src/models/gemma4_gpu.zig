@@ -336,6 +336,8 @@ pub const Gemma4GpuLayer = struct {
     head_dim: usize,
     rope: GpuRope,
     rms_norm_eps: f32,
+    /// 门控多层感知机的高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 形式 (取自 `Gemma4Config.hidden_activation`)
+    hidden_activation: backend.GeluApproximation,
     compiled_mlp: ?mlx.Closure = null,
 
     /// 单层四个融合量化投影 (QKV、O、Gate+Up、Down)
@@ -484,6 +486,7 @@ pub const Gemma4GpuLayer = struct {
             .head_dim = spec.head_dim,
             .rope = rope,
             .rms_norm_eps = cfg.rms_norm_eps,
+            .hidden_activation = cfg.hidden_activation,
             .compiled_mlp = null,
         };
     }
@@ -498,7 +501,7 @@ pub const Gemma4GpuLayer = struct {
         defer pre_mlp.deinit();
         var gate_up = try self.fused_gate_up.forwardArray(pre_mlp, stream);
         defer gate_up.deinit();
-        var fused = try gate_up.geglu(self.intermediate_size, stream);
+        var fused = try gate_up.geglu(self.intermediate_size, self.hidden_activation, stream);
         defer fused.deinit();
         var down = try self.down_proj.forwardArray(fused, stream);
         defer down.deinit();

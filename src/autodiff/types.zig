@@ -1,4 +1,5 @@
 const tensor_mod = @import("../tensor.zig");
+const backend = @import("../backend.zig");
 const Tensor = tensor_mod.Tensor;
 
 // 支持的算子类型枚举
@@ -35,7 +36,8 @@ pub const OpType = enum {
     // --- 激活函数与非线性变换 (Activation Functions) ---
     Relu, // 修正线性单元 (Rectified Linear Unit, ReLU) 激活函数
     LeakyRelu, // 带泄露修正线性单元 (Leaky Rectified Linear Unit, LeakyReLU) 激活函数
-    Gelu, // 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数
+    Gelu, // 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数 (精确 erf 形式)
+    GeluTanh, // 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数的双曲正切 (Hyperbolic Tangent, Tanh) 近似形式
     Silu, // Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU / Swish) 激活函数
     Sigmoid, // 激活函数 Sigmoid
     Tanh, // 双曲正切函数 (Hyperbolic Tangent, Tanh) 激活函数
@@ -104,6 +106,7 @@ pub const OpType = enum {
             .Relu => "y = \\max(0, x)",
             .LeakyRelu => "y = \\max(\\alpha x, x)",
             .Gelu => "y = 0.5 x \\left(1 + \\text{erf}\\left(\\frac{x}{\\sqrt{2}}\\right)\\right)",
+            .GeluTanh => "y = 0.5 x \\left(1 + \\tanh\\left(\\sqrt{2/\\pi} \\left(x + 0.044715 x^3\\right)\\right)\\right)",
             .Silu => "y = x \\cdot \\sigma(x)",
             .Sigmoid => "y = \\frac{1}{1 + e^{-x}}",
             .Tanh => "y = \\tanh(x) = \\frac{e^x - e^{-x}}{e^x + e^{-x}}",
@@ -133,6 +136,23 @@ pub const OpType = enum {
             .GrpoLoss => "\\mathcal{L}_{\\text{GRPO}} = -\\frac{1}{N} \\sum [\\min(r_t A_t, \\text{clip}(r_t) A_t) - \\beta D_{\\text{KL}}]",
             .L1Loss => "\\mathcal{L}_{\\text{reg}} = \\lambda \\sum |w|",
             .L2Loss => "\\mathcal{L}_{\\text{reg}} = \\frac{1}{2} \\lambda \\sum w^2",
+        };
+    }
+
+    /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 算子族中各算子类型对应的近似方式；非 GELU 算子返回 null
+    pub fn geluApproximation(self: OpType) ?backend.GeluApproximation {
+        return switch (self) {
+            .Gelu => .none,
+            .GeluTanh => .tanh,
+            else => null,
+        };
+    }
+
+    /// 按近似方式选择 GELU 算子族中的算子类型
+    pub fn forGelu(approximation: backend.GeluApproximation) OpType {
+        return switch (approximation) {
+            .none => .Gelu,
+            .tanh => .GeluTanh,
         };
     }
 };
@@ -210,6 +230,7 @@ pub const OpContext = union(enum) {
         alpha: f32,
     },
     Gelu: void,
+    GeluTanh: void,
     Silu: void,
     Sigmoid: void,
     Tanh: void,
