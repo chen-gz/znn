@@ -312,27 +312,6 @@ pub fn GatedMLP(comptime Proj: type) type {
             const module_scope = try enterModuleScope(graph, self);
             defer module_scope.exit();
 
-            if (Proj == core.Q4Linear and graph.options.device == .gpu and !graph.enable_grad) {
-                if (self.gate_proj.q4_weights != null and self.up_proj.q4_weights != null and self.down_proj.q4_weights != null) {
-                    if (self.activation.geluApproximation()) |gelu_approx| {
-                        const in_f = self.gate_proj.in_features;
-                        const rows = try RowView.init(graph, x, in_f);
-                        const out_2d = try graph.zeros(&.{ rows.matrix.shape.dims[0], in_f }, false);
-                        if (backend.offload.mlpForwardOffload(
-                            &self.gate_proj.q4_weights.?,
-                            &self.up_proj.q4_weights.?,
-                            &self.down_proj.q4_weights.?,
-                            gelu_approx,
-                            rows.matrix,
-                            out_2d,
-                            graph.options.mlx_stream,
-                        )) {
-                            return rows.restore(graph, out_2d, in_f);
-                        } else |_| {}
-                    }
-                }
-            }
-
             const gate = try self.gate_proj.forward(graph, x);
             const up = try self.up_proj.forward(graph, x);
             const act_gate = try self.activation.apply(graph, gate);

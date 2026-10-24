@@ -190,24 +190,6 @@ pub const Gemma4Q4Attention = struct {
         const k_raw = try graph.zeros(&.{ rows, n_kv * hd }, false);
         const v_raw = try graph.zeros(&.{ rows, n_kv * hd }, false);
 
-        if (graph.options.device == .gpu and !graph.enable_grad) {
-            if (self.q_proj.q4_weights != null and self.k_proj.q4_weights != null) {
-                const v_qw = if (self.v_proj) |*vp| (if (vp.q4_weights) |*w| w else null) else null;
-                if (backend.offload.qkvForwardOffload(
-                    &self.q_proj.q4_weights.?,
-                    &self.k_proj.q4_weights.?,
-                    v_qw,
-                    x_2d,
-                    q_raw,
-                    k_raw,
-                    v_raw,
-                    graph.options.mlx_stream,
-                )) {
-                    return .{ .q = q_raw, .k = k_raw, .v = v_raw };
-                } else |_| {}
-            }
-        }
-
         const q_tmp = try self.q_proj.forward(graph, x_2d);
         @memcpy(q_raw.data, q_tmp.data);
         const k_tmp = try self.k_proj.forward(graph, x_2d);

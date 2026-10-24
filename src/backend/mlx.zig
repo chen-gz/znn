@@ -319,6 +319,74 @@ pub fn compile(
     return .{ .handle = compiled_cls };
 }
 
+/// 类型安全的 MLX 编译闭包封装：接收纯 Array 输入数组并输出 Array 结果，自动处理 vector_array 句柄提取、上下文绑定与异常安全
+pub fn compileFn(
+    comptime n_in: usize,
+    comptime n_out: usize,
+    comptime Ctx: type,
+    comptime func: anytype,
+    shapeless: bool,
+    ctx: if (Ctx == void) void else *const Ctx,
+) !Closure {
+    if (!has_mlx) return error.MlxNotSupported;
+    const Helper = struct {
+        fn writeOut(vres: [*c]c.mlx_vector_array, res: anytype) c_int {
+            var out_handles: [n_out]c.mlx_array = undefined;
+            if (comptime n_out == 1 and @TypeOf(res) == Array) {
+                var out_arr = res;
+                defer out_arr.deinit();
+                out_handles[0] = out_arr.handle;
+                const res_vec = c.mlx_vector_array_new_data(&out_handles, 1);
+                _ = c.mlx_vector_array_set(vres, res_vec);
+                _ = c.mlx_vector_array_free(res_vec);
+            } else {
+                var out_arrs: [n_out]Array = res;
+                defer inline for (0..n_out) |i| out_arrs[i].deinit();
+                inline for (0..n_out) |i| {
+                    out_handles[i] = out_arrs[i].handle;
+                }
+                const res_vec = c.mlx_vector_array_new_data(&out_handles, n_out);
+                _ = c.mlx_vector_array_set(vres, res_vec);
+                _ = c.mlx_vector_array_free(res_vec);
+            }
+            return 0;
+        }
+
+        fn computeVoid(vres: [*c]c.mlx_vector_array, in: c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
+            _ = payload;
+            if (!has_mlx) return 1;
+            var in_arrs: [n_in]Array = undefined;
+            for (&in_arrs) |*arr| arr.* = Array.init();
+            defer inline for (0..n_in) |i| in_arrs[i].deinit();
+
+            inline for (0..n_in) |i| {
+                if (c.mlx_vector_array_get(&in_arrs[i].handle, in, i) != 0 or in_arrs[i].handle.ctx == null) return 1;
+            }
+
+            const res = func(in_arrs) catch return 1;
+            return writeOut(vres, res);
+        }
+
+        fn computeCtx(vres: [*c]c.mlx_vector_array, in: c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
+            if (!has_mlx) return 1;
+            const typed_ctx: *const Ctx = @ptrCast(@alignCast(payload orelse return 1));
+            var in_arrs: [n_in]Array = undefined;
+            for (&in_arrs) |*arr| arr.* = Array.init();
+            defer inline for (0..n_in) |i| in_arrs[i].deinit();
+
+            inline for (0..n_in) |i| {
+                if (c.mlx_vector_array_get(&in_arrs[i].handle, in, i) != 0 or in_arrs[i].handle.ctx == null) return 1;
+            }
+
+            const res = func(typed_ctx, in_arrs) catch return 1;
+            return writeOut(vres, res);
+        }
+    };
+    const c_fn = if (comptime Ctx == void) Helper.computeVoid else Helper.computeCtx;
+    const payload: ?*anyopaque = if (comptime Ctx == void) null else @constCast(@ptrCast(ctx));
+    return compile(c_fn, payload, shapeless);
+}
+
 /// MLX 多维数组封装 (Array)
 pub const Array = struct {
     handle: if (has_mlx) c.mlx_array else ?*anyopaque,
@@ -1221,38 +1289,13 @@ pub const Array = struct {
     pub fn compileGeluMul(approximation: GeluApproximation) !Closure {
         if (!has_mlx) return error.MlxNotSupported;
         return switch (approximation) {
-            inline else => |approx| compile(GeluMulKernel(approx).compute, null, true),
-        };
-    }
-
-    fn GeluMulKernel(comptime approximation: GeluApproximation) type {
-        return struct {
-            fn compute(vres: [*c]c.mlx_vector_array, in: c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
-                if (!has_mlx) return 1;
-                _ = payload;
-                var gate_h: c.mlx_array = .{ .ctx = null };
-                var up_h: c.mlx_array = .{ .ctx = null };
-                if (c.mlx_vector_array_get(&gate_h, in, 0) != 0 or gate_h.ctx == null) return 1;
-                if (c.mlx_vector_array_get(&up_h, in, 1) != 0 or up_h.ctx == null) {
-                    _ = c.mlx_array_free(gate_h);
-                    return 1;
+            inline else => |approx| compileFn(2, 1, void, struct {
+                fn run(in: [2]Array) anyerror!Array {
+                    var act = try in[0].gelu(approx, null);
+                    defer act.deinit();
+                    return multiply(act, in[1], null);
                 }
-                // mlx_vector_array_get 为取出的元素分配了新的数组句柄，用完后需释放
-                var gate = Array{ .handle = gate_h };
-                defer gate.deinit();
-                var up = Array{ .handle = up_h };
-                defer up.deinit();
-
-                var act = gate.gelu(approximation, null) catch return 1;
-                defer act.deinit();
-                var out = multiply(act, up, null) catch return 1;
-                defer out.deinit();
-
-                const res_vec = c.mlx_vector_array_new_data(&[_]c.mlx_array{out.handle}, 1);
-                _ = c.mlx_vector_array_set(vres, res_vec);
-                _ = c.mlx_vector_array_free(res_vec);
-                return 0;
-            }
+            }.run, true, {}),
         };
     }
 
@@ -1275,33 +1318,13 @@ pub const Array = struct {
     /// 静态编译残差相加与标量缩放融合闭包 (`out = (a + b) * scale`，支持任意形状 `shapeless = true`)
     pub fn compileAddMul() !Closure {
         if (!has_mlx) return error.MlxNotSupported;
-        const Helper = struct {
-            fn compute(vres: [*c]c.mlx_vector_array, in: c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
-                if (!has_mlx) return 1;
-                _ = payload;
-                // mlx_vector_array_get 为取出的元素分配了新的数组句柄，用完后需释放（deinit 对空句柄无操作）
-                var a_arr = Array.init();
-                defer a_arr.deinit();
-                var b_arr = Array.init();
-                defer b_arr.deinit();
-                var s_arr = Array.init();
-                defer s_arr.deinit();
-                if (c.mlx_vector_array_get(&a_arr.handle, in, 0) != 0 or a_arr.handle.ctx == null) return 1;
-                if (c.mlx_vector_array_get(&b_arr.handle, in, 1) != 0 or b_arr.handle.ctx == null) return 1;
-                if (c.mlx_vector_array_get(&s_arr.handle, in, 2) != 0 or s_arr.handle.ctx == null) return 1;
-
-                var sum = add(a_arr, b_arr, null) catch return 1;
+        return compileFn(3, 1, void, struct {
+            fn run(in: [3]Array) anyerror!Array {
+                var sum = try add(in[0], in[1], null);
                 defer sum.deinit();
-                var out = multiply(sum, s_arr, null) catch return 1;
-                defer out.deinit();
-
-                const res_vec = c.mlx_vector_array_new_data(&[_]c.mlx_array{out.handle}, 1);
-                _ = c.mlx_vector_array_set(vres, res_vec);
-                _ = c.mlx_vector_array_free(res_vec);
-                return 0;
+                return multiply(sum, in[2], null);
             }
-        };
-        return compile(Helper.compute, null, true);
+        }.run, true, {});
     }
 
     /// 门控高斯误差线性单元激活 (Gated Gaussian Error Linear Unit, GeGLU)

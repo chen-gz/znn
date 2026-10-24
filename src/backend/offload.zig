@@ -353,6 +353,10 @@ pub const QuantLayout = struct {
     w_q_bytes: usize,
     sb_bytes: usize,
 
+    pub fn totalBytes(self: QuantLayout) usize {
+        return self.w_q_bytes + self.sb_bytes * 2;
+    }
+
     /// 校验量化参数（位宽须整除 32，输入维度须同时整除分组长度与每个 uint32 打包的元素数）并计算各缓冲区形状与字节数
     pub fn init(in_features: usize, out_features: usize, group_size: i32, bits: i32, sb_dtype: mlx.DType) OffloadError!QuantLayout {
         if (bits <= 0 or bits > 32 or @rem(32, bits) != 0 or group_size <= 0) return error.InvalidShape;
@@ -373,6 +377,10 @@ pub const QuantLayout = struct {
             .sb_bytes = sb_dims[0] * sb_dims[1] * sb_elem_bytes,
         };
     }
+
+    pub fn initDefault(in_features: usize, out_features: usize, group_size: i32, bits: i32) QuantLayout {
+        return init(in_features, out_features, group_size, bits, .bfloat16) catch unreachable;
+    }
 };
 
 /// 将多个字节切片依次串联写入 dst 开头，总长度必须恰好等于 expected_bytes
@@ -386,11 +394,9 @@ fn concatInto(dst: []u8, slices: []const []const u8, expected_bytes: usize) Offl
     if (offset != expected_bytes) return error.ShapeMismatch;
 }
 
-/// 4-bit 分块量化矩阵乘法硬件加速权重 (Quantized Matrix Multiply Weights, Q4Weights)
-/// 将 Q4Block (18 字节/32 权重，含 16 字节数据与 1 个 f16 scale) 打包转置为
-/// Apple 机器学习拓展 (Machine Learning Explore, MLX) 原生 uint32 紧凑排列并在图形处理器 (Graphics Processing Unit, GPU) 显存中常驻。
-/// 在自回归单步解码时，通过统一内存零拷贝直接分发至硬件量化内核，消除 CPU 解包与带宽瓶颈。
-pub const Q4Weights = struct {
+/// 统一分块量化矩阵乘法硬件加速权重 (Quantized Matrix Multiply Weights, QuantWeights)
+/// 统一覆盖 4-bit (Q4) 与 8-bit (Q8) 等仿射量化权重，打包为 Apple MLX 原生 uint32 紧凑排列常驻 GPU 显存。
+pub const QuantWeights = struct {
     w_q: mlx.Array,
     scales: mlx.Array,
     biases: mlx.Array,
@@ -398,6 +404,36 @@ pub const Q4Weights = struct {
     out_features: usize,
     group_size: i32 = 32,
     bits: i32 = 4,
+
+    /// 沿第 0 轴根据词元索引向量提取对应行并执行反量化与可选标量缩放：返回 [indices.len, in_features]
+    pub fn gatherRows(
+        self: *const QuantWeights,
+        ids: mlx.Array,
+        scale: ?mlx.Array,
+        s: ?Stream,
+    ) OffloadError!mlx.Array {
+        var w_sel = try self.w_q.takeAxis(ids, 0, s);
+        defer w_sel.deinit();
+        var sc_sel = try self.scales.takeAxis(ids, 0, s);
+        defer sc_sel.deinit();
+        var bi_sel = try self.biases.takeAxis(ids, 0, s);
+        defer bi_sel.deinit();
+
+        var deq = try mlx.Array.dequantize(
+            w_sel,
+            sc_sel,
+            bi_sel,
+            self.group_size,
+            self.bits,
+            "affine",
+            s,
+        );
+        if (scale) |sc| {
+            defer deq.deinit();
+            return mlx.Array.multiply(deq, sc, s);
+        }
+        return deq;
+    }
 
     /// 将 18 字节/块的原始量化切片解包并重排写入直接内存缓冲区 (w_q, scales, biases)
     pub fn packBlocksToDirectBuffers(
@@ -673,125 +709,53 @@ pub const Q4Weights = struct {
     }
 };
 
-/// 门控多层感知机硬件算子融合与异步执行 (Multilayer Perceptron, MLP)
-/// 在图形处理器 (Graphics Processing Unit, GPU) 上连续调度门控投影 (gate_proj)、上升投影 (up_proj)、
-/// 高斯误差线性单元激活 (Gaussian Error Linear Unit, GELU，形式由 `gelu_approximation` 指定)、逐元素点乘与下降投影 (down_proj)。
-/// 中间激活值常驻显存，将三次独立内核同步合并为一次最终求值，消除驱动管线等待。
-pub fn mlpForwardOffload(
-    gate_qw: *const Q4Weights,
-    up_qw: *const Q4Weights,
-    down_qw: *const Q4Weights,
-    gelu_approximation: activation.GeluApproximation,
-    X: anytype,
-    out: anytype,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    var total_elements: usize = 1;
-    for (0..X.shape.len) |d| {
-        total_elements *= X.shape.dims[d];
+pub const Q4Weights = QuantWeights;
+
+/// 语言模型词表输出头统一门面：支持稠密转置权重 (LmHeadWeights) 与分块量化权重 (QuantWeights)
+pub const LmHead = union(enum) {
+    dense: LmHeadWeights,
+    quant: QuantWeights,
+
+    pub fn vocabSize(self: *const LmHead) usize {
+        return switch (self.*) {
+            .dense => |*d| d.vocab_size,
+            .quant => |*q| q.out_features,
+        };
     }
-    const in_f = gate_qw.in_features;
-    if (total_elements % in_f != 0) return error.ShapeMismatch;
-    const rows = total_elements / in_f;
-    const out_f = down_qw.out_features;
-    if (out.data.len < rows * out_f) return error.ShapeMismatch;
 
-    var x_mlx = try mlx.Array.fromSliceZeroCopy(X.data[0..total_elements], &.{ rows, in_f });
-    defer x_mlx.deinit();
-
-    var gate_arr = try gate_qw.forwardArray(x_mlx, stream);
-    defer gate_arr.deinit();
-
-    var up_arr = try up_qw.forwardArray(x_mlx, stream);
-    defer up_arr.deinit();
-
-    var act_arr = try gate_arr.gelu(gelu_approximation, stream);
-    defer act_arr.deinit();
-
-    var fused_arr = try mlx.Array.multiply(act_arr, up_arr, stream);
-    defer fused_arr.deinit();
-
-    var down_arr = try down_qw.forwardArray(fused_arr, stream);
-    defer down_arr.deinit();
-
-    down_arr.eval();
-
-    const res_data = try down_arr.dataFloat32();
-    if (res_data.len != rows * out_f) return error.ShapeMismatch;
-    @memcpy(out.data[0 .. rows * out_f], res_data);
-}
-
-/// 查询键值多头投影硬件并发执行 (Query-Key-Value, QKV)
-/// 在图形处理器 (Graphics Processing Unit, GPU) 上统一批处理分发 Q、K、V 三路量化投影，
-/// 并通过多张量统一求值一次性完成计算，消除重复的主机-设备同步停顿。
-pub fn qkvForwardOffload(
-    q_qw: *const Q4Weights,
-    k_qw: *const Q4Weights,
-    v_qw: ?*const Q4Weights,
-    X: anytype,
-    q_out: anytype,
-    k_out: anytype,
-    v_out: anytype,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    var total_elements: usize = 1;
-    for (0..X.shape.len) |d| {
-        total_elements *= X.shape.dims[d];
+    pub fn hiddenSize(self: *const LmHead) usize {
+        return switch (self.*) {
+            .dense => |*d| d.hidden_size,
+            .quant => |*q| q.in_features,
+        };
     }
-    const in_f = q_qw.in_features;
-    if (total_elements % in_f != 0) return error.ShapeMismatch;
-    const rows = total_elements / in_f;
 
-    var x_mlx = try mlx.Array.fromSliceZeroCopy(X.data[0..total_elements], &.{ rows, in_f });
-    defer x_mlx.deinit();
-
-    var q_arr = try q_qw.forwardArray(x_mlx, stream);
-    defer q_arr.deinit();
-
-    var k_arr = try k_qw.forwardArray(x_mlx, stream);
-    defer k_arr.deinit();
-
-    if (v_qw) |vw| {
-        var v_arr = try vw.forwardArray(x_mlx, stream);
-        defer v_arr.deinit();
-
-        mlx.Array.evalMultiple(&.{ q_arr, k_arr, v_arr });
-
-        const q_data = try q_arr.dataFloat32();
-        const k_data = try k_arr.dataFloat32();
-        const v_data = try v_arr.dataFloat32();
-        try copyRows(q_out.data, q_data, rows * q_qw.out_features);
-        try copyRows(k_out.data, k_data, rows * k_qw.out_features);
-        try copyRows(v_out.data, v_data, rows * vw.out_features);
-    } else {
-        mlx.Array.evalMultiple(&.{ q_arr, k_arr });
-
-        const q_data = try q_arr.dataFloat32();
-        const k_data = try k_arr.dataFloat32();
-        // 无独立 V 投影时 K 与 V 共享同一投影结果
-        try copyRows(q_out.data, q_data, rows * q_qw.out_features);
-        try copyRows(k_out.data, k_data, rows * k_qw.out_features);
-        try copyRows(v_out.data, k_data, rows * k_qw.out_features);
+    pub fn forwardArray(self: *const LmHead, x: mlx.Array, s: ?Stream) OffloadError!mlx.Array {
+        return switch (self.*) {
+            .dense => |*d| d.forwardArrayBf16(x, s),
+            .quant => |*q| q.forwardArray(x, s),
+        };
     }
-}
 
-/// 将设备端结果复制到输出缓冲区前缀：结果长度必须恰好为 len，输出缓冲区至少为 len
-fn copyRows(dest: []f32, src: []const f32, len: usize) OffloadError!void {
-    if (src.len != len or dest.len < len) return error.ShapeMismatch;
-    @memcpy(dest[0..len], src);
-}
+    pub fn deinit(self: *LmHead) void {
+        switch (self.*) {
+            .dense => |*d| d.deinit(),
+            .quant => |*q| q.deinit(),
+        }
+    }
+};
 
-/// 4-bit 量化矩阵乘法硬件加速便捷入口 (Quantized Matrix Multiplication, QMM)
+/// 量化矩阵乘法硬件加速便捷入口 (Quantized Matrix Multiplication, QMM)
 pub fn q4MatMul(
     X: anytype,
     out: anytype,
-    weights: *const Q4Weights,
+    weights: *const QuantWeights,
     stream: ?Stream,
 ) OffloadError!void {
     return weights.forward(X, out, stream);
 }
+
+pub const quantMatMul = q4MatMul;
 
 /// 带掩码的分组查询缩放点积注意力 (Masked Grouped-Query Scaled Dot-Product Attention)
 /// q: [B, num_heads, tq, head_dim]，k / v: [B, num_kv_heads, tk, head_dim]（num_heads 为 num_kv_heads 的整数倍，dtype 任意且一致）；
@@ -867,11 +831,13 @@ pub const GpuKvCache = struct {
     capacity: usize,
     num_kv: usize,
     head_dim: usize,
+    dtype: mlx.DType = .bfloat16,
+    curr_len: usize = 0,
 
-    pub fn init(capacity: usize, num_kv: usize, head_dim: usize, stream: Stream) !GpuKvCache {
-        var k = try mlx.Array.zeros(&.{ 1, num_kv, capacity, head_dim }, .bfloat16, stream);
+    pub fn init(capacity: usize, num_kv: usize, head_dim: usize, dtype: mlx.DType, stream: Stream) !GpuKvCache {
+        var k = try mlx.Array.zeros(&.{ 1, num_kv, capacity, head_dim }, dtype, stream);
         errdefer k.deinit();
-        const v = try mlx.Array.zeros(&.{ 1, num_kv, capacity, head_dim }, .bfloat16, stream);
+        const v = try mlx.Array.zeros(&.{ 1, num_kv, capacity, head_dim }, dtype, stream);
         return .{
             .k = k,
             .v = v,
@@ -880,7 +846,25 @@ pub const GpuKvCache = struct {
             .capacity = capacity,
             .num_kv = num_kv,
             .head_dim = head_dim,
+            .dtype = dtype,
+            .curr_len = 0,
         };
+    }
+
+    pub fn initDefault(capacity: usize, num_kv: usize, head_dim: usize, stream: Stream) !GpuKvCache {
+        return init(capacity, num_kv, head_dim, .bfloat16, stream);
+    }
+
+    pub fn truncate(self: *GpuKvCache, new_len: usize) void {
+        self.clearStepSlices();
+        if (new_len < self.curr_len) {
+            self.curr_len = new_len;
+        }
+    }
+
+    pub fn reset(self: *GpuKvCache) void {
+        self.clearStepSlices();
+        self.curr_len = 0;
     }
 
     pub fn clearStepSlices(self: *GpuKvCache) void {
@@ -898,6 +882,44 @@ pub const GpuKvCache = struct {
         self.clearStepSlices();
         self.k.deinit();
         self.v.deinit();
+    }
+
+    pub fn importWindow(
+        self: *GpuKvCache,
+        k_data: []const f32,
+        v_data: []const f32,
+        win: usize,
+        stream: Stream,
+    ) !void {
+        try self.ensureCapacity(win, stream);
+        var k_arr = try mlx.Array.fromSlice(k_data, &.{ 1, self.num_kv, win, self.head_dim });
+        defer k_arr.deinit();
+        var v_arr = try mlx.Array.fromSlice(v_data, &.{ 1, self.num_kv, win, self.head_dim });
+        defer v_arr.deinit();
+
+        var next_k = try self.k.sliceUpdate4dAxis2(k_arr, self.num_kv, 0, win, self.head_dim, stream);
+        errdefer next_k.deinit();
+        const next_v = try self.v.sliceUpdate4dAxis2(v_arr, self.num_kv, 0, win, self.head_dim, stream);
+        self.k.deinit();
+        self.v.deinit();
+        self.k = next_k;
+        self.v = next_v;
+        self.curr_len = win;
+    }
+
+    pub fn exportWindow(
+        self: *const GpuKvCache,
+        dst_k: []f32,
+        dst_v: []f32,
+        win: usize,
+        stream: ?Stream,
+    ) !void {
+        var sliced_k = try self.k.slice4dAxis2(self.num_kv, 0, win, self.head_dim, stream);
+        defer sliced_k.deinit();
+        var sliced_v = try self.v.slice4dAxis2(self.num_kv, 0, win, self.head_dim, stream);
+        defer sliced_v.deinit();
+        try sliced_k.copyToSlice(dst_k);
+        try sliced_v.copyToSlice(dst_v);
     }
 
     /// 本步查询 [pos, pos + seq_len) 共同需要的键的绝对位置范围 [start, stop)
@@ -997,6 +1019,7 @@ pub const GpuKvCache = struct {
             self.v.deinit();
             self.k = next_k;
             self.v = next_v;
+            self.curr_len = range.write_stop;
         }
         if (range.use_full_buffer) return .{ .k = self.k, .v = self.v, .is_slice = false };
         var sliced_k = try self.k.slice4dAxis2(self.num_kv, range.slice_start, range.slice_stop, self.head_dim, stream);
@@ -1009,9 +1032,9 @@ pub const GpuKvCache = struct {
         if (required <= self.capacity) return;
         const add_cap: usize = ((required - self.capacity + 255) / 256) * 256;
         const new_cap = self.capacity + add_cap;
-        var pad_k = try mlx.Array.zeros(&.{ 1, self.num_kv, add_cap, self.head_dim }, .bfloat16, stream);
+        var pad_k = try mlx.Array.zeros(&.{ 1, self.num_kv, add_cap, self.head_dim }, self.dtype, stream);
         defer pad_k.deinit();
-        var pad_v = try mlx.Array.zeros(&.{ 1, self.num_kv, add_cap, self.head_dim }, .bfloat16, stream);
+        var pad_v = try mlx.Array.zeros(&.{ 1, self.num_kv, add_cap, self.head_dim }, self.dtype, stream);
         defer pad_v.deinit();
 
         var exp_k = try mlx.Array.concatenateAxis(&.{ self.k, pad_k }, 2, stream);
@@ -1025,3 +1048,26 @@ pub const GpuKvCache = struct {
         self.capacity = new_cap;
     }
 };
+
+// ============================================================================
+// 共享 MLX 组合块与对数几率处理器转导出
+// ============================================================================
+
+pub const mlx_blocks = @import("mlx_blocks.zig");
+pub const Rope = mlx_blocks.Rope;
+pub const projectHeads = mlx_blocks.projectHeads;
+pub const gatedMlp = mlx_blocks.gatedMlp;
+pub const residualScale = mlx_blocks.residualScale;
+pub const finalHidden = mlx_blocks.finalHidden;
+
+pub const logits_processor = @import("logits_processor.zig");
+pub const softcapLogits = logits_processor.softcapLogits;
+pub const penalizeDevice = logits_processor.penalizeDevice;
+pub const deviceCandidates = logits_processor.deviceCandidates;
+pub const selectToken = logits_processor.selectToken;
+pub const selectTokenFromHidden = logits_processor.selectTokenFromHidden;
+pub const DeviceCandidates = logits_processor.DeviceCandidates;
+pub const HostCandidates = logits_processor.HostCandidates;
+pub const LogitsProcessorOptions = logits_processor.LogitsProcessorOptions;
+pub const LogitsProcessor = logits_processor.LogitsProcessor;
+

@@ -14,6 +14,7 @@ const gemma4_gpu = @import("gemma4_gpu.zig");
 const mlx = backend.mlx;
 pub const Gemma4Config = gemma4.Gemma4Config;
 pub const Q4Weights = backend.offload.Q4Weights;
+pub const QuantLayout = backend.offload.QuantLayout;
 pub const Stream = backend.offload.Stream;
 pub const GpuKvCache = backend.offload.GpuKvCache;
 const TokenExclusionMask = backend.offload.TokenExclusionMask;
@@ -82,80 +83,36 @@ pub const PlePrepContext = struct {
     hidden_size: usize,
     rms_norm_eps: f32,
 
-    pub fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
-        if (!mlx.has_mlx) return 1;
-        const ctx: *const PlePrepContext = @ptrCast(@alignCast(payload orelse return 1));
-        var idx_h: mlx.c.mlx_array = .{ .ctx = null };
-        if (mlx.c.mlx_vector_array_get(&idx_h, in, 0) != 0 or idx_h.ctx == null) return 1;
-        const indices_arr = mlx.Array{ .handle = idx_h };
+    pub fn run(ctx: *const PlePrepContext, in_arrs: [1]mlx.Array) ![2]mlx.Array {
+        const indices_arr = in_arrs[0];
         const T = indices_arr.dimSize(0);
-        if (T == 0) return 1;
+        if (T == 0) return error.ShapeMismatch;
 
-        var w_sel = ctx.embed_tokens.w_q.takeAxis(indices_arr, 0, null) catch return 1;
-        defer w_sel.deinit();
-        var sc_sel = ctx.embed_tokens.scales.takeAxis(indices_arr, 0, null) catch return 1;
-        defer sc_sel.deinit();
-        var bi_sel = ctx.embed_tokens.biases.takeAxis(indices_arr, 0, null) catch return 1;
-        defer bi_sel.deinit();
+        var emb = try ctx.embed_tokens.gatherRows(indices_arr, ctx.sqrt_hidden_arr, null);
+        defer emb.deinit();
+        var x_cur = try emb.reshape(&.{ 1, T, ctx.hidden_size }, null);
+        errdefer x_cur.deinit();
 
-        var deq = mlx.Array.dequantize(
-            w_sel,
-            sc_sel,
-            bi_sel,
-            ctx.embed_tokens.group_size,
-            ctx.embed_tokens.bits,
-            "affine",
-            null,
-        ) catch return 1;
-        defer deq.deinit();
-
-        var scaled = mlx.Array.multiply(deq, ctx.sqrt_hidden_arr, null) catch return 1;
-        defer scaled.deinit();
-        var x_cur = scaled.reshape(&.{ 1, T, ctx.hidden_size }, null) catch return 1;
-        defer x_cur.deinit();
-
-        var pw_sel = ctx.ple.embed_tokens_per_layer.w_q.takeAxis(indices_arr, 0, null) catch return 1;
-        defer pw_sel.deinit();
-        var psc_sel = ctx.ple.embed_tokens_per_layer.scales.takeAxis(indices_arr, 0, null) catch return 1;
-        defer psc_sel.deinit();
-        var pbi_sel = ctx.ple.embed_tokens_per_layer.biases.takeAxis(indices_arr, 0, null) catch return 1;
-        defer pbi_sel.deinit();
-
-        var pdeq = mlx.Array.dequantize(
-            pw_sel,
-            psc_sel,
-            pbi_sel,
-            ctx.ple.embed_tokens_per_layer.group_size,
-            ctx.ple.embed_tokens_per_layer.bits,
-            "affine",
-            null,
-        ) catch return 1;
+        var pdeq = try ctx.ple.embed_tokens_per_layer.gatherRows(indices_arr, ctx.ple.embed_scale_arr, null);
         defer pdeq.deinit();
-
-        var pscaled = mlx.Array.multiply(pdeq, ctx.ple.embed_scale_arr, null) catch return 1;
-        defer pscaled.deinit();
-        var ple_tokens_arr = pscaled.reshape(&.{ 1, T, ctx.ple.num_layers, ctx.ple.ple_dim }, null) catch return 1;
+        var ple_tokens_arr = try pdeq.reshape(&.{ 1, T, ctx.ple.num_layers, ctx.ple.ple_dim }, null);
         defer ple_tokens_arr.deinit();
 
-        var ple_proj_raw = ctx.ple.model_proj.forwardArray(x_cur, null) catch return 1;
+        var ple_proj_raw = try ctx.ple.model_proj.forwardArray(x_cur, null);
         defer ple_proj_raw.deinit();
-        var ple_proj_scaled = mlx.Array.multiply(ple_proj_raw, ctx.ple.proj_scale_arr, null) catch return 1;
+        var ple_proj_scaled = try mlx.Array.multiply(ple_proj_raw, ctx.ple.proj_scale_arr, null);
         defer ple_proj_scaled.deinit();
-        var ple_proj_4d = ple_proj_scaled.reshape(&.{ 1, T, ctx.ple.num_layers, ctx.ple.ple_dim }, null) catch return 1;
+        var ple_proj_4d = try ple_proj_scaled.reshape(&.{ 1, T, ctx.ple.num_layers, ctx.ple.ple_dim }, null);
         defer ple_proj_4d.deinit();
-        var ple_proj_normed = mlx.Array.fastRmsNorm(ple_proj_4d, ctx.ple.proj_norm_w, ctx.rms_norm_eps, null) catch return 1;
+        var ple_proj_normed = try mlx.Array.fastRmsNorm(ple_proj_4d, ctx.ple.proj_norm_w, ctx.rms_norm_eps, null);
         defer ple_proj_normed.deinit();
 
-        var ple_sum = mlx.Array.add(ple_proj_normed, ple_tokens_arr, null) catch return 1;
+        var ple_sum = try mlx.Array.add(ple_proj_normed, ple_tokens_arr, null);
         defer ple_sum.deinit();
-        var ple_inputs = mlx.Array.multiply(ple_sum, ctx.ple.input_scale_arr, null) catch return 1;
-        defer ple_inputs.deinit();
+        var ple_inputs = try mlx.Array.multiply(ple_sum, ctx.ple.input_scale_arr, null);
+        errdefer ple_inputs.deinit();
 
-        const out_handles = [_]mlx.c.mlx_array{ x_cur.handle, ple_inputs.handle };
-        const res_vec = mlx.c.mlx_vector_array_new_data(&out_handles, 2);
-        _ = mlx.c.mlx_vector_array_set(vres, res_vec);
-        _ = mlx.c.mlx_vector_array_free(res_vec);
-        return 0;
+        return .{ x_cur, ple_inputs };
     }
 };
 
@@ -200,82 +157,57 @@ pub const GpuLayerE4B = struct {
     hidden_activation: backend.GeluApproximation,
     compiled_tail: ?mlx.Closure = null,
 
-    /// 静态编译当前解码层单步解码阶段 (`seq_len == 1`) 注意力投影之后的全尾部计算图 (Post-Attention + Gated MLP + PLE + LayerScalar)
-    /// 将每层 20+ 个独立 C API 调度节点收拢为单一预编译静态闭包，由 MLX JIT 自动跨算子融合所有逐元素激活与残差连接
+    /// 执行解码层注意力投影之后的全尾部计算 (Post-Attention RMSNorm + Gated MLP + PLE + LayerScalar)
+    pub fn forwardTail(
+        self: *const GpuLayerE4B,
+        x_in: mlx.Array,
+        o_out: mlx.Array,
+        ple_slice: mlx.Array,
+        s: ?Stream,
+    ) !mlx.Array {
+        var post_attn = try mlx.Array.fastRmsNorm(o_out, self.post_attn_w, self.rms_norm_eps, s);
+        defer post_attn.deinit();
+        var x1 = try backend.mlx_blocks.residualScale(x_in, post_attn, null, s);
+        defer x1.deinit();
+
+        var post_mlp = try backend.mlx_blocks.gatedMlp(
+            x1,
+            &self.fused_gate_up,
+            null,
+            &self.down_proj,
+            self.hidden_activation,
+            self.pre_mlp_w,
+            self.post_mlp_w,
+            self.rms_norm_eps,
+            s,
+        );
+        defer post_mlp.deinit();
+        var x2 = try backend.mlx_blocks.residualScale(x1, post_mlp, null, s);
+        defer x2.deinit();
+
+        var ple_gate_raw = try self.ple_gate.forwardArray(x2, s);
+        defer ple_gate_raw.deinit();
+        var act_ple = try ple_gate_raw.gelu(self.hidden_activation, s);
+        defer act_ple.deinit();
+        var ple_modulated = try mlx.Array.multiply(act_ple, ple_slice, s);
+        defer ple_modulated.deinit();
+
+        var ple_projected = try self.ple_proj.forwardArray(ple_modulated, s);
+        defer ple_projected.deinit();
+        var ple_normed = try mlx.Array.fastRmsNorm(ple_projected, self.ple_norm_w, self.rms_norm_eps, s);
+        defer ple_normed.deinit();
+
+        return backend.mlx_blocks.residualScale(x2, ple_normed, self.layer_scalar_w, s);
+    }
+
+    pub fn tailRun(self: *const GpuLayerE4B, in_arrs: [3]mlx.Array) !mlx.Array {
+        return self.forwardTail(in_arrs[0], in_arrs[1], in_arrs[2], null);
+    }
+
+    /// 静态编译当前解码层单步解码阶段 (`seq_len == 1`) 注意力投影之后的全尾部计算图
     pub fn initCompiledTail(self: *GpuLayerE4B) void {
         if (!mlx.has_mlx) return;
-        const Helper = struct {
-            fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
-                if (!mlx.has_mlx) return 1;
-                const l: *const GpuLayerE4B = @ptrCast(@alignCast(payload orelse return 1));
-                var x_in_h: mlx.c.mlx_array = .{ .ctx = null };
-                var o_out_h: mlx.c.mlx_array = .{ .ctx = null };
-                var ple_slice_h: mlx.c.mlx_array = .{ .ctx = null };
-                if (mlx.c.mlx_vector_array_get(&x_in_h, in, 0) != 0 or x_in_h.ctx == null) return 1;
-                if (mlx.c.mlx_vector_array_get(&o_out_h, in, 1) != 0 or o_out_h.ctx == null) return 1;
-                if (mlx.c.mlx_vector_array_get(&ple_slice_h, in, 2) != 0 or ple_slice_h.ctx == null) return 1;
-
-                const x_in = mlx.Array{ .handle = x_in_h };
-                const o_out = mlx.Array{ .handle = o_out_h };
-                const ple_slice = mlx.Array{ .handle = ple_slice_h };
-
-                var post_attn = mlx.Array.fastRmsNorm(o_out, l.post_attn_w, l.rms_norm_eps, null) catch return 1;
-                defer post_attn.deinit();
-                var x1 = mlx.Array.add(x_in, post_attn, null) catch return 1;
-                defer x1.deinit();
-
-                var pre_mlp = mlx.Array.fastRmsNorm(x1, l.pre_mlp_w, l.rms_norm_eps, null) catch return 1;
-                defer pre_mlp.deinit();
-
-                var gate_up = l.fused_gate_up.forwardArray(pre_mlp, null) catch return 1;
-                defer gate_up.deinit();
-                var gu_vec = gate_up.split(2, 2, null) catch return 1;
-                defer gu_vec.deinit();
-                var gate_out = gu_vec.get(0) orelse return 1;
-                defer gate_out.deinit();
-                var up_out = gu_vec.get(1) orelse return 1;
-                defer up_out.deinit();
-
-                var act_mlp = gate_out.gelu(l.hidden_activation, null) catch return 1;
-                defer act_mlp.deinit();
-                var hidden = mlx.Array.multiply(act_mlp, up_out, null) catch return 1;
-                defer hidden.deinit();
-
-                var down_out = l.down_proj.forwardArray(hidden, null) catch return 1;
-                defer down_out.deinit();
-
-                var post_mlp = mlx.Array.fastRmsNorm(down_out, l.post_mlp_w, l.rms_norm_eps, null) catch return 1;
-                defer post_mlp.deinit();
-                var x2 = mlx.Array.add(x1, post_mlp, null) catch return 1;
-                defer x2.deinit();
-
-                var ple_gate_raw = l.ple_gate.forwardArray(x2, null) catch return 1;
-                defer ple_gate_raw.deinit();
-
-                var act_ple = ple_gate_raw.gelu(l.hidden_activation, null) catch return 1;
-                defer act_ple.deinit();
-                var ple_modulated = mlx.Array.multiply(act_ple, ple_slice, null) catch return 1;
-                defer ple_modulated.deinit();
-
-                var ple_projected = l.ple_proj.forwardArray(ple_modulated, null) catch return 1;
-                defer ple_projected.deinit();
-                var ple_normed = mlx.Array.fastRmsNorm(ple_projected, l.ple_norm_w, l.rms_norm_eps, null) catch return 1;
-                defer ple_normed.deinit();
-
-                var out = if (l.layer_scalar_w) |sw| blk: {
-                    var sum = mlx.Array.add(x2, ple_normed, null) catch return 1;
-                    defer sum.deinit();
-                    break :blk mlx.Array.multiply(sum, sw, null) catch return 1;
-                } else mlx.Array.add(x2, ple_normed, null) catch return 1;
-                defer out.deinit();
-
-                const res_vec = mlx.c.mlx_vector_array_new_data(&[_]mlx.c.mlx_array{out.handle}, 1);
-                _ = mlx.c.mlx_vector_array_set(vres, res_vec);
-                _ = mlx.c.mlx_vector_array_free(res_vec);
-                return 0;
-            }
-        };
-        self.compiled_tail = mlx.compile(Helper.compute, self, false) catch null;
+        self.compiled_tail = mlx.compileFn(3, 1, GpuLayerE4B, tailRun, false, self) catch null;
     }
 
     pub fn deinit(self: *GpuLayerE4B) void {
@@ -330,30 +262,13 @@ pub const Gemma4E4BModel = struct {
     pub const DIRECT_CACHE_VERSION: u64 = 1;
     pub const DIRECT_CACHE_FILENAME = "gemma4_e4b_direct.bin";
 
-    pub const Q4ByteLengths = struct {
-        w_len: usize,
-        s_len: usize,
-        b_len: usize,
-
-        pub fn total(self: Q4ByteLengths) usize {
-            return self.w_len + self.s_len + self.b_len;
-        }
-    };
-
-    pub fn q4ByteLengths(in_f: usize, out_f: usize, group_size: usize, bits: usize) Q4ByteLengths {
-        const pack_factor = 32 / bits;
-        const w_len = out_f * (in_f / pack_factor) * @sizeOf(u32);
-        const s_len = out_f * (in_f / group_size) * @sizeOf(u16);
-        return .{ .w_len = w_len, .s_len = s_len, .b_len = s_len };
-    }
-
     /// 计算预融合顺序二进制权重缓存 (`gemma4_e4b_direct.bin`) 的精确字节总长度
     pub fn computeExpectedDirectCacheSize(cfg: Gemma4Config) usize {
         var total: usize = 16; // 8B magic ("ZNN4E4B1") + 8B version (u64)
-        total += q4ByteLengths(cfg.hidden_size, cfg.vocab_size, 64, 4).total();
+        total += QuantLayout.initDefault(cfg.hidden_size, cfg.vocab_size, 64, 4).totalBytes();
         total += cfg.hidden_size * @sizeOf(u16);
-        total += q4ByteLengths(cfg.num_hidden_layers * cfg.hidden_size_per_layer_input, cfg.vocab_size, 64, 4).total();
-        total += q4ByteLengths(cfg.hidden_size, cfg.num_hidden_layers * cfg.hidden_size_per_layer_input, 64, 4).total();
+        total += QuantLayout.initDefault(cfg.num_hidden_layers * cfg.hidden_size_per_layer_input, cfg.vocab_size, 64, 4).totalBytes();
+        total += QuantLayout.initDefault(cfg.hidden_size, cfg.num_hidden_layers * cfg.hidden_size_per_layer_input, 64, 4).totalBytes();
         total += cfg.hidden_size_per_layer_input * @sizeOf(u16);
 
         for (0..cfg.num_hidden_layers) |idx| {
@@ -364,15 +279,15 @@ pub const Gemma4E4BModel = struct {
 
             if (has_kv) {
                 total += hd * @sizeOf(u16);
-                total += q4ByteLengths(cfg.hidden_size, out_q + 2 * out_kv, 64, 4).total();
+                total += QuantLayout.initDefault(cfg.hidden_size, out_q + 2 * out_kv, 64, 4).totalBytes();
             } else {
-                total += q4ByteLengths(cfg.hidden_size, out_q, 64, 4).total();
+                total += QuantLayout.initDefault(cfg.hidden_size, out_q, 64, 4).totalBytes();
             }
-            total += q4ByteLengths(out_q, cfg.hidden_size, 64, 4).total();
-            total += q4ByteLengths(cfg.hidden_size, cfg.intermediate_size * 2, 64, 8).total();
-            total += q4ByteLengths(cfg.intermediate_size, cfg.hidden_size, 64, 8).total();
-            total += q4ByteLengths(cfg.hidden_size, cfg.hidden_size_per_layer_input, 64, 4).total();
-            total += q4ByteLengths(cfg.hidden_size_per_layer_input, cfg.hidden_size, 64, 4).total();
+            total += QuantLayout.initDefault(out_q, cfg.hidden_size, 64, 4).totalBytes();
+            total += QuantLayout.initDefault(cfg.hidden_size, cfg.intermediate_size * 2, 64, 8).totalBytes();
+            total += QuantLayout.initDefault(cfg.intermediate_size, cfg.hidden_size, 64, 8).totalBytes();
+            total += QuantLayout.initDefault(cfg.hidden_size, cfg.hidden_size_per_layer_input, 64, 4).totalBytes();
+            total += QuantLayout.initDefault(cfg.hidden_size_per_layer_input, cfg.hidden_size, 64, 4).totalBytes();
             total += cfg.hidden_size * @sizeOf(u16);
             total += hd * @sizeOf(u16);
             total += cfg.hidden_size * @sizeOf(u16) * 4;
@@ -408,10 +323,10 @@ pub const Gemma4E4BModel = struct {
             bits: i32,
             stream: Stream,
         ) !Q4Weights {
-            const lens = q4ByteLengths(in_f, out_f, @intCast(group_size), @intCast(bits));
-            const w_bytes = try self.readBytes(lens.w_len);
-            const s_bytes = try self.readBytes(lens.s_len);
-            const b_bytes = try self.readBytes(lens.b_len);
+            const layout = QuantLayout.initDefault(in_f, out_f, group_size, bits);
+            const w_bytes = try self.readBytes(layout.w_q_bytes);
+            const s_bytes = try self.readBytes(layout.sb_bytes);
+            const b_bytes = try self.readBytes(layout.sb_bytes);
             return Q4Weights.initFromDirectBuffersCustom(
                 w_bytes,
                 s_bytes,
@@ -634,7 +549,7 @@ pub const Gemma4E4BModel = struct {
                     .rms_norm_eps = cfg.rms_norm_eps,
                 };
                 ple_prep_ctx = ctx_ptr;
-                compiled_ple_prep = mlx.compile(PlePrepContext.compute, ctx_ptr, false) catch null;
+                compiled_ple_prep = mlx.compileFn(1, 2, PlePrepContext, PlePrepContext.run, false, ctx_ptr) catch null;
             } else |_| {}
         }
         errdefer {
@@ -654,7 +569,7 @@ pub const Gemma4E4BModel = struct {
         }
         for (&gpu_kv, layers[0..num_kv_layers]) |*kv_slot, l_ref| {
             const init_cap: usize = if (l_ref.is_sliding) l_ref.sliding_window else 256;
-            kv_slot.* = try GpuKvCache.init(init_cap, l_ref.num_kv_heads, l_ref.head_dim, stream);
+            kv_slot.* = try GpuKvCache.init(init_cap, l_ref.num_kv_heads, l_ref.head_dim, .bfloat16, stream);
         }
 
         return Gemma4E4BModel{
@@ -968,28 +883,9 @@ pub const Gemma4E4BModel = struct {
         T: usize,
         s: Stream,
     ) !mlx.Array {
-        var w_sel = try self.embed_tokens.w_q.takeAxis(indices_arr, 0, s);
-        defer w_sel.deinit();
-        var sc_sel = try self.embed_tokens.scales.takeAxis(indices_arr, 0, s);
-        defer sc_sel.deinit();
-        var bi_sel = try self.embed_tokens.biases.takeAxis(indices_arr, 0, s);
-        defer bi_sel.deinit();
-
-        var deq = try mlx.Array.dequantize(
-            w_sel,
-            sc_sel,
-            bi_sel,
-            self.embed_tokens.group_size,
-            self.embed_tokens.bits,
-            "affine",
-            s,
-        );
-        defer deq.deinit();
-
-        var scaled = try mlx.Array.multiply(deq, self.sqrt_hidden_arr, s);
-        defer scaled.deinit();
-
-        return scaled.reshape(&.{ 1, T, self.config.hidden_size }, s);
+        var emb = try self.embed_tokens.gatherRows(indices_arr, self.sqrt_hidden_arr, s);
+        defer emb.deinit();
+        return emb.reshape(&.{ 1, T, self.config.hidden_size }, s);
     }
 
     /// 通过 GPU Metal 算子直接提取词元嵌入并完成反量化与缩放：[1, T, hidden_size]
@@ -1010,28 +906,9 @@ pub const Gemma4E4BModel = struct {
         T: usize,
         s: Stream,
     ) !mlx.Array {
-        var w_sel = try self.ple.embed_tokens_per_layer.w_q.takeAxis(indices_arr, 0, s);
-        defer w_sel.deinit();
-        var sc_sel = try self.ple.embed_tokens_per_layer.scales.takeAxis(indices_arr, 0, s);
-        defer sc_sel.deinit();
-        var bi_sel = try self.ple.embed_tokens_per_layer.biases.takeAxis(indices_arr, 0, s);
-        defer bi_sel.deinit();
-
-        var deq = try mlx.Array.dequantize(
-            w_sel,
-            sc_sel,
-            bi_sel,
-            self.ple.embed_tokens_per_layer.group_size,
-            self.ple.embed_tokens_per_layer.bits,
-            "affine",
-            s,
-        );
-        defer deq.deinit();
-
-        var scaled = try mlx.Array.multiply(deq, self.ple.embed_scale_arr, s);
-        defer scaled.deinit();
-
-        return scaled.reshape(&.{ 1, T, self.config.num_hidden_layers, self.config.hidden_size_per_layer_input }, s);
+        var pdeq = try self.ple.embed_tokens_per_layer.gatherRows(indices_arr, self.ple.embed_scale_arr, s);
+        defer pdeq.deinit();
+        return pdeq.reshape(&.{ 1, T, self.config.num_hidden_layers, self.config.hidden_size_per_layer_input }, s);
     }
 
     /// 通过 GPU Metal 算子直接提取逐层嵌入并完成反量化与缩放：[1, T, num_layers, ple_dim]
@@ -1357,66 +1234,31 @@ pub const Gemma4E4BModel = struct {
 
         if (l.has_kv) {
             const total_heads = l.num_heads + 2 * l.num_kv_heads;
-            var k_rot: mlx.Array = undefined;
-            var v_4d: mlx.Array = undefined;
+            const axis: usize = if (seq_len == 1) 1 else 2;
+            const qkv_shape = if (seq_len == 1)
+                [4]usize{ 1, total_heads, 1, l.head_dim }
+            else
+                [4]usize{ 1, seq_len, total_heads, l.head_dim };
+            var qkv_4d = try qkv_raw.reshape(&qkv_shape, s);
+            defer qkv_4d.deinit();
 
-            if (seq_len == 1) {
-                var qkv_4d = try qkv_raw.reshape(&.{ 1, total_heads, 1, l.head_dim }, s);
-                defer qkv_4d.deinit();
+            var q_raw_slice = try qkv_4d.sliceAxis(axis, 0, l.num_heads, s);
+            defer q_raw_slice.deinit();
+            var k_raw_slice = try qkv_4d.sliceAxis(axis, l.num_heads, l.num_heads + l.num_kv_heads, s);
+            defer k_raw_slice.deinit();
+            var v_raw_slice = try qkv_4d.sliceAxis(axis, l.num_heads + l.num_kv_heads, total_heads, s);
+            defer v_raw_slice.deinit();
 
-                var q_4d_raw = try qkv_4d.sliceAxis(1, 0, l.num_heads, s);
-                defer q_4d_raw.deinit();
-                var k_4d_raw = try qkv_4d.sliceAxis(1, l.num_heads, l.num_heads + l.num_kv_heads, s);
-                defer k_4d_raw.deinit();
-                var v_4d_raw = try qkv_4d.sliceAxis(1, l.num_heads + l.num_kv_heads, total_heads, s);
-                defer v_4d_raw.deinit();
-
-                var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
-                defer q_normed.deinit();
-                q_rot_opt = try l.rope.apply(q_normed, pos, s);
-
-                var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
-                defer k_normed.deinit();
-                v_4d = try mlx.Array.fastRmsNorm(v_4d_raw, null, l.rms_norm_eps, s);
-                errdefer v_4d.deinit();
-
-                k_rot = try l.rope.apply(k_normed, pos, s);
-            } else {
-                var qkv_4d = try qkv_raw.reshape(&.{ 1, seq_len, total_heads, l.head_dim }, s);
-                defer qkv_4d.deinit();
-
-                var q_4d_raw = try qkv_4d.sliceAxis(2, 0, l.num_heads, s);
-                defer q_4d_raw.deinit();
-                var k_4d_raw = try qkv_4d.sliceAxis(2, l.num_heads, l.num_heads + l.num_kv_heads, s);
-                defer k_4d_raw.deinit();
-                var v_4d_raw = try qkv_4d.sliceAxis(2, l.num_heads + l.num_kv_heads, total_heads, s);
-                defer v_4d_raw.deinit();
-
-                var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
-                defer q_normed.deinit();
-                var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-                defer q_4d.deinit();
-                q_rot_opt = try l.rope.apply(q_4d, pos, s);
-
-                var k_normed = try mlx.Array.fastRmsNorm(k_4d_raw, l.k_norm_w.?, l.rms_norm_eps, s);
-                defer k_normed.deinit();
-                var v_normed = try mlx.Array.fastRmsNorm(v_4d_raw, null, l.rms_norm_eps, s);
-                defer v_normed.deinit();
-
-                var k_4d = try k_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-                defer k_4d.deinit();
-                v_4d = try v_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-                errdefer v_4d.deinit();
-
-                k_rot = try l.rope.apply(k_4d, pos, s);
-            }
-            defer v_4d.deinit();
+            q_rot_opt = try backend.mlx_blocks.projectHeads(q_raw_slice, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
+            var k_rot = try backend.mlx_blocks.projectHeads(k_raw_slice, l.k_norm_w.?, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
             defer k_rot.deinit();
+            var v_4d = try backend.mlx_blocks.projectHeads(v_raw_slice, null, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, null, pos, s);
+            defer v_4d.deinit();
 
             if (self.gpu_kv[l_idx] == null) {
                 const default_cap: usize = if (l.is_sliding) l.sliding_window else 256;
                 const initial_cap = @max(default_cap, ((total_len + 255) / 256) * 256);
-                self.gpu_kv[l_idx] = try GpuKvCache.init(initial_cap, l.num_kv_heads, l.head_dim, s);
+                self.gpu_kv[l_idx] = try GpuKvCache.init(initial_cap, l.num_kv_heads, l.head_dim, .bfloat16, s);
             }
             const cache = &self.gpu_kv[l_idx].?;
             const view = try cache.writeStep(k_rot, v_4d, l.is_sliding, l.sliding_window, pos, seq_len, s);
@@ -1434,22 +1276,7 @@ pub const Gemma4E4BModel = struct {
                 eff_v_free = view.v;
             }
         } else {
-            if (seq_len == 1) {
-                var q_4d_raw = try qkv_raw.reshape(&.{ 1, l.num_heads, 1, l.head_dim }, s);
-                defer q_4d_raw.deinit();
-                var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
-                defer q_normed.deinit();
-                q_rot_opt = try l.rope.apply(q_normed, pos, s);
-            } else {
-                var q_4d_raw = try qkv_raw.reshape(&.{ 1, seq_len, l.num_heads, l.head_dim }, s);
-                defer q_4d_raw.deinit();
-                var q_normed = try mlx.Array.fastRmsNorm(q_4d_raw, l.q_norm_w, l.rms_norm_eps, s);
-                defer q_normed.deinit();
-                var q_4d = try q_normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-                defer q_4d.deinit();
-                q_rot_opt = try l.rope.apply(q_4d, pos, s);
-            }
-
+            q_rot_opt = try backend.mlx_blocks.projectHeads(qkv_raw, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
             const cache = &self.gpu_kv[l.prev_kv_idx].?;
             eff_k = cache.step_eff_k orelse cache.k;
             eff_v = cache.step_eff_v orelse cache.v;
@@ -1480,6 +1307,7 @@ pub const Gemma4E4BModel = struct {
             if (l.compiled_tail) |cls| {
                 return cls.apply3(x_in, o_out, ple_slice);
             }
+            return l.forwardTail(x_in, o_out, ple_slice, s);
         }
 
         var post_attn = try mlx.Array.fastRmsNorm(o_out, l.post_attn_w, l.rms_norm_eps, s);

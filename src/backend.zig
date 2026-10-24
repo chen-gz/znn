@@ -15,6 +15,24 @@ pub const cblas = @import("backend/cblas.zig");
 
 pub const mlx = @import("backend/mlx.zig");
 
+pub const mlx_blocks = @import("backend/mlx_blocks.zig");
+pub const Rope = mlx_blocks.Rope;
+pub const projectHeads = mlx_blocks.projectHeads;
+pub const gatedMlp = mlx_blocks.gatedMlp;
+pub const residualScale = mlx_blocks.residualScale;
+pub const finalHidden = mlx_blocks.finalHidden;
+
+pub const logits_processor = @import("backend/logits_processor.zig");
+pub const LogitsProcessor = logits_processor.LogitsProcessor;
+pub const LogitsProcessorOptions = logits_processor.LogitsProcessorOptions;
+pub const softcapLogits = logits_processor.softcapLogits;
+pub const penalizeDevice = logits_processor.penalizeDevice;
+pub const deviceCandidates = logits_processor.deviceCandidates;
+pub const selectToken = logits_processor.selectToken;
+pub const selectTokenFromHidden = logits_processor.selectTokenFromHidden;
+pub const DeviceCandidates = logits_processor.DeviceCandidates;
+pub const HostCandidates = logits_processor.HostCandidates;
+
 pub const offload = @import("backend/offload.zig");
 
 pub const rope = @import("backend/rope.zig");

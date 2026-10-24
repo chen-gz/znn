@@ -28,157 +28,25 @@ const Gemma4KVCache = gemma4.Gemma4KVCache;
 // 比例旋转位置编码 (Proportional RoPE)
 // ============================================================================
 
-/// 单个注意力层的 GPU 旋转位置编码：partial_rotary_factor 为 1 时为标准 RoPE (base = rope_theta)，
-/// 小于 1 时为在完整 head_dim 上旋转的比例旋转位置编码 (常驻 [head_dim / 2] 周期表，由 `RopeOptions.fillPeriods` 生成，
-/// 与 CPU `tensor.RopeTable` 共用同一频率公式；`mlx.fast.rope` 以 theta_i = pos / freqs[i] 计算旋转角)
-pub const GpuRope = struct {
-    head_dim: usize,
-    base: f32,
-    traditional: bool,
-    freqs: ?mlx.Array = null,
-
-    /// 只支持旋转整行 (rotary_offset = 0) 的偶数 head_dim
-    pub fn init(head_dim: usize, options: backend.rope.RopeOptions) !GpuRope {
-        if (head_dim == 0 or head_dim % 2 != 0 or options.rotary_offset != 0) return error.InvalidShape;
-        const traditional = options.mode == .interleaved;
-        if (options.partial_rotary_factor >= 1.0) return .{ .head_dim = head_dim, .base = options.base, .traditional = traditional };
-        const half = head_dim / 2;
-        if (half > backend.rope.max_angles) return error.InvalidShape;
-        var buf: [backend.rope.max_angles]f32 = undefined;
-        options.fillPeriods(head_dim, buf[0..half]);
-        return .{
-            .head_dim = head_dim,
-            .base = options.base,
-            .traditional = traditional,
-            .freqs = try mlx.Array.fromSlice(buf[0..half], &.{half}),
-        };
-    }
-
-    pub fn deinit(self: *GpuRope) void {
-        if (self.freqs) |*f| f.deinit();
-        self.freqs = null;
-    }
-
-    /// 对 [B, heads, T, head_dim] 张量施加旋转位置编码，第 t 个位置的绝对位置为 offset + t
-    pub fn apply(self: *const GpuRope, x: mlx.Array, offset: usize, s: ?Stream) !mlx.Array {
-        if (self.freqs) |f| return mlx.Array.fastRoPEWithFreqs(x, self.head_dim, self.traditional, 1.0, offset, f, s);
-        return mlx.Array.fastRoPE(x, self.head_dim, self.traditional, self.base, 1.0, offset, s);
-    }
-};
+pub const GpuRope = backend.mlx_blocks.Rope;
 
 // ============================================================================
 // 对数几率截断与词元选取 (E4B 与 12B 共用)
 // ============================================================================
 
-/// 将 GPU 对数几率转换为单精度并施加最终对数几率截断 (Final Logit Softcapping)：cap * tanh(x / cap)；cap <= 0 时只做类型转换
-pub fn softcapLogits(logits: mlx.Array, cap: f32, s: ?Stream) !mlx.Array {
-    var logits_f32 = try logits.astype(.float32, s);
-    if (cap <= 0.0) return logits_f32;
-    defer logits_f32.deinit();
-    var scaled = try logits_f32.mulScalar(1.0 / cap, s);
-    defer scaled.deinit();
-    var tanh_l = try mlx.Array.tanh(scaled, s);
-    defer tanh_l.deinit();
-    return tanh_l.mulScalar(cap, s);
+pub const softcapLogits = backend.logits_processor.softcapLogits;
+pub const penalizeDevice = backend.logits_processor.penalizeDevice;
+pub const DeviceCandidates = backend.logits_processor.DeviceCandidates;
+pub const HostCandidates = backend.logits_processor.HostCandidates;
+
+fn processorOpts(cfg: Gemma4Config) backend.LogitsProcessorOptions {
+    return .{
+        .vocab_size = cfg.vocab_size,
+        .final_logit_softcapping = cfg.final_logit_softcapping,
+        .sampling_excluded_tokens = cfg.sampling_excluded_tokens,
+    };
 }
 
-/// 设备端重复惩罚 (Repetition Penalty)：在 GPU 上对 logits [1, vocab_size] (单精度，已截断) 中 recent_tokens 的位置
-/// 取值、按 Hugging Face 规则惩罚 (正值除以系数，非正值乘以系数) 后写回，返回新数组；
-/// 不需要惩罚 (系数不大于 1 或没有落在词表内的最近词元) 时返回 null。
-/// 重复出现的词元写回同一个惩罚值，因此恰好惩罚一次。
-fn penalizeDevice(
-    allocator: std.mem.Allocator,
-    logits: mlx.Array,
-    vocab_size: usize,
-    recent_tokens: []const usize,
-    repetition_penalty: f32,
-    s: ?Stream,
-) !?mlx.Array {
-    if (!sampling.penaltyActive(repetition_penalty)) return null;
-    var count: usize = 0;
-    for (recent_tokens) |tok| count += @intFromBool(tok < vocab_size);
-    if (count == 0) return null;
-
-    const ids = try allocator.alloc(i32, count);
-    defer allocator.free(ids);
-    var n: usize = 0;
-    for (recent_tokens) |tok| {
-        if (tok >= vocab_size) continue;
-        ids[n] = @intCast(tok);
-        n += 1;
-    }
-    var idx = try mlx.Array.fromSliceI32(ids, &.{ 1, count });
-    defer idx.deinit();
-    var gathered = try logits.takeAlongAxis(idx, -1, s);
-    defer gathered.deinit();
-    var shrunk = try gathered.mulScalar(1.0 / repetition_penalty, s);
-    defer shrunk.deinit();
-    var grown = try gathered.mulScalar(repetition_penalty, s);
-    defer grown.deinit();
-    var zero = try mlx.Array.fromScalarF32(0.0);
-    defer zero.deinit();
-    var positive = try mlx.Array.greater(gathered, zero, s);
-    defer positive.deinit();
-    var penalized = try mlx.Array.where(positive, shrunk, grown, s);
-    defer penalized.deinit();
-    return try logits.putAlongAxis(idx, penalized, -1, s);
-}
-
-/// 设备端随机采样候选 (尚未求值的惰性计算图)：概率最高的 k 个词元 ID 与其已处理对数几率，
-/// 以及按需计算的完整词表对数配分函数 (只启用核采样时)
-pub const DeviceCandidates = struct {
-    /// [1, k] uint32
-    ids: mlx.Array,
-    /// [1, k] float32 (截断、重复惩罚与排除之后，尚未除以温度)
-    logits: mlx.Array,
-    /// [1] float32：log Σ exp(logit / temperature)
-    log_normalizer: ?mlx.Array = null,
-
-    pub fn deinit(self: *DeviceCandidates) void {
-        self.ids.deinit();
-        self.logits.deinit();
-        if (self.log_normalizer) |*a| a.deinit();
-        self.log_normalizer = null;
-    }
-
-    /// 候选数 k
-    pub fn len(self: *const DeviceCandidates) usize {
-        return self.ids.dimSize(1);
-    }
-
-    /// 把全部惰性数组写入 out (至少 3 个槽位)，返回实际数组个数，供多组候选一次性批量求值
-    pub fn arrays(self: *const DeviceCandidates, out: []mlx.Array) usize {
-        out[0] = self.ids;
-        out[1] = self.logits;
-        if (self.log_normalizer) |a| {
-            out[2] = a;
-            return 3;
-        }
-        return 2;
-    }
-
-    /// 读回主机候选集 (触发求值；只传输 k 对 (ID, 对数几率) 与一个标量)，写入 out[0..k]
-    pub fn read(self: *const DeviceCandidates, out: []sampling.Candidate) !HostCandidates {
-        const ids = try self.ids.dataUint32();
-        const vals = try self.logits.dataFloat32();
-        if (ids.len != vals.len or ids.len > out.len) return error.ShapeMismatch;
-        for (out[0..ids.len], ids, vals) |*cand, id, v| cand.* = .{ .id = id, .logit = v };
-        const lse: ?f32 = if (self.log_normalizer) |a| (try a.dataFloat32())[0] else null;
-        return .{ .candidates = out[0..ids.len], .log_normalizer = lse };
-    }
-};
-
-/// 读回主机的候选集
-pub const HostCandidates = struct {
-    candidates: []sampling.Candidate,
-    log_normalizer: ?f32,
-};
-
-/// 在 GPU 上为单行对数几率 [1, vocab_size] 构建随机采样候选的计算图，处理顺序与 CPU 路径及 Hugging Face 一致：
-/// 最终对数几率截断 → 重复惩罚 (recent_tokens 中的词元全部受罚，窗口由调用方决定) → 叠加排除掩码 →
-/// 取负后沿词表部分排序 (argpartition) 选出 k = `options.candidateCount` 个最大值 → 按下标取回其对数几率。
-/// 只启用核采样 (Nucleus Sampling, Top-P) 时额外计算完整词表的 log Σ exp(logit / temperature)，使累积概率按完整词表归一化；
-/// 未启用前 K 截断 (Top-K) 时 k = `sampling.bounded_candidate_count`，候选集之外的长尾概率质量不参与抽样。
 pub fn deviceCandidates(
     allocator: std.mem.Allocator,
     logits: mlx.Array,
@@ -188,40 +56,9 @@ pub fn deviceCandidates(
     options: SamplingOptions,
     s: ?Stream,
 ) !DeviceCandidates {
-    if (logits.ndim() != 2 or logits.dimSize(0) != 1 or logits.dimSize(1) != cfg.vocab_size) return error.ShapeMismatch;
-    var capped = try softcapLogits(logits, cfg.final_logit_softcapping, s);
-    defer capped.deinit();
-    var penalized_opt = try penalizeDevice(allocator, capped, cfg.vocab_size, recent_tokens, options.repetition_penalty, s);
-    defer if (penalized_opt) |*a| a.deinit();
-    var masked = try mask.apply(penalized_opt orelse capped, s);
-    defer masked.deinit();
-
-    const k = options.candidateCount(cfg.vocab_size);
-    var neg = try masked.negative(s);
-    defer neg.deinit();
-    var order = try neg.argpartitionAxis(k - 1, -1, s);
-    defer order.deinit();
-    var top_view = try order.sliceAxis(1, 0, k, s);
-    defer top_view.deinit();
-    var ids = try top_view.contiguous(s);
-    errdefer ids.deinit();
-    var vals = try masked.takeAlongAxis(ids, -1, s);
-    errdefer vals.deinit();
-
-    var lse: ?mlx.Array = null;
-    if (options.needsLogNormalizer()) {
-        var scaled = try masked.mulScalar(1.0 / options.temperature, s);
-        defer scaled.deinit();
-        lse = try scaled.logsumexpAxis(-1, false, s);
-    }
-    return .{ .ids = ids, .logits = vals, .log_normalizer = lse };
+    return backend.logits_processor.deviceCandidates(allocator, logits, processorOpts(cfg), mask, recent_tokens, options, s);
 }
 
-/// 从单行 GPU 对数几率 [1, vocab_size] 中选取下一个词元：
-/// - 不带重复惩罚的贪婪采样在 GPU 上叠加排除掩码后直接求 argmax（最终对数几率截断单调递增，不改变最大值位置）；
-/// - 带重复惩罚的贪婪采样先截断，再在 CPU 上对截断后的值施加惩罚并贪婪采样；
-/// - 随机采样在 GPU 上完成截断、惩罚、排除与候选选择 (`deviceCandidates`)，只把 k 个候选传回 CPU 交给 `Sampler` 终结。
-/// recent_tokens 中的词元全部受罚 (窗口由调用方决定)；各路径排除同一组词元 (`cfg.sampling_excluded_tokens`，mask 须由同一配置构建)。
 pub fn selectToken(
     allocator: std.mem.Allocator,
     logits: mlx.Array,
@@ -231,32 +68,12 @@ pub fn selectToken(
     sampler: *Sampler,
     s: ?Stream,
 ) !usize {
-    const opts = sampler.options;
-    if (opts.isPlainGreedy()) {
-        var best = try mask.argmax(logits, s);
-        defer best.deinit();
-        return @intCast(try best.itemUint32());
-    }
-    if (opts.isGreedy()) {
-        var capped = try softcapLogits(logits, cfg.final_logit_softcapping, s);
-        defer capped.deinit();
-        const data = try capped.dataFloat32();
-        if (data.len != cfg.vocab_size) return error.ShapeMismatch;
-        return sampling.argmaxWithPenalty(data, cfg.vocab_size, cfg.sampling_excluded_tokens, recent_tokens, opts.repetition_penalty);
-    }
-
-    var pending = try deviceCandidates(allocator, logits, cfg, mask, recent_tokens, opts, s);
-    defer pending.deinit();
-    const buf = try allocator.alloc(sampling.Candidate, pending.len());
-    defer allocator.free(buf);
-    const host = try pending.read(buf);
-    return sampler.sampleCandidates(host.candidates, host.log_normalizer);
+    return backend.logits_processor.selectToken(allocator, logits, processorOpts(cfg), mask, recent_tokens, sampler, s);
 }
 
-/// 以常驻 GPU 词表投影对最终隐状态 h_last [hidden_size] 打分并选取下一个词元
 pub fn selectTokenFromHidden(
     allocator: std.mem.Allocator,
-    lm_head: *const LmHeadWeights,
+    lm_head: anytype,
     mask: *const TokenExclusionMask,
     cfg: Gemma4Config,
     h_last: []const f32,
@@ -264,12 +81,13 @@ pub fn selectTokenFromHidden(
     sampler: *Sampler,
     s: ?Stream,
 ) !usize {
-    if (h_last.len != lm_head.hidden_size or lm_head.vocab_size != cfg.vocab_size) return error.ShapeMismatch;
-    var x = try mlx.Array.fromSlice(h_last, &.{ 1, lm_head.hidden_size });
-    defer x.deinit();
-    var logits = try lm_head.forwardArrayBf16(x, s);
-    defer logits.deinit();
-    return selectToken(allocator, logits, cfg, mask, recent_tokens, sampler, s);
+    const head: backend.offload.LmHead = switch (@TypeOf(lm_head.*)) {
+        backend.offload.LmHead => lm_head.*,
+        backend.offload.LmHeadWeights => .{ .dense = lm_head.* },
+        backend.offload.QuantWeights => .{ .quant = lm_head.* },
+        else => @compileError("Unsupported lm_head type"),
+    };
+    return backend.logits_processor.selectTokenFromHidden(allocator, &head, processorOpts(cfg), mask, h_last, recent_tokens, sampler, s);
 }
 
 // ============================================================================
@@ -512,28 +330,13 @@ pub const Gemma4GpuLayer = struct {
         if (!mlx.has_mlx) return;
         if (self.compiled_mlp != null) return;
 
-        const Helper = struct {
-            fn compute(vres: [*c]mlx.c.mlx_vector_array, in: mlx.c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
-                if (!mlx.has_mlx) return 1;
-                const lw: *const Gemma4GpuLayer = @ptrCast(@alignCast(payload orelse return 1));
-
-                var x_handle: mlx.c.mlx_array = .{ .ctx = null };
-                if (mlx.c.mlx_vector_array_get(&x_handle, in, 0) != 0 or x_handle.ctx == null) return 1;
-                // mlx_vector_array_get 为取出的元素分配了新的数组句柄，用完后需释放
-                var x1 = mlx.Array{ .handle = x_handle };
-                defer x1.deinit();
-
-                var res_arr = lw.mlpResidual(x1, null) catch return 1;
-                defer res_arr.deinit();
-
-                const res_vec = mlx.c.mlx_vector_array_new_data(&[_]mlx.c.mlx_array{res_arr.handle}, 1);
-                _ = mlx.c.mlx_vector_array_set(vres, res_vec);
-                _ = mlx.c.mlx_vector_array_free(res_vec);
-                return 0;
+        const mlpRun = struct {
+            fn run(lw: *const Gemma4GpuLayer, in: [1]mlx.Array) anyerror!mlx.Array {
+                return lw.mlpResidual(in[0], null);
             }
-        };
+        }.run;
 
-        self.compiled_mlp = try mlx.compile(Helper.compute, self, false);
+        self.compiled_mlp = try mlx.compileFn(1, 1, Gemma4GpuLayer, mlpRun, false, self);
     }
 
     pub fn deinit(self: *Gemma4GpuLayer) void {
@@ -578,8 +381,7 @@ pub const Gemma4GpuContext = struct {
     max_seq_len: usize,
     stream: Stream,
 
-    gpu_k: []?mlx.Array,
-    gpu_v: []?mlx.Array,
+    gpu_kv: []?offload.GpuKvCache,
     curr_len: usize = 0,
     sqrt_d: f32 = 0.0,
 
@@ -604,12 +406,9 @@ pub const Gemma4GpuContext = struct {
         var exclusion_mask = try TokenExclusionMask.init(allocator, cfg.vocab_size, cfg.sampling_excluded_tokens);
         errdefer exclusion_mask.deinit();
 
-        const gpu_k = try allocator.alloc(?mlx.Array, layers.len);
-        errdefer allocator.free(gpu_k);
-        const gpu_v = try allocator.alloc(?mlx.Array, layers.len);
-        errdefer allocator.free(gpu_v);
-        @memset(gpu_k, null);
-        @memset(gpu_v, null);
+        const gpu_kv = try allocator.alloc(?offload.GpuKvCache, layers.len);
+        errdefer allocator.free(gpu_kv);
+        @memset(gpu_kv, null);
 
         const stream = try Stream.defaultGpu();
 
@@ -630,8 +429,7 @@ pub const Gemma4GpuContext = struct {
             .config = cfg,
             .max_seq_len = max_seq_len,
             .stream = stream,
-            .gpu_k = gpu_k,
-            .gpu_v = gpu_v,
+            .gpu_kv = gpu_kv,
             .curr_len = 0,
             .sqrt_d = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size))),
         };
@@ -648,17 +446,14 @@ pub const Gemma4GpuContext = struct {
         self.lm_head.deinit();
         self.exclusion_mask.deinit();
         self.stream.deinit();
-        self.allocator.free(self.gpu_k);
-        self.allocator.free(self.gpu_v);
+        self.allocator.free(self.gpu_kv);
     }
 
     /// 重置 GPU 显存中的全部键值缓存
     pub fn resetCache(self: *Gemma4GpuContext) void {
-        for (self.gpu_k, self.gpu_v) |*k_opt, *v_opt| {
-            if (k_opt.*) |*k| k.deinit();
-            if (v_opt.*) |*v| v.deinit();
-            k_opt.* = null;
-            v_opt.* = null;
+        for (self.gpu_kv) |*c_opt| {
+            if (c_opt.*) |*c| c.deinit();
+            c_opt.* = null;
         }
         self.curr_len = 0;
     }
@@ -680,44 +475,6 @@ pub const Gemma4GpuContext = struct {
         const h = self.config.hidden_size;
         const table = embed_u16[0..@min(embed_u16.len, self.config.vocab_size * h)];
         try tensor.embeddingLookupInto(u16, table, tokens, h, self.sqrt_d, out);
-    }
-
-    /// 将新增键值 [1, num_kv_heads, t_new, head_dim] 沿序列轴 (axis 2) 追加至第 l 层 GPU 键值缓存
-    fn appendKv(self: *Gemma4GpuContext, l: usize, k_new: mlx.Array, v_new: mlx.Array, s: Stream) !void {
-        if (self.gpu_k[l]) |old_k| {
-            var new_k = try mlx.Array.concatenateAxis(&.{ old_k, k_new }, 2, s);
-            errdefer new_k.deinit();
-            const new_v = try mlx.Array.concatenateAxis(&.{ self.gpu_v[l].?, v_new }, 2, s);
-            self.replaceKv(l, new_k, new_v);
-        } else {
-            var cloned_k = try k_new.mulScalar(1.0, s);
-            errdefer cloned_k.deinit();
-            const cloned_v = try v_new.mulScalar(1.0, s);
-            self.replaceKv(l, cloned_k, cloned_v);
-        }
-    }
-
-    /// 仅保留第 l 层键值缓存序列轴上 [start, stop) 区间的词元
-    fn sliceKv(self: *Gemma4GpuContext, l: usize, start: usize, stop: usize, s: Stream) !void {
-        var new_k = try self.gpu_k[l].?.sliceAxis(2, start, stop, s);
-        errdefer new_k.deinit();
-        const new_v = try self.gpu_v[l].?.sliceAxis(2, start, stop, s);
-        self.replaceKv(l, new_k, new_v);
-    }
-
-    /// 以新数组替换第 l 层键值缓存并释放旧数组
-    fn replaceKv(self: *Gemma4GpuContext, l: usize, new_k: mlx.Array, new_v: mlx.Array) void {
-        if (self.gpu_k[l]) |*old_k| old_k.deinit();
-        if (self.gpu_v[l]) |*old_v| old_v.deinit();
-        self.gpu_k[l] = new_k;
-        self.gpu_v[l] = new_v;
-    }
-
-    /// 滑动窗口注意力层的键值缓存只保留最近 sliding_window 个词元（截取序列尾部）
-    fn trimSlidingKv(self: *Gemma4GpuContext, l: usize, lw: *const Gemma4GpuLayer, s: Stream) !void {
-        if (lw.attn_type != .sliding_attention) return;
-        const len = self.gpu_k[l].?.dimSize(2);
-        if (len > lw.sliding_window) try self.sliceKv(l, len - lw.sliding_window, len, s);
     }
 
     /// 校验 CPU 层缓存与 GPU 解码层的几何规格一致
@@ -749,13 +506,12 @@ pub const Gemma4GpuContext = struct {
             defer self.allocator.free(pack_buf_v);
             try cl.packWindow(pack_buf_k, pack_buf_v);
 
-            var k_arr = try mlx.Array.fromSlice(pack_buf_k, &.{ 1, lw.num_kv_heads, win, lw.head_dim });
-            errdefer k_arr.deinit();
-            k_arr.eval();
-            var v_arr = try mlx.Array.fromSlice(pack_buf_v, &.{ 1, lw.num_kv_heads, win, lw.head_dim });
-            v_arr.eval();
-
-            self.replaceKv(l_idx, k_arr, v_arr);
+            if (self.gpu_kv[l_idx] == null) {
+                const default_cap = if (lw.attn_type == .sliding_attention) lw.sliding_window else 256;
+                const initial_cap = @max(default_cap, ((win + 255) / 256) * 256);
+                self.gpu_kv[l_idx] = try offload.GpuKvCache.init(initial_cap, lw.num_kv_heads, lw.head_dim, .bfloat16, self.stream);
+            }
+            try self.gpu_kv[l_idx].?.importWindow(pack_buf_k, pack_buf_v, win, self.stream);
         }
         self.curr_len = cached_len;
     }
@@ -769,17 +525,15 @@ pub const Gemma4GpuContext = struct {
                 cl.reset();
                 continue;
             }
-            const k = self.gpu_k[l_idx] orelse return error.ShapeMismatch;
-            const v = self.gpu_v[l_idx] orelse return error.ShapeMismatch;
-            const win = k.dimSize(2);
+            const kv_cache = &(self.gpu_kv[l_idx] orelse return error.ShapeMismatch);
+            const win = cl.windowLen();
             const packed_len = lw.num_kv_heads * win * lw.head_dim;
 
             const buf_k = try self.allocator.alloc(f32, packed_len);
             defer self.allocator.free(buf_k);
             const buf_v = try self.allocator.alloc(f32, packed_len);
             defer self.allocator.free(buf_v);
-            try k.copyToSlice(buf_k);
-            try v.copyToSlice(buf_v);
+            try kv_cache.exportWindow(buf_k, buf_v, win, self.stream);
             try cl.writeWindow(buf_k, buf_v, win, self.curr_len);
         }
     }
@@ -797,20 +551,6 @@ pub const Gemma4GpuContext = struct {
         }
     };
 
-    /// 将 [1, t, n * head_dim] 投影结果按头执行均方根层归一化 (weight 为 null 时为无参数归一化)，输出 [1, n, t, head_dim]
-    fn normHeads(raw: mlx.Array, weight: ?mlx.Array, t: usize, n: usize, lw: *const Gemma4GpuLayer, s: Stream) !mlx.Array {
-        if (t == 1) {
-            var heads_4d = try raw.reshape(&.{ 1, n, 1, lw.head_dim }, s);
-            defer heads_4d.deinit();
-            return mlx.Array.fastRmsNorm(heads_4d, weight, lw.rms_norm_eps, s);
-        }
-        var heads_4d = try raw.reshape(&.{ 1, t, n, lw.head_dim }, s);
-        defer heads_4d.deinit();
-        var normed = try mlx.Array.fastRmsNorm(heads_4d, weight, lw.rms_norm_eps, s);
-        defer normed.deinit();
-        return normed.transposeAxes(&.{ 0, 2, 1, 3 }, s);
-    }
-
     /// 对 [1, t, hidden_size] 输入执行融合 QKV 量化投影、Q/K/V 头归一化、转置与旋转位置编码 (起始绝对位置为 pos)
     fn projectQkv(lw: *const Gemma4GpuLayer, in_norm: mlx.Array, t: usize, pos: usize, s: Stream) !QkvHeads {
         var qkv_raw = try lw.fused_qkv.forwardArray(in_norm, s);
@@ -827,19 +567,12 @@ pub const Gemma4GpuContext = struct {
             try k_raw.sliceAxis(2, 0, lw.k_dim, s);
         defer v_raw.deinit();
 
-        // 在连续内存上执行 Q-Norm / K-Norm / 无参数 V-Norm，再排布为 [1, heads, t, head_dim]：
-        // t == 1 时 [1, 1, heads, head_dim] 与 [1, heads, 1, head_dim] 内存布局相同，直接重塑而无需转置
-        var q_normed = try normHeads(q_raw, lw.q_norm_w, t, lw.num_heads, lw, s);
-        defer q_normed.deinit();
-        var k_normed = try normHeads(k_raw, lw.k_norm_w, t, lw.num_kv_heads, lw, s);
-        defer k_normed.deinit();
-        var v_normed = try normHeads(v_raw, null, t, lw.num_kv_heads, lw, s);
-        errdefer v_normed.deinit();
-
-        // 旋转位置编码：滑动窗口层为标准 RoPE，全局注意力层为在完整 head_dim 上旋转的比例旋转位置编码
-        var q_rot = try lw.rope.apply(q_normed, pos, s);
+        var q_rot = try backend.mlx_blocks.projectHeads(q_raw, lw.q_norm_w, t, lw.num_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
         errdefer q_rot.deinit();
-        const k_rot = try lw.rope.apply(k_normed, pos, s);
+        var k_rot = try backend.mlx_blocks.projectHeads(k_raw, lw.k_norm_w, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
+        errdefer k_rot.deinit();
+        const v_normed = try backend.mlx_blocks.projectHeads(v_raw, null, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, null, pos, s);
+
         return .{ .q_rot = q_rot, .k_rot = k_rot, .v = v_normed };
     }
 
@@ -855,18 +588,15 @@ pub const Gemma4GpuContext = struct {
 
         var post_attn = try mlx.Array.fastRmsNorm(o_out, lw.post_attn_w, lw.rms_norm_eps, s);
         defer post_attn.deinit();
-        var x1 = try mlx.Array.add(x_cur, post_attn, s);
+        var x1 = try backend.mlx_blocks.residualScale(x_cur, post_attn, null, s);
         defer x1.deinit();
         return if (use_compiled) lw.runMlp(x1, s) else lw.mlpResidual(x1, s);
     }
 
     /// 最终层归一化：取 [1, t, hidden_size] 的最后 rows 行，返回 [rows, hidden_size]
     fn finalNorm(self: *const Gemma4GpuContext, x_cur: mlx.Array, t: usize, rows: usize, s: Stream) !mlx.Array {
-        var tail = try x_cur.sliceAxis(1, t - rows, t, s);
-        defer tail.deinit();
-        var tail_2d = try tail.reshape(&.{ rows, self.config.hidden_size }, s);
-        defer tail_2d.deinit();
-        return mlx.Array.fastRmsNorm(tail_2d, self.final_norm_w, self.config.rms_norm_eps, s);
+        _ = t;
+        return backend.mlx_blocks.finalHidden(x_cur, self.final_norm_w, self.config.rms_norm_eps, rows, self.config.hidden_size, s);
     }
 
     /// 执行全 GPU 序列级并行预填充 (Prefill)，一次性完成整个 Prompt 词元序列的矩阵乘法与 KVCache 初始化，按 sampler 返回首个预测词元
@@ -898,18 +628,13 @@ pub const Gemma4GpuContext = struct {
             var qkv = try projectQkv(lw, in_norm, T, 0, s);
             defer qkv.deinit();
 
-            // (2) 写入 GPU 键值缓存 (滑动窗口层只保留最近 sliding_window 个词元)
-            if (lw.attn_type == .sliding_attention and T > lw.sliding_window) {
-                var k_win = try qkv.k_rot.sliceAxis(2, T - lw.sliding_window, T, s);
-                errdefer k_win.deinit();
-                const v_win = try qkv.v.sliceAxis(2, T - lw.sliding_window, T, s);
-                self.replaceKv(l, k_win, v_win);
-            } else {
-                var k_copy = try qkv.k_rot.mulScalar(1.0, s);
-                errdefer k_copy.deinit();
-                const v_copy = try qkv.v.mulScalar(1.0, s);
-                self.replaceKv(l, k_copy, v_copy);
+            // (2) 写入预分配 GPU 键值缓存
+            if (self.gpu_kv[l] == null) {
+                const default_cap = if (lw.attn_type == .sliding_attention) lw.sliding_window else 256;
+                const initial_cap = @max(default_cap, ((T + 255) / 256) * 256);
+                self.gpu_kv[l] = try offload.GpuKvCache.init(initial_cap, lw.num_kv_heads, lw.head_dim, .bfloat16, s);
             }
+            _ = try self.gpu_kv[l].?.writeStep(qkv.k_rot, qkv.v, lw.attn_type == .sliding_attention, lw.sliding_window, 0, T, s);
 
             // (3) 带因果与滑动窗口掩码的缩放点积注意力 (scale = 1.0)：窗口覆盖整个序列时掩码化简为融合内核的因果模式
             var attn_out = try offload.maskedAttention(self.allocator, qkv.q_rot, qkv.k_rot, qkv.v, 1.0, lw.attn_type.mask(lw.sliding_window), 0, 0, s);
@@ -956,12 +681,22 @@ pub const Gemma4GpuContext = struct {
             var qkv = try projectQkv(lw, in_norm, 1, pos, s);
             defer qkv.deinit();
 
-            // 增量写入 GPU 键值缓存，滑动窗口层随后只保留最近 sliding_window 个词元
-            try self.appendKv(l, qkv.k_rot, qkv.v, s);
-            try self.trimSlidingKv(l, lw, s);
+            // 增量写入 GPU 键值缓存
+            if (self.gpu_kv[l] == null) {
+                const default_cap = if (lw.attn_type == .sliding_attention) lw.sliding_window else 256;
+                const initial_cap = @max(default_cap, ((pos + 1 + 255) / 256) * 256);
+                self.gpu_kv[l] = try offload.GpuKvCache.init(initial_cap, lw.num_kv_heads, lw.head_dim, .bfloat16, s);
+            }
+            const view = try self.gpu_kv[l].?.writeStep(qkv.k_rot, qkv.v, lw.attn_type == .sliding_attention, lw.sliding_window, pos, 1, s);
+            defer if (view.is_slice) {
+                var vk = view.k;
+                var vv = view.v;
+                vk.deinit();
+                vv.deinit();
+            };
 
-            // 单查询注意力：缓存中的全部键均可见 (滑动窗口层缓存已截取至窗口长度)
-            var attn_out = try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, .none, s);
+            // 单查询注意力：缓存中的全部键均可见
+            var attn_out = try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, view.k, view.v, 1.0, .none, s);
             defer attn_out.deinit();
 
             // 单步解码形状固定，启用静态编译的门控多层感知机宏内核
@@ -1018,13 +753,21 @@ pub const Gemma4GpuContext = struct {
             var qkv = try projectQkv(lw, in_norm, M, pos, s);
             defer qkv.deinit();
 
-            // 增量追加至 GPU 键值缓存（滑动窗口层在本步结束后再截取最近 sliding_window 个词元）
-            try self.appendKv(l, qkv.k_rot, qkv.v, s);
-            const kv_len = self.gpu_k[l].?.dimSize(2);
+            // 增量写入预分配 GPU 键值缓存
+            if (self.gpu_kv[l] == null) {
+                const default_cap = if (lw.attn_type == .sliding_attention) lw.sliding_window else 256;
+                const initial_cap = @max(default_cap, ((pos + M + 255) / 256) * 256);
+                self.gpu_kv[l] = try offload.GpuKvCache.init(initial_cap, lw.num_kv_heads, lw.head_dim, .bfloat16, s);
+            }
+            const view = try self.gpu_kv[l].?.writeStep(qkv.k_rot, qkv.v, lw.attn_type == .sliding_attention, lw.sliding_window, pos, M, s);
+            defer if (view.is_slice) {
+                var vk = view.k;
+                var vv = view.v;
+                vk.deinit();
+                vv.deinit();
+            };
 
-            // 因果注意力：缓存中的第 j 个键对应绝对位置 pos + M - kv_len + j；
-            // 滑动窗口层的缓存超过窗口长度时，较早的查询会看到窗口之外的键，掩码化简后保留显式滑动窗口掩码
-            var attn_out = try offload.maskedAttention(self.allocator, qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, lw.attn_type.mask(lw.sliding_window), pos, pos + M - kv_len, s);
+            var attn_out = try offload.cachedAttention(self.allocator, qkv.q_rot, view.k, view.v, 1.0, lw.attn_type == .sliding_attention, lw.sliding_window, pos, M, s);
             defer attn_out.deinit();
 
             const x_next = try layerTail(lw, x_cur, attn_out, M, true, s);
@@ -1050,15 +793,11 @@ pub const Gemma4GpuContext = struct {
         else
             try self.verifySampled(logits_raw, input_tokens, history.items, recent_tokens.len, sampler, accepted_tokens, s);
 
-        // 4. 回滚未被接受的投机词元 KVCache（从缓存尾部丢弃，滑动窗口层的缓存并不从位置 0 开始），
-        //    随后滑动窗口层只保留最近 sliding_window 个词元 (惰性图切片，零同步开销)
-        const rejected = M - num_accepted;
-        for (self.layers, 0..) |*lw, l| {
-            if (rejected > 0) {
-                const len = self.gpu_k[l].?.dimSize(2);
-                try self.sliceKv(l, 0, len - rejected, s);
+        // 4. 回滚未被接受的投机词元 KVCache
+        if (M > num_accepted) {
+            for (self.gpu_kv) |*maybe_kv| {
+                if (maybe_kv.*) |*kv| kv.truncate(pos + num_accepted);
             }
-            try self.trimSlidingKv(l, lw, s);
         }
 
         self.curr_len = pos + num_accepted;
