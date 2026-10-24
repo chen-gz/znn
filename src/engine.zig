@@ -5,8 +5,21 @@ const dataset = @import("dataset.zig");
 const nn = @import("nn.zig");
 const models = @import("models.zig");
 
-pub const Gemma4E4BEngine = models.Gemma4E4BEngine;
-pub const Gemma4Q4Engine = models.Gemma4Q4Engine;
+// LLM 推理流水线 (LLM Inference Pipeline)
+pub const pipeline = @import("engine/pipeline.zig");
+pub const LLMPipeline = pipeline.LLMPipeline;
+pub const TextStream = pipeline.TextStream;
+pub const ModelArchitecture = pipeline.ModelArchitecture;
+pub const detectModelArchitecture = pipeline.detectModelArchitecture;
+
+pub const stats = @import("engine/stats.zig");
+pub const GenerationStats = stats.GenerationStats;
+pub const TextResult = stats.TextResult;
+
+// 因果语言模型训练辅助器 (Causal LM Training Utilities)
+pub const causal_lm = @import("engine/causal_lm.zig");
+pub const CausalLMStepResult = causal_lm.CausalLMStepResult;
+pub const trainCausalLMStep = causal_lm.trainCausalLMStep;
 
 pub const ClassificationStepResult = struct {
     loss: f32,
@@ -539,4 +552,16 @@ test "engine evaluateClassification weights batches by sample count" {
         expected_loss += step.loss / 3.0;
     }
     try std.testing.expectApproxEqAbs(expected_loss, res.loss, 1e-5);
+}
+
+test "engine LLMPipeline default options contract" {
+    const opt = LLMPipeline.Options.defaultOptions();
+    try std.testing.expectEqualStrings("", opt.model_path);
+    try std.testing.expectEqualStrings("gemma4_vocab.bin", opt.vocab_path);
+    try std.testing.expect(opt.warmup);
+
+    const gen_opt = LLMPipeline.GenerateOptions.defaultOptions();
+    try std.testing.expectEqual(@as(usize, 256), gen_opt.max_new_tokens);
+    try std.testing.expect(gen_opt.apply_chat_template);
+    try std.testing.expect(!gen_opt.verbose);
 }

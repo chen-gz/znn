@@ -1370,15 +1370,3 @@ test "GPT Module Save and Load" {
         try std.testing.expectEqual(w1, w2);
     }
 }
-
-test "Gemma4E4BEngine options default values and struct contracts" {
-    const default_opt = gemma4_e4b.Gemma4E4BEngine.Options.defaultOptions();
-    try std.testing.expectEqualStrings("", default_opt.model_dir);
-    try std.testing.expectEqualStrings("gemma4_vocab.bin", default_opt.vocab_path);
-    try std.testing.expect(default_opt.warmup);
-
-    const default_gen = gemma4_e4b.Gemma4E4BEngine.GenerateOptions.defaultOptions();
-    try std.testing.expectEqual(@as(usize, 256), default_gen.max_new_tokens);
-    try std.testing.expect(default_gen.apply_chat_template);
-    try std.testing.expect(!default_gen.verbose);
-}
