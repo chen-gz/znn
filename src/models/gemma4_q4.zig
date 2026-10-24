@@ -9,7 +9,7 @@ const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const nn = @import("../nn.zig");
 const gemma4 = @import("gemma4.zig");
-const gemma4_gpu = @import("gemma4_gpu.zig");
+pub const gemma4_offload = backend.gemma4_offload;
 
 const Tensor = tensor.Tensor;
 const Q4Block = tensor.quant.Q4Block;
@@ -21,8 +21,8 @@ const Gemma4KVCache = gemma4.Gemma4KVCache;
 const vec_math = backend.vec_math;
 const LmHeadWeights = backend.offload.LmHeadWeights;
 const Sampler = backend.sampling.Sampler;
-const Gemma4GpuLayer = gemma4_gpu.Gemma4GpuLayer;
-const Gemma4GpuContext = gemma4_gpu.Gemma4GpuContext;
+pub const Gemma4GpuLayer = gemma4_offload.Gemma4GpuLayer;
+pub const Gemma4GpuContext = gemma4_offload.Gemma4GpuContext;
 
 const freePersistentTensor = nn.core.freePersistentTensor;
 const deinitModel = nn.core.deinitModel;
@@ -317,7 +317,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             out_gpu: *Gemma4GpuLayer,
         ) !Gemma4Q4DecoderLayer {
             const spec = config.layerSpec(i);
-            const d = gemma4_gpu.ProjectionDims.of(config, i);
+            const d = gemma4_offload.ProjectionDims.of(config, i);
             const H = config.hidden_size;
 
             var layer = try Gemma4Q4DecoderLayer.initEmpty(
@@ -687,12 +687,12 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             var mask = try backend.offload.TokenExclusionMask.init(arena, config.vocab_size, config.sampling_excluded_tokens);
             defer mask.deinit();
             if (self.lm_head_weights) |*w| {
-                return gemma4_gpu.selectTokenFromHidden(arena, w, &mask, config, h_last, recent_tokens, sampler, stream);
+                return gemma4_offload.selectTokenFromHidden(arena, w, &mask, config, h_last, recent_tokens, sampler, stream);
             }
             // 未构建常驻 LM Head 时临时构建一次 BF16 词表矩阵
             var tmp = try LmHeadWeights.init(embed_u16, config.vocab_size, config.hidden_size, stream);
             defer tmp.deinit();
-            return gemma4_gpu.selectTokenFromHidden(arena, &tmp, &mask, config, h_last, recent_tokens, sampler, stream);
+            return gemma4_offload.selectTokenFromHidden(arena, &tmp, &mask, config, h_last, recent_tokens, sampler, stream);
         }
 
         /// 从模型映射字节中切出 BF16 词表嵌入矩阵 [vocab_size, hidden_size]

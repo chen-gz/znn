@@ -21,13 +21,15 @@ pub const ExecutionMode = enum {
     deferred,
 };
 
+pub const Device = backend.Device;
+
 /// 计算图配置（遵循 AGENTS.md §4：所有字段均有默认值）
 pub const GraphOptions = struct {
     io: ?std.Io = null, // 由应用注入的输入输出接口；null 表示串行执行
     enable_grad: bool = true,
     mode: ExecutionMode = .eager,
     max_tasks: ?usize = null,
-    device: backend.mlx.DeviceType = .cpu, // 目标计算设备：.cpu (默认) 或 .gpu (Apple Silicon MLX 硬件加速)
+    device: Device = .cpu, // 目标计算设备：.cpu (默认) 或 .gpu (Apple Silicon MLX 硬件加速)
     mlx_stream: ?backend.mlx.Stream = null, // 可选注入的 MLX 执行流 (Stream)；为 null 时使用默认流
 
     pub const default: GraphOptions = .{};

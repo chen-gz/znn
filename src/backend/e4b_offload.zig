@@ -1,33 +1,124 @@
-//! Gemma 4 E4B (Effective 4B) 苹果统一内存架构 (UMA) GPU 硬件加速推理引擎
+//! Gemma 4 E4B (Effective 4B) 苹果统一内存架构 (UMA) GPU 后端硬件加速引擎
 //!
-//! 支持直接零拷贝映射 Safetensors 模型权重与预融合顺序二进制缓存 (`gemma4_e4b_direct.bin`)、
-//! 逐层嵌入增强 (Per-Layer Embeddings, PLE)、异构滑动窗口与全局注意力机制，
-//! 以及苹果统一内存 GPU 硬件加速与双阶段异步流水线推理。
+//! 在 Layer 0 (backend) 提供端到端 GPU 零拷贝映射、自回归流水线与预融合二进制缓存执行能力，
+//! 供上层纯模型结构 (Gemma4E4BForCausalLM) 按需分发，使模型定义彻底解耦底层硬件细节。
 
 const std = @import("std");
-const backend = @import("../backend.zig");
-const tensor = @import("../tensor.zig");
-const nn = @import("../nn.zig");
-const gemma4 = @import("gemma4.zig");
-const gemma4_gpu = @import("gemma4_gpu.zig");
+const mlx = @import("mlx.zig");
+const offload = @import("offload.zig");
+const mlx_blocks = @import("mlx_blocks.zig");
+const logits_processor = @import("logits_processor.zig");
+const sampling = @import("sampling.zig");
+const safetensors = @import("safetensors.zig");
+const activation = @import("activation.zig");
+const vec_math = @import("vec_math.zig");
+const rope_mod = @import("rope.zig");
 
-const mlx = backend.mlx;
-pub const Gemma4Config = gemma4.Gemma4Config;
-pub const Q4Weights = backend.offload.Q4Weights;
-pub const QuantLayout = backend.offload.QuantLayout;
-pub const Stream = backend.offload.Stream;
-pub const GpuKvCache = backend.offload.GpuKvCache;
-const TokenExclusionMask = backend.offload.TokenExclusionMask;
-const Sampler = backend.sampling.Sampler;
-const SamplingOptions = backend.sampling.SamplingOptions;
-pub const TensorMeta = nn.TensorMeta;
-pub const SafetensorsArchive = nn.SafetensorsArchive;
+pub const Q4Weights = offload.Q4Weights;
+pub const QuantLayout = offload.QuantLayout;
+pub const Stream = offload.Stream;
+pub const GpuKvCache = offload.GpuKvCache;
+pub const TokenExclusionMask = offload.TokenExclusionMask;
+pub const Sampler = sampling.Sampler;
+pub const SamplingOptions = sampling.SamplingOptions;
+pub const SafetensorsArchive = safetensors.SafetensorsArchive;
+pub const TensorMeta = safetensors.TensorMeta;
+pub const GeluApproximation = activation.GeluApproximation;
+pub const GpuRope = mlx_blocks.Rope;
+pub const Gemma4E4BOffloadEngine = Gemma4E4BGpuContext;
 
-/// 持有独立键值缓存的解码层数 (其余 num_kv_shared_layers 层复用前层缓存)
-pub const num_kv_layers: usize = Gemma4Config.e4b.num_hidden_layers - Gemma4Config.e4b.num_kv_shared_layers;
+/// E4B 模型配置参数 (供后端执行流直接调度，零对上层模型的依赖)
+pub const E4BConfig = struct {
+    pub const e4b: E4BConfig = .{};
+    pub const TokenRange = sampling.TokenRange;
+    pub const default_sampling_excluded_tokens = [_]TokenRange{
+        .single(0),
+        .{ .first = 258880, .last = 258884 },
+    };
 
-pub const kvSourceLayer = Gemma4Config.kvSourceLayer;
-pub const isKvSharedSource = Gemma4Config.isKvSharedSource;
+    vocab_size: usize = 262144,
+    hidden_size: usize = 2560,
+    intermediate_size: usize = 10240,
+    num_hidden_layers: usize = 42,
+    num_attention_heads: usize = 8,
+    num_key_value_heads: usize = 2,
+    num_global_key_value_heads: usize = 2,
+    head_dim: usize = 256,
+    global_head_dim: usize = 512,
+    sliding_window: usize = 512,
+    rms_norm_eps: f32 = 1e-6,
+    final_logit_softcapping: f32 = 30.0,
+    hidden_size_per_layer_input: usize = 256,
+    num_kv_shared_layers: usize = 18,
+    hidden_activation: GeluApproximation = .tanh,
+    sampling_excluded_tokens: []const TokenRange = &default_sampling_excluded_tokens,
+
+    pub const LayerSpec = struct {
+        head_dim: usize,
+        num_kv_heads: usize,
+        is_sliding: bool,
+
+        pub fn ropeOptions(self: LayerSpec) rope_mod.RopeOptions {
+            if (self.is_sliding) {
+                return rope_mod.RopeOptions.proportional(10000.0, 1.0);
+            } else {
+                return rope_mod.RopeOptions.proportional(1000000.0, 0.25);
+            }
+        }
+    };
+
+    pub fn layerSpec(self: E4BConfig, idx: usize) LayerSpec {
+        const is_full = ((idx + 1) % 6 == 0);
+        return .{
+            .head_dim = if (is_full) self.global_head_dim else self.head_dim,
+            .num_kv_heads = if (is_full) self.num_global_key_value_heads else self.num_key_value_heads,
+            .is_sliding = !is_full,
+        };
+    }
+
+    pub fn toE4BConfig(raw: anytype) E4BConfig {
+        if (@TypeOf(raw) == E4BConfig) return raw;
+        return .{
+            .vocab_size = raw.vocab_size,
+            .hidden_size = raw.hidden_size,
+            .intermediate_size = raw.intermediate_size,
+            .num_hidden_layers = raw.num_hidden_layers,
+            .num_attention_heads = raw.num_attention_heads,
+            .num_key_value_heads = raw.num_key_value_heads,
+            .num_global_key_value_heads = raw.num_global_key_value_heads,
+            .head_dim = raw.head_dim,
+            .global_head_dim = raw.global_head_dim,
+            .sliding_window = raw.sliding_window,
+            .rms_norm_eps = raw.rms_norm_eps,
+            .final_logit_softcapping = raw.final_logit_softcapping,
+            .hidden_size_per_layer_input = raw.hidden_size_per_layer_input,
+            .num_kv_shared_layers = raw.num_kv_shared_layers,
+            .sampling_excluded_tokens = if (@hasField(@TypeOf(raw), "sampling_excluded_tokens")) raw.sampling_excluded_tokens else &default_sampling_excluded_tokens,
+        };
+    }
+};
+
+pub const num_kv_layers: usize = 42 - 18;
+
+pub fn kvSourceLayer(cfg: E4BConfig, layer_idx: usize) usize {
+    const first_shared = cfg.num_hidden_layers - cfg.num_kv_shared_layers;
+    if (layer_idx < first_shared) return layer_idx;
+    const is_sliding = cfg.layerSpec(layer_idx).is_sliding;
+    var j = first_shared;
+    while (j > 0) {
+        j -= 1;
+        if (cfg.layerSpec(j).is_sliding == is_sliding) return j;
+    }
+    unreachable;
+}
+
+pub fn isKvSharedSource(cfg: E4BConfig, layer_idx: usize) bool {
+    const first_shared = cfg.num_hidden_layers - cfg.num_kv_shared_layers;
+    for (first_shared..cfg.num_hidden_layers) |shared_idx| {
+        if (kvSourceLayer(cfg, shared_idx) == layer_idx) return true;
+    }
+    return false;
+}
 
 /// 逐层嵌入输入结构 (Per-Layer Inputs, PLE)
 pub const PleWeights = struct {
@@ -131,10 +222,10 @@ pub const GpuLayerE4B = struct {
     num_kv_heads: usize,
     head_dim: usize,
     /// 旋转位置编码：滑动窗口层为标准半切分 RoPE，全局注意力层为在完整 head_dim 上旋转的比例旋转位置编码 (Proportional RoPE)
-    rope: gemma4_gpu.GpuRope,
+    rope: GpuRope,
     rms_norm_eps: f32,
-    /// 门控多层感知机与逐层输入门控的高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 形式 (取自 `Gemma4Config.hidden_activation`)
-    hidden_activation: backend.GeluApproximation,
+    /// 门控多层感知机与逐层输入门控的高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 形式 (取自 `E4BConfig.hidden_activation`)
+    hidden_activation: GeluApproximation,
     compiled_tail: ?mlx.Closure = null,
 
     /// 执行解码层注意力投影之后的全尾部计算 (Post-Attention RMSNorm + Gated MLP + PLE + LayerScalar)
@@ -147,10 +238,10 @@ pub const GpuLayerE4B = struct {
     ) !mlx.Array {
         var post_attn = try mlx.Array.fastRmsNorm(o_out, self.post_attn_w, self.rms_norm_eps, s);
         defer post_attn.deinit();
-        var x1 = try backend.mlx_blocks.residualScale(x_in, post_attn, null, s);
+        var x1 = try mlx_blocks.residualScale(x_in, post_attn, null, s);
         defer x1.deinit();
 
-        var post_mlp = try backend.mlx_blocks.gatedMlp(
+        var post_mlp = try mlx_blocks.gatedMlp(
             x1,
             &self.fused_gate_up,
             null,
@@ -162,7 +253,7 @@ pub const GpuLayerE4B = struct {
             s,
         );
         defer post_mlp.deinit();
-        var x2 = try backend.mlx_blocks.residualScale(x1, post_mlp, null, s);
+        var x2 = try mlx_blocks.residualScale(x1, post_mlp, null, s);
         defer x2.deinit();
 
         var ple_gate_raw = try self.ple_gate.forwardArray(x2, s);
@@ -177,7 +268,7 @@ pub const GpuLayerE4B = struct {
         var ple_normed = try mlx.Array.fastRmsNorm(ple_projected, self.ple_norm_w, self.rms_norm_eps, s);
         defer ple_normed.deinit();
 
-        return backend.mlx_blocks.residualScale(x2, ple_normed, self.layer_scalar_w, s);
+        return mlx_blocks.residualScale(x2, ple_normed, self.layer_scalar_w, s);
     }
 
     pub fn tailRun(self: *const GpuLayerE4B, in_arrs: [3]mlx.Array) !mlx.Array {
@@ -225,7 +316,7 @@ pub const Gemma4E4BGpuContext = struct {
     norm_w: mlx.Array,
     lm_head: Q4Weights,
 
-    config: Gemma4Config,
+    config: E4BConfig,
     stream: Stream,
     /// 与 `config.sampling_excluded_tokens` 一致的 GPU 词表排除掩码 (贪婪 argmax 与随机采样候选选择前叠加)
     exclusion_mask: TokenExclusionMask,
@@ -245,7 +336,8 @@ pub const Gemma4E4BGpuContext = struct {
     pub const DIRECT_CACHE_FILENAME = "gemma4_e4b_direct.bin";
 
     /// 计算预融合顺序二进制权重缓存 (`gemma4_e4b_direct.bin`) 的精确字节总长度
-    pub fn computeExpectedDirectCacheSize(cfg: Gemma4Config) usize {
+    pub fn computeExpectedDirectCacheSize(raw_cfg: anytype) usize {
+        const cfg = E4BConfig.toE4BConfig(raw_cfg);
         var total: usize = 16; // 8B magic ("ZNN4E4B1") + 8B version (u64)
         total += QuantLayout.initDefault(cfg.hidden_size, cfg.vocab_size, 64, 4).totalBytes();
         total += cfg.hidden_size * @sizeOf(u16);
@@ -354,7 +446,7 @@ pub const Gemma4E4BGpuContext = struct {
 
     /// 加载全部权重并构建模型 (不含预热)：任一步骤失败时精确回收此前已构建的全部资源
     fn loadWeights(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8) !Gemma4E4BGpuContext {
-        const cfg = Gemma4Config.e4b;
+        const cfg = E4BConfig.e4b;
         const expected_cache_bytes = computeExpectedDirectCacheSize(cfg);
         const cache_path = try std.fs.path.join(allocator, &.{ dir_path, DIRECT_CACHE_FILENAME });
         defer allocator.free(cache_path);
@@ -577,10 +669,10 @@ pub const Gemma4E4BGpuContext = struct {
 
     /// 按直通缓存的存储顺序加载单个解码层：
     /// [k_norm] -> qkv -> o -> gate_up -> down -> ple_gate -> ple_proj -> 6 个层归一化 -> layer_scalar
-    fn loadLayer(src: *WeightSource, cfg: Gemma4Config, idx: usize) !GpuLayerE4B {
+    fn loadLayer(src: *WeightSource, cfg: E4BConfig, idx: usize) !GpuLayerE4B {
         const spec = cfg.layerSpec(idx);
         const hd = spec.head_dim;
-        const is_full = spec.attn_type == .full_attention;
+        const is_full = !spec.is_sliding;
         const H = cfg.hidden_size;
         const ple_dim = cfg.hidden_size_per_layer_input;
         const out_q = cfg.num_attention_heads * hd;
@@ -629,7 +721,7 @@ pub const Gemma4E4BGpuContext = struct {
         errdefer if (scalar.arr) |*arr| arr.deinit();
 
         // 全局注意力层采用 partial_rotary_factor = 0.25 的比例旋转位置编码 (与 12B GPU 路径共用同一实现)
-        const rope = try gemma4_gpu.GpuRope.init(hd, spec.attn_type.ropeOptions());
+        const rope = try GpuRope.init(hd, spec.ropeOptions());
 
         return .{
             .qkv_proj = qkv_proj,
@@ -837,14 +929,16 @@ pub const Gemma4E4BGpuContext = struct {
                 }
                 self.writeCache(&bits);
             }
-            const value = backend.vec_math.bf16ToF32(std.mem.readInt(u16, &bits, .little));
+            const value = vec_math.bf16ToF32(std.mem.readInt(u16, &bits, .little));
             const arr: ?mlx.Array = if (value != 1.0) try mlx.Array.fromRawData(@ptrCast(&bits), &.{1}, .bfloat16) else null;
             return .{ .value = value, .arr = arr };
         }
     };
 
     fn createTokenIndicesArray(self: *const Gemma4E4BGpuContext, tokens: []const usize) !mlx.Array {
-        try tensor.checkIndices(tokens, self.config.vocab_size);
+        for (tokens) |tok| {
+            if (tok >= self.config.vocab_size) return error.IndexOutOfBounds;
+        }
         const T = tokens.len;
         const single_tok = [_]i32{if (T > 0) @intCast(tokens[0]) else 0};
         if (T == 1) {
@@ -1030,6 +1124,14 @@ pub const Gemma4E4BGpuContext = struct {
         return best_tok_arr;
     }
 
+    fn processorOpts(cfg: E4BConfig) logits_processor.LogitsProcessorOptions {
+        return .{
+            .vocab_size = cfg.vocab_size,
+            .final_logit_softcapping = cfg.final_logit_softcapping,
+            .sampling_excluded_tokens = cfg.sampling_excluded_tokens,
+        };
+    }
+
     /// 预填充并按 sampler 在主机端完成选取 (带重复惩罚的贪婪采样与随机采样)，重复惩罚作用于完整的 Prompt 词元
     fn prefillSampled(self: *Gemma4E4BGpuContext, prompt_tokens: []const usize, sampler: *Sampler) !usize {
         const T = prompt_tokens.len;
@@ -1043,7 +1145,7 @@ pub const Gemma4E4BGpuContext = struct {
         var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, 0, T, s);
         defer logits_bf16.deinit();
 
-        const best_tok = try gemma4_gpu.selectToken(self.allocator, logits_bf16, self.config, &self.exclusion_mask, prompt_tokens, sampler, s);
+        const best_tok = try logits_processor.selectToken(self.allocator, logits_bf16, processorOpts(self.config), &self.exclusion_mask, prompt_tokens, sampler, s);
         self.curr_len = T;
         return best_tok;
     }
@@ -1059,15 +1161,24 @@ pub const Gemma4E4BGpuContext = struct {
         var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, pos, 1, s);
         defer logits_bf16.deinit();
 
-        const best_tok = try gemma4_gpu.selectToken(self.allocator, logits_bf16, self.config, &self.exclusion_mask, history_tokens, sampler, s);
+        const best_tok = try logits_processor.selectToken(self.allocator, logits_bf16, processorOpts(self.config), &self.exclusion_mask, history_tokens, sampler, s);
         self.curr_len = pos + 1;
         return best_tok;
     }
 
+    pub const default_generation = SamplingOptions{
+        .temperature = 1.0,
+        .top_k = 64,
+        .top_p = 0.95,
+        .repetition_penalty = 1.0,
+        .seed = 0,
+    };
+    pub const default_stop_tokens = [_]usize{ 1, 106 };
+
     /// 自回归生成选项 (遵循 AGENTS.md §4：所有字段均有默认值)
     pub const GenerateOptions = struct {
         /// 采样设置，默认采用 Gemma 4 官方生成配置
-        sampling: SamplingOptions = gemma4.default_generation,
+        sampling: SamplingOptions = default_generation,
         /// 最多生成的词元数 (含首个词元)
         max_new_tokens: usize = 256,
         /// 生成到这些词元 (含) 即停止
@@ -1077,8 +1188,6 @@ pub const Gemma4E4BGpuContext = struct {
             return .{};
         }
     };
-
-    pub const default_stop_tokens = [_]usize{ gemma4.Gemma4Vocabulary.EOS, gemma4.Gemma4Vocabulary.EOT };
 
     /// 开始一次自回归生成：重置键值缓存并返回逐词元产出的 `Generation`。同一模型同一时刻只能进行一次生成
     /// (共享键值缓存)；生成对象须在模型之前释放
@@ -1231,10 +1340,10 @@ pub const Gemma4E4BGpuContext = struct {
             var v_raw_slice = try qkv_4d.sliceAxis(axis, l.num_heads + l.num_kv_heads, total_heads, s);
             defer v_raw_slice.deinit();
 
-            q_rot_opt = try backend.mlx_blocks.projectHeads(q_raw_slice, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
-            var k_rot = try backend.mlx_blocks.projectHeads(k_raw_slice, l.k_norm_w.?, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
+            q_rot_opt = try mlx_blocks.projectHeads(q_raw_slice, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
+            var k_rot = try mlx_blocks.projectHeads(k_raw_slice, l.k_norm_w.?, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
             defer k_rot.deinit();
-            var v_4d = try backend.mlx_blocks.projectHeads(v_raw_slice, null, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, null, pos, s);
+            var v_4d = try mlx_blocks.projectHeads(v_raw_slice, null, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, null, pos, s);
             defer v_4d.deinit();
 
             if (self.gpu_kv[l_idx] == null) {
@@ -1258,7 +1367,7 @@ pub const Gemma4E4BGpuContext = struct {
                 eff_v_free = view.v;
             }
         } else {
-            q_rot_opt = try backend.mlx_blocks.projectHeads(qkv_raw, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
+            q_rot_opt = try mlx_blocks.projectHeads(qkv_raw, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
             const cache = &self.gpu_kv[l.prev_kv_idx].?;
             eff_k = cache.step_eff_k orelse cache.k;
             eff_v = cache.step_eff_v orelse cache.v;
@@ -1267,7 +1376,7 @@ pub const Gemma4E4BGpuContext = struct {
 
         // 缩放点积注意力 (Scaled Dot-Product Attention, SDPA, scaling = 1.0)：单词元解码与键数不超过窗口的多词元步走融合因果内核，
         // 滑动窗口层上键数超过窗口的多词元步 (如长 Prompt 预填充) 施加逐查询滑动窗口掩码
-        var attn_out_4d = try backend.offload.cachedAttention(self.allocator, q_rot, eff_k, eff_v, 1.0, l.is_sliding, l.sliding_window, pos, seq_len, s);
+        var attn_out_4d = try offload.cachedAttention(self.allocator, q_rot, eff_k, eff_v, 1.0, l.is_sliding, l.sliding_window, pos, seq_len, s);
         defer attn_out_4d.deinit();
 
         var attn_2d = if (seq_len == 1)

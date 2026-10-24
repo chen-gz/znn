@@ -15,6 +15,7 @@ pub const Op = types.Op;
 pub const Graph = graph.Graph;
 pub const ExecutionMode = graph.ExecutionMode;
 pub const GraphOptions = graph.GraphOptions;
+pub const Device = graph.Device;
 
 test {
     std.testing.refAllDecls(@This());

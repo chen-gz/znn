@@ -7,39 +7,102 @@
 //! backend 包只提供与模型无关的 MLX / 卸载原语，Gemma 4 专属的层结构、键值缓存管理与采样策略集中在本文件。
 
 const std = @import("std");
-const backend = @import("../backend.zig");
-const tensor = @import("../tensor.zig");
-const gemma4 = @import("gemma4.zig");
+const mlx = @import("mlx.zig");
+const offload = @import("offload.zig");
+const sampling = @import("sampling.zig");
+const mlx_blocks = @import("mlx_blocks.zig");
+const logits_processor = @import("logits_processor.zig");
+const rope = @import("rope.zig");
+const vec_math = @import("vec_math.zig");
+const attention_mask = @import("attention_mask.zig");
+const activation = @import("activation.zig");
 
-const mlx = backend.mlx;
-const offload = backend.offload;
-const sampling = backend.sampling;
 const Sampler = sampling.Sampler;
 const SamplingOptions = sampling.SamplingOptions;
 const Stream = mlx.Stream;
 const Q4Weights = offload.Q4Weights;
 const LmHeadWeights = offload.LmHeadWeights;
 const TokenExclusionMask = offload.TokenExclusionMask;
-const Gemma4Config = gemma4.Gemma4Config;
-const Gemma4AttentionType = gemma4.Gemma4AttentionType;
-const Gemma4KVCache = gemma4.Gemma4KVCache;
+
+pub const Gemma4AttentionType = enum {
+    sliding_attention,
+    full_attention,
+
+    pub fn ropeOptions(self: Gemma4AttentionType) rope.RopeOptions {
+        return switch (self) {
+            .sliding_attention => rope.RopeOptions.proportional(10000.0, 1.0),
+            .full_attention => rope.RopeOptions.proportional(1000000.0, 0.25),
+        };
+    }
+
+    pub fn mask(self: Gemma4AttentionType, sliding_window: usize) attention_mask.AttentionMask {
+        return switch (self) {
+            .sliding_attention => .{ .sliding = sliding_window },
+            .full_attention => .causal,
+        };
+    }
+};
+
+pub const default_sampling_excluded_tokens = [_]sampling.TokenRange{
+    .single(0),
+    .{ .first = 258880, .last = 258884 },
+};
+
+pub const Gemma4Config = struct {
+    vocab_size: usize = 262144,
+    hidden_size: usize = 3840,
+    intermediate_size: usize = 15360,
+    num_hidden_layers: usize = 48,
+    num_attention_heads: usize = 16,
+    num_key_value_heads: usize = 8,
+    num_global_key_value_heads: usize = 8,
+    head_dim: usize = 256,
+    global_head_dim: usize = 512,
+    sliding_window: usize = 512,
+    rms_norm_eps: f32 = 1e-6,
+    final_logit_softcapping: f32 = 30.0,
+    max_position_embeddings: usize = 131072,
+    hidden_activation: activation.GeluApproximation = .tanh,
+    sampling_excluded_tokens: []const sampling.TokenRange = &default_sampling_excluded_tokens,
+
+    pub const LayerSpec = struct {
+        attn_type: Gemma4AttentionType,
+        head_dim: usize,
+        num_kv_heads: usize,
+    };
+
+    pub fn layerSpec(self: Gemma4Config, layer_idx: usize) LayerSpec {
+        const is_full = ((layer_idx + 1) % 6 == 0);
+        return .{
+            .attn_type = if (is_full) .full_attention else .sliding_attention,
+            .head_dim = if (is_full) self.global_head_dim else self.head_dim,
+            .num_kv_heads = if (is_full) self.num_global_key_value_heads else self.num_key_value_heads,
+        };
+    }
+};
+
+pub fn recentWindowFor(tokens: []const usize, opts: SamplingOptions) []const usize {
+    const window = opts.repetition_window orelse return tokens;
+    if (window == 0 or tokens.len <= window) return tokens;
+    return tokens[tokens.len - window ..];
+}
 
 // ============================================================================
 // 比例旋转位置编码 (Proportional RoPE)
 // ============================================================================
 
-pub const GpuRope = backend.mlx_blocks.Rope;
+pub const GpuRope = mlx_blocks.Rope;
 
 // ============================================================================
 // 对数几率截断与词元选取 (E4B 与 12B 共用)
 // ============================================================================
 
-pub const softcapLogits = backend.logits_processor.softcapLogits;
-pub const penalizeDevice = backend.logits_processor.penalizeDevice;
-pub const DeviceCandidates = backend.logits_processor.DeviceCandidates;
-pub const HostCandidates = backend.logits_processor.HostCandidates;
+pub const softcapLogits = logits_processor.softcapLogits;
+pub const penalizeDevice = logits_processor.penalizeDevice;
+pub const DeviceCandidates = logits_processor.DeviceCandidates;
+pub const HostCandidates = logits_processor.HostCandidates;
 
-fn processorOpts(cfg: Gemma4Config) backend.LogitsProcessorOptions {
+fn processorOpts(cfg: anytype) logits_processor.LogitsProcessorOptions {
     return .{
         .vocab_size = cfg.vocab_size,
         .final_logit_softcapping = cfg.final_logit_softcapping,
@@ -50,44 +113,44 @@ fn processorOpts(cfg: Gemma4Config) backend.LogitsProcessorOptions {
 pub fn deviceCandidates(
     allocator: std.mem.Allocator,
     logits: mlx.Array,
-    cfg: Gemma4Config,
+    cfg: anytype,
     mask: *const TokenExclusionMask,
     recent_tokens: []const usize,
     options: SamplingOptions,
     s: ?Stream,
 ) !DeviceCandidates {
-    return backend.logits_processor.deviceCandidates(allocator, logits, processorOpts(cfg), mask, recent_tokens, options, s);
+    return logits_processor.deviceCandidates(allocator, logits, processorOpts(cfg), mask, recent_tokens, options, s);
 }
 
 pub fn selectToken(
     allocator: std.mem.Allocator,
     logits: mlx.Array,
-    cfg: Gemma4Config,
+    cfg: anytype,
     mask: *const TokenExclusionMask,
     recent_tokens: []const usize,
     sampler: *Sampler,
     s: ?Stream,
 ) !usize {
-    return backend.logits_processor.selectToken(allocator, logits, processorOpts(cfg), mask, recent_tokens, sampler, s);
+    return logits_processor.selectToken(allocator, logits, processorOpts(cfg), mask, recent_tokens, sampler, s);
 }
 
 pub fn selectTokenFromHidden(
     allocator: std.mem.Allocator,
     lm_head: anytype,
     mask: *const TokenExclusionMask,
-    cfg: Gemma4Config,
+    cfg: anytype,
     h_last: []const f32,
     recent_tokens: []const usize,
     sampler: *Sampler,
     s: ?Stream,
 ) !usize {
-    const head: backend.offload.LmHead = switch (@TypeOf(lm_head.*)) {
-        backend.offload.LmHead => lm_head.*,
-        backend.offload.LmHeadWeights => .{ .dense = lm_head.* },
-        backend.offload.QuantWeights => .{ .quant = lm_head.* },
+    const head: offload.LmHead = switch (@TypeOf(lm_head.*)) {
+        offload.LmHead => lm_head.*,
+        offload.LmHeadWeights => .{ .dense = lm_head.* },
+        offload.QuantWeights => .{ .quant = lm_head.* },
         else => @compileError("Unsupported lm_head type"),
     };
-    return backend.logits_processor.selectTokenFromHidden(allocator, &head, processorOpts(cfg), mask, h_last, recent_tokens, sampler, s);
+    return logits_processor.selectTokenFromHidden(allocator, &head, processorOpts(cfg), mask, h_last, recent_tokens, sampler, s);
 }
 
 // ============================================================================
@@ -100,13 +163,14 @@ pub const ProjectionDims = struct {
     kv_dim: usize,
     v_dim: usize,
 
-    pub fn of(cfg: Gemma4Config, layer_idx: usize) ProjectionDims {
+    pub fn of(cfg: anytype, layer_idx: usize) ProjectionDims {
         const spec = cfg.layerSpec(layer_idx);
         const kv_dim = spec.num_kv_heads * spec.head_dim;
+        const is_full = @intFromEnum(spec.attn_type) == @intFromEnum(Gemma4AttentionType.full_attention);
         return .{
             .q_dim = cfg.num_attention_heads * spec.head_dim,
             .kv_dim = kv_dim,
-            .v_dim = if (spec.attn_type == .full_attention) 0 else kv_dim,
+            .v_dim = if (is_full) 0 else kv_dim,
         };
     }
 };
@@ -140,7 +204,7 @@ pub const Gemma4GpuLayer = struct {
     rope: GpuRope,
     rms_norm_eps: f32,
     /// 门控多层感知机的高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 形式 (取自 `Gemma4Config.hidden_activation`)
-    hidden_activation: backend.GeluApproximation,
+    hidden_activation: activation.GeluApproximation,
     compiled_mlp: ?mlx.Closure = null,
 
     /// 单层四个融合量化投影 (QKV、O、Gate+Up、Down)
@@ -158,7 +222,7 @@ pub const Gemma4GpuLayer = struct {
         }
 
         /// 从 18 字节 Q4Block 原始切片构建并融合投影 (Q/K/V 与 Gate/Up 沿输出维度拼接)
-        pub fn fromBlocks(allocator: std.mem.Allocator, cfg: Gemma4Config, layer_idx: usize, blocks: BlockSlices) !Projections {
+        pub fn fromBlocks(allocator: std.mem.Allocator, cfg: anytype, layer_idx: usize, blocks: BlockSlices) !Projections {
             const d = ProjectionDims.of(cfg, layer_idx);
             const H = cfg.hidden_size;
             if ((blocks.v != null) != (d.v_dim != 0)) return error.ShapeMismatch;
@@ -183,7 +247,7 @@ pub const Gemma4GpuLayer = struct {
         }
 
         /// 从预重排直接内存布局 (Direct Layout) 构建投影，无需 CPU 解包
-        pub fn fromDirect(cfg: Gemma4Config, layer_idx: usize, direct: DirectSlices) !Projections {
+        pub fn fromDirect(cfg: anytype, layer_idx: usize, direct: DirectSlices) !Projections {
             const d = ProjectionDims.of(cfg, layer_idx);
             const H = cfg.hidden_size;
             var fused_qkv = try Q4Weights.initFromDirectBuffers(direct.qkv.wq, direct.qkv.sc, direct.qkv.bi, H, d.q_dim + d.kv_dim + d.v_dim, null);
@@ -236,7 +300,7 @@ pub const Gemma4GpuLayer = struct {
     /// 由已构建的投影权重与层归一化参数组装第 layer_idx 层。
     /// 成功时接管 `projections` 的所有权；失败时所有权仍归调用方。
     pub fn init(
-        cfg: Gemma4Config,
+        cfg: anytype,
         layer_idx: usize,
         projections: Projections,
         norms: NormWeights,
@@ -263,7 +327,9 @@ pub const Gemma4GpuLayer = struct {
         errdefer pm_w.deinit();
         var pom_w = try mlx.Array.fromSlice(norms.post_mlp, &.{norms.post_mlp.len});
         errdefer pom_w.deinit();
-        const rope = try GpuRope.init(spec.head_dim, spec.attn_type.ropeOptions());
+        const is_full = @intFromEnum(spec.attn_type) == @intFromEnum(Gemma4AttentionType.full_attention);
+        const attn_type: Gemma4AttentionType = if (is_full) .full_attention else .sliding_attention;
+        const rope_inst = try GpuRope.init(spec.head_dim, attn_type.ropeOptions());
 
         return .{
             .fused_qkv = projections.fused_qkv,
@@ -282,12 +348,12 @@ pub const Gemma4GpuLayer = struct {
             .pre_mlp_w = pm_w,
             .post_mlp_w = pom_w,
             .layer_scalar = layer_scalar,
-            .attn_type = spec.attn_type,
+            .attn_type = attn_type,
             .sliding_window = cfg.sliding_window,
             .num_heads = cfg.num_attention_heads,
             .num_kv_heads = spec.num_kv_heads,
             .head_dim = spec.head_dim,
-            .rope = rope,
+            .rope = rope_inst,
             .rms_norm_eps = cfg.rms_norm_eps,
             .hidden_activation = cfg.hidden_activation,
             .compiled_mlp = null,
@@ -296,7 +362,7 @@ pub const Gemma4GpuLayer = struct {
 
     /// 门控多层感知机残差块：x2 = (x1 + post_mlp_norm(down_proj(GeGLU(fused_gate_up(pre_mlp_norm(x1)))))) * layer_scalar
     pub fn mlpResidual(self: *const Gemma4GpuLayer, x1: mlx.Array, stream: ?Stream) !mlx.Array {
-        var post_mlp = try backend.mlx_blocks.gatedMlp(
+        var post_mlp = try mlx_blocks.gatedMlp(
             x1,
             &self.fused_gate_up,
             null,
@@ -308,7 +374,7 @@ pub const Gemma4GpuLayer = struct {
             stream,
         );
         defer post_mlp.deinit();
-        var x2 = try backend.mlx_blocks.residualScale(x1, post_mlp, null, stream);
+        var x2 = try mlx_blocks.residualScale(x1, post_mlp, null, stream);
         if (self.layer_scalar == 1.0) return x2;
         defer x2.deinit();
         return x2.mulScalar(self.layer_scalar, stream);
@@ -391,7 +457,7 @@ pub const Gemma4GpuContext = struct {
     /// 失败时两者的所有权仍归调用方，由调用方负责释放。
     pub fn init(
         allocator: std.mem.Allocator,
-        cfg: Gemma4Config,
+        cfg: anytype,
         layers: []Gemma4GpuLayer,
         final_norm_data: []const f32,
         lm_head: LmHeadWeights,
@@ -422,13 +488,31 @@ pub const Gemma4GpuContext = struct {
             lw.initCompiledMlp() catch {};
         }
 
+        const gemma_cfg: Gemma4Config = .{
+            .vocab_size = cfg.vocab_size,
+            .hidden_size = cfg.hidden_size,
+            .intermediate_size = cfg.intermediate_size,
+            .num_hidden_layers = cfg.num_hidden_layers,
+            .num_attention_heads = cfg.num_attention_heads,
+            .num_key_value_heads = cfg.num_key_value_heads,
+            .num_global_key_value_heads = cfg.num_global_key_value_heads,
+            .head_dim = cfg.head_dim,
+            .global_head_dim = cfg.global_head_dim,
+            .sliding_window = cfg.sliding_window,
+            .rms_norm_eps = cfg.rms_norm_eps,
+            .final_logit_softcapping = cfg.final_logit_softcapping,
+            .max_position_embeddings = cfg.max_position_embeddings,
+            .hidden_activation = cfg.hidden_activation,
+            .sampling_excluded_tokens = cfg.sampling_excluded_tokens,
+        };
+
         return .{
             .allocator = allocator,
             .layers = layers,
             .final_norm_w = final_norm_w,
             .lm_head = lm_head,
             .exclusion_mask = exclusion_mask,
-            .config = cfg,
+            .config = gemma_cfg,
             .max_seq_len = max_seq_len,
             .stream = stream,
             .gpu_kv = gpu_kv,
@@ -476,21 +560,28 @@ pub const Gemma4GpuContext = struct {
     fn embedTokens(self: *const Gemma4GpuContext, tokens: []const usize, embed_u16: []const u16, out: []f32) !void {
         const h = self.config.hidden_size;
         const table = embed_u16[0..@min(embed_u16.len, self.config.vocab_size * h)];
-        try tensor.embeddingLookupInto(u16, table, tokens, h, self.sqrt_d, out);
+        for (tokens, 0..) |tok, i| {
+            if (tok >= self.config.vocab_size) return error.IndexOutOfBounds;
+            const row = table[tok * h .. (tok + 1) * h];
+            const dest = out[i * h .. (i + 1) * h];
+            for (row, dest) |val, *d| {
+                d.* = vec_math.bf16ToF32(val) * self.sqrt_d;
+            }
+        }
     }
 
     /// 校验 CPU 层缓存与 GPU 解码层的几何规格一致
-    fn checkCacheLayout(self: *const Gemma4GpuContext, cache: *const Gemma4KVCache) !void {
+    fn checkCacheLayout(self: *const Gemma4GpuContext, cache: anytype) !void {
         if (cache.layers.len != self.layers.len) return error.ShapeMismatch;
         for (self.layers, cache.layers) |lw, cl| {
-            if (cl.core.num_kv_heads != lw.num_kv_heads or cl.core.head_dim != lw.head_dim or cl.attn_type != lw.attn_type) {
+            if (cl.core.num_kv_heads != lw.num_kv_heads or cl.core.head_dim != lw.head_dim or @intFromEnum(cl.attn_type) != @intFromEnum(lw.attn_type)) {
                 return error.ShapeMismatch;
             }
         }
     }
 
     /// 将 CPU 预填充 / 解码得到的键值缓存 (各层可见窗口) 同步导入 GPU 显存，GPU 解码位置随之设为 CPU 缓存游标
-    pub fn syncCacheFromCpu(self: *Gemma4GpuContext, cache: *const Gemma4KVCache) !void {
+    pub fn syncCacheFromCpu(self: *Gemma4GpuContext, cache: anytype) !void {
         try self.checkCacheLayout(cache);
         self.resetCache();
         const cached_len = if (cache.layers.len > 0) cache.layers[0].core.curr_len else 0;
@@ -520,7 +611,7 @@ pub const Gemma4GpuContext = struct {
 
     /// 将 GPU 显存中的键值缓存 (各层可见窗口) 写回 CPU 层缓存并把 CPU 游标设为 GPU 解码位置，
     /// 使 GPU 预填充 / 解码之后可以无缝切换到 CPU 增量解码
-    pub fn syncCacheToCpu(self: *const Gemma4GpuContext, cache: *Gemma4KVCache) !void {
+    pub fn syncCacheToCpu(self: *const Gemma4GpuContext, cache: anytype) !void {
         try self.checkCacheLayout(cache);
         for (self.layers, cache.layers, 0..) |lw, *cl, l_idx| {
             if (self.curr_len == 0) {
@@ -569,11 +660,11 @@ pub const Gemma4GpuContext = struct {
             try k_raw.sliceAxis(2, 0, lw.k_dim, s);
         defer v_raw.deinit();
 
-        var q_rot = try backend.mlx_blocks.projectHeads(q_raw, lw.q_norm_w, t, lw.num_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
+        var q_rot = try mlx_blocks.projectHeads(q_raw, lw.q_norm_w, t, lw.num_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
         errdefer q_rot.deinit();
-        var k_rot = try backend.mlx_blocks.projectHeads(k_raw, lw.k_norm_w, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
+        var k_rot = try mlx_blocks.projectHeads(k_raw, lw.k_norm_w, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
         errdefer k_rot.deinit();
-        const v_normed = try backend.mlx_blocks.projectHeads(v_raw, null, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, null, pos, s);
+        const v_normed = try mlx_blocks.projectHeads(v_raw, null, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, null, pos, s);
 
         return .{ .q_rot = q_rot, .k_rot = k_rot, .v = v_normed };
     }
@@ -590,7 +681,7 @@ pub const Gemma4GpuContext = struct {
 
         var post_attn = try mlx.Array.fastRmsNorm(o_out, lw.post_attn_w, lw.rms_norm_eps, s);
         defer post_attn.deinit();
-        var x1 = try backend.mlx_blocks.residualScale(x_cur, post_attn, null, s);
+        var x1 = try mlx_blocks.residualScale(x_cur, post_attn, null, s);
         defer x1.deinit();
         return if (use_compiled) lw.runMlp(x1, s) else lw.mlpResidual(x1, s);
     }
@@ -598,7 +689,7 @@ pub const Gemma4GpuContext = struct {
     /// 最终层归一化：取 [1, t, hidden_size] 的最后 rows 行，返回 [rows, hidden_size]
     fn finalNorm(self: *const Gemma4GpuContext, x_cur: mlx.Array, t: usize, rows: usize, s: Stream) !mlx.Array {
         _ = t;
-        return backend.mlx_blocks.finalHidden(x_cur, self.final_norm_w, self.config.rms_norm_eps, rows, self.config.hidden_size, s);
+        return mlx_blocks.finalHidden(x_cur, self.final_norm_w, self.config.rms_norm_eps, rows, self.config.hidden_size, s);
     }
 
     /// 执行全 GPU 序列级并行预填充 (Prefill)，一次性完成整个 Prompt 词元序列的矩阵乘法与 KVCache 初始化，按 sampler 返回首个预测词元
@@ -653,7 +744,7 @@ pub const Gemma4GpuContext = struct {
         defer h_norm.deinit();
         var logits = try self.lm_head.forwardArrayBf16(h_norm, s);
         defer logits.deinit();
-        const next = try selectToken(self.allocator, logits, self.config, &self.exclusion_mask, gemma4.recentWindowFor(prompt_tokens, sampler.options), sampler, s);
+        const next = try selectToken(self.allocator, logits, self.config, &self.exclusion_mask, recentWindowFor(prompt_tokens, sampler.options), sampler, s);
         self.curr_len = T;
         return next;
     }
@@ -711,7 +802,7 @@ pub const Gemma4GpuContext = struct {
         defer h_norm.deinit();
         var logits = try self.lm_head.forwardArrayBf16(h_norm, s);
         defer logits.deinit();
-        const next = try selectToken(self.allocator, logits, self.config, &self.exclusion_mask, gemma4.recentWindowFor(recent_tokens, sampler.options), sampler, s);
+        const next = try selectToken(self.allocator, logits, self.config, &self.exclusion_mask, recentWindowFor(recent_tokens, sampler.options), sampler, s);
         self.curr_len = pos + 1;
         return next;
     }
@@ -826,7 +917,7 @@ pub const Gemma4GpuContext = struct {
 
         for (0..M) |i| {
             const row = logits_slice[i * V .. (i + 1) * V];
-            const window = gemma4.recentWindowFor(history[0 .. recent_len + i], sampling_opts);
+            const window = recentWindowFor(history[0 .. recent_len + i], sampling_opts);
             const pred = sampling.argmaxWithPenalty(row, V, self.config.sampling_excluded_tokens, window, sampling_opts.repetition_penalty);
             accepted_tokens[i] = pred;
             if (i + 1 < M and pred != input_tokens[i + 1]) return i + 1;
@@ -853,7 +944,7 @@ pub const Gemma4GpuContext = struct {
         for (0..M) |i| {
             var row = try logits_raw.sliceAxis(0, i, i + 1, s);
             defer row.deinit();
-            const window = gemma4.recentWindowFor(history[0 .. recent_len + i], sampler.options);
+            const window = recentWindowFor(history[0 .. recent_len + i], sampler.options);
             pending[i] = try deviceCandidates(self.allocator, row, self.config, &self.exclusion_mask, window, sampler.options, s);
             built += 1;
         }

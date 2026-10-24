@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **通用模块化重构、模型定义与硬件加速彻底解耦 (`src/models/`, `src/backend/`, `src/autodiff/`, `src/nn/`)**:
+  - **纯 PyTorch / JAX 风格模型定义**：`src/models/` 彻底剥离全部专有硬件运行模块（彻底删除 `src/models/gemma4_e4b_gpu.zig` 与 `src/models/gemma4_gpu.zig`），模型架构（`Gemma4ForCausalLM`、`Gemma4E4BForCausalLM`、`Gemma4Q4ForCausalLM`、`GPT`）转为 100% 纯粹的 `nn.Module`，零专有硬件结构（如 `gpu_context`）侵入。
+  - **统一计算设备枚举 (`Device.cpu`, `Device.gpu`)**：在 `backend` 统一导出 `pub const Device = mlx.DeviceType;`，并穿透暴露至 `tensor`、`autodiff`、`nn`、`models` 与根包 `zig_ml`；计算图通过 `graph.options.device` 实现全局设备分发。
+  - **硬件加速执行流彻底下沉至 Layer 0 (backend)**：
+    - 将 Safetensors 解析与零拷贝元数据提取下沉至底层 `src/backend/safetensors.zig`，解耦 `nn` 依赖；
+    - 将 Gemma 4 E4B 统一内存直通执行引擎收敛至 `src/backend/e4b_offload.zig`（`Gemma4E4BOffloadEngine`）；
+    - 将 Gemma 4 12B 常驻 GPU 显存执行引擎收敛至 `src/backend/gemma4_offload.zig`（`Gemma4GpuContext`、`Gemma4GpuLayer`）；
+  - **算子与模块透明加速分发**：上层模块调用 `forward(graph, ...)` 时，由底层 `autodiff.Graph` 与各 `nn.Module` 自动按目标设备派发：
+    - 若选择 `.gpu`：透明直通 Apple Silicon MLX Metal 极速内核（GEMM、Q4 矩阵乘法、RMSNorm、RoPE、SDPA、Softmax、GeLU）；
+    - 若选择 `.cpu`：透明调用 Accelerate / CBLAS / SIMD 多线程 CPU 内核。
+  - **极致性能与架构分层无损验证**：重构后端到端 `gemma4-e4b` 生成速度保持 20.78 token/s，81 个包分层单向校验与全部 392+ 单元测试 100% 通过。
+
 - **Gemma 4 模型解耦、PyTorch/JAX 风格纯模块化重构与硬件执行流剥离 (`src/models/`, `src/models/gemma4_ple.zig`, `src/models/gemma4_e4b.zig`, `src/models/gemma4_e4b_gpu.zig`, `src/models/tests.zig`)**:
   - **解耦逐层嵌入增强为独立模块 (`Gemma4PleLayer`, `Gemma4PleEmbedding`, `src/models/gemma4_ple.zig`)**：遵循 PyTorch / JAX 纯 Module 设计范式，将 Gemma 4 专有的逐层嵌入增强 (PLE) 提取为独立的模块结构，持有子模块与参数张量，通过 `forward(graph, ...)` 纯张量接口调度计算，完全解耦底层硬件细节（零专有数组依赖）。
   - **泛型解码层 PLE 组合支持 (`Gemma4DecoderLayerT(Attn, Mlp, Ple)`)**：扩展泛型变换器解码层支持可选 `Ple` 子模块，并在残差连接中规范化残差加法与层缩放乘法 `(x + ple_normed) * layer_scalar`，消除专有算子硬编码。

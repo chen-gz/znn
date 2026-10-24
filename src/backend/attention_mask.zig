@@ -50,6 +50,8 @@ pub const Mask = union(enum) {
     }
 };
 
+pub const AttentionMask = Mask;
+
 /// 单个查询在键块中的可见区间 [begin, end) (相对键块起点的下标)；三种掩码的可见键都是连续区间
 pub const KeyRange = struct {
     begin: usize,
