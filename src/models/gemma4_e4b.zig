@@ -1069,14 +1069,14 @@ pub const Gemma4E4BModel = struct {
         /// 最多生成的词元数 (含首个词元)
         max_new_tokens: usize = 256,
         /// 生成到这些词元 (含) 即停止
-        stop_tokens: []const usize = &default_stop_tokens,
+        stop_tokens: []const usize = &Gemma4E4BModel.default_stop_tokens,
 
         pub fn defaultOptions() GenerateOptions {
             return .{};
         }
     };
 
-    const default_stop_tokens = [_]usize{ gemma4.Gemma4Vocabulary.EOS, gemma4.Gemma4Vocabulary.EOT };
+    pub const default_stop_tokens = [_]usize{ gemma4.Gemma4Vocabulary.EOS, gemma4.Gemma4Vocabulary.EOT };
 
     /// 开始一次自回归生成：重置键值缓存并返回逐词元产出的 `Generation`。同一模型同一时刻只能进行一次生成
     /// (共享键值缓存)；生成对象须在模型之前释放
@@ -1348,5 +1348,256 @@ pub const Gemma4E4BModel = struct {
             return mlx.Array.fusedAddMul(x2, ple_normed, sw, self.compiled_add_mul, s);
         }
         return mlx.Array.add(x2, ple_normed, s);
+    }
+};
+
+/// Gemma 4 E4B 端到端极速推理引擎 (Inference Engine)
+/// 类似 Python `mlx_lm` 与 Hugging Face `pipeline`，将模型加载、词表解码、Prompt 模板注入、
+/// 自回归流式生成与性能基准统计彻底封装为高层模块，提供极简的开箱即用调用体验。
+pub const Gemma4E4BEngine = struct {
+    allocator: std.mem.Allocator,
+    model: Gemma4E4BModel,
+    vocab: gemma4.Gemma4Vocabulary,
+    load_time_s: f64,
+
+    pub const Options = struct {
+        model_dir: []const u8,
+        vocab_path: []const u8 = "gemma4_vocab.bin",
+        warmup: bool = true,
+
+        pub fn defaultOptions() Options {
+            return .{ .model_dir = "" };
+        }
+    };
+
+    pub const GenerateOptions = struct {
+        sampling: SamplingOptions = gemma4.default_generation,
+        max_new_tokens: usize = 256,
+        stop_tokens: []const usize = &Gemma4E4BModel.default_stop_tokens,
+        /// 是否自动将纯文本包裹为 Gemma 4 官方 Instruct 对话模板 `<bos><|turn>user\n...\n<|turn>model\n`
+        apply_chat_template: bool = true,
+        /// 是否在生成结束时自动打印性能基准测试报告 (TTFT、生成速率、吞吐等)
+        verbose: bool = false,
+
+        pub fn defaultOptions() GenerateOptions {
+            return .{};
+        }
+    };
+
+    pub const GenerationStats = struct {
+        load_time_s: f64 = 0.0,
+        prefill_time_ms: f64 = 0.0,
+        decode_time_s: f64 = 0.0,
+        total_time_s: f64 = 0.0,
+        prompt_tokens: usize = 0,
+        generated_tokens: usize = 0,
+        prefill_tps: f64 = 0.0,
+        decode_tps: f64 = 0.0,
+        is_pipelined: bool = false,
+
+        /// 打印与官方基准测试完全对齐的精美性能报告
+        pub fn printReport(self: GenerationStats) void {
+            std.debug.print(
+                \\
+                \\================================================================================
+                \\📊 Gemma 4 E4B 性能基准测试报告 (Performance Benchmark):
+                \\================================================================================
+                \\   - 模型冷启动加载耗时 : {d:.3} 秒 (零拷贝 mmap 直通)
+                \\   - Prompt 预填充耗时  : {d:.2} 毫秒 (TTFT 首字延迟)
+                \\   - 预填充吞吐速率     : {d:.1} token/s
+                \\   - 生成词元总数       : {} tokens
+                \\   - 自回归解码速率     : {d:.2} token/s ({s})
+                \\   - 端到端总生成耗时   : {d:.2} 秒
+                \\================================================================================
+                \\
+            , .{
+                self.load_time_s,
+                self.prefill_time_ms,
+                self.prefill_tps,
+                self.generated_tokens,
+                self.decode_tps,
+                if (self.is_pipelined) "纯 Metal GPU 双阶段异步流水线" else "同步解码 + 设备端候选选择",
+                self.total_time_s,
+            });
+        }
+    };
+
+    pub const TextResult = struct {
+        text: []const u8,
+        stats: GenerationStats,
+
+        pub fn deinit(self: *TextResult, allocator: std.mem.Allocator) void {
+            allocator.free(self.text);
+        }
+    };
+
+    /// 初始化端到端推理引擎：一站式完成模型权重直通映射、Metal 算子预热、词表零拷贝映射与反查表构建
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) !Gemma4E4BEngine {
+        var timer_load: std.posix.system.timespec = undefined;
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_load);
+        const load_start_ns = @as(u64, @intCast(timer_load.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_load.nsec));
+
+        var model = try Gemma4E4BModel.loadFromDirectoryWithOptions(allocator, io, options.model_dir, .{ .warmup = options.warmup });
+        errdefer model.deinit();
+
+        var vocab = gemma4.Gemma4Vocabulary.openFile(io, options.vocab_path) catch |err| blk: {
+            var buf: [1024]u8 = undefined;
+            const fallback_path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ options.model_dir, options.vocab_path }) catch return err;
+            break :blk try gemma4.Gemma4Vocabulary.openFile(io, fallback_path);
+        };
+        errdefer vocab.deinit();
+        try vocab.buildLookupTable(allocator);
+
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_load);
+        const load_end_ns = @as(u64, @intCast(timer_load.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_load.nsec));
+        const load_time_s = @as(f64, @floatFromInt(load_end_ns - load_start_ns)) / 1e9;
+
+        return .{
+            .allocator = allocator,
+            .model = model,
+            .vocab = vocab,
+            .load_time_s = load_time_s,
+        };
+    }
+
+    pub fn deinit(self: *Gemma4E4BEngine) void {
+        self.model.deinit();
+        self.vocab.deinit();
+    }
+
+    /// 高级文本流式迭代器 (Text Streaming Iterator)
+    pub const TextStream = struct {
+        engine: *Gemma4E4BEngine,
+        generation: Gemma4E4BModel.Generation,
+        prompt_tokens: []const usize,
+        start_ns: u64,
+        decode_start_ns: u64 = 0,
+        prefill_time_ms: f64 = 0.0,
+        finished: bool = false,
+
+        pub fn deinit(self: *TextStream) void {
+            self.generation.deinit();
+            self.engine.allocator.free(self.prompt_tokens);
+        }
+
+        /// 获取下一个文本片段（已直接反向解码为 UTF-8 字符串），结束返回 null
+        pub fn next(self: *TextStream) !?[]const u8 {
+            if (self.finished) return null;
+            const maybe_tok = try self.generation.next();
+            if (maybe_tok) |tok| {
+                if (self.generation.generated().len == 1) {
+                    var ts: std.posix.system.timespec = undefined;
+                    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
+                    self.decode_start_ns = @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+                    self.prefill_time_ms = @as(f64, @floatFromInt(self.decode_start_ns - self.start_ns)) / 1e6;
+                }
+                return self.engine.vocab.decode(tok);
+            }
+            self.finished = true;
+            return null;
+        }
+
+        /// 计算并产出当前/已完成的性能基准统计
+        pub fn stats(self: *const TextStream) GenerationStats {
+            var ts: std.posix.system.timespec = undefined;
+            _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
+            const end_ns = @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+            const total_s = @as(f64, @floatFromInt(end_ns - self.start_ns)) / 1e9;
+            const decode_s = if (self.decode_start_ns > 0) @as(f64, @floatFromInt(end_ns - self.decode_start_ns)) / 1e9 else 0.0;
+            const gen_count = self.generation.generated().len;
+            const decode_count = if (gen_count > 1) gen_count - 1 else 0;
+            const decode_tps = if (decode_s > 0.0) @as(f64, @floatFromInt(decode_count)) / decode_s else 0.0;
+            const prefill_tps = if (self.prefill_time_ms > 0.0)
+                @as(f64, @floatFromInt(self.prompt_tokens.len)) / (self.prefill_time_ms / 1000.0)
+            else
+                0.0;
+
+            return .{
+                .load_time_s = self.engine.load_time_s,
+                .prefill_time_ms = self.prefill_time_ms,
+                .decode_time_s = decode_s,
+                .total_time_s = total_s,
+                .prompt_tokens = self.prompt_tokens.len,
+                .generated_tokens = gen_count,
+                .prefill_tps = prefill_tps,
+                .decode_tps = decode_tps,
+                .is_pipelined = self.generation.isPipelined(),
+            };
+        }
+    };
+
+    /// 创建一个流式生成会话 (TextStream)
+    pub fn stream(self: *Gemma4E4BEngine, prompt: []const u8, options: GenerateOptions) !TextStream {
+        const prompt_tokens = if (options.apply_chat_template)
+            try self.vocab.formatInstructPrompt(self.allocator, prompt)
+        else
+            try self.vocab.encode(self.allocator, prompt);
+        errdefer self.allocator.free(prompt_tokens);
+
+        var timer_ts: std.posix.system.timespec = undefined;
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
+        const start_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
+
+        const generation = try self.model.generate(self.allocator, prompt_tokens, .{
+            .sampling = options.sampling,
+            .max_new_tokens = options.max_new_tokens,
+            .stop_tokens = options.stop_tokens,
+        });
+
+        return .{
+            .engine = self,
+            .generation = generation,
+            .prompt_tokens = prompt_tokens,
+            .start_ns = start_ns,
+        };
+    }
+
+    /// 便捷流式打印：实时将生成的文本输出到标准输出，并可选打印性能报告
+    pub fn streamPrint(
+        self: *Gemma4E4BEngine,
+        prompt: []const u8,
+        options: GenerateOptions,
+    ) !GenerationStats {
+        var s = try self.stream(prompt, options);
+        defer s.deinit();
+
+        while (try s.next()) |chunk| {
+            if (chunk.len > 0) {
+                std.debug.print("{s}", .{chunk});
+            }
+        }
+
+        const gen_stats = s.stats();
+        if (options.verbose) {
+            gen_stats.printReport();
+        }
+        return gen_stats;
+    }
+
+    /// 端到端文本生成 (Text-in -> Text-out)：一次性返回完整响应字符串
+    pub fn generateText(
+        self: *Gemma4E4BEngine,
+        allocator: std.mem.Allocator,
+        prompt: []const u8,
+        options: GenerateOptions,
+    ) !TextResult {
+        var s = try self.stream(prompt, options);
+        defer s.deinit();
+
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(allocator);
+
+        while (try s.next()) |chunk| {
+            try buf.appendSlice(allocator, chunk);
+        }
+
+        const gen_stats = s.stats();
+        if (options.verbose) {
+            gen_stats.printReport();
+        }
+        return .{
+            .text = try buf.toOwnedSlice(allocator),
+            .stats = gen_stats,
+        };
     }
 };

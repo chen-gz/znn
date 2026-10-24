@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Gemma 4 E4B 端到端极速推理引擎 (`src/models/gemma4_e4b.zig`, `src/engine.zig`, `src/models.zig`, `examples/gemma4_e4b.zig`, `src/models/tests.zig`)**:
+  - **端到端推理模块 (`Gemma4E4BEngine`)**：对齐 Python `mlx_lm` 与 Hugging Face `pipeline`，封装模型加载、262K 词表零拷贝映射、Metal 算子预热、Instruct 提示词模板注入、流式生成迭代器（`TextStream`）与完整性能基准报告（`GenerationStats`）。
+  - **简化调用入口**：提供 `generateText`（文本输入到文本输出，返回 `TextResult`）与 `streamPrint`（自动流式打印与评测耗时统计），彻底消除调用方手写 Token ID 遍历、时间戳计算与吞吐计算样板代码。
+  - **前端极简化 (`examples/gemma4_e4b.zig`)**：重构 `examples/gemma4_e4b.zig`，将原本繁复的手工时间测量、解码循环与报表逻辑收敛为一行 `engine.streamPrint` 调用。
+
+
 - **Gemma 4 Instruct 对话模板与提示词拼接抽象 (`src/models/gemma4.zig`, `examples/gemma4.zig`, `examples/gemma4_e4b.zig`, `src/models/tests.zig`)**:
   - **结构化对话消息与轮次角色 (`Gemma4Vocabulary.Role`, `Gemma4Vocabulary.Message`)**：在 `Gemma4Vocabulary` 中增加结构化角色（`user`、`model`、`system`）与消息类型，消除手写硬编码词元 ID。
   - **统一模板拼接函数 (`formatInstructPrompt`, `formatChatPrompt`, `appendTurn`)**：提供开箱即用的单轮提示词格式化函数 `formatInstructPrompt(allocator, prompt)` 与多轮对话模板函数 `formatChatPrompt(allocator, messages, add_generation_prompt)`，自动处理 `<bos>`、`<|turn>{role}\n`、`<turn|>\n` 与 `<|turn>model\n`，彻底消除 `examples/gemma4.zig` 与 `examples/gemma4_e4b.zig` 中的手写词元拼接样板代码。
