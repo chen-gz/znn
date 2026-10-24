@@ -1295,6 +1295,27 @@ pub const Gemma4Vocabulary = struct {
     pub const MODEL: usize = 4368; // model
     pub const SYSTEM: usize = 9731; // system
 
+    /// 对话轮次角色 (Conversation Turn Role)
+    pub const Role = enum {
+        user,
+        model,
+        system,
+
+        pub fn tokenId(self: Role) usize {
+            return switch (self) {
+                .user => USER,
+                .model => MODEL,
+                .system => SYSTEM,
+            };
+        }
+    };
+
+    /// 结构化对话消息 (Chat Message)
+    pub const Message = struct {
+        role: Role,
+        content: []const u8,
+    };
+
     /// O(1) 根据 token_id 获取对应解码文本切片
     pub fn decode(self: *const Gemma4Vocabulary, token_id: usize) []const u8 {
         if (token_id >= self.count) return "";
@@ -1385,6 +1406,70 @@ pub const Gemma4Vocabulary = struct {
         var buf: [6]u8 = undefined;
         const piece = std.fmt.bufPrint(&buf, "<0x{X:0>2}>", .{byte}) catch unreachable;
         return self.findToken(piece) orelse error.UnencodableByte;
+    }
+
+    /// 追加单轮对话片段到词元列表：`<|turn>{role}\n{content}<turn|>\n`
+    pub fn appendTurn(
+        self: *const Gemma4Vocabulary,
+        list: *std.ArrayList(usize),
+        allocator: std.mem.Allocator,
+        role: Role,
+        content: []const u8,
+    ) !void {
+        try list.append(allocator, SOT);
+        try list.append(allocator, role.tokenId());
+        try list.append(allocator, NL);
+        const tokens = try self.encode(allocator, content);
+        defer allocator.free(tokens);
+        try list.appendSlice(allocator, tokens);
+        try list.append(allocator, EOT);
+        try list.append(allocator, NL);
+    }
+
+    /// 追加生成引导头：`<|turn>{role}\n`（默认 model）
+    pub fn appendGenerationPrompt(
+        list: *std.ArrayList(usize),
+        allocator: std.mem.Allocator,
+        role: Role,
+    ) !void {
+        try list.append(allocator, SOT);
+        try list.append(allocator, role.tokenId());
+        try list.append(allocator, NL);
+    }
+
+    /// 将多轮对话格式化为符合 Gemma 4 Instruct 标准的词元序列：
+    /// `<bos>` + 若干 `[<|turn>{role}\n{content}<turn|>\n]` + 可选 `[<|turn>model\n]`
+    pub fn formatChatPrompt(
+        self: *const Gemma4Vocabulary,
+        allocator: std.mem.Allocator,
+        messages: []const Message,
+        add_generation_prompt: bool,
+    ) ![]usize {
+        var list: std.ArrayList(usize) = .empty;
+        errdefer list.deinit(allocator);
+
+        try list.append(allocator, BOS);
+        for (messages) |msg| {
+            try self.appendTurn(&list, allocator, msg.role, msg.content);
+        }
+        if (add_generation_prompt) {
+            try appendGenerationPrompt(&list, allocator, .model);
+        }
+        return list.toOwnedSlice(allocator);
+    }
+
+    /// 便捷方法：将单轮用户输入格式化为完整的 Gemma 4 Instruct 提示词词元切片：
+    /// `<bos><|turn>user\n{user_prompt}<turn|>\n<|turn>model\n`
+    pub fn formatInstructPrompt(
+        self: *const Gemma4Vocabulary,
+        allocator: std.mem.Allocator,
+        user_prompt: []const u8,
+    ) ![]usize {
+        return self.formatChatPrompt(
+            allocator,
+            &.{.{ .role = .user, .content = user_prompt }},
+            true,
+        );
     }
 };
 

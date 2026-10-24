@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Gemma 4 Instruct 对话模板与提示词拼接抽象 (`src/models/gemma4.zig`, `examples/gemma4.zig`, `examples/gemma4_e4b.zig`, `src/models/tests.zig`)**:
+  - **结构化对话消息与轮次角色 (`Gemma4Vocabulary.Role`, `Gemma4Vocabulary.Message`)**：在 `Gemma4Vocabulary` 中增加结构化角色（`user`、`model`、`system`）与消息类型，消除手写硬编码词元 ID。
+  - **统一模板拼接函数 (`formatInstructPrompt`, `formatChatPrompt`, `appendTurn`)**：提供开箱即用的单轮提示词格式化函数 `formatInstructPrompt(allocator, prompt)` 与多轮对话模板函数 `formatChatPrompt(allocator, messages, add_generation_prompt)`，自动处理 `<bos>`、`<|turn>{role}\n`、`<turn|>\n` 与 `<|turn>model\n`，彻底消除 `examples/gemma4.zig` 与 `examples/gemma4_e4b.zig` 中的手写词元拼接样板代码。
+
+
 - **共享损失核与泛型循环层收敛 (`src/tensor/losses.zig`, `src/autodiff/`, `src/nn/recurrent.zig`, `src/nn/llm.zig`)**:
   - **共享损失计算核 (`src/tensor/losses.zig`)**：新增 `ceRow`（按对数求和指数 LSE 精确计算单行交叉熵，支持概率写入与原地梯度累加）、`accumulateCeGradRow`、`dpoTerm`（直接偏好优化单样本损失与导数）与 `grpoTerm`（组相对策略优化裁剪代理目标与 KL 散度项及对数概率梯度）；消除 `autodiff/op.zig`、`autodiff/backward_core.zig` 与 `nn/llm.zig` 间三处前向与反向公式重复实现。
   - **整型标签多态支持 (`Tensor.softmaxCrossEntropy`)**：扩展 `Tensor.softmaxCrossEntropy` 支持任意整型切片与元组（`u8`、`u32`、`usize`），复用 `tensor.losses.ceRow` 并实现统一的越界与形状校验。
