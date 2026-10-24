@@ -11,9 +11,10 @@
 ```text
 src/
 ├── root.zig                      # 顶层公共门面 (Facade)，聚合导出所有核心子模块
-├── backend.zig                   # 硬件后端与执行器门面 (导出 activation, GeluApproximation, Executor, cblas, mlx, offload, rope, sampling, vec_math)
+├── backend.zig                   # 硬件后端与执行器门面 (导出 activation, attention_mask, GeluApproximation, AttentionMask, VisibleRange, Executor, cblas, mlx, offload, rope, sampling, vec_math)
 ├── backend/
 │   ├── activation.zig            # 逐元素激活的标量公式唯一来源 (GeluApproximation：GELU 精确 erf 形式与 tanh 近似形式的前向与导数)
+│   ├── attention_mask.zig        # 注意力掩码规则唯一来源 (Mask = none | causal | sliding, visibleRange, isSlidingWindowVisible, fillAdditiveMask)
 │   ├── cblas.zig                 # macOS Accelerate (AMX) 构建期链接与跨平台 8 路 SIMD GEMM 后备内核
 │   ├── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
 │   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定与 GPU 数组算子
@@ -22,14 +23,15 @@ src/
 │   ├── sampling.zig              # 通用采样基础设施 (TokenRange 排除区间, argmaxWithPenalty, BF16 排除掩码, SamplingOptions / Sampler 温度 + Top-K + Top-P 随机采样, selectTopK 部分选择, 投机采样校验)
 │   ├── vec_math.zig              # SIMD 行原语的唯一来源 (exp8, sum / max / sumSquares, dot / dotBf16, axpy, softmaxRow, logSumExpRow, sigmoid, softcap, BF16 展开)
 │   └── tests.zig                 # 硬件计算后端与 GPU 算子卸载单元测试集
-├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, Q4Block, RopeOptions, RopeTable, embeddingLookupInto, checkIndices, ops)
+├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, Q4Block, RopeOptions, RopeTable, AttentionMask, AttentionOptions, RmsNormOptions, attendOneQuery, embeddingLookupInto, checkIndices, ops)
 ├── tensor/
 │   ├── shape.zig                 # 8D Shape 维度系统、跨步推导与 NumPy 广播规则
-│   ├── types.zig                 # DType、原生 bf16、SliceRange、ConvOptions、PoolOptions、索引校验 (indexScalarToUsize, checkIndices) 与 GenericTensor(T)
+│   ├── types.zig                 # DType、原生 bf16、SliceRange、ConvOptions、PoolOptions、AttentionOptions、RmsNormOptions、索引校验 (indexScalarToUsize, checkIndices) 与 GenericTensor(T)
 │   ├── static.zig                # 编译期静态形状校验张量包装器 StaticTensor(T, dims)
-│   ├── core.zig                  # f32 自动微分张量核心、索引、基础算术与激活函数
+│   ├── core.zig                  # f32 自动微分张量核心、索引、基础算术与激活函数 (含 softcap 与参数化 gelu)
 │   ├── conv_pool.zig             # 1D/2D 卷积、转置卷积、最大/平均池化与自适应平均池化数值内核
-│   ├── nn_kernels.zig            # 归一化 (RMSNorm, LayerNorm, BatchNorm1d/2d, GroupNorm)、Dropout、RoPE、嵌入查表 (embedding, embeddingLookupInto) 与 BatchMatMul
+│   ├── attention_kernels.zig     # 缩放点积注意力 CPU 内核 (attendOneQuery 单查询步注意力与 attentionForward 批处理注意力，支持因果/滑动窗口掩码、Tq != Tk 与零拷贝 GQA)
+│   ├── nn_kernels.zig            # 归一化 (RMSNorm 含可选权重与 weight_offset, LayerNorm, BatchNorm1d/2d, GroupNorm)、Dropout、RoPE、嵌入查表 (embedding, embeddingLookupInto) 与 BatchMatMul
 │   ├── rope.zig                  # RopeTable：CPU RoPE 前向、反向与增量解码共用的旋转表 (init / angles / applyRow(inverse))
 │   ├── reductions.zig            # 多轴归约 (sum, mean, var, std, min, max, argmin, argmax)、条件掩码、跨步切片与排序检索
 │   ├── quant.zig                 # 4-bit 量化 (Q4Block split-half 排布)、量化/反量化与矩阵乘法 (q4MatMulInto / q4MatMul)
