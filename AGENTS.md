@@ -58,3 +58,17 @@
   `backend` (0) ← `tensor`, `dataset` (1) ← `autodiff`, `regression`, `manifold` (2) ← `nn`, `cross_validation` (3) ← `optim`, `models` (4) ← `engine` (5) ← `bench` (6) ← `root` (7).
 - `zig build check-layers` ([`tools/check_layers.zig`](tools/check_layers.zig)) enforces this rule and also runs as part of `zig build test`. When adding a new package, register its layer in the `layers` table of that tool.
 - Imports between files of the same package are allowed. To break an upward dependency, move the shared code down to the lower layer or pass an opaque handle (e.g. `Tensor.creator: ?*tensor.OpHandle`, converted with `autodiff.Op.handle()` / `autodiff.Op.creatorOf()`); never re-export a higher-layer API from a lower-layer facade.
+
+## 7. Model & Engine Design Principles (模型层与引擎层设计原则)
+- **`models` (Layer 4) 是纯粹的模型定义与架构实现**：
+  - `models` 仅包含模型配置（`*Config`）、网络层结构体、参数容器、前向计算（`forward`）与原生自回归会话生成（`generate()`）。
+  - 严禁在 `models` 包中堆砌上层端到端控制台阶段打印、复杂的命令行参数解析或特定执行流引擎（如历史上的 `Gemma4*Engine`）。
+- **`engine` (Layer 5) 专注于训练工作流与执行调度**：
+  - 管理多步训练循环、梯度更新与评估流程（如 `ClassificationTrainer`、因果自回归模型单步训练 `trainCausalLMStep`）。
+- **避免跨模型推理流水线的过早抽象 (No Premature Generalization)**：
+  - 在尚未接入多个异构大模型（如 LLaMA、Mistral、Qwen 等）时，严禁生造一个内部写死特定模型词表或控制符的虚假“通用 Pipeline”。
+  - 各具体模型推理通过各自的原生结构体与专属词表直接调用（如 `examples/` 直接调用 `Gemma4E4BModel` / `DefaultGemma4Q4` 与 `Gemma4Vocabulary`）。
+  - 待后续积累了更多异构大模型并形成稳定的通用分词器与生成协议后，再在 `engine` 统一沉淀通用的多态推理流水线。
+- **保持端到端大模型训练能力完备**：
+  - 框架必须完整支持因果自回归语言模型的全生命周期训练（计算图构建、交叉熵损失、反向传播与优化器更新），确保可以直接加载 `models.GPT` 等模型编写预训练、SFT 与微调脚本。
+

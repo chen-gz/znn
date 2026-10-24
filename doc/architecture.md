@@ -81,7 +81,9 @@ src/
 │   ├── tests.zig                 # Gemma 4 全精度、4-bit 量化、E4B 推理引擎与对话模板单元测试
 │   └── tests_vis.zig             # 可视化作用域归属、Schema 2.0 黄金边集与 18 个经典模型导出测试
 ├── optim.zig                     # SGD, Adam, AdamW 优化器、4 类学习率调度器、梯度裁剪与 ZNNO 检查点
-├── engine.zig                    # 分类任务训练与无梯度评估引擎 (Step / Epoch 执行器)
+├── engine.zig                    # 执行引擎门面 (导出分类训练器、评估器与 causal_lm 因果语言模型训练单步)
+├── engine/
+│   └── causal_lm.zig             # 因果自回归语言模型训练单步调度器 (trainCausalLMStep: 前向、交叉熵、反向传播与优化器更新)
 ├── dataset.zig                   # MNIST/Fashion-MNIST IDX 加载器、DataLoader、BPETokenizer 与 BinaryMmapDataset
 ├── regression.zig                # OLS、Ridge、Lasso、ElasticNet 经典回归算法
 ├── cross_validation.zig          # 分层 K-Fold 交叉验证、StandardScaler 与网格超参数搜索
@@ -230,6 +232,8 @@ flowchart TD
   * `graph.executor()`：获取当前注入的执行器（`Executor.serial` 或基于 `std.Io.Threaded` 的并行执行器）；
   * `graph.arenaAllocator()`：获取计算图 Arena 分配器，用于与计算图同生命周期的临时缓冲区 (如 `RNN.forward` 返回的输出切片)。
 * **`nn` 层 (`src/nn/`)**：所有模块的前向统一为 `forward(self, graph: *Graph, x, ...)`，只通过计算图执行算子，没有 Eager / Graph 双分支，也不需要手动释放中间张量。推理时调用方传入 `Graph.init(allocator, .{ .enable_grad = false })` 构建的计算图即可。计算图 JSON 导出属于 `nn`：`nn.generateJson(&graph, allocator)` / `nn.exportJson(&graph, path, allocator)`。训练循环位于上层的 `engine`（`engine.trainClassificationStep` 等），`nn` 不再转导出。
+* **`models` 层 (`src/models/`)**：纯粹的模型架构与权重定义库（`GPT`、`Gemma4ForCausalLM`、`Gemma4E4BModel`、`DefaultGemma4Q4`）。模型内部仅定义网络结构、前向传播 `forward` 与原生自回归生成循环 `generate`。严禁在 `models` 包中堆砌上层端到端控制台阶段打印、复杂的命令行参数解析或特定执行流引擎。
+* **`engine` 层 (`src/engine/`)**：专注于训练工作流与执行循环调度（多分类训练评估 `ClassificationTrainer`、因果自回归大模型单步训练 `trainCausalLMStep`）。遵循“避免过早通用抽象 (No Premature Generalization)”原则：在尚未接入多个异构大模型时，不强行抽象虚假的跨模型推理 Pipeline，各模型推理直接由各示例基于原生模型与专属词表直接调用；大模型预训练、微调与对齐训练能力则由 `engine.causal_lm` 完备提供。
 * **KV-Cache 单步推理** (`CausalSelfAttention.forwardInference` / `MLALayer.forwardInference`)：在函数内部创建局部无梯度计算图承载中间张量，最终输出拷贝到调用方分配器上返回。
 
 ```mermaid
