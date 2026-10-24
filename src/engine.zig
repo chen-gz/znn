@@ -3,6 +3,9 @@ const tensor = @import("tensor.zig");
 const autodiff = @import("autodiff.zig");
 const dataset = @import("dataset.zig");
 const nn = @import("nn.zig");
+const models = @import("models.zig");
+
+pub const Gemma4E4BEngine = models.Gemma4E4BEngine;
 
 pub const ClassificationStepResult = struct {
     loss: f32,
