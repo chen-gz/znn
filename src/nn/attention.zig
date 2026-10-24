@@ -1,5 +1,6 @@
 const std = @import("std");
 const tensor = @import("../tensor.zig");
+const vec_math = @import("../backend.zig").vec_math;
 const autodiff = @import("../autodiff.zig");
 const core = @import("core.zig");
 const deinitModel = core.deinitModel;
@@ -23,51 +24,6 @@ fn createCacheTensor(allocator: std.mem.Allocator, dims: []const usize) !*Tensor
     t.shape = Shape.init(dims);
     t.strides = tensor.computeContiguousStrides(t.shape);
     return t;
-}
-
-/// 单步增量推理内层循环使用的单指令多数据 (Single Instruction Multiple Data, SIMD) 向量宽度
-const simd_width = 8;
-const F32xN = @Vector(simd_width, f32);
-
-/// 向量点积 sum(a[i] * b[i])：按 SIMD 宽度分块累加，尾部逐元素处理
-fn dot(a: []const f32, b: []const f32) f32 {
-    std.debug.assert(a.len == b.len);
-    var acc: F32xN = @splat(0.0);
-    var i: usize = 0;
-    while (i + simd_width <= a.len) : (i += simd_width) {
-        const va: F32xN = a[i..][0..simd_width].*;
-        const vb: F32xN = b[i..][0..simd_width].*;
-        acc += va * vb;
-    }
-    var sum = @reduce(.Add, acc);
-    while (i < a.len) : (i += 1) sum += a[i] * b[i];
-    return sum;
-}
-
-/// 缩放累加 y += alpha * x
-fn axpy(y: []f32, alpha: f32, x: []const f32) void {
-    std.debug.assert(y.len == x.len);
-    const va: F32xN = @splat(alpha);
-    var i: usize = 0;
-    while (i + simd_width <= y.len) : (i += simd_width) {
-        const vx: F32xN = x[i..][0..simd_width].*;
-        const vy: F32xN = y[i..][0..simd_width].*;
-        y[i..][0..simd_width].* = vy + va * vx;
-    }
-    while (i < y.len) : (i += 1) y[i] += alpha * x[i];
-}
-
-/// 原地数值稳定的归一化指数函数 (Softmax)：先减去最大值再求指数，避免上溢
-fn softmaxInPlace(scores: []f32) void {
-    var max_score: f32 = -std.math.inf(f32);
-    for (scores) |s| max_score = @max(max_score, s);
-    var exp_sum: f32 = 0.0;
-    for (scores) |*s| {
-        s.* = @exp(s.* - max_score);
-        exp_sum += s.*;
-    }
-    const inv_sum = 1.0 / exp_sum;
-    for (scores) |*s| s.* *= inv_sum;
 }
 
 /// 键值缓存 (Key-Value Cache, KVCache)，用于大语言模型 (Large Language Model, LLM) 自回归增量推理 (O(T) 生成复杂度)
@@ -382,15 +338,15 @@ pub const CausalSelfAttention = struct {
                 const head_base = (b * n_kv + kv_h) * cache.max_len;
                 for (0..curr_len) |pos| {
                     const k_cached = cache.k.data[(head_base + pos) * hs .. (head_base + pos + 1) * hs];
-                    scores[pos] = dot(q_head, k_cached) * scale;
+                    scores[pos] = vec_math.dot(q_head, k_cached) * scale;
                 }
-                softmaxInPlace(scores);
+                vec_math.softmaxRowInPlace(scores);
 
                 const y_head = y_2d.data[(b * C + h * hs)..(b * C + (h + 1) * hs)];
                 @memset(y_head, 0.0);
                 for (0..curr_len) |pos| {
                     const v_cached = cache.v.data[(head_base + pos) * hs .. (head_base + pos + 1) * hs];
-                    axpy(y_head, scores[pos], v_cached);
+                    vec_math.axpy(y_head, scores[pos], v_cached);
                 }
             }
         }
@@ -401,34 +357,6 @@ pub const CausalSelfAttention = struct {
         return try tensor.array(allocator, out_shape, out_proj.data);
     }
 };
-
-/// 旋转位置编码 (Rotary Position Embedding, RoPE) 一维 (1-Dimensional, 1D) 旋转角表：
-/// 为长度 `dim` 的向量在位置 `pos` 处计算每个频率 i 的 cos(pos * inv_freq_i) 与 sin(pos * inv_freq_i)，
-/// 其中 inv_freq_i = 1 / 10000^(2i / dim)。`cos_out` 与 `sin_out` 的长度必须都为 dim / 2。
-/// 每个频率只计算一次幂函数与三角函数，同一位置的所有向量 (批次、注意力头) 复用同一张表。
-pub fn rope1DAngles(cos_out: []f32, sin_out: []f32, dim: usize, pos: usize) void {
-    std.debug.assert(cos_out.len == dim / 2 and sin_out.len == dim / 2);
-    const pos_f = @as(f32, @floatFromInt(pos));
-    const dim_f = @as(f32, @floatFromInt(dim));
-    for (cos_out, sin_out, 0..) |*c, *s, i| {
-        const inv_freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / dim_f);
-        const theta = pos_f * inv_freq;
-        c.* = @cos(theta);
-        s.* = @sin(theta);
-    }
-}
-
-/// 旋转位置编码 (Rotary Position Embedding, RoPE) 一维 (1-Dimensional, 1D) 原地旋转变换 (交错配对 (2i, 2i + 1))：
-/// 使用 `rope1DAngles` 预计算的旋转角表，`cos_t` / `sin_t` 的长度必须为 vec.len / 2 (奇数长度时最后一个元素保持不变)
-pub fn applyRope1D(vec: []f32, cos_t: []const f32, sin_t: []const f32) void {
-    std.debug.assert(cos_t.len == vec.len / 2 and sin_t.len == vec.len / 2);
-    for (cos_t, sin_t, 0..) |c, s, i| {
-        const x0 = vec[2 * i];
-        const x1 = vec[2 * i + 1];
-        vec[2 * i] = x0 * c - x1 * s;
-        vec[2 * i + 1] = x0 * s + x1 * c;
-    }
-}
 
 /// 多头潜在注意力缓存 (Multi-Head Latent Attention Cache, MLACache)
 /// 对应 DeepSeek-V2 / V3 论文：
@@ -483,6 +411,8 @@ pub const MLALayer = struct {
     w_uv: Linear, // 内容值 (Content Value) 上投影 (Up-Projection): d_c -> n_head * head_dim
     core: ScaledDotProductAttention = .{}, // 缩放点积注意力核心子模块 (Scaled Dot-Product Attention, SDPA)
     o_proj: Linear, // 输出投影 (Output Projection): n_head * head_dim -> dim
+    /// 解耦旋转位置编码配置，作用于每个 d_r 维旋转向量 (查询的旋转子空间与共享 k_r)；全序列前向与增量解码共用
+    rope: tensor.RopeOptions = .{},
     name: ?[]const u8 = null,
     module_type: []const u8 = "MLALayer",
 
@@ -566,13 +496,15 @@ pub const MLALayer = struct {
         // 3. 重塑并转置为四维 (4-Dimensional, 4D) 多头结构，对查询 (Query) 的旋转位置编码 (Rotary Position Embedding, RoPE) 子空间与共享 k_r 施加旋转位置编码
         const q_4d = try graph.reshape(q_all, &.{ B, T, nh, q_head_dim });
         const q_trans = try graph.transposeND(q_4d, 1, 2);
-        const q_rot = try graph.rope(q_trans, 0, .{ .rotary_offset = hd });
+        var q_rope = self.rope;
+        q_rope.rotary_offset += hd;
+        const q_rot = try graph.rope(q_trans, 0, q_rope);
 
         const k_c_4d = try graph.reshape(k_c_2d, &.{ B, T, nh, hd });
         const k_c = try graph.transposeND(k_c_4d, 1, 2);
 
         const k_r_4d = try graph.reshape(k_r_2d, &.{ B, 1, T, dr });
-        const k_r_rot = try graph.rope(k_r_4d, 0, .{});
+        const k_r_rot = try graph.rope(k_r_4d, 0, self.rope);
 
         const k_r_heads = if (nh > 1) try graph.repeatKV(k_r_rot, nh) else k_r_rot;
 
@@ -626,13 +558,14 @@ pub const MLALayer = struct {
 
         // 2. 施加旋转位置编码 (Rotary Position Embedding, RoPE) 并写入多头潜在注意力缓存 (Multi-Head Latent Attention Cache, MLACache)
         const t = cache.curr_len;
-        const rope_cos = try step_alloc.alloc(f32, dr / 2);
-        const rope_sin = try step_alloc.alloc(f32, dr / 2);
-        rope1DAngles(rope_cos, rope_sin, dr, t);
+        const rope_table = try tensor.RopeTable.init(dr, self.rope);
+        const rope_cos = try step_alloc.alloc(f32, rope_table.num_angles);
+        const rope_sin = try step_alloc.alloc(f32, rope_table.num_angles);
+        rope_table.angles(t, rope_cos, rope_sin);
 
         for (0..B) |b| {
             const k_r_vec = k_r_step.data[b * dr .. (b + 1) * dr];
-            applyRope1D(k_r_vec, rope_cos, rope_sin);
+            rope_table.applyRow(k_r_vec, rope_cos, rope_sin, false);
 
             const dest_c = cache.c_kv.data[(b * cache.max_len + t) * dc .. (b * cache.max_len + t + 1) * dc];
             const dest_r = cache.k_r.data[(b * cache.max_len + t) * dr .. (b * cache.max_len + t + 1) * dr];
@@ -658,28 +591,28 @@ pub const MLALayer = struct {
                 const q_offset = b * (nh * q_stride) + h * q_stride;
                 const q_c_head = q_all.data[q_offset .. q_offset + hd];
                 const q_r_head = q_all.data[q_offset + hd .. q_offset + q_stride];
-                applyRope1D(q_r_head, rope_cos, rope_sin);
+                rope_table.applyRow(q_r_head, rope_cos, rope_sin, false);
 
                 // 公式 (7) 矩阵吸收: \tilde{q}_{t,i} = (W_i^{UK})^T q_{t,i}^C \in R^{dc}
                 // 内容键偏置 b^{UK} 对所有位置贡献同一常数 q^C \cdot b^{UK}，归一化指数函数 (Softmax) 对其不变，故可省略
                 for (q_absorbed, 0..) |*qa, c_idx| {
                     const w_row = self.w_uk.weight.data[c_idx * kv_cols + h * hd .. c_idx * kv_cols + (h + 1) * hd];
-                    qa.* = dot(w_row, q_c_head);
+                    qa.* = vec_math.dot(w_row, q_c_head);
                 }
 
                 // 在低维潜在空间直接与缓存中的 c_j^{KV} 计算点积打分
                 for (0..curr_len) |pos| {
                     const c_cached = cache.c_kv.data[(b * cache.max_len + pos) * dc .. (b * cache.max_len + pos + 1) * dc];
                     const k_r_cached = cache.k_r.data[(b * cache.max_len + pos) * dr .. (b * cache.max_len + pos + 1) * dr];
-                    scores[pos] = (dot(q_absorbed, c_cached) + dot(q_r_head, k_r_cached)) * scale;
+                    scores[pos] = (vec_math.dot(q_absorbed, c_cached) + vec_math.dot(q_r_head, k_r_cached)) * scale;
                 }
-                softmaxInPlace(scores);
+                vec_math.softmaxRowInPlace(scores);
 
                 // 公式 (8) 潜在空间加权求和: u_h = \sum \alpha_{i,j} c_j^{KV} \in R^{dc}
                 @memset(u_latent, 0.0);
                 for (0..curr_len) |pos| {
                     const c_cached = cache.c_kv.data[(b * cache.max_len + pos) * dc .. (b * cache.max_len + pos + 1) * dc];
-                    axpy(u_latent, scores[pos], c_cached);
+                    vec_math.axpy(u_latent, scores[pos], c_cached);
                 }
 
                 // 还原头输出: y_h = (W_i^{UV})^T u_h + b_i^{UV} \in R^{hd}
@@ -687,7 +620,7 @@ pub const MLALayer = struct {
                 const y_head_dest = y_concat[(b * nh + h) * hd .. (b * nh + h + 1) * hd];
                 @memcpy(y_head_dest, self.w_uv.bias.data[h * hd .. (h + 1) * hd]);
                 for (u_latent, 0..) |u, c_idx| {
-                    axpy(y_head_dest, u, self.w_uv.weight.data[c_idx * kv_cols + h * hd .. c_idx * kv_cols + (h + 1) * hd]);
+                    vec_math.axpy(y_head_dest, u, self.w_uv.weight.data[c_idx * kv_cols + h * hd .. c_idx * kv_cols + (h + 1) * hd]);
                 }
             }
         }

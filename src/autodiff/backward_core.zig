@@ -5,6 +5,7 @@ const transposeShape = tensor.transposeShape;
 const Op = @import("types.zig").Op;
 
 const backend = @import("../backend.zig");
+const vec_math = backend.vec_math;
 
 /// 二维矩阵在基础线性代数子程序 (Basic Linear Algebra Subprograms, BLAS) 中的存储描述：
 /// 逻辑元素 `X[i][j]` 位于 `ptr[i * ld + j]` (行主序，`trans = false`) 或 `ptr[j * ld + i]` (转置存储，`trans = true`)
@@ -104,24 +105,10 @@ const RowWalker = struct {
     }
 };
 
-const vec_len = 8;
-const Vec = @Vector(vec_len, f32);
-
-fn sumSlice(xs: []const f32) f32 {
-    var acc: Vec = @splat(0.0);
-    var i: usize = 0;
-    while (i + vec_len <= xs.len) : (i += vec_len) {
-        acc += @as(Vec, xs[i..][0..vec_len].*);
-    }
-    var total: f32 = @reduce(.Add, acc);
-    while (i < xs.len) : (i += 1) total += xs[i];
-    return total;
-}
-
 /// 把一行上游梯度 `g` 乘以 `scale` 后累加到 `dst[off + j * stride]`：跨步为 0 (广播轴) 时先求和再写一次
 fn accumulateRow(dst: []f32, off: usize, stride: usize, g: []const f32, comptime scale: f32) void {
     switch (stride) {
-        0 => dst[off] += scale * sumSlice(g),
+        0 => dst[off] += scale * vec_math.sum(g),
         1 => for (dst[off..][0..g.len], g) |*d, gv| {
             d.* += scale * gv;
         },
@@ -264,7 +251,7 @@ pub fn backwardCore(self: *Op) !void {
             const C = self.outputs[0];
             if (A.requires_grad) {
                 for (A.grad, C.grad, A.data) |*a_g, c_g, a_val| {
-                    const sig = if (a_val >= 0.0) 1.0 / (1.0 + @exp(-a_val)) else @exp(a_val) / (1.0 + @exp(a_val));
+                    const sig = vec_math.sigmoid(a_val);
                     const d_silu = sig * (1.0 + a_val * (1.0 - sig));
                     a_g.* += c_g * d_silu;
                 }
@@ -312,10 +299,7 @@ pub fn backwardCore(self: *Op) !void {
                     const log_ratio_rejected = pi_rejected.data[i] - ctx.ref_rejected[i];
                     const z = ctx.beta * (log_ratio_chosen - log_ratio_rejected);
                     // d/dz (-log(sigmoid(z))) = -sigmoid(-z) = -1 / (1 + exp(z))
-                    const sig_neg_z: f32 = if (z >= 0.0)
-                        @exp(-z) / (1.0 + @exp(-z))
-                    else
-                        1.0 / (1.0 + @exp(z));
+                    const sig_neg_z = vec_math.sigmoid(-z);
                     const dz = -inv_n * ctx.beta * sig_neg_z;
                     if (pi_chosen.requires_grad) {
                         pi_chosen.grad[i] += dz;
@@ -369,10 +353,7 @@ pub fn backwardCore(self: *Op) !void {
 
             if (logits.requires_grad) {
                 for (logits.grad, logits.data, targets.data) |*x_g, x_val, y_val| {
-                    const sig: f32 = if (x_val >= 0.0)
-                        1.0 / (1.0 + @exp(-x_val))
-                    else
-                        @exp(x_val) / (1.0 + @exp(x_val));
+                    const sig = vec_math.sigmoid(x_val);
                     x_g.* += scale * (sig - y_val);
                 }
             }

@@ -19,9 +19,7 @@ const GemmaUnscaledRMSNorm = gemma4.GemmaUnscaledRMSNorm;
 const Gemma4Config = gemma4.Gemma4Config;
 const Gemma4AttentionType = gemma4.Gemma4AttentionType;
 const Gemma4KVCache = gemma4.Gemma4KVCache;
-const ropeSplitHalf = gemma4.ropeSplitHalf;
-const dotF32Bf16 = gemma4.dotF32Bf16;
-const validateTokenIds = gemma4.validateTokenIds;
+const vec_math = backend.vec_math;
 const LmHeadWeights = backend.offload.LmHeadWeights;
 const Sampler = backend.sampling.Sampler;
 const Gemma4GpuLayer = gemma4_gpu.Gemma4GpuLayer;
@@ -113,11 +111,7 @@ pub const Q4Linear = struct {
         const num_blocks = self.blocks.len;
         var f32_chunk: [32]f32 = undefined;
         for (0..num_blocks) |b| {
-            for (0..32) |j| {
-                const b_bits = bf16_weights[b * 32 + j];
-                const val: tensor.bf16 = .{ .bits = b_bits };
-                f32_chunk[j] = val.toF32();
-            }
+            vec_math.widenBf16(&f32_chunk, bf16_weights[b * 32 ..][0..32], 1.0);
             self.blocks[b] = Q4Block.quantize(&f32_chunk);
         }
     }
@@ -267,8 +261,7 @@ pub const Gemma4Q4Attention = struct {
     num_kv_heads: usize,
     head_dim: usize,
     sliding_window: usize,
-    rope_theta: f32,
-    partial_rotary_factor: f32,
+    rope: tensor.RopeOptions,
 
     name: ?[]const u8 = null,
     module_type: []const u8 = "Gemma4Q4Attention",
@@ -315,8 +308,7 @@ pub const Gemma4Q4Attention = struct {
             .num_kv_heads = num_kv_heads,
             .head_dim = head_dim,
             .sliding_window = sliding_window,
-            .rope_theta = attn_type.ropeTheta(),
-            .partial_rotary_factor = attn_type.partialRotaryFactor(),
+            .rope = attn_type.ropeOptions(),
         };
     }
 
@@ -359,8 +351,7 @@ pub const Gemma4Q4Attention = struct {
             .num_kv_heads = num_kv_heads,
             .head_dim = head_dim,
             .sliding_window = sliding_window,
-            .rope_theta = attn_type.ropeTheta(),
-            .partial_rotary_factor = attn_type.partialRotaryFactor(),
+            .rope = attn_type.ropeOptions(),
         };
     }
 
@@ -486,8 +477,8 @@ pub const Gemma4Q4Attention = struct {
         const v = try graph.transposeND(v_4d, 1, 2);
 
         // 4. 施加半切分 RoPE 旋转位置编码 (Split-Half RoPE, Gemma 官方标准)
-        const q_rot = try ropeSplitHalf(graph, q, 0, self.partial_rotary_factor, self.rope_theta);
-        const k_rot = try ropeSplitHalf(graph, k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
+        const q_rot = try graph.rope(q, 0, self.rope);
+        const k_rot = try graph.rope(k_t_unrot, 0, self.rope);
 
         // 5. 写入键值缓存 (Key-Value Cache, KVCache)
         if (layer_cache) |cache| try gemma4.writePrefillKVCache(cache, k_rot.data, v.data, B, T);
@@ -548,8 +539,8 @@ pub const Gemma4Q4Attention = struct {
         // 3. 施加半切分旋转位置编码 (Split-Half RoPE, 当前时间步为 pos)
         const q_4d = try graph.reshape(q_normed, &.{ 1, nh, 1, hd });
         const k_4d = try graph.reshape(k_normed, &.{ 1, n_kv, 1, hd });
-        const q_rot = try ropeSplitHalf(graph, q_4d, pos, self.partial_rotary_factor, self.rope_theta);
-        const k_rot = try ropeSplitHalf(graph, k_4d, pos, self.partial_rotary_factor, self.rope_theta);
+        const q_rot = try graph.rope(q_4d, pos, self.rope);
+        const k_rot = try graph.rope(k_4d, pos, self.rope);
 
         // 4. 写入键值缓存并执行单查询点积注意力 (Single Query Attention against Cached Keys & Values)
         return gemma4.decodeAttention(graph, layer_cache, self.attn_type, self.sliding_window, nh, q_rot.data, k_rot.data, v_normed.data);
@@ -837,17 +828,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             // 1. 词表嵌入查找
             const tok_emb = if (self.embed_u16_mmap) |embed_u16| blk: {
                 const out_emb = try graph.tensorND(&.{ B, T, config.hidden_size }, false);
-                for (0..B * T) |idx| {
-                    const raw_id = token_ids.data[idx];
-                    const tok: usize = if (raw_id >= 0.0) @intFromFloat(raw_id) else 0;
-                    const safe_tok = @min(tok, config.vocab_size - 1);
-                    const emb_row = embed_u16[safe_tok * config.hidden_size .. (safe_tok + 1) * config.hidden_size];
-                    const dest = out_emb.data[idx * config.hidden_size .. (idx + 1) * config.hidden_size];
-                    for (0..config.hidden_size) |d| {
-                        const b: tensor.bf16 = .{ .bits = emb_row[d] };
-                        dest[d] = b.toF32();
-                    }
-                }
+                try tensor.embeddingLookupInto(u16, embed_u16, token_ids.data[0 .. B * T], config.hidden_size, 1.0, out_emb.data);
                 break :blk out_emb;
             } else try self.embed_tokens.forward(graph, token_ids);
             const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
@@ -869,7 +850,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     const h_row = h_2d.data[r * config.hidden_size .. (r + 1) * config.hidden_size];
                     const out_row = out_logits.data[r * config.vocab_size .. (r + 1) * config.vocab_size];
                     for (out_row, 0..) |*o, v| {
-                        o.* = dotF32Bf16(h_row, embed_u16[v * config.hidden_size .. (v + 1) * config.hidden_size]);
+                        o.* = vec_math.dotBf16(h_row, embed_u16[v * config.hidden_size .. (v + 1) * config.hidden_size]);
                     }
                 }
                 break :blk out_logits;
@@ -972,15 +953,6 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             return computeDirectLayerOffsets().offsets[config.num_hidden_layers];
         }
 
-        /// 将小端 BF16 原始字节解码写入 F32 参数缓冲区 (逐元素读取，不要求源地址对齐)
-        fn loadBf16Into(dest: []f32, bytes: []const u8) void {
-            std.debug.assert(bytes.len >= dest.len * 2);
-            for (dest, 0..) |*d, idx| {
-                const b: tensor.bf16 = .{ .bits = std.mem.readInt(u16, bytes[idx * 2 ..][0..2], .little) };
-                d.* = b.toF32();
-            }
-        }
-
         /// 按存储顺序 (input, post_attn, pre_ffn, post_ffn, q_norm, k_norm, layer_scalar) 填充单层归一化参数
         fn loadLayerNorms(layer: *Gemma4Q4DecoderLayer, bytes: []const u8, head_dim: usize) void {
             const H = config.hidden_size;
@@ -991,14 +963,14 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 &layer.pre_feedforward_layernorm,
                 &layer.post_feedforward_layernorm,
             }) |ln| {
-                loadBf16Into(ln.weight.data, bytes[cursor .. cursor + H * 2]);
+                vec_math.widenBf16Bytes(ln.weight.data, bytes[cursor .. cursor + H * 2]);
                 cursor += H * 2;
             }
             inline for (.{ &layer.self_attn.q_norm, &layer.self_attn.k_norm }) |ln| {
-                loadBf16Into(ln.weight.data[0..head_dim], bytes[cursor .. cursor + head_dim * 2]);
+                vec_math.widenBf16Bytes(ln.weight.data[0..head_dim], bytes[cursor .. cursor + head_dim * 2]);
                 cursor += head_dim * 2;
             }
-            loadBf16Into(layer.layer_scalar.data[0..1], bytes[cursor .. cursor + 2]);
+            vec_math.widenBf16Bytes(layer.layer_scalar.data[0..1], bytes[cursor .. cursor + 2]);
         }
 
         /// 从直通布局字节流中切出单个投影矩阵的三段式切片 (w_q, scales, biases) 并推进游标
@@ -1118,7 +1090,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             // 1. 最终层 RMSNorm 权重 (BF16)
             const norm = try GemmaRMSNorm.init(allocator, config.hidden_size, config.rms_norm_eps);
             errdefer deinitModel(&norm, allocator);
-            loadBf16Into(norm.weight.data, mmap_bytes[magic_bytes..embed_offset]);
+            vec_math.widenBf16Bytes(norm.weight.data, mmap_bytes[magic_bytes..embed_offset]);
 
             // 2. 词表嵌入矩阵 (BF16) 保持在 mmap 与 GPU 统一显存中，
             // 避免在 CPU 堆内存上分配 4.03 GB 的冗余 F32 Tensor，自回归直接利用零拷贝映射
@@ -1427,21 +1399,6 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             return @alignCast(std.mem.bytesAsSlice(u16, mmap_bytes[embed_offset .. embed_offset + embed_bytes]));
         }
 
-        /// BF16 词元嵌入查表并施加 Gemma 嵌入缩放 sqrt(hidden_size)，返回 [1, T, hidden_size]
-        fn embedScaledBf16(graph: *autodiff.Graph, embed_u16: []const u16, tokens: []const usize) !*Tensor {
-            const H = config.hidden_size;
-            const tok_emb = try graph.tensorND(&.{ 1, tokens.len, H }, false);
-            const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(H)));
-            for (tokens, 0..) |tok, t_idx| {
-                const emb_row = embed_u16[tok * H .. (tok + 1) * H];
-                for (tok_emb.data[t_idx * H .. (t_idx + 1) * H], emb_row) |*dst, bits| {
-                    const b: tensor.bf16 = .{ .bits = bits };
-                    dst.* = b.toF32() * sqrt_d;
-                }
-            }
-            return tok_emb;
-        }
-
         /// 无键值缓存的自回归前向推理单步：输入完整历史 token_ids 序列与 mmap 字节，前向传播后按 sampler 选取下一个词元。
         /// 词表投影通过 graph.executor() 并行，不派生临时 OS 线程
         pub fn generateNextToken(
@@ -1453,12 +1410,11 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         ) !usize {
             const T = token_ids.len;
             if (T == 0) return error.EmptyPrompt;
-            try validateTokenIds(token_ids, config.vocab_size);
 
             const embed_u16 = try embedSliceFromMmap(mmap_bytes);
 
             // 1. 词表嵌入查表
-            const tok_emb = try embedScaledBf16(graph, embed_u16, token_ids);
+            const tok_emb = try gemma4.embedTokensScaled(u16, graph, embed_u16, config.hidden_size, token_ids);
 
             // 2. 逐层前向传播
             var h = tok_emb;
@@ -1487,7 +1443,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         ) !usize {
             const T = prompt_tokens.len;
             if (T == 0) return error.EmptyPrompt;
-            try validateTokenIds(prompt_tokens, config.vocab_size);
+            try tensor.checkIndices(prompt_tokens, config.vocab_size);
             if (T > cache.max_seq_len) return error.ContextWindowExceeded;
             cache.reset();
 
@@ -1506,7 +1462,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             self.kv_owner = .cpu;
 
             // 1. 词表嵌入查表
-            const tok_emb = try embedScaledBf16(graph, embed_u16, prompt_tokens);
+            const tok_emb = try gemma4.embedTokensScaled(u16, graph, embed_u16, config.hidden_size, prompt_tokens);
 
             // 2. 逐层预填充前向传播并写入键值缓存
             var h = tok_emb;
@@ -1549,7 +1505,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             sampler: *Sampler,
         ) !usize {
             const tokens = [_]usize{token};
-            try validateTokenIds(&tokens, config.vocab_size);
+            try tensor.checkIndices(&tokens, config.vocab_size);
             const embed_u16 = try embedSliceFromMmap(mmap_bytes);
 
             if (graph.options.device == .gpu and self.gpu_context != null) {
@@ -1563,7 +1519,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             try self.syncCpuCache(cache);
 
             // 1. 单个词元嵌入查表 [1, 1, hidden_size]
-            const tok_emb = try embedScaledBf16(graph, embed_u16, &tokens);
+            const tok_emb = try gemma4.embedTokensScaled(u16, graph, embed_u16, config.hidden_size, &tokens);
 
             // 2. 逐层增量解码传播
             var h = tok_emb;
@@ -1593,7 +1549,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         ) !usize {
             if (input_tokens.len == 0) return 0;
             if (accepted_buf.len == 0) return error.BufferTooSmall;
-            try validateTokenIds(input_tokens, config.vocab_size);
+            try tensor.checkIndices(input_tokens, config.vocab_size);
             const embed_u16 = try embedSliceFromMmap(mmap_bytes);
 
             if (graph.options.device == .gpu and self.gpu_context != null) {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const vec_math = @import("../backend/vec_math.zig");
 const core = @import("core.zig");
 const Tensor = core.Tensor;
 const shape_mod = @import("shape.zig");
@@ -202,67 +203,6 @@ pub fn numel(self: Tensor) usize {
     return self.shape.numel();
 }
 
-const V8 = @Vector(8, f32);
-
-/// 连续切片求和：8 路向量累加器打破串行加法的依赖链，比逐元素串行累加更快且舍入误差更小
-pub fn sumSlice(values: []const f32) f32 {
-    var acc: V8 = @splat(0.0);
-    var i: usize = 0;
-    while (i + 8 <= values.len) : (i += 8) {
-        acc += values[i..][0..8].*;
-    }
-    var total: f32 = @reduce(.Add, acc);
-    while (i < values.len) : (i += 1) total += values[i];
-    return total;
-}
-
-/// 连续切片的平方和（8 路向量累加）
-pub fn sumSquaresSlice(values: []const f32) f32 {
-    var acc: V8 = @splat(0.0);
-    var i: usize = 0;
-    while (i + 8 <= values.len) : (i += 8) {
-        const v: V8 = values[i..][0..8].*;
-        acc += v * v;
-    }
-    var total: f32 = @reduce(.Add, acc);
-    while (i < values.len) : (i += 1) total += values[i] * values[i];
-    return total;
-}
-
-/// 连续切片相对给定中心的偏差平方和 `sum((x - center)^2)`（8 路向量累加）
-pub fn sumSquaredDeviationsSlice(values: []const f32, center: f32) f32 {
-    const c_vec: V8 = @splat(center);
-    var acc: V8 = @splat(0.0);
-    var i: usize = 0;
-    while (i + 8 <= values.len) : (i += 8) {
-        const d = @as(V8, values[i..][0..8].*) - c_vec;
-        acc += d * d;
-    }
-    var total: f32 = @reduce(.Add, acc);
-    while (i < values.len) : (i += 1) {
-        const d = values[i] - center;
-        total += d * d;
-    }
-    return total;
-}
-
-/// 非空连续切片的最大值（与逐元素 `if (v > m) m = v` 扫描结果一致，含 NaN 时语义可能不同，调用方仅用于数值稳定化平移）
-pub fn maxSlice(values: []const f32) f32 {
-    std.debug.assert(values.len > 0);
-    var i: usize = 0;
-    var m: f32 = values[0];
-    if (values.len >= 8) {
-        var acc: V8 = values[0..8].*;
-        i = 8;
-        while (i + 8 <= values.len) : (i += 8) {
-            acc = @max(acc, @as(V8, values[i..][0..8].*));
-        }
-        m = @reduce(.Max, acc);
-    }
-    while (i < values.len) : (i += 1) m = @max(m, values[i]);
-    return m;
-}
-
 /// 通用多维张量沿指定轴或全局求和归约 (Sum Reduction)
 /// 非连续输入先物化为连续副本；沿轴归约按 (outer, k, inner) 顺序把整行累加到输出行，访存连续且可向量化
 pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
@@ -313,7 +253,7 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
 
         if (inner_size == 1) {
             for (0..outer_size) |outer| {
-                C.data[outer] = sumSlice(x_data[outer * reduce_size ..][0..reduce_size]);
+                C.data[outer] = vec_math.sum(x_data[outer * reduce_size ..][0..reduce_size]);
             }
         } else {
             for (0..outer_size) |outer| {
@@ -328,7 +268,7 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
         return C;
     } else {
         // 全局归约 (Global reduction over all elements)
-        const total = sumSlice(x_data);
+        const total = vec_math.sum(x_data);
         if (keepdims) {
             const out_shape_dims: [8]usize = @splat(1);
             const C = try zeros(allocator, out_shape_dims[0..self.shape.len]);

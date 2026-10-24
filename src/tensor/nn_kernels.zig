@@ -6,13 +6,14 @@ const conv_pool = @import("conv_pool.zig");
 const Tensor = core.Tensor;
 const ConvOptions = types.ConvOptions;
 const PoolOptions = types.PoolOptions;
-const RopeOptions = types.RopeOptions;
+const rope_mod = @import("../backend/rope.zig");
+const RopeOptions = rope_mod.RopeOptions;
+const RopeTable = @import("rope.zig").RopeTable;
 const ops_mod = @import("ops.zig");
 const zeros = ops_mod.zeros;
 const free = ops_mod.free;
-const reductions = @import("reductions.zig");
 const shape_mod = @import("shape.zig");
-const vec_math = @import("vec_math.zig");
+const vec_math = @import("../backend/vec_math.zig");
 
 pub const conv1d = conv_pool.conv1d;
 pub const conv2d = conv_pool.conv2d;
@@ -37,17 +38,7 @@ pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
     const C = try zeros(allocator, x.shape.dims[0..x.shape.len]);
 
     for (0..M) |i| {
-        const row_in = x.data[i * D .. (i + 1) * D];
-        const row_out = C.data[i * D .. (i + 1) * D];
-
-        const max_val = reductions.maxSlice(row_in);
-        vec_math.expShifted(row_in, row_out, max_val);
-        const exp_sum = reductions.sumSlice(row_out);
-
-        const inv_sum = 1.0 / exp_sum;
-        for (row_out) |*p| {
-            p.* *= inv_sum;
-        }
+        vec_math.softmaxRow(x.data[i * D .. (i + 1) * D], C.data[i * D .. (i + 1) * D]);
     }
     return C;
 }
@@ -71,7 +62,7 @@ pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator
         const row_in = x.data[i * D .. (i + 1) * D];
         const row_out = Y.data[i * D .. (i + 1) * D];
 
-        const sum_x2 = reductions.sumSquaresSlice(row_in);
+        const sum_x2 = vec_math.sumSquares(row_in);
         const inv_rms = 1.0 / @sqrt(sum_x2 / @as(f32, @floatFromInt(D)) + eps);
 
         for (row_in, row_out, g_c.data[0..D]) |x_val, *y_val, g_val| {
@@ -104,8 +95,8 @@ pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std
         const row_in = x.data[i * D .. (i + 1) * D];
         const row_out = Y.data[i * D .. (i + 1) * D];
 
-        const mean_val = reductions.sumSlice(row_in) / d_f;
-        const var_sum = reductions.sumSquaredDeviationsSlice(row_in, mean_val);
+        const mean_val = vec_math.sum(row_in) / d_f;
+        const var_sum = vec_math.sumSquaredDeviations(row_in, mean_val);
         const inv_std = 1.0 / @sqrt(var_sum / d_f + eps);
 
         for (row_in, row_out, g_c.data[0..D], b_c.data[0..D]) |x_val, *y_val, g_val, b_val| {
@@ -203,14 +194,14 @@ fn batchNormChannels(
             var sum_x: f32 = 0.0;
             for (0..N) |n| {
                 const start_idx = (n * C + c_) * spatial_size;
-                sum_x += reductions.sumSlice(x_contig.data[start_idx .. start_idx + spatial_size]);
+                sum_x += vec_math.sum(x_contig.data[start_idx .. start_idx + spatial_size]);
             }
             mean_val = sum_x / m_f;
 
             var var_sum: f32 = 0.0;
             for (0..N) |n| {
                 const start_idx = (n * C + c_) * spatial_size;
-                var_sum += reductions.sumSquaredDeviationsSlice(x_contig.data[start_idx .. start_idx + spatial_size], mean_val);
+                var_sum += vec_math.sumSquaredDeviations(x_contig.data[start_idx .. start_idx + spatial_size], mean_val);
             }
             const var_val = var_sum / m_f;
             inv_std = 1.0 / @sqrt(var_val + eps);
@@ -280,8 +271,8 @@ pub fn groupNorm(
             const group_offset = (n * num_groups + g) * group_elems;
             const group_slice = x_contig.data[group_offset .. group_offset + group_elems];
 
-            const mean_val = reductions.sumSlice(group_slice) / group_elems_f;
-            const var_sum = reductions.sumSquaredDeviationsSlice(group_slice, mean_val);
+            const mean_val = vec_math.sum(group_slice) / group_elems_f;
+            const var_sum = vec_math.sumSquaredDeviations(group_slice, mean_val);
             const inv_std = 1.0 / @sqrt(var_sum / group_elems_f + eps);
 
             const ng_idx = n * num_groups + g;
@@ -319,71 +310,32 @@ pub fn applyDropoutMask(self: *Tensor, mask: []const f32, allocator: std.mem.All
 /// 旋转位置编码统一前向核函数 (Rotary Position Embedding, RoPE)
 /// 支持经典相邻配对 (Interleaved) 与主流半切分配对 (Split-Half) 两种拓扑，
 /// 以及任意频率基数 (base)、旋转子空间偏移 (rotary_offset) 与部分旋转因子 (partial_rotary_factor)。
+/// 旋转由共享的 `RopeTable` 完成：每个位置只计算一次三角函数表并复用于全部 outer 行（批次与注意力头）。
 pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: std.mem.Allocator) !*Tensor {
+    if (self.shape.len == 0) return error.IncompatibleDimensions;
     const x = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (x != self) x.deinit(allocator);
 
-    if (self.shape.len == 0) return error.IncompatibleDimensions;
-    const rotary_offset = options.rotary_offset;
-    const base = options.base;
     const D = x.shape.dims[x.shape.len - 1];
-    if (rotary_offset > D) return error.DimensionOutOfBounds;
     const T = if (x.shape.len >= 2) x.shape.dims[x.shape.len - 2] else 1;
-    const rot_dim = D - rotary_offset;
-    const half = rot_dim / 2;
-    const rot_dim_f = @as(f32, @floatFromInt(rot_dim));
-
-    const factor = std.math.clamp(options.partial_rotary_factor, 0.0, 1.0);
-    const num_angles = @as(usize, @intFromFloat(@as(f32, @floatFromInt(half)) * factor));
+    const table = try RopeTable.init(D, options);
 
     const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
     errdefer free(allocator, Y);
     if (T * D == 0) return Y;
     const outer = x.shape.numel() / (T * D);
 
-    // 频率与各位置的 cos / sin 只依赖 (t, i)：每个位置只计算一次三角函数表并复用于全部 outer 行（批次与注意力头）
-    const tables = try allocator.alloc(f32, 3 * num_angles);
-    defer allocator.free(tables);
-    const inv_freq = tables[0..num_angles];
-    const cos_tab = tables[num_angles .. 2 * num_angles];
-    const sin_tab = tables[2 * num_angles .. 3 * num_angles];
-    for (inv_freq, 0..) |*f, i| {
-        f.* = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
-    }
-
+    var cos_buf: [rope_mod.max_angles]f32 = undefined;
+    var sin_buf: [rope_mod.max_angles]f32 = undefined;
+    const cos_tab = cos_buf[0..table.num_angles];
+    const sin_tab = sin_buf[0..table.num_angles];
     for (0..T) |t| {
-        const pos_f = @as(f32, @floatFromInt(start_pos + t));
-        for (inv_freq, cos_tab, sin_tab) |freq, *cos_t, *sin_t| {
-            const theta = pos_f * freq;
-            cos_t.* = @cos(theta);
-            sin_t.* = @sin(theta);
-        }
-
+        table.angles(start_pos + t, cos_tab, sin_tab);
         for (0..outer) |o| {
-            const row_in = x.data[(o * T + t) * D .. (o * T + t + 1) * D];
-            const row_out = Y.data[(o * T + t) * D .. (o * T + t + 1) * D];
-
-            // 先复制整行，后续仅更新参与旋转的维度
-            @memcpy(row_out, row_in);
-
-            switch (options.mode) {
-                .interleaved => {
-                    for (cos_tab, sin_tab, 0..) |cos_t, sin_t, i| {
-                        const x0 = row_in[rotary_offset + 2 * i];
-                        const x1 = row_in[rotary_offset + 2 * i + 1];
-                        row_out[rotary_offset + 2 * i] = x0 * cos_t - x1 * sin_t;
-                        row_out[rotary_offset + 2 * i + 1] = x0 * sin_t + x1 * cos_t;
-                    }
-                },
-                .split_half => {
-                    for (cos_tab, sin_tab, 0..) |cos_t, sin_t, i| {
-                        const x0 = row_in[rotary_offset + i];
-                        const x1 = row_in[rotary_offset + i + half];
-                        row_out[rotary_offset + i] = x0 * cos_t - x1 * sin_t;
-                        row_out[rotary_offset + i + half] = x1 * cos_t + x0 * sin_t;
-                    }
-                },
-            }
+            // 先复制整行 (仍在一级缓存中)，再原地旋转参与旋转的维度
+            const row = Y.data[(o * T + t) * D ..][0..D];
+            @memcpy(row, x.data[(o * T + t) * D ..][0..D]);
+            table.applyRow(row, cos_tab, sin_tab, false);
         }
     }
     return Y;
@@ -496,8 +448,27 @@ pub fn batchMatMul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) 
     return C;
 }
 
-inline fn indexScalarToUsize(val: anytype, vocab_size: usize) !usize {
-    return types.indexScalarToUsize(@TypeOf(val), val, vocab_size);
+/// 嵌入查表 (Embedding Lookup) 内核：out[t, :] = table[ids[t], :] * scale，写入 [ids.len, dim] 行主序缓冲区。
+/// - `Elem` 为 f32 (单精度嵌入表) 或 u16 (脑浮点 16 (Brain Floating Point 16, BF16) 原始位，展开为单精度后缩放)；
+/// - `ids` 为任意整数或浮点元素类型的切片，词表大小为 table.len / dim，越界、负数或非整数 ID 返回 `error.IndexOutOfBounds`；
+/// - scale = 1 时为纯查表 (如 Gemma 的 sqrt(hidden_size) 嵌入缩放即通过 scale 传入)。
+pub fn embeddingLookupInto(comptime Elem: type, table: []const Elem, ids: anytype, dim: usize, scale: f32, out: []f32) !void {
+    comptime std.debug.assert(Elem == f32 or Elem == u16);
+    if (dim == 0 or out.len != ids.len * dim) return error.ShapeMismatch;
+    const vocab = table.len / dim;
+    const IdxT = std.meta.Elem(@TypeOf(ids));
+    for (ids, 0..) |raw, t| {
+        const id = try types.indexScalarToUsize(IdxT, raw, vocab);
+        const row = table[id * dim ..][0..dim];
+        const dst = out[t * dim ..][0..dim];
+        if (Elem == u16) {
+            vec_math.widenBf16(dst, row, scale);
+        } else if (scale == 1.0) {
+            @memcpy(dst, row);
+        } else {
+            vec_math.scaleCopy(dst, row, scale);
+        }
+    }
 }
 
 pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator) !*Tensor {
@@ -510,6 +481,7 @@ pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator) 
         defer free(allocator, table);
         return embedding(table, indices, allocator);
     }
+    const table = self.data[0 .. VocabSize * D];
 
     const IdxT = @TypeOf(indices);
     const idx_info = @typeInfo(IdxT);
@@ -529,36 +501,24 @@ pub fn embedding(self: *Tensor, indices: anytype, allocator: std.mem.Allocator) 
 
         const num_indices = indices.shape.numel();
         if (indices.isContiguous() and indices.data.len >= num_indices) {
-            for (0..num_indices) |i| {
-                const idx = try indexScalarToUsize(indices.data[i], VocabSize);
-                const w_row = self.data[idx * D .. (idx + 1) * D];
-                const y_row = Y.data[i * D .. (i + 1) * D];
-                @memcpy(y_row, w_row);
-            }
+            try embeddingLookupInto(f32, table, indices.data[0..num_indices], D, 1.0, Y.data);
         } else {
+            const ElemT = std.meta.Elem(@TypeOf(indices.data));
             var coord: [8]usize = @splat(0);
             for (0..num_indices) |i| {
                 var flat_idx: usize = 0;
                 for (0..in_rank) |d| flat_idx += coord[d] * indices.strides.dims[d];
-                const idx = try indexScalarToUsize(indices.data[flat_idx], VocabSize);
-                const w_row = self.data[idx * D .. (idx + 1) * D];
-                const y_row = Y.data[i * D .. (i + 1) * D];
-                @memcpy(y_row, w_row);
+                const idx = try types.indexScalarToUsize(ElemT, indices.data[flat_idx], VocabSize);
+                @memcpy(Y.data[i * D .. (i + 1) * D], table[idx * D .. (idx + 1) * D]);
 
                 indices.shape.incrementCoord(&coord);
             }
         }
         return Y;
     } else {
-        const T_len = indices.len;
-        const Y = try zeros(allocator, &.{ T_len, D });
+        const Y = try zeros(allocator, &.{ indices.len, D });
         errdefer free(allocator, Y);
-        for (0..T_len) |i| {
-            const idx = try indexScalarToUsize(indices[i], VocabSize);
-            const w_row = self.data[idx * D .. (idx + 1) * D];
-            const y_row = Y.data[i * D .. (i + 1) * D];
-            @memcpy(y_row, w_row);
-        }
+        try embeddingLookupInto(f32, table, indices, D, 1.0, Y.data);
         return Y;
     }
 }

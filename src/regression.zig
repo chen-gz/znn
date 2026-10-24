@@ -1,5 +1,6 @@
 const std = @import("std");
 const tensor = @import("tensor.zig");
+const dot = @import("backend.zig").vec_math.dot;
 
 /// Soft-thresholding operator: S_gamma(z) = sign(z) * max(|z| - gamma, 0)
 pub fn softThreshold(z: f32, gamma: f32) f32 {
@@ -156,24 +157,6 @@ fn centerData(
         .X_c = X_c,
         .y_c = y_c,
     };
-}
-
-/// Dot product with multi-lane SIMD (`@Vector`) partial sums (a scalar f32 reduction cannot be
-/// auto-vectorized under strict floating-point semantics).
-fn dot(a: []const f32, b: []const f32) f32 {
-    std.debug.assert(a.len == b.len);
-    const vec_len = std.simd.suggestVectorLength(f32) orelse 4;
-    const Vec = @Vector(vec_len, f32);
-    var acc: Vec = @splat(0.0);
-    var i: usize = 0;
-    while (i + vec_len <= a.len) : (i += vec_len) {
-        const va: Vec = a[i..][0..vec_len].*;
-        const vb: Vec = b[i..][0..vec_len].*;
-        acc += va * vb;
-    }
-    var sum = @reduce(.Add, acc);
-    while (i < a.len) : (i += 1) sum += a[i] * b[i];
-    return sum;
 }
 
 /// Solves Ordinary Least Squares (OLS) or Ridge regression analytically:

@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const backend = @import("../backend.zig");
+const tensor = @import("../tensor.zig");
 const gemma4 = @import("gemma4.zig");
 
 const mlx = backend.mlx;
@@ -27,44 +28,28 @@ const Gemma4KVCache = gemma4.Gemma4KVCache;
 // 比例旋转位置编码 (Proportional RoPE)
 // ============================================================================
 
-/// 计算比例旋转位置编码的周期表，与 mlx-lm `ProportionalRoPE`、Hugging Face `proportional` RoPE 以及
-/// F32 CPU 路径 (`tensor.rope` 的 split_half + partial_rotary_factor) 一致：在完整 head_dim 上以 (i, i + head_dim / 2) 配对，
-/// 前 num_angles = floor(head_dim / 2 * partial_rotary_factor) 个角度的周期为 base^(2i / head_dim)，
-/// 其余角度周期为 +inf (旋转角恒为 0，保持恒等)。`mlx.fast.rope` 以 theta_i = pos / freqs[i] 计算旋转角。
-pub fn proportionalRopeFreqs(out: []f32, head_dim: usize, partial_rotary_factor: f32, base: f32) void {
-    const half = head_dim / 2;
-    std.debug.assert(out.len == half);
-    const factor = std.math.clamp(partial_rotary_factor, 0.0, 1.0);
-    const num_angles: usize = @intFromFloat(@as(f32, @floatFromInt(half)) * factor);
-    const hd_f: f32 = @floatFromInt(head_dim);
-    for (out, 0..) |*f, i| {
-        f.* = if (i < num_angles)
-            std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / hd_f)
-        else
-            std.math.inf(f32);
-    }
-}
-
-/// 单个注意力层的 GPU 旋转位置编码：partial_rotary_factor 为 1 时为标准半切分 RoPE (base = rope_theta)，
-/// 小于 1 时为在完整 head_dim 上旋转的比例旋转位置编码 (常驻 [head_dim / 2] 周期表)
+/// 单个注意力层的 GPU 旋转位置编码：partial_rotary_factor 为 1 时为标准 RoPE (base = rope_theta)，
+/// 小于 1 时为在完整 head_dim 上旋转的比例旋转位置编码 (常驻 [head_dim / 2] 周期表，由 `RopeOptions.fillPeriods` 生成，
+/// 与 CPU `tensor.RopeTable` 共用同一频率公式；`mlx.fast.rope` 以 theta_i = pos / freqs[i] 计算旋转角)
 pub const GpuRope = struct {
     head_dim: usize,
     base: f32,
+    traditional: bool,
     freqs: ?mlx.Array = null,
 
-    /// 周期表在栈上构建时支持的最大角度数 (head_dim / 2)
-    pub const max_angles: usize = 1024;
-
-    pub fn init(head_dim: usize, partial_rotary_factor: f32, base: f32) !GpuRope {
-        if (head_dim == 0 or head_dim % 2 != 0) return error.InvalidShape;
-        if (partial_rotary_factor >= 1.0) return .{ .head_dim = head_dim, .base = base };
+    /// 只支持旋转整行 (rotary_offset = 0) 的偶数 head_dim
+    pub fn init(head_dim: usize, options: backend.rope.RopeOptions) !GpuRope {
+        if (head_dim == 0 or head_dim % 2 != 0 or options.rotary_offset != 0) return error.InvalidShape;
+        const traditional = options.mode == .interleaved;
+        if (options.partial_rotary_factor >= 1.0) return .{ .head_dim = head_dim, .base = options.base, .traditional = traditional };
         const half = head_dim / 2;
-        if (half > max_angles) return error.InvalidShape;
-        var buf: [max_angles]f32 = undefined;
-        proportionalRopeFreqs(buf[0..half], head_dim, partial_rotary_factor, base);
+        if (half > backend.rope.max_angles) return error.InvalidShape;
+        var buf: [backend.rope.max_angles]f32 = undefined;
+        options.fillPeriods(head_dim, buf[0..half]);
         return .{
             .head_dim = head_dim,
-            .base = base,
+            .base = options.base,
+            .traditional = traditional,
             .freqs = try mlx.Array.fromSlice(buf[0..half], &.{half}),
         };
     }
@@ -76,8 +61,8 @@ pub const GpuRope = struct {
 
     /// 对 [B, heads, T, head_dim] 张量施加旋转位置编码，第 t 个位置的绝对位置为 offset + t
     pub fn apply(self: *const GpuRope, x: mlx.Array, offset: usize, s: ?Stream) !mlx.Array {
-        if (self.freqs) |f| return mlx.Array.fastRoPEWithFreqs(x, self.head_dim, false, 1.0, offset, f, s);
-        return mlx.Array.fastRoPE(x, self.head_dim, false, self.base, 1.0, offset, s);
+        if (self.freqs) |f| return mlx.Array.fastRoPEWithFreqs(x, self.head_dim, self.traditional, 1.0, offset, f, s);
+        return mlx.Array.fastRoPE(x, self.head_dim, self.traditional, self.base, 1.0, offset, s);
     }
 };
 
@@ -460,7 +445,7 @@ pub const Gemma4GpuLayer = struct {
         errdefer pm_w.deinit();
         var pom_w = try mlx.Array.fromSlice(norms.post_mlp, &.{norms.post_mlp.len});
         errdefer pom_w.deinit();
-        const rope = try GpuRope.init(spec.head_dim, spec.attn_type.partialRotaryFactor(), spec.attn_type.ropeTheta());
+        const rope = try GpuRope.init(spec.head_dim, spec.attn_type.ropeOptions());
 
         return .{
             .fused_qkv = projections.fused_qkv,
@@ -693,14 +678,8 @@ pub const Gemma4GpuContext = struct {
     /// 写入 [tokens.len, hidden_size] 行主序缓冲区
     fn embedTokens(self: *const Gemma4GpuContext, tokens: []const usize, embed_u16: []const u16, out: []f32) !void {
         const h = self.config.hidden_size;
-        std.debug.assert(out.len == tokens.len * h);
-        for (tokens, 0..) |tok, t| {
-            if (tok >= self.config.vocab_size or (tok + 1) * h > embed_u16.len) return error.TokenOutOfBounds;
-            const emb_row = embed_u16[tok * h ..][0..h];
-            for (out[t * h ..][0..h], emb_row) |*d, e| {
-                d.* = @as(f32, @bitCast(@as(u32, e) << 16)) * self.sqrt_d;
-            }
-        }
+        const table = embed_u16[0..@min(embed_u16.len, self.config.vocab_size * h)];
+        try tensor.embeddingLookupInto(u16, table, tokens, h, self.sqrt_d, out);
     }
 
     /// 将新增键值 [1, num_kv_heads, t_new, head_dim] 沿序列轴 (axis 2) 追加至第 l 层 GPU 键值缓存

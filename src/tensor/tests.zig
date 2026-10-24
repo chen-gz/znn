@@ -40,21 +40,23 @@ const sqrt = tensor.sqrt;
 const exp = tensor.exp;
 const log = tensor.log;
 const abs = tensor.abs;
-const applyRoPE = tensor.applyRoPE;
 const solveLinearSystem = tensor.solveLinearSystem;
 
-test "applyRoPE rotation properties" {
-    var data = [_]f32{ 1.0, 0.0, 0.0, 1.0 }; // seq_len=2, n_head=1, head_dim=2
-    applyRoPE(&data, 2, 1, 2, 10000.0);
+test "rope rotation properties" {
+    const allocator = std.testing.allocator;
+    const X = try tensor.array(allocator, &.{ 2, 2 }, &.{ 1.0, 0.0, 0.0, 1.0 }); // seq_len=2, head_dim=2
+    defer free(allocator, X);
+    const Y = try X.rope(0, .{}, allocator);
+    defer free(allocator, Y);
     // m = 0: theta^0 = 1, freq = 0 -> cos(0)=1, sin(0)=0 -> x0=1.0, x1=0.0
-    try std.testing.expectApproxEqAbs(@as(f32, 1.0), data[0], 1e-5);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), data[1], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), Y.data[0], 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), Y.data[1], 1e-5);
 
     // m = 1: freq = 1.0 -> cos(1), sin(1) for [0.0, 1.0] -> x2 = 0*cos(1) - 1*sin(1) = -sin(1), x3 = 0*sin(1) + 1*cos(1) = cos(1)
     const expected_x2 = -@sin(@as(f32, 1.0));
     const expected_x3 = @cos(@as(f32, 1.0));
-    try std.testing.expectApproxEqAbs(expected_x2, data[2], 1e-5);
-    try std.testing.expectApproxEqAbs(expected_x3, data[3], 1e-5);
+    try std.testing.expectApproxEqAbs(expected_x2, Y.data[2], 1e-5);
+    try std.testing.expectApproxEqAbs(expected_x3, Y.data[3], 1e-5);
 }
 
 test "broadcastShapes inference" {
@@ -1876,6 +1878,66 @@ test "audit: rope matches the per-element reference formula for both pairing mod
     }
 }
 
+test "RopeTable with precomputed angles matches the per-element reference rotation" {
+    // 逐元素重新计算幂函数与三角函数的参考实现 (旋转位置编码 (Rotary Position Embedding, RoPE) 交错配对)
+    const reference = struct {
+        fn rotate(vec: []f32, pos: usize) void {
+            const pos_f = @as(f32, @floatFromInt(pos));
+            for (0..vec.len / 2) |i| {
+                const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(vec.len)));
+                const theta = pos_f * freq;
+                const x0 = vec[2 * i];
+                const x1 = vec[2 * i + 1];
+                vec[2 * i] = x0 * @cos(theta) - x1 * @sin(theta);
+                vec[2 * i + 1] = x0 * @sin(theta) + x1 * @cos(theta);
+            }
+        }
+    };
+
+    var prng = std.Random.DefaultPrng.init(2468);
+    const random = prng.random();
+    // 偶数与奇数长度 (奇数时最后一个元素保持不变)
+    inline for (.{ 2, 8, 9, 64 }) |dim| {
+        const table = try tensor.RopeTable.init(dim, .{});
+        for ([_]usize{ 0, 1, 7, 1000 }) |pos| {
+            var cos_t: [dim / 2]f32 = undefined;
+            var sin_t: [dim / 2]f32 = undefined;
+            table.angles(pos, &cos_t, &sin_t);
+            // 同一张角度表复用于多个向量 (对应批次与注意力头)
+            for (0..3) |_| {
+                var expected: [dim]f32 = undefined;
+                for (&expected) |*v| v.* = random.float(f32) * 2.0 - 1.0;
+                var actual = expected;
+                reference.rotate(&expected, pos);
+                table.applyRow(&actual, &cos_t, &sin_t, false);
+                try std.testing.expectEqualSlices(f32, &expected, &actual);
+            }
+        }
+    }
+}
+
+test "embeddingLookupInto gathers f32 and BF16 rows with scaling and rejects invalid ids" {
+    const table = [_]f32{ 0.5, -1.0, 2.0, 0.25, 3.0, -0.75 }; // [vocab = 3, dim = 2]
+    var bits: [table.len]u16 = undefined;
+    for (&bits, table) |*b, v| b.* = tensor.bf16.fromF32(v).bits;
+
+    var out: [6]f32 = undefined;
+    try tensor.embeddingLookupInto(f32, &table, &[_]usize{ 2, 0, 2 }, 2, 1.0, &out);
+    try std.testing.expectEqualSlices(f32, &.{ 3.0, -0.75, 0.5, -1.0, 3.0, -0.75 }, &out);
+
+    // BF16 原始位表展开后乘以缩放系数；浮点 ID 与整数 ID 等价
+    try tensor.embeddingLookupInto(u16, &bits, &[_]f32{ 1.0, 2.0, 0.0 }, 2, 2.0, &out);
+    try std.testing.expectEqualSlices(f32, &.{ 4.0, 0.5, 6.0, -1.5, 1.0, -2.0 }, &out);
+
+    try std.testing.expectError(error.IndexOutOfBounds, tensor.embeddingLookupInto(f32, &table, &[_]usize{3}, 2, 1.0, out[0..2]));
+    try std.testing.expectError(error.IndexOutOfBounds, tensor.embeddingLookupInto(u16, &bits, &[_]f32{-1.0}, 2, 1.0, out[0..2]));
+    try std.testing.expectError(error.IndexOutOfBounds, tensor.embeddingLookupInto(u16, &bits, &[_]f32{0.5}, 2, 1.0, out[0..2]));
+    try std.testing.expectError(error.ShapeMismatch, tensor.embeddingLookupInto(f32, &table, &[_]usize{0}, 2, 1.0, out[0..3]));
+
+    try tensor.checkIndices(&[_]usize{ 0, 2 }, 3);
+    try std.testing.expectError(error.IndexOutOfBounds, tensor.checkIndices(&[_]usize{ 0, 3 }, 3));
+}
+
 test "audit: matmul accepts transposed views without materializing and matches the copied result" {
     const allocator = std.testing.allocator;
     const A_base = try zeros(allocator, &.{ 5, 3 });
@@ -1909,27 +1971,6 @@ test "audit: matmul accepts transposed views without materializing and matches t
     const got2 = try rows.matmul(AT, allocator);
     defer free(allocator, got2);
     for (want2.data, got2.data) |w, g| try std.testing.expectApproxEqAbs(w, g, 1e-5);
-}
-
-test "audit: applyRoPETensor 4D layout matches the 3D layout" {
-    const allocator = std.testing.allocator;
-    const T: usize = 4;
-    const H: usize = 3;
-    const D: usize = 6;
-    // 四维 [1, H, T, D] 与三维 [T, H, D] 存放同一组向量
-    const x4 = try zeros(allocator, &.{ 1, H, T, D });
-    defer free(allocator, x4);
-    fillDeterministic(x4, 21);
-    const x3 = try zeros(allocator, &.{ T, H, D });
-    defer free(allocator, x3);
-    for (0..H) |h| for (0..T) |t| {
-        @memcpy(x3.data[(t * H + h) * D ..][0..D], x4.data[(h * T + t) * D ..][0..D]);
-    };
-    tensor.applyRoPETensor(x4, 10000.0);
-    tensor.applyRoPETensor(x3, 10000.0);
-    for (0..H) |h| for (0..T) |t| {
-        try std.testing.expectEqualSlices(f32, x3.data[(t * H + h) * D ..][0..D], x4.data[(h * T + t) * D ..][0..D]);
-    };
 }
 
 test "audit: solveRidgeAnalytical recovers multi-feature weights" {

@@ -32,12 +32,12 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         try std.testing.expectApproxEqAbs(@as(f32, 1.0), y.data[3], 1e-4);
     }
 
-    // 2. Gemma 专用 Split-Half RoPE 算子单测
+    // 2. Gemma 滑动窗口层半切分旋转位置编码 (Split-Half RoPE) 配置单测
     {
         var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const x = try g.ones(&.{ 1, 2, 8 }, false);
-        const x_rot = try gemma4.ropeSplitHalf(&g, x, 0, 1.0, 10000.0);
+        const x_rot = try g.rope(x, 0, gemma4.Gemma4AttentionType.sliding_attention.ropeOptions());
         try std.testing.expectEqual(@as(usize, 3), x_rot.shape.len);
         try std.testing.expectEqual(@as(usize, 8), x_rot.shape.dims[2]);
     }
@@ -495,7 +495,7 @@ test "Gemma 4 inference entry points reject invalid prompts instead of reading o
     // 提示词超出键值缓存容量
     try std.testing.expectError(error.ContextWindowExceeded, model.prefill(&g, &.{ 2, 3, 4, 5, 6 }, &cache, &greedy));
     // 词元 ID 越界与空提示词
-    try std.testing.expectError(error.InvalidTokenId, model.prefill(&g, &.{ 2, 128 }, &cache, &greedy));
+    try std.testing.expectError(error.IndexOutOfBounds, model.prefill(&g, &.{ 2, 128 }, &cache, &greedy));
     try std.testing.expectError(error.EmptyPrompt, model.prefill(&g, &.{}, &cache, &greedy));
 
     // 缓存写满后增量解码返回错误
@@ -503,7 +503,7 @@ test "Gemma 4 inference entry points reject invalid prompts instead of reading o
     _ = try model.decodeStep(&g, 5, &cache, &.{ 2, 3, 4 }, &greedy);
     try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
     try std.testing.expectError(error.ContextWindowExceeded, model.decodeStep(&g, 6, &cache, &.{ 2, 3, 4, 5 }, &greedy));
-    try std.testing.expectError(error.InvalidTokenId, model.decodeStep(&g, 1000, &cache, &.{2}, &greedy));
+    try std.testing.expectError(error.IndexOutOfBounds, model.decodeStep(&g, 1000, &cache, &.{2}, &greedy));
 }
 
 /// 对构造函数的每一次内存分配依次注入失败，断言构造返回 OutOfMemory 且已分配内存全部释放。
@@ -610,7 +610,7 @@ test "Gemma4Q4 mmap loader reads per-layer norms and layer_scalar in storage ord
     var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer g.deinit();
     var greedy = sampling.Sampler.init(.greedy);
-    try std.testing.expectError(error.InvalidTokenId, model.prefill(&g, &.{ 2, cfg.vocab_size }, &cache, bytes, &greedy));
+    try std.testing.expectError(error.IndexOutOfBounds, model.prefill(&g, &.{ 2, cfg.vocab_size }, &cache, bytes, &greedy));
     try std.testing.expectError(error.EmptyPrompt, model.prefill(&g, &.{}, &cache, bytes, &greedy));
 }
 
@@ -645,26 +645,6 @@ test "promptLookup tolerates a zero minimum n-gram length" {
     try std.testing.expectEqual(@as(?[]const usize, null), gemma4.promptLookup(&.{1}, 0, 3, 2));
 }
 
-test "Gemma 4 SIMD dot kernels match scalar references" {
-    var prng = std.Random.DefaultPrng.init(3);
-    const random = prng.random();
-    var a: [37]f32 = undefined;
-    var b: [37]f32 = undefined;
-    var b_bits: [37]u16 = undefined;
-    fillNormal(&a, random, 1.0);
-    fillNormal(&b, random, 1.0);
-    for (&b_bits, &b) |*bits, *v| {
-        bits.* = @truncate(@as(u32, @bitCast(v.*)) >> 16);
-        v.* = @bitCast(@as(u32, bits.*) << 16);
-    }
-    inline for (.{ 0, 1, 16, 31, 37 }) |n| {
-        var ref: f32 = 0;
-        for (a[0..n], b[0..n]) |x, y| ref += x * y;
-        try std.testing.expectApproxEqAbs(ref, gemma4.dotF32(a[0..n], b[0..n]), 1e-4);
-        try std.testing.expectApproxEqAbs(ref, gemma4.dotF32Bf16(a[0..n], b_bits[0..n]), 1e-4);
-    }
-}
-
 /// 以 `mlx.fast.rope(dims = hd, freqs)` 的语义 (配对 (i, i + hd/2)，theta_i = pos / freqs[i]) 在 CPU 上旋转单个头向量
 fn ropeWithFreqsReference(x: []const f32, freqs: []const f32, pos: usize, out: []f32) void {
     const half = x.len / 2;
@@ -682,19 +662,18 @@ fn checkProportionalRopeTable(comptime hd: usize, pos: usize, attn_type: gemma4.
     const allocator = std.testing.allocator;
     var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
     defer g.deinit();
-    const base = attn_type.ropeTheta();
-    const factor = attn_type.partialRotaryFactor();
+    const opts = attn_type.ropeOptions();
     const x = try g.tensorND(&.{ 1, 1, 1, hd }, false);
     for (x.data, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i + 1))) * 0.5;
-    const y_ref = try gemma4.ropeSplitHalf(&g, x, pos, factor, base);
+    const y_ref = try g.rope(x, pos, opts);
 
     var freqs: [hd / 2]f32 = undefined;
-    gemma4_gpu.proportionalRopeFreqs(&freqs, hd, factor, base);
+    opts.fillPeriods(hd, &freqs);
     var y: [hd]f32 = undefined;
     ropeWithFreqsReference(x.data[0..hd], &freqs, pos, &y);
     try std.testing.expect(maxAbsDiff(y_ref.data[0..hd], &y) < 1e-4);
     // 未参与旋转的角度周期为 +inf (保持恒等)
-    const num_angles: usize = @intFromFloat(@as(f32, @floatFromInt(hd / 2)) * factor);
+    const num_angles: usize = @intFromFloat(@as(f32, @floatFromInt(hd / 2)) * opts.partial_rotary_factor);
     for (freqs, 0..) |f, i| try std.testing.expectEqual(i >= num_angles, std.math.isInf(f));
 }
 
@@ -767,13 +746,13 @@ test "Gemma 4 CPU greedy LM head skips configured tokens and penalizes after sof
     }
 
     const after = gemma4.samplingLogit(10.0, 2.0, true, 2.0);
-    const before = gemma4.softcapLogit(10.0 / 2.0, 2.0);
+    const before = backend.vec_math.softcap(10.0 / 2.0, 2.0);
     try std.testing.expectApproxEqAbs(2.0 * std.math.tanh(@as(f32, 5.0)) / 2.0, after, 1e-6);
     try std.testing.expect(before > gemma4.samplingLogit(1.5, 2.0, false, 2.0));
     try std.testing.expect(after < gemma4.samplingLogit(1.5, 2.0, false, 2.0));
     // 负值惩罚同样作用在截断之后：乘以惩罚系数
     try std.testing.expectApproxEqAbs(2.0 * std.math.tanh(@as(f32, -0.5)) * 3.0, gemma4.samplingLogit(-1.0, 2.0, true, 3.0), 1e-6);
-    try std.testing.expectEqual(@as(f32, 7.0), gemma4.softcapLogit(7.0, 0.0));
+    try std.testing.expectEqual(@as(f32, 7.0), backend.vec_math.softcap(7.0, 0.0));
 }
 
 test "Gemma 4 sampling exclusions come from the config and agree between CPU argmax and the GPU mask" {
@@ -946,7 +925,7 @@ test "Gemma 4 CPU LM head sampling applies softcap, penalty and exclusion before
     // 完整对数几率即截断后的点积
     var logits: [8]f32 = undefined;
     try gemma4.lmHeadLogitsCpu(cfg, f32, &g, &embed, &h, &logits);
-    for (raw, logits) |r, l| try std.testing.expectApproxEqAbs(gemma4.softcapLogit(r, cfg.final_logit_softcapping), l, 1e-6);
+    for (raw, logits) |r, l| try std.testing.expectApproxEqAbs(backend.vec_math.softcap(r, cfg.final_logit_softcapping), l, 1e-6);
 
     // 贪婪采样 (温度 <= 0 或 top_k == 1) 走融合快车道，与 greedyLmHeadCpu 一致
     for ([_]sampling.SamplingOptions{
@@ -1166,7 +1145,7 @@ test "Gemma 4 GPU candidate selection matches the CPU sampler for identical logi
 
     // CPU 参考：截断 → 惩罚 → 排除
     var processed: [128]f32 = undefined;
-    for (raw, &processed) |r, *p| p.* = gemma4.softcapLogit(r, cfg.final_logit_softcapping);
+    for (raw, &processed) |r, *p| p.* = backend.vec_math.softcap(r, cfg.final_logit_softcapping);
     try sampling.applyRepetitionPenaltyInPlace(allocator, &processed, &recent, 1.4);
     sampling.maskExcludedInPlace(&processed, cfg.sampling_excluded_tokens);
 

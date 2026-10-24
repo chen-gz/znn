@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const vec_math = @import("vec_math.zig");
 
 // C 语言基础线性代数子程序 (C Basic Linear Algebra Subprograms, CBLAS) 布局与转置常量的 C 语言接口包装
 pub const CblasRowMajor = 101;
@@ -112,17 +113,6 @@ fn sgemmRowMajor(
 const vec_len = 8;
 const Vec = @Vector(vec_len, f32);
 
-/// 目标平台是否具备硬件融合乘加 (Fused Multiply-Add, FMA) 指令；不具备时 `@mulAdd` 会退化为逐元素软件调用，故改用普通乘加
-const has_fma = switch (builtin.cpu.arch) {
-    .x86, .x86_64 => std.Target.x86.featureSetHas(builtin.cpu.features, .fma),
-    .aarch64, .aarch64_be => std.Target.aarch64.featureSetHas(builtin.cpu.features, .neon),
-    else => false,
-};
-
-inline fn mulAdd(a: Vec, b: Vec, c: Vec) Vec {
-    return if (has_fma) @mulAdd(Vec, a, b, c) else a * b + c;
-}
-
 /// 寄存器分块微内核尺寸：每次计算 MR×NR 的输出块（6×16 = 12 个 8 路累加向量，恰好放入 16 个向量寄存器）
 const MR = 6;
 const NR = 2 * vec_len;
@@ -234,8 +224,8 @@ fn microKernel(kc: usize, a: [*]const f32, b: [*]const f32, c: [*]f32, ldc: usiz
         const b_hi: Vec = b[p * NR + vec_len ..][0..vec_len].*;
         inline for (0..MR) |r| {
             const av: Vec = @splat(a[p * MR + r]);
-            lo[r] = mulAdd(av, b_lo, lo[r]);
-            hi[r] = mulAdd(av, b_hi, hi[r]);
+            lo[r] = vec_math.mulAdd(Vec, av, b_lo, lo[r]);
+            hi[r] = vec_math.mulAdd(Vec, av, b_hi, hi[r]);
         }
     }
 
@@ -278,7 +268,7 @@ fn sgemmSmall(
             const a_row = A + i * lda;
             const c_row = C + i * ldc;
             for (0..n) |j| {
-                c_row[j] += alpha * dotProduct(a_row, B + j * ldb, k);
+                c_row[j] += alpha * vec_math.dot(a_row[0..k], (B + j * ldb)[0..k]);
             }
         }
         return;
@@ -289,17 +279,8 @@ fn sgemmSmall(
         for (0..k) |p| {
             const a_val = alpha * (if (ta) A[p * lda + i] else A[i * lda + p]);
             if (!tb) {
-                const b_row = B + p * ldb;
-                const a_vec: Vec = @splat(a_val);
-                var j: usize = 0;
-                while (j + vec_len <= n) : (j += vec_len) {
-                    const b_vec: Vec = b_row[j..][0..vec_len].*;
-                    // 访存受限的轴向累加 (AXPY) 循环无循环携带依赖，分离的乘法与加法比融合乘加更利于双发射
-                    c_row[j..][0..vec_len].* = @as(Vec, c_row[j..][0..vec_len].*) + a_vec * b_vec;
-                }
-                while (j < n) : (j += 1) {
-                    c_row[j] += a_val * b_row[j];
-                }
+                // 访存受限的缩放累加 (AXPY) 循环无循环携带依赖，分离的乘法与加法比融合乘加更利于双发射
+                vec_math.axpy(c_row[0..n], a_val, (B + p * ldb)[0..n]);
             } else {
                 for (0..n) |j| {
                     c_row[j] += a_val * B[j * ldb + p];
@@ -307,26 +288,6 @@ fn sgemmSmall(
             }
         }
     }
-}
-
-/// 向量化点积：4 组独立累加器隐藏融合乘加 (Fused Multiply-Add, FMA) 延迟，尾部逐元素累加
-fn dotProduct(a: [*]const f32, b: [*]const f32, k: usize) f32 {
-    var acc: [4]Vec = @splat(@splat(0.0));
-    var p: usize = 0;
-    while (p + 4 * vec_len <= k) : (p += 4 * vec_len) {
-        inline for (0..4) |u| {
-            const off = p + u * vec_len;
-            acc[u] = mulAdd(a[off..][0..vec_len].*, b[off..][0..vec_len].*, acc[u]);
-        }
-    }
-    while (p + vec_len <= k) : (p += vec_len) {
-        acc[0] = mulAdd(a[p..][0..vec_len].*, b[p..][0..vec_len].*, acc[0]);
-    }
-    var dot: f32 = @reduce(.Add, (acc[0] + acc[1]) + (acc[2] + acc[3]));
-    while (p < k) : (p += 1) {
-        dot += a[p] * b[p];
-    }
-    return dot;
 }
 
 /// 朴素三重循环参考实现：仅用于测试中逐元素校验各分块路径

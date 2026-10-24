@@ -22,8 +22,6 @@ const InitOptions = core.InitOptions;
 pub const KVCache = attention.KVCache;
 pub const ScaledDotProductAttention = attention.ScaledDotProductAttention;
 pub const CausalSelfAttention = attention.CausalSelfAttention;
-pub const applyRope1D = attention.applyRope1D;
-pub const rope1DAngles = attention.rope1DAngles;
 pub const MLACache = attention.MLACache;
 pub const MLALayer = attention.MLALayer;
 

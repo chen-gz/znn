@@ -1,5 +1,6 @@
 const std = @import("std");
 const tensor_mod = @import("../tensor.zig");
+const vec_math = @import("../backend.zig").vec_math;
 pub const tensor = tensor_mod;
 const Tensor = tensor_mod.Tensor;
 const types = @import("types.zig");
@@ -65,31 +66,11 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
                 if (w <= 0.0) continue;
 
                 const row = logits.data[i * D .. (i + 1) * D];
-                var max_val = row[0];
-                for (row[1..]) |val| {
-                    if (val > max_val) max_val = val;
-                }
+                if (probs.len == B_size * D) vec_math.softmaxRow(row, probs[i * D .. (i + 1) * D]);
 
-                var sum: f32 = 0.0;
-                if (probs.len == B_size * D) {
-                    const row_probs = probs[i * D .. (i + 1) * D];
-                    for (0..D) |j| {
-                        const e = @exp(row[j] - max_val);
-                        row_probs[j] = e;
-                        sum += e;
-                    }
-                    for (row_probs) |*p| {
-                        p.* /= sum;
-                    }
-                } else {
-                    for (row) |val| {
-                        sum += @exp(val - max_val);
-                    }
-                }
-
-                // 对数求和指数 (Log-Sum-Exp, LSE) 形式：-log softmax(z)_y = max + log(sum) - z_y，
+                // 对数求和指数 (Log-Sum-Exp, LSE) 形式：-log softmax(z)_y = log Σ exp(z) - z_y，
                 // 目标类别概率下溢为 0 时依然给出精确损失，而不是被截断
-                const log_sum_exp = max_val + @log(sum);
+                const log_sum_exp = vec_math.logSumExpRow(row, 1.0);
                 loss_sum += (log_sum_exp - row[targets[i]]) * w;
                 total_w += w;
             }
@@ -317,12 +298,7 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         },
         .RoPE => {
             const ctx = self.context.RoPE;
-            copyFromEager(self.outputs[0], try self.inputs[0].rope(ctx.start_pos, .{
-                .rotary_offset = ctx.rotary_offset,
-                .base = ctx.base,
-                .mode = ctx.mode,
-                .partial_rotary_factor = ctx.partial_rotary_factor,
-            }, allocator), allocator);
+            copyFromEager(self.outputs[0], try self.inputs[0].rope(ctx.start_pos, ctx.options, allocator), allocator);
         },
         .BatchMatMul => {
             copyFromEager(self.outputs[0], try self.inputs[0].batchMatMul(self.inputs[1], allocator), allocator);

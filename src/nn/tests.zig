@@ -73,8 +73,6 @@ const MLP = nn.MLP;
 const SwiGLU = nn.SwiGLU;
 const MoELayer = nn.MoELayer;
 const CausalSelfAttention = nn.CausalSelfAttention;
-const applyRope1D = nn.applyRope1D;
-const rope1DAngles = nn.rope1DAngles;
 const MLACache = nn.MLACache;
 const MLALayer = nn.MLALayer;
 const TransformerBlock = nn.TransformerBlock;
@@ -1903,15 +1901,16 @@ test "computeGroupAdvantages rejects invalid group sizes" {
 
 /// 以随机参数 (含全部偏置) 对比多头潜在注意力 (Multi-Head Latent Attention, MLA) 增量推理与全序列前向的最大误差。
 /// batch_2d = true 时以二维输入 [B, C] 批量执行单步推理
-fn mlaIncrementalMaxDiff(batch_2d: bool) !f32 {
+fn mlaIncrementalMaxDiff(batch_2d: bool, d_r: usize, rope: tensor.RopeOptions) !f32 {
     const allocator = std.testing.allocator;
     var prng = std.Random.DefaultPrng.init(7);
     const random = prng.random();
     const dim = 8;
     const T = 4;
     const B = 2;
-    var mla = try MLALayer.init(allocator, dim, 2, 4, 4, 2);
+    var mla = try MLALayer.init(allocator, dim, 2, 4, 4, d_r);
     defer nn.deinitModel(&mla, allocator);
+    mla.rope = rope;
     const params = try nn.parameters(&mla, allocator);
     defer allocator.free(params);
     for (params) |p| {
@@ -1924,7 +1923,7 @@ fn mlaIncrementalMaxDiff(batch_2d: bool) !f32 {
     for (x.data) |*v| v.* = random.floatNorm(f32);
     const y_full = try mla.forward(&g, x);
 
-    var cache = try MLACache.init(allocator, B, T, 4, 2);
+    var cache = try MLACache.init(allocator, B, T, 4, d_r);
     defer cache.deinit(allocator);
     var max_diff: f32 = 0;
     const step = try allocator.alloc(f32, B * dim);
@@ -1946,46 +1945,15 @@ fn mlaIncrementalMaxDiff(batch_2d: bool) !f32 {
     return max_diff;
 }
 
-test "applyRope1D with precomputed angles matches the per-element reference rotation" {
-    // 逐元素重新计算幂函数与三角函数的参考实现 (旋转位置编码 (Rotary Position Embedding, RoPE) 交错配对)
-    const reference = struct {
-        fn rotate(vec: []f32, pos: usize) void {
-            const pos_f = @as(f32, @floatFromInt(pos));
-            for (0..vec.len / 2) |i| {
-                const freq = 1.0 / std.math.pow(f32, 10000.0, @as(f32, @floatFromInt(2 * i)) / @as(f32, @floatFromInt(vec.len)));
-                const theta = pos_f * freq;
-                const x0 = vec[2 * i];
-                const x1 = vec[2 * i + 1];
-                vec[2 * i] = x0 * @cos(theta) - x1 * @sin(theta);
-                vec[2 * i + 1] = x0 * @sin(theta) + x1 * @cos(theta);
-            }
-        }
-    };
-
-    var prng = std.Random.DefaultPrng.init(2468);
-    const random = prng.random();
-    // 偶数与奇数长度 (奇数时最后一个元素保持不变)
-    inline for (.{ 2, 8, 9, 64 }) |dim| {
-        for ([_]usize{ 0, 1, 7, 1000 }) |pos| {
-            var cos_t: [dim / 2]f32 = undefined;
-            var sin_t: [dim / 2]f32 = undefined;
-            rope1DAngles(&cos_t, &sin_t, dim, pos);
-            // 同一张角度表复用于多个向量 (对应批次与注意力头)
-            for (0..3) |_| {
-                var expected: [dim]f32 = undefined;
-                for (&expected) |*v| v.* = random.float(f32) * 2.0 - 1.0;
-                var actual = expected;
-                reference.rotate(&expected, pos);
-                applyRope1D(&actual, &cos_t, &sin_t);
-                try std.testing.expectEqualSlices(f32, &expected, &actual);
-            }
-        }
-    }
+test "MLALayer forwardInference matches full forward with biases and batched inputs" {
+    try std.testing.expect(try mlaIncrementalMaxDiff(false, 2, .{}) < 1e-4);
+    try std.testing.expect(try mlaIncrementalMaxDiff(true, 2, .{}) < 1e-4);
 }
 
-test "MLALayer forwardInference matches full forward with biases and batched inputs" {
-    try std.testing.expect(try mlaIncrementalMaxDiff(false) < 1e-4);
-    try std.testing.expect(try mlaIncrementalMaxDiff(true) < 1e-4);
+test "MLALayer full forward and incremental decode share the configured RoPE options" {
+    // 非默认频率基数与半切分配对：全序列前向 (Graph.rope) 与增量解码 (RopeTable) 必须使用同一配置
+    try std.testing.expect(try mlaIncrementalMaxDiff(false, 4, .{ .mode = .split_half, .base = 50.0 }) < 1e-4);
+    try std.testing.expect(try mlaIncrementalMaxDiff(true, 6, .{ .base = 3.0, .partial_rotary_factor = 0.5 }) < 1e-4);
 }
 
 test "CausalSelfAttention forwardInference matches full forward and reports a full cache" {

@@ -719,13 +719,7 @@ pub fn rope(self: *Graph, X_in: *Tensor, start_pos: usize, options: tensor_mod.R
         Y,
         &.{X},
         .RoPE,
-        .{ .RoPE = .{
-            .start_pos = start_pos,
-            .rotary_offset = options.rotary_offset,
-            .base = options.base,
-            .mode = options.mode,
-            .partial_rotary_factor = options.partial_rotary_factor,
-        } },
+        .{ .RoPE = .{ .start_pos = start_pos, .options = options } },
         self.enable_grad and X.requires_grad,
     );
 }
