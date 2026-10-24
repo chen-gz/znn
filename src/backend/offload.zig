@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const mlx = @import("mlx.zig");
+const activation = @import("activation.zig");
 const sampling = @import("sampling.zig");
 
 /// 当前硬件环境是否支持统一卸载 (macOS Apple Silicon aarch64 且已集成 MLX)
@@ -658,12 +659,13 @@ pub const Q4Weights = struct {
 
 /// 门控多层感知机硬件算子融合与异步执行 (Multilayer Perceptron, MLP)
 /// 在图形处理器 (Graphics Processing Unit, GPU) 上连续调度门控投影 (gate_proj)、上升投影 (up_proj)、
-/// 高斯误差线性单元激活 (Gaussian Error Linear Unit, GELU)、逐元素点乘与下降投影 (down_proj)。
+/// 高斯误差线性单元激活 (Gaussian Error Linear Unit, GELU，形式由 `gelu_approximation` 指定)、逐元素点乘与下降投影 (down_proj)。
 /// 中间激活值常驻显存，将三次独立内核同步合并为一次最终求值，消除驱动管线等待。
 pub fn mlpForwardOffload(
     gate_qw: *const Q4Weights,
     up_qw: *const Q4Weights,
     down_qw: *const Q4Weights,
+    gelu_approximation: activation.GeluApproximation,
     X: anytype,
     out: anytype,
     stream: ?Stream,
@@ -688,7 +690,7 @@ pub fn mlpForwardOffload(
     var up_arr = try up_qw.forwardArray(x_mlx, stream);
     defer up_arr.deinit();
 
-    var act_arr = try gate_arr.gelu(stream);
+    var act_arr = try gate_arr.gelu(gelu_approximation, stream);
     defer act_arr.deinit();
 
     var fused_arr = try mlx.Array.multiply(act_arr, up_arr, stream);

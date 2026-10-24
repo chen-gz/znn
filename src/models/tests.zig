@@ -42,9 +42,9 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         try std.testing.expectEqual(@as(usize, 8), x_rot.shape.dims[2]);
     }
 
-    // 3. Gemma4MLP 单元测试
+    // 3. Gemma4MLP 单元测试 (与按双曲正切近似 GELU 手工计算的结果逐元素对比)
     {
-        var mlp = try gemma4.Gemma4MLP.init(allocator, 8, 16);
+        var mlp = try gemma4.Gemma4MLP.init(allocator, 8, 16, .tanh);
         mlp.gate_proj.resetParameters(random, .{});
         mlp.up_proj.resetParameters(random, .{});
         mlp.down_proj.resetParameters(random, .{});
@@ -52,11 +52,26 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
 
         var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
-        const x = try g.ones(&.{ 2, 8 }, false);
+        const x = try g.tensorND(&.{ 2, 8 }, false);
+        for (x.data, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.9) * 3.0;
         const out = try mlp.forward(&g, x);
         try std.testing.expectEqual(@as(usize, 2), out.shape.len);
         try std.testing.expectEqual(@as(usize, 2), out.shape.dims[0]);
         try std.testing.expectEqual(@as(usize, 8), out.shape.dims[1]);
+
+        const gate = try mlp.gate_proj.forward(&g, x);
+        const up = try mlp.up_proj.forward(&g, x);
+        const hidden = try g.tensorND(&.{ 2, 16 }, false);
+        for (hidden.data, gate.data, up.data) |*h, gv, uv| h.* = backend.activation.gelu(.tanh, gv) * uv;
+        const expected = try mlp.down_proj.forward(&g, hidden);
+        for (expected.data, out.data) |e, o| try std.testing.expectApproxEqAbs(e, o, 1e-5);
+
+        // 同一权重下的精确 (erf) 形式输出与之接近但不相同
+        mlp.hidden_activation = .none;
+        const out_exact = try mlp.forward(&g, x);
+        var max_diff: f32 = 0.0;
+        for (out_exact.data, out.data) |e, o| max_diff = @max(max_diff, @abs(e - o));
+        try std.testing.expect(max_diff > 0.0);
     }
 
     // 4. Gemma4Attention 单元测试 (含 Q/K-Norm, V-Norm 与 GQA)
@@ -364,7 +379,7 @@ test "Gemma4DecoderLayer applies layer_scalar identically in forward, prefill an
     var prng = std.Random.DefaultPrng.init(1);
     const random = prng.random();
 
-    var layer = try gemma4.Gemma4DecoderLayer.init(allocator, .sliding_attention, 16, 32, 4, 2, 4, 8, 1e-6);
+    var layer = try gemma4.Gemma4DecoderLayer.init(allocator, .sliding_attention, 16, 32, 4, 2, 4, 8, 1e-6, .tanh);
     defer nn.deinitModel(&layer, allocator);
     randomizeAttention(&layer.self_attn, random);
     layer.mlp.gate_proj.resetParameters(random, .{});
@@ -1047,6 +1062,41 @@ test "Gemma 4 F32 tiny model keeps greedy decoding and reproduces sampled sequen
     sampling.maskExcludedInPlace(processed, cfg.sampling_excluded_tokens);
     var reference = sampling.Sampler.init(opts);
     try std.testing.expectEqual(first[0], try reference.sampleLogits(backend.Executor.serial, allocator, processed));
+}
+
+test "Gemma 4 tiny F32 and Q4 models use the tanh-approximate GELU" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(backend.GeluApproximation.tanh, gemma4.Gemma4Config.defaultConfig().hidden_activation);
+    try std.testing.expectEqual(backend.GeluApproximation.tanh, gemma4.Gemma4Config.e4b.hidden_activation);
+
+    // F32 模型：前向计算图只记录双曲正切近似算子 GeluTanh (每层一个)，不出现精确形式算子 Gelu
+    {
+        var model = try initTinyGemma4ForSampling(allocator);
+        defer nn.deinitModel(&model, allocator);
+        for (model.layers) |layer| try std.testing.expectEqual(backend.GeluApproximation.tanh, layer.mlp.hidden_activation);
+        var g = autodiff.Graph.initDefault(allocator);
+        defer g.deinit();
+        const ids = try g.tensorNDWithData(&.{ 1, 3 }, &.{ 2.0, 10.0, 25.0 }, false);
+        _ = try model.forward(&g, ids);
+        var tanh_count: usize = 0;
+        for (g.ops.items) |op| {
+            try std.testing.expect(op.op_type != .Gelu);
+            if (op.op_type == .GeluTanh) tanh_count += 1;
+        }
+        try std.testing.expectEqual(gemma4.TinyGemma4.config.num_hidden_layers, tanh_count);
+    }
+
+    // Q4 模型：各层多层感知机均使用双曲正切近似形式
+    {
+        const M = gemma4_q4.TinyQ4Gemma4;
+        const bytes = try allocator.alloc(u8, M.computeExpectedFileSize());
+        defer allocator.free(bytes);
+        @memset(bytes, 0);
+        @memcpy(bytes[0..8], M.Q4_MAGIC);
+        var model = try M.loadFromMmapWithOptions(allocator, bytes, .{ .lm_head_mode = .bf16, .warmup = false });
+        defer model.deinit(allocator);
+        for (model.layers) |layer| try std.testing.expectEqual(backend.GeluApproximation.tanh, layer.mlp.hidden_activation);
+    }
 }
 
 test "Gemma 4 Q4 tiny model sampling is reproducible and breaks logit ties canonically" {

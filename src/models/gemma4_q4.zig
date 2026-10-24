@@ -156,10 +156,17 @@ pub const Gemma4Q4MLP = struct {
     gate_proj: Q4Linear,
     up_proj: Q4Linear,
     down_proj: Q4Linear,
+    /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 形式 (Gemma 4 为双曲正切近似形式)
+    hidden_activation: backend.GeluApproximation,
     name: ?[]const u8 = null,
     module_type: []const u8 = "Gemma4Q4MLP",
 
-    pub fn init(allocator: std.mem.Allocator, hidden_size: usize, intermediate_size: usize) !Gemma4Q4MLP {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        hidden_size: usize,
+        intermediate_size: usize,
+        hidden_activation: backend.GeluApproximation,
+    ) !Gemma4Q4MLP {
         const gate_proj = try Q4Linear.init(allocator, hidden_size, intermediate_size);
         errdefer deinitModel(&gate_proj, allocator);
         const up_proj = try Q4Linear.init(allocator, hidden_size, intermediate_size);
@@ -171,15 +178,17 @@ pub const Gemma4Q4MLP = struct {
             .gate_proj = gate_proj,
             .up_proj = up_proj,
             .down_proj = down_proj,
+            .hidden_activation = hidden_activation,
         };
     }
 
     /// 构建无 CPU 权重实体的空 MLP 结构 (用于 GPU 硬件加速直通路径，避免 4.5 GB 内存分配与零填充)
-    pub fn initEmpty(hidden_size: usize, intermediate_size: usize) Gemma4Q4MLP {
+    pub fn initEmpty(hidden_size: usize, intermediate_size: usize, hidden_activation: backend.GeluApproximation) Gemma4Q4MLP {
         return Gemma4Q4MLP{
             .gate_proj = Q4Linear.fromBlocks(hidden_size, intermediate_size, &.{}),
             .up_proj = Q4Linear.fromBlocks(hidden_size, intermediate_size, &.{}),
             .down_proj = Q4Linear.fromBlocks(intermediate_size, hidden_size, &.{}),
+            .hidden_activation = hidden_activation,
         };
     }
 
@@ -210,6 +219,7 @@ pub const Gemma4Q4MLP = struct {
                     &self.gate_proj.q4_weights.?,
                     &self.up_proj.q4_weights.?,
                     &self.down_proj.q4_weights.?,
+                    self.hidden_activation,
                     x_2d,
                     out_2d,
                     graph.options.mlx_stream,
@@ -227,7 +237,7 @@ pub const Gemma4Q4MLP = struct {
 
         const gate = try self.gate_proj.forward(graph, x_2d);
         const up = try self.up_proj.forward(graph, x_2d);
-        const gelu_gate = try graph.gelu(gate);
+        const gelu_gate = try graph.gelu(gate, self.hidden_activation);
         const hidden = try graph.mul(gelu_gate, up);
         const out = try self.down_proj.forward(graph, hidden);
 
@@ -581,6 +591,7 @@ pub const Gemma4Q4DecoderLayer = struct {
         head_dim: usize,
         sliding_window: usize,
         rms_norm_eps: f32,
+        hidden_activation: backend.GeluApproximation,
     ) !Gemma4Q4DecoderLayer {
         const input_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&input_layernorm, allocator);
@@ -599,7 +610,7 @@ pub const Gemma4Q4DecoderLayer = struct {
         errdefer deinitModel(&post_attention_layernorm, allocator);
         const pre_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&pre_feedforward_layernorm, allocator);
-        var mlp = try Gemma4Q4MLP.init(allocator, hidden_size, intermediate_size);
+        var mlp = try Gemma4Q4MLP.init(allocator, hidden_size, intermediate_size, hidden_activation);
         errdefer mlp.deinit(allocator);
         const post_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&post_feedforward_layernorm, allocator);
@@ -628,6 +639,7 @@ pub const Gemma4Q4DecoderLayer = struct {
         head_dim: usize,
         sliding_window: usize,
         rms_norm_eps: f32,
+        hidden_activation: backend.GeluApproximation,
     ) !Gemma4Q4DecoderLayer {
         const input_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&input_layernorm, allocator);
@@ -646,7 +658,7 @@ pub const Gemma4Q4DecoderLayer = struct {
         errdefer deinitModel(&post_attention_layernorm, allocator);
         const pre_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&pre_feedforward_layernorm, allocator);
-        const mlp = Gemma4Q4MLP.initEmpty(hidden_size, intermediate_size);
+        const mlp = Gemma4Q4MLP.initEmpty(hidden_size, intermediate_size, hidden_activation);
         const post_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&post_feedforward_layernorm, allocator);
 
@@ -781,6 +793,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     head_dim,
                     config.sliding_window,
                     config.rms_norm_eps,
+                    config.hidden_activation,
                 );
                 initialized_layers += 1;
             }
@@ -1045,6 +1058,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 spec.head_dim,
                 config.sliding_window,
                 config.rms_norm_eps,
+                config.hidden_activation,
             );
             errdefer layer.deinit(allocator);
             loadLayerNorms(&layer, mmap_bytes[cursor_start..], spec.head_dim);
@@ -1186,6 +1200,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     spec.head_dim,
                     config.sliding_window,
                     config.rms_norm_eps,
+                    config.hidden_activation,
                 );
                 loadLayerNorms(&layer, mmap_bytes[offsets.offsets[i]..], spec.head_dim);
 

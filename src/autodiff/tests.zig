@@ -903,7 +903,7 @@ test "GELU forward and backward" {
     defer graph.deinit();
 
     const A = try graph.tensorNDWithData(&.{ 2, 2 }, &.{ -1.0, 0.0, 1.0, 2.0 }, true);
-    const C = try graph.gelu(A);
+    const C = try graph.gelu(A, .none);
 
     try graph.forward();
 

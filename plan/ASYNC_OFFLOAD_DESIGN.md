@@ -346,7 +346,7 @@ sequenceDiagram
 
 | 类别 | 内核 | 对应 OpType |
 | :--- | :--- | :--- |
-| 逐元素一元 / 标量 | relu、gelu、silu、sigmoid、tanh、exp、log、sqrt、abs；标量加减乘除 | `Relu`、`Gelu`、`Silu`、`Sigmoid`、`Tanh`、`Exp`、`Log`、`Sqrt`、`Abs`、`AddScalar` 等 |
+| 逐元素一元 / 标量 | relu、gelu (精确 erf 形式与 tanh 近似形式)、silu、sigmoid、tanh、exp、log、sqrt、abs；标量加减乘除 | `Relu`、`Gelu`、`GeluTanh`、`Silu`、`Sigmoid`、`Tanh`、`Exp`、`Log`、`Sqrt`、`Abs`、`AddScalar` 等 |
 | 二元广播 | add、sub、mul、div（连续快速路径 + 通用跨步路径） | `Add`、`Sub`、`Mul`、`Div` |
 | 归约 | 行内 sum、mean、max、argmax；行内 softmax | `Sum`、`Mean`、`Softmax` |
 | 归一化 | rmsnorm（含 Gemma 的 `1 + w` 缩放）、layernorm | `RmsNorm`、`LayerNorm` |

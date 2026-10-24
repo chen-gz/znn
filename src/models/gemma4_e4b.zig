@@ -195,6 +195,8 @@ pub const GpuLayerE4B = struct {
     /// 旋转位置编码：滑动窗口层为标准半切分 RoPE，全局注意力层为在完整 head_dim 上旋转的比例旋转位置编码 (Proportional RoPE)
     rope: gemma4_gpu.GpuRope,
     rms_norm_eps: f32,
+    /// 门控多层感知机与逐层输入门控的高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 形式 (取自 `Gemma4Config.hidden_activation`)
+    hidden_activation: backend.GeluApproximation,
     compiled_tail: ?mlx.Closure = null,
 
     /// 静态编译当前解码层单步解码阶段 (`seq_len == 1`) 注意力投影之后的全尾部计算图 (Post-Attention + Gated MLP + PLE + LayerScalar)
@@ -233,7 +235,7 @@ pub const GpuLayerE4B = struct {
                 var up_out = gu_vec.get(1) orelse return 1;
                 defer up_out.deinit();
 
-                var act_mlp = gate_out.gelu(null) catch return 1;
+                var act_mlp = gate_out.gelu(l.hidden_activation, null) catch return 1;
                 defer act_mlp.deinit();
                 var hidden = mlx.Array.multiply(act_mlp, up_out, null) catch return 1;
                 defer hidden.deinit();
@@ -249,7 +251,7 @@ pub const GpuLayerE4B = struct {
                 var ple_gate_raw = l.ple_gate.forwardArray(x2, null) catch return 1;
                 defer ple_gate_raw.deinit();
 
-                var act_ple = ple_gate_raw.gelu(null) catch return 1;
+                var act_ple = ple_gate_raw.gelu(l.hidden_activation, null) catch return 1;
                 defer act_ple.deinit();
                 var ple_modulated = mlx.Array.multiply(act_ple, ple_slice, null) catch return 1;
                 defer ple_modulated.deinit();
@@ -614,7 +616,7 @@ pub const Gemma4E4BModel = struct {
             }
         }
 
-        var compiled_gelu_mul: ?mlx.Closure = mlx.Array.compileGeluMul() catch null;
+        var compiled_gelu_mul: ?mlx.Closure = mlx.Array.compileGeluMul(cfg.hidden_activation) catch null;
         errdefer if (compiled_gelu_mul) |*cls| cls.deinit();
         var compiled_add_mul: ?mlx.Closure = mlx.Array.compileAddMul() catch null;
         errdefer if (compiled_add_mul) |*cls| cls.deinit();
@@ -757,6 +759,7 @@ pub const Gemma4E4BModel = struct {
             .head_dim = hd,
             .rope = rope,
             .rms_norm_eps = cfg.rms_norm_eps,
+            .hidden_activation = cfg.hidden_activation,
         };
     }
 
@@ -1514,7 +1517,7 @@ pub const Gemma4E4BModel = struct {
         var up_out = gu_vec.get(1).?;
         defer up_out.deinit();
 
-        var hidden = try mlx.Array.fusedGeluMul(gate_out, up_out, self.compiled_gelu_mul, s);
+        var hidden = try mlx.Array.fusedGeluMul(gate_out, up_out, self.config.hidden_activation, self.compiled_gelu_mul, s);
         defer hidden.deinit();
 
         var down_out = try l.down_proj.forwardArray(hidden, s);
@@ -1533,12 +1536,12 @@ pub const Gemma4E4BModel = struct {
         // 将连续的 ple_gate_raw [1, T, 256] 以 O(1) 零拷贝视图重塑为 [1, T, 1, 256]，使 fusedGeluMul 直接融合读取步进视图并输出连续张量，
         // 随后以 O(1) 零拷贝视图恢复为 [1, T, 256]，彻底消除 42 层非连续 reshape 触发的 GPU 拷贝内核！
         var ple_modulated = if (seq_len == 1)
-            try mlx.Array.fusedGeluMul(ple_gate_raw, ple_slice, self.compiled_gelu_mul, s)
+            try mlx.Array.fusedGeluMul(ple_gate_raw, ple_slice, self.config.hidden_activation, self.compiled_gelu_mul, s)
         else blk: {
             const ple_dim = self.config.hidden_size_per_layer_input;
             var ple_gate_4d = try ple_gate_raw.reshape(&.{ 1, seq_len, 1, ple_dim }, s);
             defer ple_gate_4d.deinit();
-            var ple_mod_4d = try mlx.Array.fusedGeluMul(ple_gate_4d, ple_slice, self.compiled_gelu_mul, s);
+            var ple_mod_4d = try mlx.Array.fusedGeluMul(ple_gate_4d, ple_slice, self.config.hidden_activation, self.compiled_gelu_mul, s);
             defer ple_mod_4d.deinit();
             break :blk try ple_mod_4d.reshape(&.{ 1, seq_len, ple_dim }, s);
         };

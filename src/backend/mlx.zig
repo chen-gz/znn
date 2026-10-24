@@ -6,6 +6,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const activation = @import("activation.zig");
+const GeluApproximation = activation.GeluApproximation;
 
 /// 当前构建目标是否支持 Apple 机器学习拓展 (Machine Learning Explore, MLX)
 pub const has_mlx: bool = (builtin.os.tag == .macos and builtin.cpu.arch == .aarch64);
@@ -1145,35 +1147,62 @@ pub const Array = struct {
         return res;
     }
 
-    /// 高斯误差线性单元激活函数 (Gaussian Error Linear Unit, GELU)
-    /// 数学公式：GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))（自动保持输入张量精度）
-    pub fn gelu(self: Array, stream: ?Stream) !Array {
+    /// 高斯误差线性单元激活函数 (Gaussian Error Linear Unit, GELU)（自动保持输入张量精度）
+    /// - `.none`：GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+    /// - `.tanh`：GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3)))（与 mlx-lm `nn.gelu_approx` 一致）
+    pub fn gelu(self: Array, approximation: GeluApproximation, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         const dt = self.dtype();
-        var s_scale = try fromScalarTyped(0.7071067811865475, dt);
-        defer s_scale.deinit();
-        var x_scaled = try multiply(self, s_scale, stream);
-        defer x_scaled.deinit();
 
-        var erf_val = try x_scaled.erf(stream);
-        defer erf_val.deinit();
+        // inner = erf(x / sqrt(2)) 或 tanh(sqrt(2 / pi) * (x + 0.044715 * x^3))
+        var inner = switch (approximation) {
+            .none => blk: {
+                var s_scale = try fromScalarTyped(activation.gelu_erf_scale, dt);
+                defer s_scale.deinit();
+                var x_scaled = try multiply(self, s_scale, stream);
+                defer x_scaled.deinit();
+                break :blk try x_scaled.erf(stream);
+            },
+            .tanh => blk: {
+                var x_sq = try multiply(self, self, stream);
+                defer x_sq.deinit();
+                var s_cubic = try fromScalarTyped(activation.gelu_tanh_cubic_coeff, dt);
+                defer s_cubic.deinit();
+                var cubic_term = try multiply(x_sq, s_cubic, stream);
+                defer cubic_term.deinit();
+                var s_one_inner = try fromScalarTyped(1.0, dt);
+                defer s_one_inner.deinit();
+                var poly = try add(s_one_inner, cubic_term, stream);
+                defer poly.deinit();
+                // x + 0.044715 * x^3 = x * (1 + 0.044715 * x^2)
+                var cubic_sum = try multiply(self, poly, stream);
+                defer cubic_sum.deinit();
+                var s_scale = try fromScalarTyped(activation.gelu_tanh_scale, dt);
+                defer s_scale.deinit();
+                var u = try multiply(cubic_sum, s_scale, stream);
+                defer u.deinit();
+                break :blk try u.tanh(stream);
+            },
+        };
+        defer inner.deinit();
 
         var s_one = try fromScalarTyped(1.0, dt);
         defer s_one.deinit();
-        var one_plus_erf = try add(s_one, erf_val, stream);
-        defer one_plus_erf.deinit();
+        var one_plus_inner = try add(s_one, inner, stream);
+        defer one_plus_inner.deinit();
 
         var s_half = try fromScalarTyped(0.5, dt);
         defer s_half.deinit();
         var half_x = try multiply(self, s_half, stream);
         defer half_x.deinit();
 
-        return multiply(half_x, one_plus_erf, stream);
+        return multiply(half_x, one_plus_inner, stream);
     }
 
     /// 门控高斯误差线性单元融合激活乘法：`out = GELU(gate) * up`
-    /// 若提供了预编译的静态闭包 (Closure)，则直接派发单内核融合算子，将 6 次 Metal 内核启动合并为 1 次寄存器级融合执行
-    pub fn fusedGeluMul(gate: Array, up: Array, compiled: ?Closure, stream: ?Stream) !Array {
+    /// 若提供了预编译的静态闭包 (Closure，须由 `compileGeluMul` 以相同的 `approximation` 编译)，则直接派发单内核融合算子，
+    /// 将多次 Metal 内核启动合并为 1 次寄存器级融合执行
+    pub fn fusedGeluMul(gate: Array, up: Array, approximation: GeluApproximation, compiled: ?Closure, stream: ?Stream) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         if (compiled) |cls| {
             var in_vec = VectorArray.fromArrays(&.{ gate, up });
@@ -1182,15 +1211,22 @@ pub const Array = struct {
             defer out_vec.deinit();
             if (out_vec.get(0)) |res| return res;
         }
-        var act = try gate.gelu(stream);
+        var act = try gate.gelu(approximation, stream);
         defer act.deinit();
         return multiply(act, up, stream);
     }
 
-    /// 静态编译门控高斯误差线性单元算子融合闭包 (`out = GELU(gate) * up`，支持任意形状 `shapeless = true`)
-    pub fn compileGeluMul() !Closure {
+    /// 静态编译门控高斯误差线性单元算子融合闭包 (`out = GELU(gate) * up`，支持任意形状 `shapeless = true`)，
+    /// 闭包按 `approximation` 在编译期特化
+    pub fn compileGeluMul(approximation: GeluApproximation) !Closure {
         if (!has_mlx) return error.MlxNotSupported;
-        const Helper = struct {
+        return switch (approximation) {
+            inline else => |approx| compile(GeluMulKernel(approx).compute, null, true),
+        };
+    }
+
+    fn GeluMulKernel(comptime approximation: GeluApproximation) type {
+        return struct {
             fn compute(vres: [*c]c.mlx_vector_array, in: c.mlx_vector_array, payload: ?*anyopaque) callconv(.c) c_int {
                 if (!has_mlx) return 1;
                 _ = payload;
@@ -1207,7 +1243,7 @@ pub const Array = struct {
                 var up = Array{ .handle = up_h };
                 defer up.deinit();
 
-                var act = gate.gelu(null) catch return 1;
+                var act = gate.gelu(approximation, null) catch return 1;
                 defer act.deinit();
                 var out = multiply(act, up, null) catch return 1;
                 defer out.deinit();
@@ -1218,7 +1254,6 @@ pub const Array = struct {
                 return 0;
             }
         };
-        return compile(Helper.compute, null, true);
     }
 
     /// 残差相加与标量缩放融合算子：`out = (a + b) * scale`
@@ -1270,14 +1305,14 @@ pub const Array = struct {
     }
 
     /// 门控高斯误差线性单元激活 (Gated Gaussian Error Linear Unit, GeGLU)
-    /// 沿最后一轴将门控与上升投影切分为两半，计算 `out = GELU(gate) * up`
-    pub fn geglu(self: Array, intermediate_size: usize, stream: ?Stream) !Array {
+    /// 沿最后一轴将门控与上升投影切分为两半，计算 `out = GELU(gate) * up` (GELU 按 `approximation` 选择形式)
+    pub fn geglu(self: Array, intermediate_size: usize, approximation: GeluApproximation, stream: ?Stream) !Array {
         const last_axis = self.ndim() - 1;
         var gate = try self.sliceAxis(last_axis, 0, intermediate_size, stream);
         defer gate.deinit();
         var up = try self.sliceAxis(last_axis, intermediate_size, intermediate_size * 2, stream);
         defer up.deinit();
-        var act = try gate.gelu(stream);
+        var act = try gate.gelu(approximation, stream);
         defer act.deinit();
         return multiply(act, up, stream);
     }

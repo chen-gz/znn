@@ -11,8 +11,9 @@
 ```text
 src/
 ├── root.zig                      # 顶层公共门面 (Facade)，聚合导出所有核心子模块
-├── backend.zig                   # 硬件后端与执行器门面 (导出 Executor, cblas, mlx, offload, sampling)
+├── backend.zig                   # 硬件后端与执行器门面 (导出 activation, GeluApproximation, Executor, cblas, mlx, offload, sampling)
 ├── backend/
+│   ├── activation.zig            # 逐元素激活的标量公式唯一来源 (GeluApproximation：GELU 精确 erf 形式与 tanh 近似形式的前向与导数)
 │   ├── cblas.zig                 # macOS Accelerate (AMX) 构建期链接与跨平台 8 路 SIMD GEMM 后备内核
 │   ├── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
 │   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定与 GPU 数组算子
@@ -48,7 +49,7 @@ src/
 ├── nn/
 │   ├── core.zig                  # Linear (1D/2D/N-D), Conv1D, Conv2D, ConvTranspose1D, ConvTranspose2D, Sequential
 │   ├── module.zig                # 基于 nn.walk 的编译期结构反射协议、持久化参数张量分配/释放 (含 tied weights 去重释放)
-│   ├── activations.zig           # ReLU, LeakyReLU, Sigmoid, Tanh, GELU, SiLU 激活层
+│   ├── activations.zig           # ReLU, LeakyReLU, Sigmoid, Tanh, GELU (精确 / tanh 近似), SiLU 激活层
 │   ├── normalization.zig         # RMSNorm, LayerNorm, BatchNorm1d, BatchNorm2d, GroupNorm, Dropout 与 1D/2D/自适应池化层
 │   ├── recurrent.zig             # RNNCell, RNN, LSTMCell, LSTM, StackedLSTM, GRUCell, GRU 与命名返回结构体
 │   ├── attention.zig             # ScaledDotProductAttention, KVCache, CausalSelfAttention (MHA/GQA/MQA), MLACache, MLALayer

@@ -4,7 +4,7 @@ const tensor = @import("../tensor.zig");
 const transposeShape = tensor.transposeShape;
 const Op = @import("types.zig").Op;
 
-extern fn erff(x: f32) f32;
+const backend = @import("../backend.zig");
 
 /// 二维矩阵在基础线性代数子程序 (Basic Linear Algebra Subprograms, BLAS) 中的存储描述：
 /// 逻辑元素 `X[i][j]` 位于 `ptr[i * ld + j]` (行主序，`trans = false`) 或 `ptr[j * ld + i]` (转置存储，`trans = true`)
@@ -215,23 +215,18 @@ pub fn backwardCore(self: *Op) !void {
             }
         },
         // ====================================================================
-        // 3.5. 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数反向传播 (GELU Backward)
+        // 3.5. 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数反向传播 (GELU Backward，精确形式与双曲正切近似形式)
         // ====================================================================
-        .Gelu => {
+        .Gelu, .GeluTanh => {
             const A = self.inputs[0];
             const C = self.outputs[0];
 
             if (A.requires_grad) {
                 const total = A.shape.numel();
-                const sqrt_2 = @sqrt(@as(f32, 2.0));
-                const inv_sqrt_2pi = 1.0 / @sqrt(@as(f32, 2.0 * std.math.pi));
-                for (0..total) |i| {
-                    const x = A.data[i];
-                    const erf_val = erff(x / sqrt_2);
-                    const cdf = 0.5 * (1.0 + erf_val);
-                    const pdf = inv_sqrt_2pi * @exp(-0.5 * x * x);
-                    const deriv = cdf + x * pdf;
-                    A.grad[i] += C.grad[i] * deriv;
+                switch (self.op_type.geluApproximation().?) {
+                    inline else => |approx| for (A.grad[0..total], C.grad[0..total], A.data[0..total]) |*a_g, c_g, x| {
+                        a_g.* += c_g * backend.activation.geluDerivative(approx, x);
+                    },
                 }
             }
         },

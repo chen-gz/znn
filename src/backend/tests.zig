@@ -6,6 +6,7 @@ const std = @import("std");
 const mlx = @import("mlx.zig");
 const offload = @import("offload.zig");
 const sampling = @import("sampling.zig");
+const activation = @import("activation.zig");
 const cblas = @import("cblas.zig");
 const Executor = @import("executor.zig").Executor;
 
@@ -316,10 +317,12 @@ test "MLX GPU backend matmul and fast kernels" {
     var x_gelu = try Array.fromSlice(&gelu_inputs, &.{ 1, 4 });
     defer x_gelu.deinit();
 
-    var y_gelu = try x_gelu.gelu(stream);
+    var y_gelu = try x_gelu.gelu(.none, stream);
     defer y_gelu.deinit();
+    var y_gelu_tanh = try x_gelu.gelu(.tanh, stream);
+    defer y_gelu_tanh.deinit();
 
-    Array.evalMultiple(&.{y_gelu});
+    Array.evalMultiple(&.{ y_gelu, y_gelu_tanh });
     const gelu_out = try y_gelu.dataFloat32();
     try std.testing.expectEqual(@as(usize, 4), gelu_out.len);
     // GELU(0) = 0.0
@@ -328,6 +331,12 @@ test "MLX GPU backend matmul and fast kernels" {
     try std.testing.expectApproxEqAbs(@as(f32, 0.8413447), gelu_out[1], 1e-4);
     // GELU(-1) = 0.5 * (-1) * (1 + erf(-1/sqrt(2))) = -0.158655
     try std.testing.expectApproxEqAbs(@as(f32, -0.158655), gelu_out[2], 1e-4);
+    // 双曲正切近似形式与 CPU 标量参考实现一致：GELU_tanh(1) = 0.8411920，GELU_tanh(-1) = -0.1588080
+    const gelu_tanh_out = try y_gelu_tanh.dataFloat32();
+    for (gelu_inputs, gelu_tanh_out) |x_val, y_val| {
+        try std.testing.expectApproxEqAbs(activation.gelu(.tanh, x_val), y_val, 1e-5);
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 0.8411920), gelu_tanh_out[1], 1e-5);
 
     // 5. 验证原生 GPU quantize 与 quantizedMatmul 端到端协同
     var test_w_data: [64]f32 = undefined;
@@ -440,7 +449,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var geglu_arr = try Array.fromSlice(&geglu_in, &.{ 1, 4 });
     defer geglu_arr.deinit();
 
-    var geglu_res = try geglu_arr.geglu(2, stream);
+    var geglu_res = try geglu_arr.geglu(2, .none, stream);
     defer geglu_res.deinit();
     geglu_res.eval();
     const geglu_out = try geglu_res.dataFloat32();
@@ -459,7 +468,7 @@ test "MLX GPU backend matmul and fast kernels" {
             if (c.mlx_vector_array_get(&x_handle, in, 0) != 0 or x_handle.ctx == null) return 1;
             const x = Array{ .handle = x_handle };
 
-            var gelu_res = x.gelu(null) catch return 1;
+            var gelu_res = x.gelu(.none, null) catch return 1;
             defer gelu_res.deinit();
 
             var one = Array.fromScalarF32(1.0) catch return 1;
@@ -516,15 +525,30 @@ test "MLX GPU backend matmul and fast kernels" {
     defer scaled_bf16.deinit();
     try std.testing.expectEqual(DType.bfloat16, scaled_bf16.dtype());
 
-    var gelu_bf16 = try x_bf16.gelu(stream);
+    var gelu_bf16 = try x_bf16.gelu(.tanh, stream);
     defer gelu_bf16.deinit();
     try std.testing.expectEqual(DType.bfloat16, gelu_bf16.dtype());
 
-    var compiled_gm = try Array.compileGeluMul();
-    defer compiled_gm.deinit();
-    var fused_gm_bf16 = try Array.fusedGeluMul(x_bf16, scaled_bf16, compiled_gm, stream);
-    defer fused_gm_bf16.deinit();
-    try std.testing.expectEqual(DType.bfloat16, fused_gm_bf16.dtype());
+    // 两种近似方式的融合闭包分别与逐算子回退路径的结果一致
+    inline for (.{ activation.GeluApproximation.none, activation.GeluApproximation.tanh }) |approx| {
+        var compiled_gm = try Array.compileGeluMul(approx);
+        defer compiled_gm.deinit();
+        var fused_gm_bf16 = try Array.fusedGeluMul(x_bf16, scaled_bf16, approx, compiled_gm, stream);
+        defer fused_gm_bf16.deinit();
+        try std.testing.expectEqual(DType.bfloat16, fused_gm_bf16.dtype());
+
+        var fused_f32 = try Array.fusedGeluMul(in_comp_arr, in_comp_arr, approx, compiled_gm, stream);
+        defer fused_f32.deinit();
+        var eager_f32 = try Array.fusedGeluMul(in_comp_arr, in_comp_arr, approx, null, stream);
+        defer eager_f32.deinit();
+        Array.evalMultiple(&.{ fused_f32, eager_f32 });
+        const fused_vals = try fused_f32.dataFloat32();
+        const eager_vals = try eager_f32.dataFloat32();
+        for (in_comp_data, fused_vals, eager_vals) |x_val, f_val, e_val| {
+            try std.testing.expectApproxEqAbs(e_val, f_val, 1e-5);
+            try std.testing.expectApproxEqAbs(activation.gelu(approx, x_val) * x_val, e_val, 1e-5);
+        }
+    }
 }
 
 test "backend offload infrastructure" {
@@ -652,7 +676,7 @@ test "backend offload infrastructure" {
     defer slice_b.deinit();
 
     // 验证 gelu 与 multiply
-    var act = try slice_a.gelu(stream);
+    var act = try slice_a.gelu(.none, stream);
     defer act.deinit();
     var mul = try mlx.Array.multiply(act, slice_b, stream);
     defer mul.deinit();
