@@ -1427,7 +1427,7 @@ test "Gemma 4 PLE modules and Gemma4E4BForCausalLM forward" {
         };
 
         var model = try gemma4_e4b.Gemma4E4BForCausalLM(tiny_cfg).init(allocator);
-        defer model.deinit(allocator);
+        defer model.deinit();
 
         var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();

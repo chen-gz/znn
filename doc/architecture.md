@@ -77,7 +77,9 @@ src/
 │   ├── gemma4.zig                # Gemma 4 配置、泛型注意力与解码层 (Gemma4AttentionT, Gemma4DecoderLayerT)、全精度模型 (Gemma4ForCausalLM, TinyGemma4) 与词表/对话模板 (Gemma4Vocabulary)
 │   ├── gemma4_q4.zig             # Gemma 4 架构 4-bit 量化实现与统一流式生成会话 (Gemma4Q4ForCausalLM.generate / Generation, TinyQ4Gemma4)
 │   ├── gemma4_gpu.zig            # Gemma 4 GPU 推理共享组件与 12B 端到端解码上下文 (Gemma4GpuLayer, Gemma4GpuContext 含无偏投机采样校验)
-│   ├── gemma4_e4b.zig            # Gemma 4 E4B (Effective 4B) 4-bit/8-bit 混合量化端侧推理引擎 (PleWeights, GpuLayerE4B, Gemma4E4BModel)
+│   ├── gemma4_ple.zig            # Gemma 4 逐层嵌入增强纯模块 (Gemma4PleLayer, Gemma4PleEmbedding)
+│   ├── gemma4_e4b.zig            # Gemma 4 E4B 纯模型架构 (Gemma4E4BDecoderLayer, Gemma4E4BForCausalLM, Gemma4E4BModel)
+│   ├── gemma4_e4b_gpu.zig        # Gemma 4 E4B 苹果统一内存 (UMA) GPU 硬件加速推理引擎 (PleWeights, GpuLayerE4B, Gemma4E4BGpuContext)
 │   ├── tests.zig                 # Gemma 4 全精度、4-bit 量化、E4B 推理引擎与对话模板单元测试
 │   └── tests_vis.zig             # 可视化作用域归属、Schema 2.0 黄金边集与 18 个经典模型导出测试
 ├── optim.zig                     # SGD, Adam, AdamW 优化器、4 类学习率调度器、梯度裁剪与 ZNNO 检查点

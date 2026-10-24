@@ -9,10 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Gemma 4 模型解耦与 PyTorch/JAX 风格纯模块化重构 (`src/models/`, `src/models/gemma4_ple.zig`, `src/models/gemma4_e4b.zig`, `src/models/tests.zig`)**:
+- **Gemma 4 模型解耦、PyTorch/JAX 风格纯模块化重构与硬件执行流剥离 (`src/models/`, `src/models/gemma4_ple.zig`, `src/models/gemma4_e4b.zig`, `src/models/gemma4_e4b_gpu.zig`, `src/models/tests.zig`)**:
   - **解耦逐层嵌入增强为独立模块 (`Gemma4PleLayer`, `Gemma4PleEmbedding`, `src/models/gemma4_ple.zig`)**：遵循 PyTorch / JAX 纯 Module 设计范式，将 Gemma 4 专有的逐层嵌入增强 (PLE) 提取为独立的模块结构，持有子模块与参数张量，通过 `forward(graph, ...)` 纯张量接口调度计算，完全解耦底层硬件细节（零专有数组依赖）。
   - **泛型解码层 PLE 组合支持 (`Gemma4DecoderLayerT(Attn, Mlp, Ple)`)**：扩展泛型变换器解码层支持可选 `Ple` 子模块，并在残差连接中规范化残差加法与层缩放乘法 `(x + ple_normed) * layer_scalar`，消除专有算子硬编码。
-  - **Gemma 4 E4B 模块化架构定义 (`Gemma4E4BDecoderLayer`, `Gemma4E4BForCausalLM`)**：在 `src/models/gemma4_e4b.zig` 中新增纯粹、通用、解耦硬件的 `Gemma4E4BForCausalLM` 模型定义与 `Gemma4E4BDecoderLayer` 解码层，完全使用 `autodiff.Graph` 与 `Tensor` 进行端到端前向传播，与底层 Apple Silicon UMA GPU 硬件流式推理引擎（`Gemma4E4BModel` / `GpuLayerE4B`）明确分层解耦。
+  - **Gemma 4 E4B 模块化架构定义与硬件流彻底剥离 (`src/models/gemma4_e4b.zig` vs `src/models/gemma4_e4b_gpu.zig`)**：将 `GpuLayerE4B`、`PleWeights`、`forwardLayer` 与底层 MLX 执行流彻底剥离至专有硬件加速文件 `src/models/gemma4_e4b_gpu.zig`（`Gemma4E4BGpuContext`）；`src/models/gemma4_e4b.zig` 实现零 `backend.mlx` 依赖，纯粹由 `nn.Module` 组装并通过 `autodiff.Graph` 调度前向，性能通过后端 offload 引擎分发并保持 100% 极致吞吐。
   - **模型单元测试全量覆盖 (`src/models/tests.zig`)**：增加 `Gemma4PleLayer`、`Gemma4PleEmbedding` 与 `Gemma4E4BForCausalLM` 端到端前向计算测试，验证纯 Module 拓扑与张量维度的正确性。
 
 - **因果语言模型训练支持与模型直接推理收敛 (`src/engine/causal_lm.zig`, `src/engine.zig`, `src/models/`, `examples/`)**:
