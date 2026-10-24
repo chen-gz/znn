@@ -9,14 +9,7 @@ const gemma4 = zig_ml.models.gemma4;
 const gemma4_e4b = zig_ml.models.gemma4_e4b;
 const sampling = zig_ml.backend.sampling;
 
-pub const TensorMeta = gemma4_e4b.TensorMeta;
-pub const SafetensorsArchive = gemma4_e4b.SafetensorsArchive;
-pub const PleWeights = gemma4_e4b.PleWeights;
-pub const PlePrepContext = gemma4_e4b.PlePrepContext;
-pub const GpuLayerE4B = gemma4_e4b.GpuLayerE4B;
-pub const GpuKvCache = gemma4_e4b.GpuKvCache;
-pub const Gemma4E4BModel = gemma4_e4b.Gemma4E4BModel;
-pub const Gemma4E4BEngine = gemma4_e4b.Gemma4E4BEngine;
+const Gemma4E4BEngine = gemma4_e4b.Gemma4E4BEngine;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
