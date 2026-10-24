@@ -11,23 +11,26 @@
 ```text
 src/
 ├── root.zig                      # 顶层公共门面 (Facade)，聚合导出所有核心子模块
-├── backend.zig                   # 硬件后端与执行器门面 (导出 activation, GeluApproximation, Executor, cblas, mlx, offload, sampling)
+├── backend.zig                   # 硬件后端与执行器门面 (导出 activation, GeluApproximation, Executor, cblas, mlx, offload, rope, sampling, vec_math)
 ├── backend/
 │   ├── activation.zig            # 逐元素激活的标量公式唯一来源 (GeluApproximation：GELU 精确 erf 形式与 tanh 近似形式的前向与导数)
 │   ├── cblas.zig                 # macOS Accelerate (AMX) 构建期链接与跨平台 8 路 SIMD GEMM 后备内核
 │   ├── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
 │   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定与 GPU 数组算子
 │   ├── offload.zig               # 与模型无关的硬件加速卸载原语 (GEMM, RMSNorm, RoPE, SDPA, 滑动窗口注意力, LmHeadWeights, TokenExclusionMask, Q4Weights, GpuKvCache)
+│   ├── rope.zig                  # 旋转位置编码配置 RopeOptions (含 proportional 预设) 与旋转角数量 / 频率 / MLX 周期表的唯一公式 (CPU 与 GPU 共用)
 │   ├── sampling.zig              # 通用采样基础设施 (TokenRange 排除区间, argmaxWithPenalty, BF16 排除掩码, SamplingOptions / Sampler 温度 + Top-K + Top-P 随机采样, selectTopK 部分选择, 投机采样校验)
+│   ├── vec_math.zig              # SIMD 行原语的唯一来源 (exp8, sum / max / sumSquares, dot / dotBf16, axpy, softmaxRow, logSumExpRow, sigmoid, softcap, BF16 展开)
 │   └── tests.zig                 # 硬件计算后端与 GPU 算子卸载单元测试集
-├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, Q4Block, ops)
+├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, Q4Block, RopeOptions, RopeTable, embeddingLookupInto, checkIndices, ops)
 ├── tensor/
 │   ├── shape.zig                 # 8D Shape 维度系统、跨步推导与 NumPy 广播规则
-│   ├── types.zig                 # DType、原生 bf16、SliceRange、ConvOptions、PoolOptions、RopeOptions 与 GenericTensor(T)
+│   ├── types.zig                 # DType、原生 bf16、SliceRange、ConvOptions、PoolOptions、索引校验 (indexScalarToUsize, checkIndices) 与 GenericTensor(T)
 │   ├── static.zig                # 编译期静态形状校验张量包装器 StaticTensor(T, dims)
 │   ├── core.zig                  # f32 自动微分张量核心、索引、基础算术与激活函数
 │   ├── conv_pool.zig             # 1D/2D 卷积、转置卷积、最大/平均池化与自适应平均池化数值内核
-│   ├── nn_kernels.zig            # 归一化 (RMSNorm, LayerNorm, BatchNorm1d/2d, GroupNorm)、Dropout、RoPE 与 BatchMatMul
+│   ├── nn_kernels.zig            # 归一化 (RMSNorm, LayerNorm, BatchNorm1d/2d, GroupNorm)、Dropout、RoPE、嵌入查表 (embedding, embeddingLookupInto) 与 BatchMatMul
+│   ├── rope.zig                  # RopeTable：CPU RoPE 前向、反向与增量解码共用的旋转表 (init / angles / applyRow(inverse))
 │   ├── reductions.zig            # 多轴归约 (sum, mean, var, std, min, max, argmin, argmax)、条件掩码、跨步切片与排序检索
 │   ├── quant.zig                 # 4-bit 量化 (Q4Block split-half 排布)、量化/反量化与矩阵乘法 (q4MatMulInto / q4MatMul)
 │   ├── linalg.zig                # 豪斯霍尔德 QR 分解 (qr)、雅可比对称特征分解 (symeig) 与单边雅可比奇异值分解 (svd)
@@ -102,7 +105,7 @@ flowchart TD
     
     Visualization["计算图可视化协议 Schema 2.0 (src/nn/visualization.zig, src/nn/graph_ir.zig, web/)\n• Scoped Local Graph (模块局部图、端口 @in/@out 抽象)\n• 透明算子折叠与 LCA 拓扑收归\n• 导出 JSON 与仓库内置 Web 可视化器 (web/) 严格对齐"]
     
-    Backend["硬件加速与并行执行器 (src/backend/)\n• cblas.zig: macOS Accelerate (AMX) 构建期直通与跨平台 8 路 SIMD 后备\n• executor.zig: 基于 std.Io 的 parallelFor 与逐位确定性 parallelReduce"]
+    Backend["硬件加速与并行执行器 (src/backend/)\n• cblas.zig: macOS Accelerate (AMX) 构建期直通与跨平台 8 路 SIMD 后备\n• executor.zig: 基于 std.Io 的 parallelFor 与逐位确定性 parallelReduce\n• vec_math.zig / rope.zig: 全库共用的 SIMD 行原语与 RoPE 频率定义"]
 
     Dataset --> TensorCore
     TensorCore --> Autodiff
@@ -153,7 +156,8 @@ flowchart TD
 ### 2.4 统一算子配置结构体 (`ConvOptions`, `PoolOptions` & `RopeOptions`)
 * **`ConvOptions` (`src/tensor/types.zig`)**：`stride: usize = 1, padding: usize = 0`，统一用于 `conv1d`、`conv2d`、`convTranspose1d`、`convTranspose2d`；
 * **`PoolOptions` (`src/tensor/types.zig`)**：`stride: ?usize = null, padding: usize = 0`（提供 `resolveStride(pool_size)`，当 `stride == null` 时默认等于 `pool_size`），统一用于 `maxpool1d`、`avgpool1d`、`maxpool2d`、`avgpool2d`；
-* **`RopeOptions` (`src/tensor/types.zig`)**：`rotary_offset: usize = 0, base: f32 = 10000.0, mode: Mode = .interleaved, partial_rotary_factor: f32 = 1.0`（支持 `.interleaved` 相邻配对与 `.split_half` 半切分配对以及比例旋转因子），统一用于 `Tensor.rope(start_pos, options, alloc)` 与 `Graph.rope(x, start_pos, options)`。
+* **`RopeOptions` (`src/backend/rope.zig`，经 `tensor.RopeOptions` 导出)**：`rotary_offset: usize = 0, base: f32 = 10000.0, mode: Mode = .interleaved, partial_rotary_factor: f32 = 1.0`（支持 `.interleaved` 相邻配对与 `.split_half` 半切分配对以及比例旋转因子），统一用于 `Tensor.rope(start_pos, options, alloc)`、`Graph.rope(x, start_pos, options)`、`MLALayer.rope` 与 Gemma 4 的 `GpuRope`。旋转子空间 `rot_dim = head_dim - rotary_offset`，参与旋转的角度数 `num_angles = floor(rot_dim / 2 * partial_rotary_factor)`，频率分母始终是完整 `rot_dim`，半切分配对间距为 `rot_dim / 2`，其余角度保持恒等；`RopeOptions.proportional(theta, factor)` 是 Hugging Face / mlx-lm 比例旋转位置编码 (Proportional RoPE) 的预设，`fillPeriods` 生成 MLX `fast.rope` 的周期表。
+* **`RopeTable` (`src/tensor/rope.zig`)**：`init(head_dim, options)` 预计算频率，`angles(pos, cos, sin)` 每个位置只算一次三角函数，`applyRow(row, cos, sin, comptime inverse)` 原地旋转一行；CPU 前向内核、RoPE 反向传播 (`inverse = true`，dX = Rᵀ dY) 与 `MLALayer.forwardInference` 共用这一份旋转实现。
 
 ### 2.5 4-bit 分块量化与 Split-Half 向量化排布 (`src/tensor/quant.zig`)
 为满足大语言模型（如 Gemma 4）在端侧的高速低显存/低内存推理，`src/tensor/quant.zig` 实现了 split-half 排布的 `Q4Block`：
@@ -341,7 +345,7 @@ flowchart LR
    - 支持动态 `KVCache` 键值缓存，单步自回归解码从 $O(N^2)$ 降低至 $O(N)$。
 2. **多头潜在注意力与统一旋转位置编码 (`MLALayer` & `RopeOptions`, `nn/attention.zig`)**：
    - 引入低秩键值压缩机制（$d_c$ 潜变量投影）与解耦的旋转位置编码（RoPE $d_r$ 向量），大幅缩减推理时 `MLACache` 的显存占用；
-   - `Tensor.rope` 与 `Graph.rope` 统一接收 `(start_pos: usize, options: RopeOptions)`，其中 `RopeOptions = struct { rotary_offset: usize = 0, base: f32 = 10000.0 }`。
+   - `Tensor.rope` 与 `Graph.rope` 统一接收 `(start_pos: usize, options: RopeOptions)`；`MLALayer.rope` 作用于每个 $d_r$ 维旋转向量，全序列前向 (`Graph.rope`) 与增量解码 (`RopeTable`) 共用同一配置。
 3. **SwiGLU 门控前馈网络 (`SwiGLU`, `nn/transformer.zig`)**：
    - 采用双路投影结构：$\text{SwiGLU}(x) = (\text{SiLU}(x W_{\text{gate}}) \odot (x W_{\text{up}})) W_{\text{down}}$；
    - 相比传统两层 MLP 具备更优秀的表征容量与训练稳定性。
@@ -399,6 +403,15 @@ flowchart LR
 * 使用 Zig 原生 `@Vector(8, f32)` SIMD 指令（同时覆盖 `NoTrans × NoTrans` 与 `NoTrans × Trans` 矩阵乘法路径）；
 * 每次循环并发处理 8 个单精度浮点数的乘加运算 (FMA)；
 * 经过缓存块优化，消除跨平台依赖与动态库链接错误。
+
+### 6.3 共享 SIMD 行原语 (`src/backend/vec_math.zig`)
+全库的行级向量化原语只有一份定义，位于最底层 backend 包，CPU 张量内核、自动微分、增量解码、采样与 Gemma 4 CPU 路径都调用它：
+* `exp8` / `expShifted`（8 路多项式指数，约 2 ULP）、`sum` / `max` / `sumSquares` / `sumSquaredDeviations`（8 路归约）；
+* `dot` / `dotBf16`（两组 16 路累加器，有硬件融合乘加时使用 `@mulAdd`；`dotBf16` 直接读取 BF16 原始位）、`axpy` / `scaleCopy`（逐元素先乘后加，与标量循环逐位一致）；
+* `softmaxRow` / `softmaxRowInPlace`（减最大值 + `exp8`）与 `logSumExpRow` / `logSumExpPartial` / `LogSumExp.merge`（双精度指数与累加，`NanPolicy.propagate` 用于损失函数，`.skip` 用于采样的有序并行归约）；
+* 标量 `sigmoid`（数值稳定的两分支形式）、`softcap`（`cap * tanh(x / cap)`，`cap <= 0` 为恒等）与 BF16 展开 `bf16ToF32` / `widenBf16`（可带缩放）/ `widenBf16Bytes`（小端、非对齐字节）。
+
+嵌入查表 `tensor.embeddingLookupInto(Elem, table, ids, dim, scale, out)`（`Elem` 为 f32 或 BF16 原始位 u16，越界 ID 返回 `error.IndexOutOfBounds`）是 `Tensor.embedding` 与 Gemma 4 F32 / Q4 / GPU 主机端嵌入共用的行收集内核；`tensor.checkIndices` 在修改任何状态前提前校验词元 ID。
 
 ---
 
