@@ -5,6 +5,7 @@ const std = @import("std");
 
 pub const gemma4 = @import("models/gemma4.zig");
 pub const gemma4_q4 = @import("models/gemma4_q4.zig");
+pub const Gemma4Q4Engine = gemma4_q4.Gemma4Q4Engine;
 pub const gemma4_gpu = @import("models/gemma4_gpu.zig");
 pub const gemma4_e4b = @import("models/gemma4_e4b.zig");
 pub const Gemma4E4BModel = gemma4_e4b.Gemma4E4BModel;
