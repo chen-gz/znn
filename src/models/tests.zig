@@ -1370,3 +1370,77 @@ test "GPT Module Save and Load" {
         try std.testing.expectEqual(w1, w2);
     }
 }
+
+test "Gemma 4 PLE modules and Gemma4E4BForCausalLM forward" {
+    const allocator = std.testing.allocator;
+
+    // 1. Gemma4PleLayer 模块前向计算测试
+    {
+        var ple_layer = try gemma4.Gemma4PleLayer(nn.Linear).init(allocator, 16, 8, 1e-6, .tanh);
+        defer ple_layer.deinit(allocator);
+
+        var g = autodiff.Graph.initDefault(allocator);
+        defer g.deinit();
+
+        const x = try g.ones(&.{ 1, 2, 16 }, false);
+        const ple_slice = try g.ones(&.{ 1, 2, 8 }, false);
+        const layer_scalar = try g.ones(&.{1}, false);
+
+        const out = try ple_layer.forward(&g, x, ple_slice, layer_scalar);
+        try std.testing.expectEqual(@as(usize, 3), out.shape.len);
+        try std.testing.expectEqualSlices(usize, &.{ 1, 2, 16 }, out.shape.dims[0..3]);
+    }
+
+    // 2. Gemma4PleEmbedding 模块前向计算测试
+    {
+        var ple_emb = try gemma4.Gemma4PleEmbedding(nn.Linear).init(allocator, 16, 2, 8, 1e-6);
+        defer ple_emb.deinit(allocator);
+
+        var g = autodiff.Graph.initDefault(allocator);
+        defer g.deinit();
+
+        const x_cur = try g.ones(&.{ 1, 2, 16 }, false);
+        const ple_tokens = try g.ones(&.{ 1, 2, 2, 8 }, false);
+
+        const out = try ple_emb.forward(&g, x_cur, ple_tokens);
+        try std.testing.expectEqual(@as(usize, 4), out.shape.len);
+        try std.testing.expectEqualSlices(usize, &.{ 1, 2, 2, 8 }, out.shape.dims[0..4]);
+    }
+
+    // 3. Gemma4E4BForCausalLM 端到端模型模块前向计算测试
+    {
+        const tiny_cfg = gemma4.Gemma4Config{
+            .vocab_size = 64,
+            .hidden_size = 32,
+            .intermediate_size = 64,
+            .num_hidden_layers = 2,
+            .num_attention_heads = 4,
+            .num_key_value_heads = 2,
+            .num_global_key_value_heads = 1,
+            .head_dim = 8,
+            .global_head_dim = 16,
+            .sliding_window = 4,
+            .rms_norm_eps = 1e-6,
+            .final_logit_softcapping = 30.0,
+            .max_position_embeddings = 32,
+            .hidden_size_per_layer_input = 32,
+        };
+
+        var model = try gemma4_e4b.Gemma4E4BForCausalLM(tiny_cfg).init(allocator);
+        defer model.deinit(allocator);
+
+        var g = autodiff.Graph.initDefault(allocator);
+        defer g.deinit();
+
+        const token_ids = try g.zeros(&.{ 1, 3 }, false);
+        for (token_ids.data, 0..) |*val, idx| {
+            val.* = @as(f32, @floatFromInt(idx % 10));
+        }
+
+        const logits = try model.forward(&g, token_ids);
+        try std.testing.expectEqual(@as(usize, 3), logits.shape.len);
+        try std.testing.expectEqual(@as(usize, 1), logits.shape.dims[0]); // B
+        try std.testing.expectEqual(@as(usize, 3), logits.shape.dims[1]); // T
+        try std.testing.expectEqual(@as(usize, 64), logits.shape.dims[2]); // V
+    }
+}
