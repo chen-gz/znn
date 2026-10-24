@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **共享 `nn` 模块抽象与架构原语统一 (`src/nn/`, `src/models/`, `src/tensor/quant.zig`, `examples/`)**:
+  - **统一可缩放与无缩放 `RMSNorm` (`nn.RMSNorm`)**：扩展 `RMSNorm` 支持可选权重 `weight: ?*Tensor`、偏置偏移 `weight_offset` 与 `initUnscaled`，删除 `src/models/gemma4.zig` 中专有的 `GemmaRMSNorm` 与 `GemmaUnscaledRMSNorm`。
+  - **`Linear` 支持可选偏置并消除 3D↔2D 重塑冗余 (`nn.Linear`)**：新增 `Linear.Options{ .bias: bool = true }` 与 `Linear.initWithOptions`；重构 `Linear.forward` 直接接收任意维度张量并在内部利用批量/2D SGEMM 处理，彻底移除 `MLP`、`SwiGLU`、`MLALayer` 与 `Gemma4MLP` 中冗余的手动 3D↔2D `reshape`。
+  - **下沉量化线性层与通用量化切片 (`nn.Q4Linear`, `tensor.quantizeSliceBf16`)**：将 `Q4Linear` 从 `src/models/gemma4_q4.zig` 统一迁入 `src/nn/core.zig`，并在 `src/tensor/quant.zig` 提供泛型量化切片 `quantizeSliceBf16` 替代模型私有实现。
+  - **泛型门控前馈网络与可配置专家激活 (`nn.GatedMLP(Proj)`, `nn.MoELayer`)**：新增 `GatedActivation` 枚举（支持 `.silu`、`.gelu`、`.gelu_tanh`）与泛型模块 `GatedMLP(comptime Proj)`，支持以 `Linear` 与 `Q4Linear` 实例化；`SwiGLU`、`Gemma4MLP` 与 `Gemma4Q4MLP` 统一收敛为 `GatedMLP` 的特化；`MoELayer` 支持通过 `activation: GatedActivation` 传入可配置激活。
+  - **泛型分组查询注意力与张量转置辅助原语 (`nn.GQAAttention(Proj)`, `splitHeads`, `mergeHeads`)**：在 `nn/attention.zig` 中新增张量头重排工具 `splitHeads` 与 `mergeHeads`，并构建泛型 `GQAAttention(comptime Proj)`（支持 QK 归一化、无缩放 V 归一化、可选 RoPE、缩放因子、掩码与键值头复用）；`CausalSelfAttention`、`Gemma4Attention` 与 `Gemma4Q4Attention` 统一复用头转置辅助原语。
+  - **单层键值缓存原语与生命周期解耦 (`nn.LayerKVCache`, `nn.KVCache`, `Gemma4KVCache.LayerCache`)**：实现解耦的 CPU 单层键值缓存 `LayerKVCache`（支持 `append`、`writePrefill`、`visibleRange`、`packWindow`/`writeWindow` 及写入前 `ContextWindowExceeded` 保护）；`nn.KVCache` 与 `Gemma4KVCache.LayerCache` 统一代理至 `LayerKVCache`，并修复视图张量结构体与底层切片内存的析构生命周期。
+  - **采样原语归一与全局清理 (`src/nn/llm.zig`, `examples/`)**：删除 `src/nn/llm.zig` 中重复的 `sampleTopP` / `sampleTopK`，统一使用 `backend.sampling.Sampler` 并更新 `examples/llm_training.zig` 与 `examples/train_shakespeare.zig`；迁移 `releaseModuleGrads` 与 `createLayerScalar` 至 `nn.core`（`src/nn/module.zig`）。
+
 - **修复基准测试编译与 GPU/CPU 候选采样一致性单测 (`src/bench/mlx_suite.zig`, `src/models/tests.zig`)**:
   - **更新基准测试至统一算子接口 (`src/bench/mlx_suite.zig`)**：将 `mlx_suite.zig` 中遗留的 `Graph.scaledDotProductAttention` 统一更新为 `Graph.attention(q, k, v, .{ .scale = scale, .mask = .causal })`，将 `Graph.rmsNorm` 调用更新为传入 `RmsNormOptions{ .eps = 1e-5 }`，修复 `zig build e4b` / `zig build bench` 编译失败。
   - **修复 GPU 候选采样与 CPU 选取的一致性断言 (`src/models/tests.zig`)**：断言对比经 `sampling.buildDistribution` 剔除不可采样词元并排序后的终结候选分布，消除未截断前原始有界切片与 CPU 堆部分选择的长度与排序偏差。

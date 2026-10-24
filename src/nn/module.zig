@@ -51,6 +51,38 @@ pub fn createVectorTensor(allocator: std.mem.Allocator, len: usize, fill: f32, r
     return t;
 }
 
+/// 分配标量 `[1]` 持久化缓冲区 (例如 Gemma 4 的 layer_scalar)，初始值为 1.0，标为 is_buffer = true，
+/// 避免被优化器当作可训练参数参与权重衰减
+pub fn createLayerScalar(allocator: std.mem.Allocator) !*Tensor {
+    const layer_scalar = try createPersistentTensor(allocator, 1, 1, false);
+    layer_scalar.data[0] = 1.0;
+    layer_scalar.shape = Shape.init(&.{1});
+    layer_scalar.strides = tensor.computeContiguousStrides(layer_scalar.shape);
+    layer_scalar.is_buffer = true;
+    return layer_scalar;
+}
+
+/// 分配多维持久化无梯度缓存张量 (例如 MLACache)
+pub fn createCacheTensor(allocator: std.mem.Allocator, dims: []const usize) !*Tensor {
+    const shape = try Shape.fromSlice(dims);
+    const count = shape.numel();
+    const t = try allocator.create(Tensor);
+    errdefer allocator.destroy(t);
+    const data = try allocator.alloc(f32, count);
+    errdefer allocator.free(data);
+    @memset(data, 0.0);
+    t.* = Tensor{
+        .data = data,
+        .grad = &.{},
+        .shape = shape,
+        .strides = tensor.computeContiguousStrides(shape),
+        .requires_grad = false,
+        .is_buffer = true,
+        .creator = null,
+    };
+    return t;
+}
+
 /// 释放 `createPersistentTensor` 分配的张量；梯度缓冲只要存在即释放（参数被冻结后 `requires_grad` 可能为 false）
 pub fn freePersistentTensor(allocator: std.mem.Allocator, t: *Tensor) void {
     allocator.free(t.data);
@@ -244,6 +276,22 @@ pub fn zeroGradModel(model: anytype) void {
         }
     };
     var v = Visitor{};
+    walk(model, &v) catch |err| switch (err) {};
+}
+
+/// 释放模型内全部张量的梯度缓冲区并将 requires_grad 置为 false (用于仅推理加载时削减显存/内存开销)
+pub fn releaseModuleGrads(model: anytype, allocator: std.mem.Allocator) void {
+    const Visitor = struct {
+        allocator: std.mem.Allocator,
+        pub fn visitTensor(self: *@This(), _: []const u8, t: *Tensor) !void {
+            if (t.grad.len > 0) {
+                self.allocator.free(t.grad);
+                t.grad = &.{};
+            }
+            t.requires_grad = false;
+        }
+    };
+    var v = Visitor{ .allocator = allocator };
     walk(model, &v) catch |err| switch (err) {};
 }
 

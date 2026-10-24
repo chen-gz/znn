@@ -42,6 +42,7 @@ pub const initWeights = core.initWeights;
 pub const createPersistentTensor = core.createPersistentTensor;
 pub const freePersistentTensor = core.freePersistentTensor;
 pub const Linear = core.Linear;
+pub const Q4Linear = core.Q4Linear;
 pub const ConvOptions = tensor.ConvOptions;
 pub const Conv1D = core.Conv1D;
 pub const Conv2D = core.Conv2D;
@@ -50,6 +51,8 @@ pub const ConvTranspose2D = core.ConvTranspose2D;
 pub const Module = core.Module;
 pub const deinitModel = core.deinitModel;
 pub const zeroGradModel = core.zeroGradModel;
+pub const releaseModuleGrads = core.releaseModuleGrads;
+pub const createLayerScalar = core.createLayerScalar;
 pub const initModel = core.initModel;
 pub const initModelWithSample = core.initModelWithSample;
 pub const callForward = core.callForward;
@@ -112,9 +115,15 @@ pub const GRUResult = recurrent.GRUResult;
 
 // 5. Transformer、注意力与生成对齐 (Transformer, Attention & Alignment)
 pub const Embedding = transformer.Embedding;
+pub const LayerKVCache = transformer.LayerKVCache;
 pub const KVCache = transformer.KVCache;
 pub const ScaledDotProductAttention = transformer.ScaledDotProductAttention;
+pub const splitHeads = transformer.splitHeads;
+pub const mergeHeads = transformer.mergeHeads;
+pub const GQAAttention = transformer.GQAAttention;
 pub const MLP = transformer.MLP;
+pub const GatedActivation = transformer.GatedActivation;
+pub const GatedMLP = transformer.GatedMLP;
 pub const SwiGLU = transformer.SwiGLU;
 pub const MoELayer = transformer.MoELayer;
 pub const CausalSelfAttention = transformer.CausalSelfAttention;
@@ -135,8 +144,6 @@ pub const computeGroupAdvantages = transformer.computeGroupAdvantages;
 pub const computeGRPOLoss = transformer.computeGRPOLoss;
 pub const grpoLoss = transformer.grpoLoss;
 pub const grpoLossGraph = transformer.grpoLossGraph;
-pub const sampleTopP = transformer.sampleTopP;
-pub const sampleTopK = transformer.sampleTopK;
 
 // 6. 权重序列化 (Serialization - Safetensors)
 pub const saveModel = serialization.saveModel;

@@ -18,9 +18,9 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
     var prng = std.Random.DefaultPrng.init(42);
     const random = prng.random();
 
-    // 1. GemmaRMSNorm 单元测试 (含 unit offset 1.0 + weight 特性)
+    // 1. RMSNorm 单元测试 (含带权重与无权重两种模式)
     {
-        var norm = try gemma4.GemmaRMSNorm.init(allocator, 4, 1e-6);
+        var norm = try nn.RMSNorm.init(allocator, 4, 1e-6);
         defer nn.deinitModel(&norm, allocator);
         var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
@@ -30,6 +30,10 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         // x rms = 2.0, x / rms = 1.0, weight 为 1.0, 结果为 1.0
         try std.testing.expectApproxEqAbs(@as(f32, 1.0), y.data[0], 1e-4);
         try std.testing.expectApproxEqAbs(@as(f32, 1.0), y.data[3], 1e-4);
+
+        const unscaled = nn.RMSNorm.initUnscaled(.{ .eps = 1e-6 });
+        const y_unscaled = try unscaled.forward(&g, x);
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), y_unscaled.data[0], 1e-4);
     }
 
     // 2. Gemma 滑动窗口层半切分旋转位置编码 (Split-Half RoPE) 配置单测
@@ -44,7 +48,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
 
     // 3. Gemma4MLP 单元测试 (与按双曲正切近似 GELU 手工计算的结果逐元素对比)
     {
-        var mlp = try gemma4.Gemma4MLP.init(allocator, 8, 16, .tanh);
+        var mlp = try gemma4.Gemma4MLP.initGemma(allocator, 8, 16, .tanh);
         mlp.gate_proj.resetParameters(random, .{});
         mlp.up_proj.resetParameters(random, .{});
         mlp.down_proj.resetParameters(random, .{});
@@ -67,7 +71,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         for (expected.data, out.data) |e, o| try std.testing.expectApproxEqAbs(e, o, 1e-5);
 
         // 同一权重下的精确 (erf) 形式输出与之接近但不相同
-        mlp.hidden_activation = .none;
+        mlp.activation = .gelu;
         const out_exact = try mlp.forward(&g, x);
         var max_diff: f32 = 0.0;
         for (out_exact.data, out.data) |e, o| max_diff = @max(max_diff, @abs(e - o));
@@ -217,7 +221,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         var cache = try gemma4.Gemma4KVCache.initDefault(allocator, gemma4_q4.TinyQ4Gemma4.config);
         defer cache.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 2), cache.layers.len);
-        try std.testing.expectEqual(@as(usize, 0), cache.layers[0].curr_len);
+        try std.testing.expectEqual(@as(usize, 0), cache.layers[0].core.curr_len);
 
         // 构造合法的 TinyQ4Gemma4 二进制内存切片
         const expected_bytes = gemma4_q4.TinyQ4Gemma4.computeExpectedFileSize();
@@ -235,7 +239,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         const prompt = [_]usize{ 2, 10, 25 };
         var greedy = sampling.Sampler.init(.greedy);
         const next_1 = try mmap_model.prefill(&g_prefill, &prompt, &cache, mock_mmap, &greedy);
-        try std.testing.expectEqual(@as(usize, 3), cache.layers[0].curr_len);
+        try std.testing.expectEqual(@as(usize, 3), cache.layers[0].core.curr_len);
         try std.testing.expect(next_1 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
 
         // 验证 mmap 加载后的模型同样可安全调用 forward() 接口
@@ -248,7 +252,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         defer g_decode.deinit();
 
         const next_2 = try mmap_model.decodeStep(&g_decode, next_1, &cache, mock_mmap, &prompt, &greedy);
-        try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
+        try std.testing.expectEqual(@as(usize, 4), cache.layers[0].core.curr_len);
         try std.testing.expect(next_2 < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
 
         // 验证在 Apple MLX GPU 硬件加速模式下的预填充与增量解码等价性
@@ -258,14 +262,14 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
             defer g_gpu_prefill.deinit();
 
             const next_gpu_1 = try mmap_model.prefill(&g_gpu_prefill, &prompt, &cache, mock_mmap, &greedy);
-            try std.testing.expectEqual(@as(usize, 3), cache.layers[0].curr_len);
+            try std.testing.expectEqual(@as(usize, 3), cache.layers[0].core.curr_len);
             try std.testing.expectEqual(next_1, next_gpu_1);
 
             var g_gpu_decode = autodiff.Graph.init(allocator, .{ .device = .gpu });
             defer g_gpu_decode.deinit();
 
             const next_gpu_2 = try mmap_model.decodeStep(&g_gpu_decode, next_gpu_1, &cache, mock_mmap, &prompt, &greedy);
-            try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
+            try std.testing.expectEqual(@as(usize, 4), cache.layers[0].core.curr_len);
             try std.testing.expectEqual(next_2, next_gpu_2);
 
             // 验证在 GPU 模式下的投机采样多词元校验
@@ -279,7 +283,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         }
 
         cache.reset();
-        try std.testing.expectEqual(@as(usize, 0), cache.layers[0].curr_len);
+        try std.testing.expectEqual(@as(usize, 0), cache.layers[0].core.curr_len);
     }
 }
 
@@ -424,7 +428,7 @@ fn checkAttentionPrefillDecodeParity(attn_type: gemma4.Gemma4AttentionType, head
     var cache_a = try gemma4.Gemma4KVCache.LayerCache.init(allocator, attn_type, n_kv, head_dim, W, 32);
     defer cache_a.deinit(allocator);
     const y_all = try attn.forwardPrefill(&g, x, &cache_a);
-    try std.testing.expectEqual(T, cache_a.curr_len);
+    try std.testing.expectEqual(T, cache_a.core.curr_len);
 
     var cache_b = try gemma4.Gemma4KVCache.LayerCache.init(allocator, attn_type, n_kv, head_dim, W, 32);
     defer cache_b.deinit(allocator);
@@ -436,7 +440,7 @@ fn checkAttentionPrefillDecodeParity(attn_type: gemma4.Gemma4AttentionType, head
         try std.testing.expect(maxAbsDiff(yt.data, y_all.data[t * C .. (t + 1) * C]) < 1e-4);
     }
     // 预填充 (M = T) 与逐词元解码 (M = 1) 走不同的矩阵乘法分块路径，累加顺序不同，只要求浮点容差内一致
-    try std.testing.expect(maxAbsDiff(cache_a.k[0 .. T * head_dim], cache_b.k[0 .. T * head_dim]) < 1e-5);
+    try std.testing.expect(maxAbsDiff(cache_a.core.k[0 .. T * head_dim], cache_b.core.k[0 .. T * head_dim]) < 1e-5);
 }
 
 test "Gemma4Attention prefill matches incremental decode beyond the sliding window" {
@@ -501,7 +505,7 @@ test "Gemma 4 inference entry points reject invalid prompts instead of reading o
     // 缓存写满后增量解码返回错误
     _ = try model.prefill(&g, &.{ 2, 3, 4 }, &cache, &greedy);
     _ = try model.decodeStep(&g, 5, &cache, &.{ 2, 3, 4 }, &greedy);
-    try std.testing.expectEqual(@as(usize, 4), cache.layers[0].curr_len);
+    try std.testing.expectEqual(@as(usize, 4), cache.layers[0].core.curr_len);
     try std.testing.expectError(error.ContextWindowExceeded, model.decodeStep(&g, 6, &cache, &.{ 2, 3, 4, 5 }, &greedy));
     try std.testing.expectError(error.IndexOutOfBounds, model.decodeStep(&g, 1000, &cache, &.{2}, &greedy));
 }
@@ -599,7 +603,7 @@ test "Gemma4Q4 mmap loader reads per-layer norms and layer_scalar in storage ord
 
     var model = try M.loadFromMmapWithOptions(allocator, bytes, .{ .lm_head_mode = .bf16, .warmup = false });
     defer model.deinit(allocator);
-    try std.testing.expectEqual(@as(f32, 2.0), model.layers[1].input_layernorm.weight.data[0]);
+    try std.testing.expectEqual(@as(f32, 2.0), model.layers[1].input_layernorm.weight.?.data[0]);
     try std.testing.expectEqual(@as(f32, 0.5), model.layers[1].layer_scalar.data[0]);
     try std.testing.expectEqual(@as(f32, 0.0), model.layers[0].layer_scalar.data[0]);
     try std.testing.expectEqual(cfg.hidden_size * cfg.num_attention_heads * cfg.head_dim / 32, model.layers[0].self_attn.q_proj.blocks.len);
@@ -812,7 +816,7 @@ test "Gemma4KVCache layer window pack and restore keep incremental decode identi
         var cache_b = try gemma4.Gemma4KVCache.LayerCache.init(allocator, attn_type, n_kv, hd, W, 16);
         defer cache_b.deinit(allocator);
         try cache_b.writeWindow(packed_k[0 .. n_kv * win * hd], packed_v[0 .. n_kv * win * hd], win, T);
-        try std.testing.expectEqual(T, cache_b.curr_len);
+        try std.testing.expectEqual(T, cache_b.core.curr_len);
         // 全局注意力层必须恢复完整历史，过短的窗口被拒绝
         if (attn_type == .full_attention) {
             try std.testing.expectError(error.ShapeMismatch, cache_b.writeWindow(packed_k[0 .. n_kv * hd], packed_v[0 .. n_kv * hd], 1, T));
@@ -1052,7 +1056,7 @@ test "Gemma 4 tiny F32 and Q4 models use the tanh-approximate GELU" {
     {
         var model = try initTinyGemma4ForSampling(allocator);
         defer nn.deinitModel(&model, allocator);
-        for (model.layers) |layer| try std.testing.expectEqual(backend.GeluApproximation.tanh, layer.mlp.hidden_activation);
+        for (model.layers) |layer| try std.testing.expectEqual(nn.GatedActivation.gelu_tanh, layer.mlp.activation);
         var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
         const ids = try g.tensorNDWithData(&.{ 1, 3 }, &.{ 2.0, 10.0, 25.0 }, false);
@@ -1074,7 +1078,7 @@ test "Gemma 4 tiny F32 and Q4 models use the tanh-approximate GELU" {
         @memcpy(bytes[0..8], M.Q4_MAGIC);
         var model = try M.loadFromMmapWithOptions(allocator, bytes, .{ .lm_head_mode = .bf16, .warmup = false });
         defer model.deinit(allocator);
-        for (model.layers) |layer| try std.testing.expectEqual(backend.GeluApproximation.tanh, layer.mlp.hidden_activation);
+        for (model.layers) |layer| try std.testing.expectEqual(nn.GatedActivation.gelu_tanh, layer.mlp.activation);
     }
 }
 

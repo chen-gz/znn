@@ -1,4 +1,5 @@
 const std = @import("std");
+const backend = @import("../backend.zig");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const Tensor = tensor.Tensor;
@@ -20,7 +21,10 @@ pub const nameModules = module.nameModules;
 pub const enterModuleScope = module.enterModuleScope;
 pub const createPersistentTensor = module.createPersistentTensor;
 pub const createVectorTensor = module.createVectorTensor;
+pub const createLayerScalar = module.createLayerScalar;
+pub const createCacheTensor = module.createCacheTensor;
 pub const freePersistentTensor = module.freePersistentTensor;
+pub const releaseModuleGrads = module.releaseModuleGrads;
 const applyCustomInit = module.applyCustomInit;
 
 // ============================================================================
@@ -41,17 +45,33 @@ pub const initWeights = init_mod.initWeights;
 
 pub const Linear = struct {
     weight: *Tensor,
-    bias: *Tensor,
+    bias: ?*Tensor = null,
     name: ?[]const u8 = null,
     module_type: []const u8 = "Linear",
 
+    pub const Options = struct {
+        bias: bool = true,
+
+        pub const default: Options = .{};
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
     /// 构造线性层：只分配参数内存 (权重与偏置全零)，不做任何数值初始化。
-    /// 参数数值由 nn.initModel (外部 customInit 或内置 resetParameters)、Graph.initWeights 或直接调用 resetParameters 设置。
+    /// 默认包含偏置项 (bias: true)
     pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !Linear {
+        return initWithOptions(allocator, in_features, out_features, .{});
+    }
+
+    /// 携带配置构造 (可通过 .bias = false 消除偏置)
+    pub fn initWithOptions(allocator: std.mem.Allocator, in_features: usize, out_features: usize, options: Options) !Linear {
         const weight = try createPersistentTensor(allocator, in_features, out_features, true);
         errdefer freePersistentTensor(allocator, weight);
-        const bias = try createPersistentTensor(allocator, 1, out_features, true);
-        errdefer freePersistentTensor(allocator, bias);
+        const bias = if (options.bias) blk: {
+            const b = try createPersistentTensor(allocator, 1, out_features, true);
+            break :blk b;
+        } else null;
 
         return Linear{
             .weight = weight,
@@ -65,7 +85,9 @@ pub const Linear = struct {
         const out_features = self.weight.shape.dims[1];
         const w_init = options.resolveWeightInit();
         initWeights(random, self.weight.data, in_features, out_features, w_init);
-        initWeights(random, self.bias.data, in_features, out_features, options.bias_init);
+        if (self.bias) |bias| {
+            initWeights(random, bias.data, in_features, out_features, options.bias_init);
+        }
     }
 
     /// 模块标准数学变换公式
@@ -78,7 +100,7 @@ pub const Linear = struct {
 
         const rows = try RowView.init(graph, x, self.weight.shape.dims[0]);
         const z = try graph.matmul(rows.matrix, self.weight);
-        const y = try graph.addBias(z, self.bias);
+        const y = if (self.bias) |bias| try graph.addBias(z, bias) else z;
         return rows.restore(graph, y, self.weight.shape.dims[1]);
     }
 };
@@ -103,6 +125,122 @@ pub const RowView = struct {
         var out_dims = self.input_shape.dims;
         out_dims[self.input_shape.len - 1] = out_features;
         return graph.reshape(y, out_dims[0..self.input_shape.len]);
+    }
+};
+
+/// 4-bit 量化线性层 (Q4Linear)
+/// 权重存储为 Q4Block 结构体切片，内存体积仅为原始单精度 F32 的 1/8、BF16 的 1/4！
+pub const Q4Linear = struct {
+    in_features: usize,
+    out_features: usize,
+    blocks: []tensor.Q4Block, // 权重分块数据，总长度 = (in_features * out_features) / 32
+    owns_blocks: bool = true,
+    q4_weights: ?backend.offload.Q4Weights = null,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "Q4Linear",
+
+    pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !Q4Linear {
+        std.debug.assert((in_features * out_features) % tensor.Q4Block.QK == 0);
+        const num_blocks = (in_features * out_features) / tensor.Q4Block.QK;
+        const blocks = try allocator.alloc(tensor.Q4Block, num_blocks);
+        @memset(blocks, std.mem.zeroes(tensor.Q4Block));
+
+        return Q4Linear{
+            .in_features = in_features,
+            .out_features = out_features,
+            .blocks = blocks,
+            .owns_blocks = true,
+            .q4_weights = null,
+        };
+    }
+
+    pub fn fromBlocks(in_features: usize, out_features: usize, blocks: []const tensor.Q4Block) Q4Linear {
+        return Q4Linear{
+            .in_features = in_features,
+            .out_features = out_features,
+            .blocks = @constCast(blocks),
+            .owns_blocks = false,
+            .q4_weights = null,
+        };
+    }
+
+    pub fn deinit(self: *Q4Linear, allocator: std.mem.Allocator) void {
+        if (self.q4_weights) |*qw| {
+            qw.deinit();
+            self.q4_weights = null;
+        }
+        if (self.owns_blocks) {
+            allocator.free(self.blocks);
+            self.blocks = &.{};
+            self.owns_blocks = false;
+        }
+    }
+
+    pub fn inFeatures(self: *const Q4Linear) usize {
+        return self.in_features;
+    }
+
+    pub fn outFeatures(self: *const Q4Linear) usize {
+        return self.out_features;
+    }
+
+    pub fn resetParameters(self: *Q4Linear, random: std.Random, options: InitOptions) void {
+        _ = self;
+        _ = random;
+        _ = options;
+    }
+
+    /// 零拷贝绑定 mmap 映射文件中的 Q4Block 权重块切片
+    pub fn bindMmapBlocks(self: *Q4Linear, mmap_bytes: []const u8, cursor: *usize, allocator: std.mem.Allocator) void {
+        self.deinit(allocator);
+        const count = (self.in_features * self.out_features) / tensor.Q4Block.QK;
+        const bytes = count * @sizeOf(tensor.Q4Block);
+        self.blocks = @constCast(@as([]const tensor.Q4Block, @alignCast(std.mem.bytesAsSlice(tensor.Q4Block, mmap_bytes[cursor.* .. cursor.* + bytes]))));
+        self.owns_blocks = false;
+        cursor.* += bytes;
+    }
+
+    /// 启用图形处理器 (Graphics Processing Unit, GPU) 硬件加速卸载
+    pub fn enableOffload(self: *Q4Linear, allocator: std.mem.Allocator, stream: ?backend.mlx.Stream) !void {
+        if (!backend.offload.isAvailable()) return;
+        if (self.q4_weights != null) return;
+        const raw_bytes = std.mem.sliceAsBytes(self.blocks);
+        self.q4_weights = try backend.offload.Q4Weights.initFromBlocks(
+            allocator,
+            raw_bytes,
+            self.in_features,
+            self.out_features,
+            stream,
+        );
+    }
+
+    /// 从原始 F32 权重矩阵原地量化填充当前层
+    pub fn quantizeFromF32(self: *Q4Linear, f32_weights: []const f32) void {
+        std.debug.assert(f32_weights.len == self.in_features * self.out_features);
+        tensor.quant.quantizeSlice(self.blocks, f32_weights);
+    }
+
+    /// 从原始 BF16 权重矩阵原地量化填充当前层
+    pub fn quantizeFromBF16(self: *Q4Linear, bf16_weights: []const u16) void {
+        std.debug.assert(bf16_weights.len == self.in_features * self.out_features);
+        tensor.quant.quantizeSliceBf16(self.blocks, bf16_weights);
+    }
+
+    /// 前向传播：高效按块点积计算 x * W，在 GPU 硬件加速模式下直通 MLX 量化内核
+    pub fn forward(self: *const Q4Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+
+        if (graph.options.device == .gpu and backend.offload.isAvailable() and !graph.enable_grad) {
+            if (self.q4_weights) |*qw| {
+                const rows = try RowView.init(graph, x, self.in_features);
+                const out_2d = try graph.tensorND(&.{ rows.matrix.shape.dims[0], self.out_features }, false);
+                try qw.forward(rows.matrix, out_2d, graph.options.mlx_stream);
+                return rows.restore(graph, out_2d, self.out_features);
+            }
+        }
+
+        return graph.q4MatMul(x, self.blocks, self.in_features, self.out_features);
     }
 };
 

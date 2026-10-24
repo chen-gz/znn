@@ -118,7 +118,7 @@ describe("model-graph schema 2.0", () => {
     const rows = layoutPipeline(buildLocalGraph(mod(`${BLOCK}.attn.core`)));
     expect(rowIds(rows)).toEqual([
       ["@in0", "@in1", "@in2"],
-      ["act_Attention_17"],
+      ["act_Attention_22"],
       ["@out0"],
     ]);
   });
@@ -159,7 +159,7 @@ describe("model-graph schema 2.0", () => {
     expect(gptGraph).toContain("stroke-dasharray:2 3");
 
     const core = buildMermaidLocalGraph(mod(`${BLOCK}.attn.core`)).code;
-    expect(core).toContain('("⚡ act_Attention_17 : Attention")');
+    expect(core).toContain('("⚡ act_Attention_22 : Attention")');
   });
 
   it("collects subtree nodes by module rather than by name prefix", () => {

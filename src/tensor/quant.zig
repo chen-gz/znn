@@ -116,6 +116,17 @@ pub fn quantizeSlice(dest: []Q4Block, src: []const f32) void {
     }
 }
 
+/// 批量量化 BF16 位模式切片为 Q4 块
+pub fn quantizeSliceBf16(dest: []Q4Block, src: []const u16) void {
+    const num_blocks = src.len / Q4Block.QK;
+    std.debug.assert(dest.len >= num_blocks);
+    var f32_chunk: [32]f32 = undefined;
+    for (0..num_blocks) |b| {
+        backend.vec_math.widenBf16(&f32_chunk, src[b * 32 .. (b + 1) * 32], 1.0);
+        dest[b] = Q4Block.quantize(&f32_chunk);
+    }
+}
+
 /// 批量反量化 Q4 块为单精度浮点切片
 pub fn dequantizeSlice(dest: []f32, src: []const Q4Block) void {
     std.debug.assert(dest.len >= src.len * Q4Block.QK);

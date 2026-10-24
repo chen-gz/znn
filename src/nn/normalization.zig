@@ -29,26 +29,40 @@ const BatchNormTensors = struct {
 
 /// 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)
 pub const RMSNorm = struct {
-    weight: *Tensor, // 可学习的缩放因子 gamma (Shape: [dim])
-    eps: f32, // 均方根分母防止除以 0 的极小常数 (epsilon, eps)
+    weight: ?*Tensor = null, // 可学习的缩放因子 gamma (Shape: [dim])；为 null 时不缩放 (无参数 RMSNorm)
+    options: tensor.RmsNormOptions = .{}, // 均方根分母极小常数 eps 与权重偏移 weight_offset
     name: ?[]const u8 = null,
     module_type: []const u8 = "RMSNorm",
 
+    /// 标准构造：分配可学习缩放权重 (全 1.0) 并指定 eps
     pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !RMSNorm {
+        return initWithOptions(allocator, dim, .{ .eps = eps });
+    }
+
+    /// 携带完整 RmsNormOptions (支持 weight_offset)
+    pub fn initWithOptions(allocator: std.mem.Allocator, dim: usize, options: tensor.RmsNormOptions) !RMSNorm {
         const weight = try createVectorTensor(allocator, dim, 1.0, true);
-        return RMSNorm{
+        return .{
             .weight = weight,
-            .eps = eps,
+            .options = options,
+        };
+    }
+
+    /// 无权重缩放 RMSNorm (例如 Gemma 4 的 v_norm)，不分配任何参数张量
+    pub fn initUnscaled(options: tensor.RmsNormOptions) RMSNorm {
+        return .{
+            .weight = null,
+            .options = options,
         };
     }
 
     /// 模块标准数学变换公式
-    pub const formula = "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot \\gamma";
+    pub const formula = "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}} \\odot (w + \\text{offset})";
 
     pub fn forward(self: *const RMSNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        return try graph.rmsNorm(x, self.weight, .{ .eps = self.eps });
+        return try graph.rmsNorm(x, self.weight, self.options);
     }
 };
 

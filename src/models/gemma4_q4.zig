@@ -14,8 +14,7 @@ const gemma4_gpu = @import("gemma4_gpu.zig");
 const Tensor = tensor.Tensor;
 const Q4Block = tensor.quant.Q4Block;
 const Embedding = nn.transformer.Embedding;
-const GemmaRMSNorm = gemma4.GemmaRMSNorm;
-const GemmaUnscaledRMSNorm = gemma4.GemmaUnscaledRMSNorm;
+const RMSNorm = nn.RMSNorm;
 const Gemma4Config = gemma4.Gemma4Config;
 const Gemma4AttentionType = gemma4.Gemma4AttentionType;
 const Gemma4KVCache = gemma4.Gemma4KVCache;
@@ -29,221 +28,10 @@ const freePersistentTensor = nn.core.freePersistentTensor;
 const deinitModel = nn.core.deinitModel;
 const enterModuleScope = nn.core.enterModuleScope;
 
-/// 4-bit 量化线性层 (Q4Linear)
-/// 权重存储为 Q4Block 结构体切片，内存体积仅为原始单精度 F32 的 1/8、BF16 的 1/4！
-pub const Q4Linear = struct {
-    in_features: usize,
-    out_features: usize,
-    blocks: []Q4Block, // 权重分块数据，总长度 = (in_features * out_features) / 32
-    owns_blocks: bool = true,
-    q4_weights: ?backend.offload.Q4Weights = null,
-    name: ?[]const u8 = null,
-    module_type: []const u8 = "Q4Linear",
-
-    pub fn init(allocator: std.mem.Allocator, in_features: usize, out_features: usize) !Q4Linear {
-        std.debug.assert((in_features * out_features) % Q4Block.QK == 0);
-        const num_blocks = (in_features * out_features) / Q4Block.QK;
-        const blocks = try allocator.alloc(Q4Block, num_blocks);
-        @memset(blocks, std.mem.zeroes(Q4Block));
-
-        return Q4Linear{
-            .in_features = in_features,
-            .out_features = out_features,
-            .blocks = blocks,
-            .owns_blocks = true,
-            .q4_weights = null,
-        };
-    }
-
-    pub fn fromBlocks(in_features: usize, out_features: usize, blocks: []const Q4Block) Q4Linear {
-        return Q4Linear{
-            .in_features = in_features,
-            .out_features = out_features,
-            .blocks = @constCast(blocks),
-            .owns_blocks = false,
-            .q4_weights = null,
-        };
-    }
-
-    pub fn deinit(self: *Q4Linear, allocator: std.mem.Allocator) void {
-        if (self.q4_weights) |*qw| {
-            qw.deinit();
-            self.q4_weights = null;
-        }
-        if (self.owns_blocks) {
-            allocator.free(self.blocks);
-        }
-    }
-
-    /// 零拷贝绑定 mmap 映射文件中的 Q4Block 权重块切片
-    pub fn bindMmapBlocks(self: *Q4Linear, mmap_bytes: []const u8, cursor: *usize, allocator: std.mem.Allocator) void {
-        self.deinit(allocator);
-        const count = (self.in_features * self.out_features) / Q4Block.QK;
-        const bytes = count * @sizeOf(Q4Block);
-        self.blocks = @constCast(@as([]const Q4Block, @alignCast(std.mem.bytesAsSlice(Q4Block, mmap_bytes[cursor.* .. cursor.* + bytes]))));
-        self.owns_blocks = false;
-        cursor.* += bytes;
-    }
-
-    /// 启用图形处理器 (Graphics Processing Unit, GPU) 硬件加速卸载
-    pub fn enableOffload(self: *Q4Linear, allocator: std.mem.Allocator, stream: ?backend.mlx.Stream) !void {
-        if (!backend.offload.isAvailable()) return;
-        if (self.q4_weights != null) return;
-        const raw_bytes = std.mem.sliceAsBytes(self.blocks);
-        self.q4_weights = try backend.offload.Q4Weights.initFromBlocks(
-            allocator,
-            raw_bytes,
-            self.in_features,
-            self.out_features,
-            stream,
-        );
-    }
-
-    /// 从原始 F32 权重矩阵原地量化填充当前层
-    pub fn quantizeFromF32(self: *Q4Linear, f32_weights: []const f32) void {
-        std.debug.assert(f32_weights.len == self.in_features * self.out_features);
-        tensor.quant.quantizeSlice(self.blocks, f32_weights);
-    }
-
-    /// 从原始 BF16 权重矩阵原地量化填充当前层
-    pub fn quantizeFromBF16(self: *Q4Linear, bf16_weights: []const u16) void {
-        std.debug.assert(bf16_weights.len == self.in_features * self.out_features);
-        const num_blocks = self.blocks.len;
-        var f32_chunk: [32]f32 = undefined;
-        for (0..num_blocks) |b| {
-            vec_math.widenBf16(&f32_chunk, bf16_weights[b * 32 ..][0..32], 1.0);
-            self.blocks[b] = Q4Block.quantize(&f32_chunk);
-        }
-    }
-
-    /// 前向传播：高效按块点积计算 x * W，在 GPU 硬件加速模式下直通 MLX 量化内核
-    pub fn forward(self: *const Q4Linear, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
-
-        if (graph.options.device == .gpu and backend.offload.isAvailable() and !graph.enable_grad) {
-            if (self.q4_weights) |*qw| {
-                var total_elem: usize = 1;
-                for (0..x.shape.len) |d| {
-                    total_elem *= x.shape.dims[d];
-                }
-                const in_f = self.in_features;
-                const out_f = self.out_features;
-                const rows = total_elem / in_f;
-                const out = if (x.shape.len == 2)
-                    try graph.tensorND(&.{ rows, out_f }, false)
-                else if (x.shape.len == 3)
-                    try graph.tensorND(&.{ x.shape.dims[0], x.shape.dims[1], out_f }, false)
-                else
-                    try graph.tensorND(&.{ rows, out_f }, false);
-                try qw.forward(x, out, graph.options.mlx_stream);
-                return out;
-            }
-        }
-
-        return graph.q4MatMul(x, self.blocks, self.in_features, self.out_features);
-    }
-};
+pub const Q4Linear = nn.Q4Linear;
 
 /// Gemma 4 门控前馈多层感知机 (Q4 量化版本)
-pub const Gemma4Q4MLP = struct {
-    gate_proj: Q4Linear,
-    up_proj: Q4Linear,
-    down_proj: Q4Linear,
-    /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 形式 (Gemma 4 为双曲正切近似形式)
-    hidden_activation: backend.GeluApproximation,
-    name: ?[]const u8 = null,
-    module_type: []const u8 = "Gemma4Q4MLP",
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        hidden_size: usize,
-        intermediate_size: usize,
-        hidden_activation: backend.GeluApproximation,
-    ) !Gemma4Q4MLP {
-        const gate_proj = try Q4Linear.init(allocator, hidden_size, intermediate_size);
-        errdefer deinitModel(&gate_proj, allocator);
-        const up_proj = try Q4Linear.init(allocator, hidden_size, intermediate_size);
-        errdefer deinitModel(&up_proj, allocator);
-        const down_proj = try Q4Linear.init(allocator, intermediate_size, hidden_size);
-        errdefer deinitModel(&down_proj, allocator);
-
-        return Gemma4Q4MLP{
-            .gate_proj = gate_proj,
-            .up_proj = up_proj,
-            .down_proj = down_proj,
-            .hidden_activation = hidden_activation,
-        };
-    }
-
-    /// 构建无 CPU 权重实体的空 MLP 结构 (用于 GPU 硬件加速直通路径，避免 4.5 GB 内存分配与零填充)
-    pub fn initEmpty(hidden_size: usize, intermediate_size: usize, hidden_activation: backend.GeluApproximation) Gemma4Q4MLP {
-        return Gemma4Q4MLP{
-            .gate_proj = Q4Linear.fromBlocks(hidden_size, intermediate_size, &.{}),
-            .up_proj = Q4Linear.fromBlocks(hidden_size, intermediate_size, &.{}),
-            .down_proj = Q4Linear.fromBlocks(intermediate_size, hidden_size, &.{}),
-            .hidden_activation = hidden_activation,
-        };
-    }
-
-    pub fn deinit(self: *Gemma4Q4MLP, allocator: std.mem.Allocator) void {
-        self.gate_proj.deinit(allocator);
-        self.up_proj.deinit(allocator);
-        self.down_proj.deinit(allocator);
-    }
-
-    pub fn forward(self: *const Gemma4Q4MLP, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
-
-        const old_shape = x.shape;
-        const is_3d = (old_shape.len == 3);
-        var x_2d = x;
-        if (is_3d) {
-            const B = old_shape.dims[0];
-            const T = old_shape.dims[1];
-            const D = old_shape.dims[2];
-            x_2d = try graph.reshape(x, &.{ B * T, D });
-        }
-
-        if (graph.options.device == .gpu and !graph.enable_grad) {
-            if (self.gate_proj.q4_weights != null and self.up_proj.q4_weights != null and self.down_proj.q4_weights != null) {
-                const out_2d = try graph.zeros(&.{ x_2d.shape.dims[0], self.gate_proj.in_features }, false);
-                if (backend.offload.mlpForwardOffload(
-                    &self.gate_proj.q4_weights.?,
-                    &self.up_proj.q4_weights.?,
-                    &self.down_proj.q4_weights.?,
-                    self.hidden_activation,
-                    x_2d,
-                    out_2d,
-                    graph.options.mlx_stream,
-                )) {
-                    if (is_3d) {
-                        const B = old_shape.dims[0];
-                        const T = old_shape.dims[1];
-                        const D = old_shape.dims[2];
-                        return try graph.reshape(out_2d, &.{ B, T, D });
-                    }
-                    return out_2d;
-                } else |_| {}
-            }
-        }
-
-        const gate = try self.gate_proj.forward(graph, x_2d);
-        const up = try self.up_proj.forward(graph, x_2d);
-        const gelu_gate = try graph.gelu(gate, self.hidden_activation);
-        const hidden = try graph.mul(gelu_gate, up);
-        const out = try self.down_proj.forward(graph, hidden);
-
-        if (is_3d) {
-            const B = old_shape.dims[0];
-            const T = old_shape.dims[1];
-            const D = old_shape.dims[2];
-            return try graph.reshape(out, &.{ B, T, D });
-        }
-        return out;
-    }
-};
+pub const Gemma4Q4MLP = nn.GatedMLP(nn.Q4Linear);
 
 /// Gemma 4 混合注意力机制 (Q4 量化版本)
 pub const Gemma4Q4Attention = struct {
@@ -251,9 +39,9 @@ pub const Gemma4Q4Attention = struct {
     k_proj: Q4Linear,
     v_proj: ?Q4Linear,
     o_proj: Q4Linear,
-    q_norm: GemmaRMSNorm,
-    k_norm: GemmaRMSNorm,
-    v_norm: GemmaUnscaledRMSNorm,
+    q_norm: RMSNorm,
+    k_norm: RMSNorm,
+    v_norm: RMSNorm,
 
     attn_type: Gemma4AttentionType,
     hidden_size: usize,
@@ -288,11 +76,11 @@ pub const Gemma4Q4Attention = struct {
         var o_proj = try Q4Linear.init(allocator, q_dim, hidden_size);
         errdefer o_proj.deinit(allocator);
 
-        const q_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
+        const q_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
         errdefer deinitModel(&q_norm, allocator);
-        const k_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
+        const k_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
         errdefer deinitModel(&k_norm, allocator);
-        const v_norm = GemmaUnscaledRMSNorm.init(rms_norm_eps);
+        const v_norm = RMSNorm.initUnscaled(.{ .eps = rms_norm_eps });
 
         return Gemma4Q4Attention{
             .q_proj = q_proj,
@@ -331,11 +119,11 @@ pub const Gemma4Q4Attention = struct {
         const v_proj = if (attn_type == .full_attention) null else Q4Linear.fromBlocks(hidden_size, kv_dim, &.{});
         const o_proj = Q4Linear.fromBlocks(q_dim, hidden_size, &.{});
 
-        const q_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
+        const q_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
         errdefer deinitModel(&q_norm, allocator);
-        const k_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
+        const k_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
         errdefer deinitModel(&k_norm, allocator);
-        const v_norm = GemmaUnscaledRMSNorm.init(rms_norm_eps);
+        const v_norm = RMSNorm.initUnscaled(.{ .eps = rms_norm_eps });
 
         return Gemma4Q4Attention{
             .q_proj = q_proj,
@@ -467,13 +255,9 @@ pub const Gemma4Q4Attention = struct {
         const v_normed = try self.v_norm.forward(graph, v_heads);
 
         // 3. 转置为四维头张量
-        const q_4d = try graph.reshape(q_normed, &.{ B, T, nh, hd });
-        const k_4d = try graph.reshape(k_normed, &.{ B, T, n_kv, hd });
-        const v_4d = try graph.reshape(v_normed, &.{ B, T, n_kv, hd });
-
-        const q = try graph.transposeND(q_4d, 1, 2);
-        const k_t_unrot = try graph.transposeND(k_4d, 1, 2);
-        const v = try graph.transposeND(v_4d, 1, 2);
+        const q = try nn.splitHeads(graph, q_normed, B, T, nh, hd);
+        const k_t_unrot = try nn.splitHeads(graph, k_normed, B, T, n_kv, hd);
+        const v = try nn.splitHeads(graph, v_normed, B, T, n_kv, hd);
 
         // 4. 施加半切分 RoPE 旋转位置编码 (Split-Half RoPE, Gemma 官方标准)
         const q_rot = try graph.rope(q, 0, self.rope);
@@ -490,11 +274,8 @@ pub const Gemma4Q4Attention = struct {
         });
 
         // 7. 转置并输出投影
-        const y_trans = try graph.transposeND(y_4d, 1, 2);
-        const y_2d = try graph.reshape(y_trans, &.{ B * T, nh * hd });
-        const out_2d = try self.o_proj.forward(graph, y_2d);
-
-        return try graph.reshape(out_2d, &.{ B, T, C });
+        const y_3d = try nn.mergeHeads(graph, y_4d, B, T, nh, hd);
+        return try self.o_proj.forward(graph, y_3d);
     }
 
     /// 增量解码注意力特征图计算 (Decode Attention Feature Extraction)
@@ -512,8 +293,8 @@ pub const Gemma4Q4Attention = struct {
         const nh = self.num_heads;
         const n_kv = self.num_kv_heads;
         const hd = self.head_dim;
-        const pos = layer_cache.curr_len;
-        if (pos >= layer_cache.max_seq_len) return error.ContextWindowExceeded;
+        const pos = layer_cache.core.curr_len;
+        if (pos >= layer_cache.core.max_seq_len) return error.ContextWindowExceeded;
 
         const x_2d = if (x.shape.len == 2) x else try graph.reshape(x, &.{ 1, C });
 
@@ -556,12 +337,12 @@ pub const Gemma4Q4Attention = struct {
 
 /// Gemma 4 解码器层 (Q4 量化版本)
 pub const Gemma4Q4DecoderLayer = struct {
-    input_layernorm: GemmaRMSNorm,
+    input_layernorm: RMSNorm,
     self_attn: Gemma4Q4Attention,
-    post_attention_layernorm: GemmaRMSNorm,
-    pre_feedforward_layernorm: GemmaRMSNorm,
+    post_attention_layernorm: RMSNorm,
+    pre_feedforward_layernorm: RMSNorm,
     mlp: Gemma4Q4MLP,
-    post_feedforward_layernorm: GemmaRMSNorm,
+    post_feedforward_layernorm: RMSNorm,
     layer_scalar: *Tensor,
 
     name: ?[]const u8 = null,
@@ -579,7 +360,7 @@ pub const Gemma4Q4DecoderLayer = struct {
         rms_norm_eps: f32,
         hidden_activation: backend.GeluApproximation,
     ) !Gemma4Q4DecoderLayer {
-        const input_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const input_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&input_layernorm, allocator);
         var self_attn = try Gemma4Q4Attention.init(
             allocator,
@@ -592,16 +373,16 @@ pub const Gemma4Q4DecoderLayer = struct {
             rms_norm_eps,
         );
         errdefer self_attn.deinit(allocator);
-        const post_attention_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const post_attention_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&post_attention_layernorm, allocator);
-        const pre_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const pre_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&pre_feedforward_layernorm, allocator);
-        var mlp = try Gemma4Q4MLP.init(allocator, hidden_size, intermediate_size, hidden_activation);
+        var mlp = try Gemma4Q4MLP.initGemma(allocator, hidden_size, intermediate_size, hidden_activation);
         errdefer mlp.deinit(allocator);
-        const post_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const post_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&post_feedforward_layernorm, allocator);
 
-        const layer_scalar = try gemma4.createLayerScalar(allocator);
+        const layer_scalar = try nn.createLayerScalar(allocator);
 
         return Gemma4Q4DecoderLayer{
             .input_layernorm = input_layernorm,
@@ -627,7 +408,7 @@ pub const Gemma4Q4DecoderLayer = struct {
         rms_norm_eps: f32,
         hidden_activation: backend.GeluApproximation,
     ) !Gemma4Q4DecoderLayer {
-        const input_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const input_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&input_layernorm, allocator);
         var self_attn = try Gemma4Q4Attention.initEmpty(
             allocator,
@@ -640,15 +421,15 @@ pub const Gemma4Q4DecoderLayer = struct {
             rms_norm_eps,
         );
         errdefer self_attn.deinit(allocator);
-        const post_attention_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const post_attention_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&post_attention_layernorm, allocator);
-        const pre_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const pre_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&pre_feedforward_layernorm, allocator);
-        const mlp = Gemma4Q4MLP.initEmpty(hidden_size, intermediate_size, hidden_activation);
-        const post_feedforward_layernorm = try GemmaRMSNorm.init(allocator, hidden_size, rms_norm_eps);
+        const mlp = Gemma4Q4MLP.initEmpty(hidden_size, intermediate_size, nn.GatedActivation.fromGelu(hidden_activation));
+        const post_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
         errdefer deinitModel(&post_feedforward_layernorm, allocator);
 
-        const layer_scalar = try gemma4.createLayerScalar(allocator);
+        const layer_scalar = try nn.createLayerScalar(allocator);
 
         return Gemma4Q4DecoderLayer{
             .input_layernorm = input_layernorm,
@@ -742,7 +523,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         embed_tokens: Embedding,
         embed_u16_mmap: ?[]const u16 = null,
         layers: []Gemma4Q4DecoderLayer,
-        norm: GemmaRMSNorm,
+        norm: RMSNorm,
         /// 尚未交给 GPU 解码上下文的独立 LM Head：只在 GPU 上下文不存在 (未启用或构建失败) 时持有；
         /// GPU 上下文构建成功后所有权转移至 `gpu_context` 并将本字段置空，两者绝不同时持有同一份权重
         lm_head_weights: ?LmHeadWeights = null,
@@ -784,7 +565,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 initialized_layers += 1;
             }
 
-            const norm = try GemmaRMSNorm.init(allocator, config.hidden_size, config.rms_norm_eps);
+            const norm = try RMSNorm.init(allocator, config.hidden_size, config.rms_norm_eps);
 
             return Self{
                 .embed_tokens = embed_tokens,
@@ -955,11 +736,11 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 &layer.pre_feedforward_layernorm,
                 &layer.post_feedforward_layernorm,
             }) |ln| {
-                vec_math.widenBf16Bytes(ln.weight.data, bytes[cursor .. cursor + H * 2]);
+                vec_math.widenBf16Bytes(ln.weight.?.data, bytes[cursor .. cursor + H * 2]);
                 cursor += H * 2;
             }
             inline for (.{ &layer.self_attn.q_norm, &layer.self_attn.k_norm }) |ln| {
-                vec_math.widenBf16Bytes(ln.weight.data[0..head_dim], bytes[cursor .. cursor + head_dim * 2]);
+                vec_math.widenBf16Bytes(ln.weight.?.data[0..head_dim], bytes[cursor .. cursor + head_dim * 2]);
                 cursor += head_dim * 2;
             }
             vec_math.widenBf16Bytes(layer.layer_scalar.data[0..1], bytes[cursor .. cursor + 2]);
@@ -982,12 +763,12 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         fn layerNormWeights(layer: *const Gemma4Q4DecoderLayer) Gemma4GpuLayer.NormWeights {
             const hd = layer.self_attn.head_dim;
             return .{
-                .input = layer.input_layernorm.weight.data,
-                .q = layer.self_attn.q_norm.weight.data[0..hd],
-                .k = layer.self_attn.k_norm.weight.data[0..hd],
-                .post_attn = layer.post_attention_layernorm.weight.data,
-                .pre_mlp = layer.pre_feedforward_layernorm.weight.data,
-                .post_mlp = layer.post_feedforward_layernorm.weight.data,
+                .input = layer.input_layernorm.weight.?.data,
+                .q = layer.self_attn.q_norm.weight.?.data[0..hd],
+                .k = layer.self_attn.k_norm.weight.?.data[0..hd],
+                .post_attn = layer.post_attention_layernorm.weight.?.data,
+                .pre_mlp = layer.pre_feedforward_layernorm.weight.?.data,
+                .post_mlp = layer.post_feedforward_layernorm.weight.?.data,
             };
         }
 
@@ -1080,9 +861,9 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             _ = std.posix.system.madvise(@ptrCast(@alignCast(@constCast(mmap_bytes.ptr))), mmap_bytes.len, std.posix.MADV.WILLNEED);
 
             // 1. 最终层 RMSNorm 权重 (BF16)
-            const norm = try GemmaRMSNorm.init(allocator, config.hidden_size, config.rms_norm_eps);
+            const norm = try RMSNorm.init(allocator, config.hidden_size, config.rms_norm_eps);
             errdefer deinitModel(&norm, allocator);
-            vec_math.widenBf16Bytes(norm.weight.data, mmap_bytes[magic_bytes..embed_offset]);
+            vec_math.widenBf16Bytes(norm.weight.?.data, mmap_bytes[magic_bytes..embed_offset]);
 
             // 2. 词表嵌入矩阵 (BF16) 保持在 mmap 与 GPU 统一显存中，
             // 避免在 CPU 堆内存上分配 4.03 GB 的冗余 F32 Tensor，自回归直接利用零拷贝映射
@@ -1125,7 +906,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     allocator,
                     config,
                     gpu_layers,
-                    norm.weight.data,
+                    norm.weight.?.data,
                     lm_head_weights,
                     config.max_position_embeddings,
                 );
@@ -1324,7 +1105,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 allocator,
                 config,
                 gpu_layers,
-                self.norm.weight.data,
+                self.norm.weight.?.data,
                 lm_head,
                 config.max_position_embeddings,
             );
@@ -1446,7 +1227,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 // 键值内容只存在于 GPU：CPU 层缓存仅推进游标，切回 CPU 解码前由 syncCpuCache 写回内容
                 self.kv_owner = .gpu;
                 for (cache.layers) |*cl| {
-                    cl.curr_len = T;
+                    cl.core.curr_len = T;
                 }
                 return next_tok;
             }
@@ -1504,7 +1285,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 const gpu_ctx = try self.syncGpuCache(cache);
                 const next_tok = try gpu_ctx.decodeStep(token, embed_u16, recent_tokens, sampler, graph.options.mlx_stream);
                 for (cache.layers) |*cl| {
-                    cl.curr_len += 1;
+                    cl.core.curr_len += 1;
                 }
                 return next_tok;
             }
@@ -1555,7 +1336,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                     accepted_buf,
                 );
                 for (cache.layers) |*cl| {
-                    cl.curr_len += accepted_count;
+                    cl.core.curr_len += accepted_count;
                 }
                 return accepted_count;
             }

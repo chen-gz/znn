@@ -724,7 +724,7 @@ pub const Gemma4GpuContext = struct {
     fn checkCacheLayout(self: *const Gemma4GpuContext, cache: *const Gemma4KVCache) !void {
         if (cache.layers.len != self.layers.len) return error.ShapeMismatch;
         for (self.layers, cache.layers) |lw, cl| {
-            if (cl.num_kv_heads != lw.num_kv_heads or cl.head_dim != lw.head_dim or cl.attn_type != lw.attn_type) {
+            if (cl.core.num_kv_heads != lw.num_kv_heads or cl.core.head_dim != lw.head_dim or cl.attn_type != lw.attn_type) {
                 return error.ShapeMismatch;
             }
         }
@@ -734,12 +734,12 @@ pub const Gemma4GpuContext = struct {
     pub fn syncCacheFromCpu(self: *Gemma4GpuContext, cache: *const Gemma4KVCache) !void {
         try self.checkCacheLayout(cache);
         self.resetCache();
-        const cached_len = if (cache.layers.len > 0) cache.layers[0].curr_len else 0;
+        const cached_len = if (cache.layers.len > 0) cache.layers[0].core.curr_len else 0;
         if (cached_len == 0) return;
         if (cached_len >= self.max_seq_len) return error.ContextWindowExceeded;
 
         for (self.layers, cache.layers, 0..) |lw, *cl, l_idx| {
-            if (cl.curr_len != cached_len) return error.ShapeMismatch;
+            if (cl.core.curr_len != cached_len) return error.ShapeMismatch;
             const win = cl.windowLen();
             const packed_len = lw.num_kv_heads * win * lw.head_dim;
 

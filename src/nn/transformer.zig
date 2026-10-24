@@ -1,4 +1,5 @@
 const std = @import("std");
+const backend = @import("../backend.zig");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const core = @import("core.zig");
@@ -11,6 +12,7 @@ pub const llm = @import("llm.zig");
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
 const Linear = core.Linear;
+const RowView = core.RowView;
 const RMSNorm = normalization.RMSNorm;
 const createPersistentTensor = core.createPersistentTensor;
 const freePersistentTensor = core.freePersistentTensor;
@@ -19,8 +21,12 @@ const InitMethod = core.InitMethod;
 const InitOptions = core.InitOptions;
 
 // 注意力子模块符号导出
+pub const LayerKVCache = attention.LayerKVCache;
 pub const KVCache = attention.KVCache;
 pub const ScaledDotProductAttention = attention.ScaledDotProductAttention;
+pub const splitHeads = attention.splitHeads;
+pub const mergeHeads = attention.mergeHeads;
+pub const GQAAttention = attention.GQAAttention;
 pub const CausalSelfAttention = attention.CausalSelfAttention;
 pub const MLACache = attention.MLACache;
 pub const MLALayer = attention.MLALayer;
@@ -35,8 +41,6 @@ pub const computeGroupAdvantages = llm.computeGroupAdvantages;
 pub const computeGRPOLoss = llm.computeGRPOLoss;
 pub const grpoLoss = llm.grpoLoss;
 pub const grpoLossGraph = llm.grpoLossGraph;
-pub const sampleTopP = llm.sampleTopP;
-pub const sampleTopK = llm.sampleTopK;
 
 // ============================================================================
 // 1. 嵌入层 (Embedding Layer)
@@ -90,164 +94,257 @@ pub const Embedding = struct {
 };
 
 // ============================================================================
-// 2. 前馈网络模块：多层感知机 (Multi-Layer Perceptron, MLP) 与 Swish 门控线性单元 (Swish-Gated Linear Unit, SwiGLU)
+// 2. 前馈网络模块：多层感知机 (MLP)、门控激活函数与泛型门控前馈网络 (GatedMLP / SwiGLU)
 // ============================================================================
+
+/// 门控前馈激活函数类型
+pub const GatedActivation = enum {
+    silu,
+    gelu,
+    gelu_tanh,
+
+    pub fn apply(self: GatedActivation, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        return switch (self) {
+            .silu => graph.silu(x),
+            .gelu => graph.gelu(x, .none),
+            .gelu_tanh => graph.gelu(x, .tanh),
+        };
+    }
+
+    pub fn fromGelu(approx: backend.GeluApproximation) GatedActivation {
+        return switch (approx) {
+            .none => .gelu,
+            .tanh => .gelu_tanh,
+        };
+    }
+
+    pub fn geluApproximation(self: GatedActivation) ?backend.GeluApproximation {
+        return switch (self) {
+            .gelu => .none,
+            .gelu_tanh => .tanh,
+            .silu => null,
+        };
+    }
+};
 
 /// 多层感知机 (Multi-Layer Perceptron, MLP) / 前馈神经网络 (Feed-Forward Network, FFN) 模块
 /// 变换器 (Transformer) 架构中的重要组件，紧跟在自注意力 (Self-Attention) 之后，
 /// 用于在每个词元 (Token) 位置上独立地进行非线性特征投影与融合。
 ///
 /// 数学公式：
-/// \text{MLP}(x) = \text{GELU}(x W_1 + b_1) W_2 + b_2
+/// \text{MLP}(x) = \text{Act}(x W_1 + b_1) W_2 + b_2
 /// 结构：
-/// Linear(dim -> hidden_dim) -> 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数 -> Linear(hidden_dim -> dim)
+/// Linear(dim -> hidden_dim) -> 激活函数 (默认 GELU) -> Linear(hidden_dim -> dim)
 /// 其中 hidden_dim 通常设置为 4 * dim。
 pub const MLP = struct {
     c_fc: Linear, // 升维全连接投影层 (Fully Connected Layer, c_fc: dim -> hidden_dim)
     c_proj: Linear, // 降维投影层 (Output Projection, c_proj: hidden_dim -> dim)
+    activation: GatedActivation = .gelu,
     name: ?[]const u8 = null,
     module_type: []const u8 = "MLP",
+
+    pub const Options = struct {
+        bias: bool = true,
+        activation: GatedActivation = .gelu,
+
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
 
     /// 初始化多层感知机 (Multi-Layer Perceptron, MLP) 模块
     /// dim: 输入与输出隐藏维度
     /// hidden_dim: 中间隐藏维度 (一般为 4 * dim)
     pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize) !MLP {
-        const c_fc = try Linear.init(allocator, dim, hidden_dim);
+        return initWithOptions(allocator, dim, hidden_dim, .{});
+    }
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize, options: Options) !MLP {
+        const c_fc = try Linear.initWithOptions(allocator, dim, hidden_dim, .{ .bias = options.bias });
         errdefer deinitModel(&c_fc, allocator);
-        const c_proj = try Linear.init(allocator, hidden_dim, dim);
+        const c_proj = try Linear.initWithOptions(allocator, hidden_dim, dim, .{ .bias = options.bias });
         errdefer deinitModel(&c_proj, allocator);
 
         return MLP{
             .c_fc = c_fc,
             .c_proj = c_proj,
+            .activation = options.activation,
         };
     }
 
     /// 库内标准参数初始化：在已分配的张量上按 options 重新填充权重与偏置，不分配内存，也不设置 is_custom_initialized 标记
     pub fn resetParameters(self: *MLP, random: std.Random, options: InitOptions) void {
         var fc_opts = options;
-        fc_opts.nonlinearity = .gelu;
+        fc_opts.nonlinearity = switch (self.activation) {
+            .silu => .silu,
+            .gelu, .gelu_tanh => .gelu,
+        };
         self.c_fc.resetParameters(random, fc_opts);
         self.c_proj.resetParameters(random, options);
     }
 
     /// 模块标准数学变换公式
-    pub const formula = "y = \\text{GELU}(x W_{fc} + b_{fc}) W_{proj} + b_{proj}";
+    pub const formula = "y = \\text{Act}(x W_{fc} + b_{fc}) W_{proj} + b_{proj}";
 
     /// 前向传播逻辑
-    /// 支持输入二维张量 (2-Dimensional Tensor, 2D) [B*T, D] 或三维张量 (3-Dimensional Tensor, 3D) [B, T, D]
+    /// 支持输入任意形状张量 [..., dim]，输出与输入形状对齐
     pub fn forward(self: *const MLP, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        const old_shape = x.shape;
-        const is_3d = (old_shape.len == 3);
-        var x_2d = x;
 
-        // 1. 如果输入是三维 (3-Dimensional, 3D) [B, T, D]，则将其打平为二维 (2-Dimensional, 2D) [B*T, D] 以满足线性层 (Linear) 矩阵乘法的输入规范
-        if (is_3d) {
-            const B = old_shape.dims[0];
-            const T = old_shape.dims[1];
-            const D = old_shape.dims[2];
-            x_2d = try graph.reshape(x, &.{ B * T, D });
+        const h1 = try self.c_fc.forward(graph, x);
+        const a1 = try self.activation.apply(graph, h1);
+        if (self.name) |mod_name| {
+            switch (self.activation) {
+                .gelu => a1.setNameFormatted("{s}.gelu", .{mod_name}),
+                .gelu_tanh => a1.setNameFormatted("{s}.gelu_tanh", .{mod_name}),
+                .silu => a1.setNameFormatted("{s}.silu", .{mod_name}),
+            }
         }
-
-        // 2. 升维映射: [B*T, D] -> [B*T, hidden_dim]
-        const h1 = try self.c_fc.forward(graph, x_2d);
-
-        // 3. 高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 激活函数引入非线性
-        const a1 = try graph.gelu(h1, .none);
-        if (self.name) |mod_name| a1.setNameFormatted("{s}.gelu", .{mod_name});
-
-        // 4. 降维投射回原始特征维度: [B*T, hidden_dim] -> [B*T, D]
-        const h2 = try self.c_proj.forward(graph, a1);
-
-        // 5. 如果输入原本是三维 (3-Dimensional, 3D)，需要将输出再重新恢复成三维形状: [B, T, D]
-        if (is_3d) {
-            const B = old_shape.dims[0];
-            const T = old_shape.dims[1];
-            const D = old_shape.dims[2];
-            return try graph.reshape(h2, &.{ B, T, D });
-        }
-        return h2;
+        return try self.c_proj.forward(graph, a1);
     }
 };
+
+/// 泛型门控前馈神经网络模块 (GatedMLP: gate_proj, up_proj, down_proj)
+/// 统一适用于全精度 Linear 与量化 Q4Linear，支持 SiLU (SwiGLU / LLaMA) 与 GELU / GELU(tanh) (Gemma 4)
+///
+/// 数学公式：
+/// y = (\text{Act}(x W_{\text{gate}}) \odot (x W_{\text{up}})) W_{\text{down}}
+pub fn GatedMLP(comptime Proj: type) type {
+    return struct {
+        const Self = @This();
+
+        gate_proj: Proj,
+        up_proj: Proj,
+        down_proj: Proj,
+        activation: GatedActivation = .silu,
+        name: ?[]const u8 = null,
+        module_type: []const u8 = "GatedMLP",
+
+        pub const Options = struct {
+            bias: bool = false,
+            activation: GatedActivation = .silu,
+
+            pub fn defaultOptions() Options {
+                return .{};
+            }
+        };
+
+        pub fn init(allocator: std.mem.Allocator, in_features: usize, intermediate_size: usize) !Self {
+            return initWithOptions(allocator, in_features, intermediate_size, .{});
+        }
+
+        pub fn initWithOptions(allocator: std.mem.Allocator, in_features: usize, intermediate_size: usize, options: Options) !Self {
+            const gate_proj = if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, in_features, intermediate_size, .{ .bias = options.bias })
+            else
+                try Proj.init(allocator, in_features, intermediate_size);
+            errdefer deinitModel(&gate_proj, allocator);
+
+            const up_proj = if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, in_features, intermediate_size, .{ .bias = options.bias })
+            else
+                try Proj.init(allocator, in_features, intermediate_size);
+            errdefer deinitModel(&up_proj, allocator);
+
+            const down_proj = if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, intermediate_size, in_features, .{ .bias = options.bias })
+            else
+                try Proj.init(allocator, intermediate_size, in_features);
+            errdefer deinitModel(&down_proj, allocator);
+
+            return Self{
+                .gate_proj = gate_proj,
+                .up_proj = up_proj,
+                .down_proj = down_proj,
+                .activation = options.activation,
+            };
+        }
+
+        pub fn initSilu(allocator: std.mem.Allocator, in_features: usize, intermediate_size: usize) !Self {
+            return initWithOptions(allocator, in_features, intermediate_size, .{ .bias = true, .activation = .silu });
+        }
+
+        pub fn initGemma(allocator: std.mem.Allocator, in_features: usize, intermediate_size: usize, gelu_approx: backend.GeluApproximation) !Self {
+            return initWithOptions(allocator, in_features, intermediate_size, .{
+                .bias = false,
+                .activation = GatedActivation.fromGelu(gelu_approx),
+            });
+        }
+
+        pub fn initEmpty(hidden_size: usize, intermediate_size: usize, activation: GatedActivation) Self {
+            return Self{
+                .gate_proj = Proj.fromBlocks(hidden_size, intermediate_size, &.{}),
+                .up_proj = Proj.fromBlocks(hidden_size, intermediate_size, &.{}),
+                .down_proj = Proj.fromBlocks(intermediate_size, hidden_size, &.{}),
+                .activation = activation,
+            };
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            if (@hasDecl(Proj, "deinit")) {
+                self.gate_proj.deinit(allocator);
+                self.up_proj.deinit(allocator);
+                self.down_proj.deinit(allocator);
+            } else {
+                deinitModel(&self.gate_proj, allocator);
+                deinitModel(&self.up_proj, allocator);
+                deinitModel(&self.down_proj, allocator);
+            }
+        }
+
+        pub fn resetParameters(self: *Self, random: std.Random, options: InitOptions) void {
+            if (@hasDecl(Proj, "resetParameters")) {
+                var gate_opts = options;
+                gate_opts.nonlinearity = switch (self.activation) {
+                    .silu => .silu,
+                    .gelu, .gelu_tanh => .relu,
+                };
+                self.gate_proj.resetParameters(random, gate_opts);
+                self.up_proj.resetParameters(random, options);
+                self.down_proj.resetParameters(random, options);
+            }
+        }
+
+        pub const formula = "y = (\\text{Act}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
+
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+            const module_scope = try enterModuleScope(graph, self);
+            defer module_scope.exit();
+
+            if (Proj == core.Q4Linear and graph.options.device == .gpu and !graph.enable_grad) {
+                if (self.gate_proj.q4_weights != null and self.up_proj.q4_weights != null and self.down_proj.q4_weights != null) {
+                    if (self.activation.geluApproximation()) |gelu_approx| {
+                        const in_f = self.gate_proj.in_features;
+                        const rows = try RowView.init(graph, x, in_f);
+                        const out_2d = try graph.zeros(&.{ rows.matrix.shape.dims[0], in_f }, false);
+                        if (backend.offload.mlpForwardOffload(
+                            &self.gate_proj.q4_weights.?,
+                            &self.up_proj.q4_weights.?,
+                            &self.down_proj.q4_weights.?,
+                            gelu_approx,
+                            rows.matrix,
+                            out_2d,
+                            graph.options.mlx_stream,
+                        )) {
+                            return rows.restore(graph, out_2d, in_f);
+                        } else |_| {}
+                    }
+                }
+            }
+
+            const gate = try self.gate_proj.forward(graph, x);
+            const up = try self.up_proj.forward(graph, x);
+            const act_gate = try self.activation.apply(graph, gate);
+            if (self.name) |mod_name| act_gate.setNameFormatted("{s}.act", .{mod_name});
+            const hidden = try graph.mul(act_gate, up);
+            return try self.down_proj.forward(graph, hidden);
+        }
+    };
+}
 
 /// 现代变换器 (Transformer) 门控前馈网络：Swish 门控线性单元 (Swish-Gated Linear Unit, SwiGLU / LLaMA-style Multi-Layer Perceptron, MLP)
-/// 结构：(Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU)(x * W_gate) * (x * W_up)) * W_down
-/// 其中 hidden_dim 通常设置为 8/3 * dim
-pub const SwiGLU = struct {
-    w_gate: Linear, // 门控投影层 (dim -> hidden_dim)
-    w_up: Linear, // 升维投影层 (dim -> hidden_dim)
-    w_down: Linear, // 降维投影层 (hidden_dim -> dim)
-    name: ?[]const u8 = null,
-    module_type: []const u8 = "SwiGLU",
-
-    pub fn init(allocator: std.mem.Allocator, dim: usize, hidden_dim: usize) !SwiGLU {
-        const w_gate = try Linear.init(allocator, dim, hidden_dim);
-        errdefer deinitModel(&w_gate, allocator);
-        const w_up = try Linear.init(allocator, dim, hidden_dim);
-        errdefer deinitModel(&w_up, allocator);
-        const w_down = try Linear.init(allocator, hidden_dim, dim);
-        errdefer deinitModel(&w_down, allocator);
-
-        return SwiGLU{
-            .w_gate = w_gate,
-            .w_up = w_up,
-            .w_down = w_down,
-        };
-    }
-
-    /// 库内标准参数初始化：在已分配的张量上按 options 重新填充权重与偏置，不分配内存，也不设置 is_custom_initialized 标记
-    pub fn resetParameters(self: *SwiGLU, random: std.Random, options: InitOptions) void {
-        var gate_opts = options;
-        gate_opts.nonlinearity = .silu;
-        self.w_gate.resetParameters(random, gate_opts);
-        self.w_up.resetParameters(random, options);
-        self.w_down.resetParameters(random, options);
-    }
-
-    /// 模块标准数学变换公式
-    pub const formula = "y = (\\text{SiLU}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
-
-    /// 前向传播逻辑：支持二维 (2-Dimensional, 2D) [B*T, D] 或三维 (3-Dimensional, 3D) [B, T, D]
-    pub fn forward(self: *const SwiGLU, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
-        const old_shape = x.shape;
-        const is_3d = (old_shape.len == 3);
-        var x_2d = x;
-
-        if (is_3d) {
-            const B = old_shape.dims[0];
-            const T = old_shape.dims[1];
-            const D = old_shape.dims[2];
-            x_2d = try graph.reshape(x, &.{ B * T, D });
-        }
-
-        // 1. 计算门控 (Gate) 投影: [B*T, D] -> [B*T, hidden_dim]
-        const gate = try self.w_gate.forward(graph, x_2d);
-
-        // 2. 计算升维 (Up) 投影: [B*T, D] -> [B*T, hidden_dim]
-        const up = try self.w_up.forward(graph, x_2d);
-
-        // 3. 计算 Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU) 激活: SiLU(gate)
-        const silu_gate = try graph.silu(gate);
-
-        // 4. 逐元素乘法: SiLU(gate) * up
-        const hidden = try graph.mul(silu_gate, up);
-
-        // 5. 降维投射回原始特征维度: [B*T, hidden_dim] -> [B*T, D]
-        const out = try self.w_down.forward(graph, hidden);
-
-        if (is_3d) {
-            const B = old_shape.dims[0];
-            const T = old_shape.dims[1];
-            const D = old_shape.dims[2];
-            return try graph.reshape(out, &.{ B, T, D });
-        }
-        return out;
-    }
-};
+pub const SwiGLU = GatedMLP(Linear);
 
 // ============================================================================
 // 3. 混合专家前馈网络层 (Mixture of Experts Layer, MoELayer)
@@ -267,11 +364,21 @@ pub const MoELayer = struct {
     num_shared_experts: usize,
     top_k: usize,
     norm_topk_prob: bool = false,
+    activation: GatedActivation = .gelu,
     gate: Linear,
     routed_experts: []MLP,
     shared_experts: []MLP,
     name: ?[]const u8 = null,
     module_type: []const u8 = "MoELayer",
+
+    pub const Options = struct {
+        norm_topk_prob: bool = false,
+        activation: GatedActivation = .gelu,
+
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
 
     pub const formula = "y = \\sum_{i \\in \\text{TopK}(g(x))} p_i(x) E_i(x) + \\sum_{j} E^{\\text{shared}}_j(x)";
 
@@ -282,6 +389,18 @@ pub const MoELayer = struct {
         num_routed_experts: usize,
         num_shared_experts: usize,
         top_k: usize,
+    ) !MoELayer {
+        return initWithOptions(allocator, dim, hidden_dim, num_routed_experts, num_shared_experts, top_k, .{});
+    }
+
+    pub fn initWithOptions(
+        allocator: std.mem.Allocator,
+        dim: usize,
+        hidden_dim: usize,
+        num_routed_experts: usize,
+        num_shared_experts: usize,
+        top_k: usize,
+        options: Options,
     ) !MoELayer {
         if (dim == 0 or hidden_dim == 0 or num_routed_experts == 0 or top_k == 0 or top_k > num_routed_experts) {
             return error.InvalidConfiguration;
@@ -298,7 +417,7 @@ pub const MoELayer = struct {
             for (0..init_r) |i| deinitModel(&routed[i], allocator);
         }
         for (0..num_routed_experts) |i| {
-            routed[i] = try MLP.init(allocator, dim, hidden_dim);
+            routed[i] = try MLP.initWithOptions(allocator, dim, hidden_dim, .{ .activation = options.activation });
             init_r += 1;
         }
 
@@ -310,7 +429,7 @@ pub const MoELayer = struct {
             for (0..init_s) |i| deinitModel(&shared[i], allocator);
         }
         for (0..num_shared_experts) |i| {
-            shared[i] = try MLP.init(allocator, dim, hidden_dim);
+            shared[i] = try MLP.initWithOptions(allocator, dim, hidden_dim, .{ .activation = options.activation });
             init_s += 1;
         }
 
@@ -319,6 +438,8 @@ pub const MoELayer = struct {
             .num_routed_experts = num_routed_experts,
             .num_shared_experts = num_shared_experts,
             .top_k = top_k,
+            .norm_topk_prob = options.norm_topk_prob,
+            .activation = options.activation,
             .gate = gate,
             .routed_experts = routed,
             .shared_experts = shared,
@@ -382,16 +503,16 @@ pub const MoELayer = struct {
         const proj_biases = try arena.alloc(*Tensor, E);
         for (self.routed_experts, 0..) |exp, e| {
             fc_weights[e] = exp.c_fc.weight;
-            fc_biases[e] = exp.c_fc.bias;
+            fc_biases[e] = exp.c_fc.bias.?;
             proj_weights[e] = exp.c_proj.weight;
-            proj_biases[e] = exp.c_proj.bias;
+            proj_biases[e] = exp.c_proj.bias.?;
         }
 
         const routed_out = blk: {
             const routed_scope = try graph.enterChildScope("routed_experts", "ModuleList");
             defer routed_scope.exit();
             const h1 = try graph.gatherMatMul(x_2d, topk.indices, fc_weights, fc_biases); // [N, K, hidden_dim]
-            const a1 = try graph.gelu(h1, .none); // [N, K, hidden_dim]
+            const a1 = try self.activation.apply(graph, h1); // [N, K, hidden_dim]
             break :blk try graph.gatherMatMul(a1, topk.indices, proj_weights, proj_biases); // [N, K, D]
         };
 

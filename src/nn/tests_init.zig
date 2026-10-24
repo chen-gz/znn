@@ -77,12 +77,12 @@ test "Weight initialization methods and Linear initWithOptions" {
     const tanh_stats = calcStats(lin_tanh.weight.data);
     // Var = gain^2 * 2 / (100 + 100) = (25 / 9) * 2 / 200 = 25 / 900 ~ 0.02778
     try std.testing.expectApproxEqAbs(@as(f32, 0.02778), tanh_stats.variance, 0.005);
-    for (lin_tanh.bias.data) |b| {
+    for (lin_tanh.bias.?.data) |b| {
         try std.testing.expectApproxEqAbs(@as(f32, 0.5), b, 1e-5);
     }
     // 库内置初始化不标记自定义初始化
     try std.testing.expect(!lin_tanh.weight.is_custom_initialized);
-    try std.testing.expect(!lin_tanh.bias.is_custom_initialized);
+    try std.testing.expect(!lin_tanh.bias.?.is_custom_initialized);
 }
 
 test "initModel infers per-layer initialization from the forward graph" {
@@ -251,28 +251,28 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
     const x = try graph.zeros(&.{ 2, 100 }, false);
     x.setName("features_input");
 
-    const z1 = try graph.addBias(try graph.matmul(x, fc_relu.weight), fc_relu.bias);
+    const z1 = try graph.addBias(try graph.matmul(x, fc_relu.weight), fc_relu.bias.?);
     const a1 = try graph.relu(z1); // 后续接 ReLU
     a1.setName("relu_activation_1");
 
-    const z2 = try graph.addBias(try graph.matmul(a1, fc_tanh.weight), fc_tanh.bias);
+    const z2 = try graph.addBias(try graph.matmul(a1, fc_tanh.weight), fc_tanh.bias.?);
     const a2 = try graph.tanh(z2); // 后续接 Tanh
 
     var fc_out = try Linear.init(allocator, 10, 2);
     defer nn.deinitModel(&fc_out, allocator);
     try nn.nameModules(&fc_out, names.allocator(), "logits_out");
 
-    const logits = try graph.addBias(try graph.matmul(a2, fc_custom.weight), fc_custom.bias);
+    const logits = try graph.addBias(try graph.matmul(a2, fc_custom.weight), fc_custom.bias.?);
     logits.setName("custom_head_logits");
 
-    const final_out = try graph.addBias(try graph.matmul(logits, fc_out.weight), fc_out.bias);
+    const final_out = try graph.addBias(try graph.matmul(logits, fc_out.weight), fc_out.bias.?);
     final_out.setName("network_final_out");
 
     // 3. 图建立之后初始化：外部模块定义了 customInit -> initModel 调用之并标记其参数；
     //    其余参数由 graph.initWeights 依据下游激活函数推导初始化，不覆盖 customInit 的结果
     try nn.initModel(&special, &graph, random);
     try std.testing.expect(fc_custom.weight.is_custom_initialized);
-    try std.testing.expect(fc_custom.bias.is_custom_initialized);
+    try std.testing.expect(fc_custom.bias.?.is_custom_initialized);
     const custom_weight_sample = fc_custom.weight.data[0];
     graph.initWeights(random);
 
@@ -301,7 +301,7 @@ test "Graph.initWeights dynamically infers activations and respects customInit" 
 
     // fc_custom 已经过 customInit -> 绝对不会被 Graph 重写覆盖！
     try std.testing.expectEqual(custom_weight_sample, fc_custom.weight.data[0]);
-    for (fc_custom.bias.data) |b| {
+    for (fc_custom.bias.?.data) |b| {
         try std.testing.expectApproxEqAbs(@as(f32, 3.14), b, 1e-5);
     }
 
@@ -418,7 +418,7 @@ test "Built-in library initialization never marks is_custom_initialized" {
     defer nn.deinitModel(&lin, allocator);
     lin.resetParameters(random, .{});
     try std.testing.expect(!lin.weight.is_custom_initialized);
-    try std.testing.expect(!lin.bias.is_custom_initialized);
+    try std.testing.expect(!lin.bias.?.is_custom_initialized);
 
     var conv = try nn.Conv2D.init(allocator, 3, 4, 3, .{});
     defer nn.deinitModel(&conv, allocator);
@@ -450,7 +450,7 @@ test "Built-in library initialization never marks is_custom_initialized" {
     defer nn.deinitModel(&lstm, allocator);
     try testing_init.initRecurrent(&lstm, allocator, random);
     try std.testing.expect(!lstm.cell.w_ih_f.weight.is_custom_initialized);
-    try std.testing.expect(!lstm.cell.w_ih_f.bias.is_custom_initialized);
+    try std.testing.expect(!lstm.cell.w_ih_f.bias.?.is_custom_initialized);
 }
 
 test "initModel runs external customInit first and initializes the rest from the forward graph" {
@@ -462,7 +462,7 @@ test "initModel runs external customInit first and initializes the rest from the
     var bare = try Linear.init(allocator, 4, 3);
     defer nn.deinitModel(&bare, allocator);
     for (bare.weight.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
-    for (bare.bias.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
+    for (bare.bias.?.data) |v| try std.testing.expectEqual(@as(f32, 0.0), v);
 
     // 1. 全部参数由确定性 customInit(self) 指定：不依赖计算图内容 (空图即可)，不消耗随机数，参数被标记为自定义初始化
     const CustomBlock = struct {
@@ -471,7 +471,7 @@ test "initModel runs external customInit first and initializes the rest from the
 
         pub fn customInit(self: *@This()) void {
             @memset(self.fc.weight.data, 0.25);
-            @memset(self.fc.bias.data, -1.0);
+            @memset(self.fc.bias.?.data, -1.0);
         }
     };
     var custom = CustomBlock{
@@ -486,7 +486,7 @@ test "initModel runs external customInit first and initializes the rest from the
         try nn.initModel(&custom, &empty_graph, random);
     }
     for (custom.fc.weight.data) |v| try std.testing.expectEqual(@as(f32, 0.25), v);
-    for (custom.fc.bias.data) |v| try std.testing.expectEqual(@as(f32, -1.0), v);
+    for (custom.fc.bias.?.data) |v| try std.testing.expectEqual(@as(f32, -1.0), v);
     try std.testing.expect(custom.fc.weight.is_custom_initialized);
     try std.testing.expect(custom.norm.weight.is_custom_initialized);
     try std.testing.expect(custom.norm.bias.is_custom_initialized);
@@ -517,9 +517,9 @@ test "initModel runs external customInit first and initializes the rest from the
         if (v != 0.0) nonzero = true;
     }
     try std.testing.expect(nonzero);
-    for (plain.cell.w_ih_f.bias.data) |v| try std.testing.expectEqual(@as(f32, 1.0), v);
+    for (plain.cell.w_ih_f.bias.?.data) |v| try std.testing.expectEqual(@as(f32, 1.0), v);
     try std.testing.expect(!plain.fc.weight.is_custom_initialized);
-    try std.testing.expect(!plain.cell.w_ih_f.bias.is_custom_initialized);
+    try std.testing.expect(!plain.cell.w_ih_f.bias.?.is_custom_initialized);
 
     // 3. Sequential：定义了 customInit 的外部层被调用并标记，库层依据计算图中的下游激活函数初始化
     const ConstLayer = struct {
@@ -527,7 +527,7 @@ test "initModel runs external customInit first and initializes the rest from the
 
         pub fn customInit(self: *@This()) void {
             @memset(self.fc.weight.data, 0.5);
-            @memset(self.fc.bias.data, 0.0);
+            if (self.fc.bias) |b| @memset(b.data, 0.0);
         }
 
         pub fn forward(self: @This(), graph: *autodiff.Graph, x: *Tensor) !*Tensor {
@@ -549,7 +549,7 @@ test "initModel runs external customInit first and initializes the rest from the
     try std.testing.expect(model.layers.@"0".weight.data[0] != 0.0 or model.layers.@"0".weight.data[1] != 0.0);
     for (model.layers.@"2".fc.weight.data) |v| try std.testing.expectEqual(@as(f32, 0.5), v);
     try std.testing.expect(model.layers.@"2".fc.weight.is_custom_initialized);
-    try std.testing.expect(model.layers.@"2".fc.bias.is_custom_initialized);
+    try std.testing.expect(model.layers.@"2".fc.bias.?.is_custom_initialized);
 
     // 4. 嵌套：未定义 customInit 的父模块递归查找，子模块的 customInit (含随机数签名) 在任意层级被调用
     const RandomHead = struct {
@@ -557,7 +557,7 @@ test "initModel runs external customInit first and initializes the rest from the
 
         pub fn customInit(self: *@This(), rnd: std.Random) void {
             for (self.fc.weight.data) |*w| w.* = 2.0 + rnd.float(f32);
-            @memset(self.fc.bias.data, 0.0);
+            if (self.fc.bias) |b| @memset(b.data, 0.0);
         }
     };
     const Outer = struct {

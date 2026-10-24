@@ -64,7 +64,7 @@ pub fn inferModuleFormula(self: *const Graph, module_path: []const u8) []const u
         if (std.mem.eql(u8, m_type, "GroupNorm")) return "y = \\text{GroupNorm}(x; \\gamma, \\beta)";
         if (std.mem.eql(u8, m_type, "Embedding")) return "y = \\text{Embedding}(x; W)";
         if (std.mem.eql(u8, m_type, "MLP")) return "y = \\text{GELU}(x W_{fc} + b_{fc}) W_{proj} + b_{proj}";
-        if (std.mem.eql(u8, m_type, "SwiGLU")) return "y = (\\text{SiLU}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
+        if (std.mem.eql(u8, m_type, "SwiGLU") or std.mem.eql(u8, m_type, "GatedMLP")) return "y = (\\text{Act}(x W_{\\text{gate}}) \\odot (x W_{\\text{up}})) W_{\\text{down}}";
         if (std.mem.eql(u8, m_type, "CausalSelfAttention")) return "A = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V W_o + b_o";
         if (std.mem.eql(u8, m_type, "ScaledDotProductAttention")) return "\\text{AttentionCore}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V";
         if (std.mem.eql(u8, m_type, "TransformerBlock")) return "h_l = x_l + \\text{Attention}(\\text{RMSNorm}(x_l)), \\quad x_{l+1} = \\text{TransformerBlock}(x_l) = h_l + \\text{MLP}(\\text{RMSNorm}(h_l))";
