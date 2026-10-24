@@ -296,17 +296,19 @@ pub const Gemma4GpuLayer = struct {
 
     /// 门控多层感知机残差块：x2 = (x1 + post_mlp_norm(down_proj(GeGLU(fused_gate_up(pre_mlp_norm(x1)))))) * layer_scalar
     pub fn mlpResidual(self: *const Gemma4GpuLayer, x1: mlx.Array, stream: ?Stream) !mlx.Array {
-        var pre_mlp = try mlx.Array.fastRmsNorm(x1, self.pre_mlp_w, self.rms_norm_eps, stream);
-        defer pre_mlp.deinit();
-        var gate_up = try self.fused_gate_up.forwardArray(pre_mlp, stream);
-        defer gate_up.deinit();
-        var fused = try gate_up.geglu(self.intermediate_size, self.hidden_activation, stream);
-        defer fused.deinit();
-        var down = try self.down_proj.forwardArray(fused, stream);
-        defer down.deinit();
-        var post_mlp = try mlx.Array.fastRmsNorm(down, self.post_mlp_w, self.rms_norm_eps, stream);
+        var post_mlp = try backend.mlx_blocks.gatedMlp(
+            x1,
+            &self.fused_gate_up,
+            null,
+            &self.down_proj,
+            self.hidden_activation,
+            self.pre_mlp_w,
+            self.post_mlp_w,
+            self.rms_norm_eps,
+            stream,
+        );
         defer post_mlp.deinit();
-        var x2 = try mlx.Array.add(x1, post_mlp, stream);
+        var x2 = try backend.mlx_blocks.residualScale(x1, post_mlp, null, stream);
         if (self.layer_scalar == 1.0) return x2;
         defer x2.deinit();
         return x2.mulScalar(self.layer_scalar, stream);

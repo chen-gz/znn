@@ -5,6 +5,7 @@ const autodiff = zig_ml.autodiff;
 const dataset = zig_ml.dataset;
 const optim = zig_ml.optim;
 const backend = zig_ml.backend;
+const models = zig_ml.models;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -54,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
     const batch_size: usize = 16;
     const vocab_size: usize = 256; // 256 raw byte tokens
 
-    const gpt_config = nn.GPTConfig{
+    const gpt_config = models.GPTConfig{
         .vocab_size = vocab_size,
         .block_size = block_size,
         .n_embd = 96,
@@ -70,8 +71,8 @@ pub fn main(init: std.process.Init) !void {
         gpt_config.n_layer,
     });
 
-    const GPTModule = nn.Module(nn.GPT(gpt_config));
-    var model = try GPTModule.init(allocator, try nn.GPT(gpt_config).init(allocator));
+    const GPTModule = nn.Module(models.GPT(gpt_config));
+    var model = try GPTModule.init(allocator, try models.GPT(gpt_config).init(allocator));
     defer model.deinit();
     // 用一条长度为 block_size 的样本 token 序列建立前向计算图，依据计算图初始化参数
     const init_ids = try zig_ml.tensor.zeros(allocator, &.{ 1, block_size });

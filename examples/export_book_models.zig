@@ -3,6 +3,7 @@ const zig_ml = @import("zig_ml");
 const nn = zig_ml.nn;
 const autodiff = zig_ml.autodiff;
 const tensor = zig_ml.tensor;
+const models = zig_ml.models;
 
 const Tensor = tensor.Tensor;
 
@@ -269,14 +270,14 @@ pub fn main(init: std.process.Init) !void {
         // 10. gpt
         try exportModel(allocator, "gpt", struct {
             fn run(alloc: std.mem.Allocator, rnd: std.Random, g: *autodiff.Graph, file_path: []const u8) !void {
-                const cfg = nn.GPTConfig{
+                const cfg = models.GPTConfig{
                     .vocab_size = 256,
                     .block_size = 32,
                     .n_embd = 64,
                     .n_head = 4,
                     .n_layer = 2,
                 };
-                var gpt = try nn.GPT(cfg).init(alloc);
+                var gpt = try models.GPT(cfg).init(alloc);
                 defer nn.deinitModel(&gpt, alloc);
                 var names = std.heap.ArenaAllocator.init(alloc);
                 defer names.deinit();

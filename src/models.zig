@@ -9,6 +9,12 @@ pub const gemma4_gpu = @import("models/gemma4_gpu.zig");
 pub const gemma4_e4b = @import("models/gemma4_e4b.zig");
 pub const Gemma4E4BModel = gemma4_e4b.Gemma4E4BModel;
 
+pub const gpt = @import("models/gpt.zig");
+pub const GPTConfig = gpt.GPTConfig;
+pub const GPT = gpt.GPT;
+pub const TransformerDecoder = gpt.TransformerDecoder;
+pub const DefaultGPT = gpt.DefaultGPT;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("models/tests.zig");

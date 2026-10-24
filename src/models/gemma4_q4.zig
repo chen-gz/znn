@@ -34,466 +34,10 @@ pub const Q4Linear = nn.Q4Linear;
 pub const Gemma4Q4MLP = nn.GatedMLP(nn.Q4Linear);
 
 /// Gemma 4 混合注意力机制 (Q4 量化版本)
-pub const Gemma4Q4Attention = struct {
-    q_proj: Q4Linear,
-    k_proj: Q4Linear,
-    v_proj: ?Q4Linear,
-    o_proj: Q4Linear,
-    q_norm: RMSNorm,
-    k_norm: RMSNorm,
-    v_norm: RMSNorm,
-
-    attn_type: Gemma4AttentionType,
-    hidden_size: usize,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    sliding_window: usize,
-    rope: tensor.RopeOptions,
-
-    name: ?[]const u8 = null,
-    module_type: []const u8 = "Gemma4Q4Attention",
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        attn_type: Gemma4AttentionType,
-        hidden_size: usize,
-        num_heads: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-        sliding_window: usize,
-        rms_norm_eps: f32,
-    ) !Gemma4Q4Attention {
-        const q_dim = num_heads * head_dim;
-        const kv_dim = num_kv_heads * head_dim;
-
-        var q_proj = try Q4Linear.init(allocator, hidden_size, q_dim);
-        errdefer q_proj.deinit(allocator);
-        var k_proj = try Q4Linear.init(allocator, hidden_size, kv_dim);
-        errdefer k_proj.deinit(allocator);
-        var v_proj = if (attn_type == .full_attention) null else try Q4Linear.init(allocator, hidden_size, kv_dim);
-        errdefer if (v_proj) |*vp| vp.deinit(allocator);
-        var o_proj = try Q4Linear.init(allocator, q_dim, hidden_size);
-        errdefer o_proj.deinit(allocator);
-
-        const q_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
-        errdefer deinitModel(&q_norm, allocator);
-        const k_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
-        errdefer deinitModel(&k_norm, allocator);
-        const v_norm = RMSNorm.initUnscaled(.{ .eps = rms_norm_eps });
-
-        return Gemma4Q4Attention{
-            .q_proj = q_proj,
-            .k_proj = k_proj,
-            .v_proj = v_proj,
-            .o_proj = o_proj,
-            .q_norm = q_norm,
-            .k_norm = k_norm,
-            .v_norm = v_norm,
-            .attn_type = attn_type,
-            .hidden_size = hidden_size,
-            .num_heads = num_heads,
-            .num_kv_heads = num_kv_heads,
-            .head_dim = head_dim,
-            .sliding_window = sliding_window,
-            .rope = attn_type.ropeOptions(),
-        };
-    }
-
-    /// 构建无 CPU 权重实体的空注意力机制结构 (用于 GPU 硬件加速直通路径，避免数 GB 内存分配与零填充)
-    pub fn initEmpty(
-        allocator: std.mem.Allocator,
-        attn_type: Gemma4AttentionType,
-        hidden_size: usize,
-        num_heads: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-        sliding_window: usize,
-        rms_norm_eps: f32,
-    ) !Gemma4Q4Attention {
-        const q_dim = num_heads * head_dim;
-        const kv_dim = num_kv_heads * head_dim;
-
-        const q_proj = Q4Linear.fromBlocks(hidden_size, q_dim, &.{});
-        const k_proj = Q4Linear.fromBlocks(hidden_size, kv_dim, &.{});
-        const v_proj = if (attn_type == .full_attention) null else Q4Linear.fromBlocks(hidden_size, kv_dim, &.{});
-        const o_proj = Q4Linear.fromBlocks(q_dim, hidden_size, &.{});
-
-        const q_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
-        errdefer deinitModel(&q_norm, allocator);
-        const k_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
-        errdefer deinitModel(&k_norm, allocator);
-        const v_norm = RMSNorm.initUnscaled(.{ .eps = rms_norm_eps });
-
-        return Gemma4Q4Attention{
-            .q_proj = q_proj,
-            .k_proj = k_proj,
-            .v_proj = v_proj,
-            .o_proj = o_proj,
-            .q_norm = q_norm,
-            .k_norm = k_norm,
-            .v_norm = v_norm,
-            .attn_type = attn_type,
-            .hidden_size = hidden_size,
-            .num_heads = num_heads,
-            .num_kv_heads = num_kv_heads,
-            .head_dim = head_dim,
-            .sliding_window = sliding_window,
-            .rope = attn_type.ropeOptions(),
-        };
-    }
-
-    pub fn deinit(self: *Gemma4Q4Attention, allocator: std.mem.Allocator) void {
-        self.q_proj.deinit(allocator);
-        self.k_proj.deinit(allocator);
-        if (self.v_proj) |*vp| vp.deinit(allocator);
-        self.o_proj.deinit(allocator);
-        deinitModel(&self.q_norm, allocator);
-        deinitModel(&self.k_norm, allocator);
-    }
-
-    pub fn forward(self: *const Gemma4Q4Attention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        return self.forwardPrefillOptional(graph, x, null);
-    }
-
-    /// 预填充阶段 (Prefill Phase)：处理初始输入的提示词元 (Prompt Tokens) 序列，
-    /// 计算注意力并将该层所有的键值特征存入键值缓存 (Key-Value Cache, KVCache)
-    pub fn forwardPrefill(
-        self: *const Gemma4Q4Attention,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: *Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        return self.forwardPrefillOptional(graph, x, layer_cache);
-    }
-
-    const QKVResult = struct {
-        q: *Tensor,
-        k: *Tensor,
-        v: *Tensor,
-    };
-
-    /// 查询键值多头投影分发 (Query-Key-Value, QKV)
-    /// 优先利用图形处理器 (Graphics Processing Unit, GPU) 批量分发量化矩阵乘法 (Quantized Matrix Multiplication, QMM)，
-    /// 并执行单次多张量统一求值，降低主机-设备往返同步停顿。
-    fn projectQKV(
-        self: *const Gemma4Q4Attention,
-        graph: *autodiff.Graph,
-        x_2d: *Tensor,
-    ) !QKVResult {
-        const rows = x_2d.shape.dims[0];
-        const nh = self.num_heads;
-        const n_kv = self.num_kv_heads;
-        const hd = self.head_dim;
-
-        const q_raw = try graph.zeros(&.{ rows, nh * hd }, false);
-        const k_raw = try graph.zeros(&.{ rows, n_kv * hd }, false);
-        const v_raw = try graph.zeros(&.{ rows, n_kv * hd }, false);
-
-        const q_tmp = try self.q_proj.forward(graph, x_2d);
-        @memcpy(q_raw.data, q_tmp.data);
-        const k_tmp = try self.k_proj.forward(graph, x_2d);
-        @memcpy(k_raw.data, k_tmp.data);
-        if (self.v_proj) |*vp| {
-            const v_tmp = try vp.forward(graph, x_2d);
-            @memcpy(v_raw.data, v_tmp.data);
-        } else {
-            @memcpy(v_raw.data, k_tmp.data);
-        }
-        return .{ .q = q_raw, .k = k_raw, .v = v_raw };
-    }
-
-    fn forwardPrefillOptional(
-        self: *const Gemma4Q4Attention,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: ?*Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
-
-        const B = x.shape.dims[0];
-        const T = x.shape.dims[1];
-        const C = self.hidden_size;
-        const nh = self.num_heads;
-        const n_kv = self.num_kv_heads;
-        const hd = self.head_dim;
-        const groups = nh / n_kv;
-
-        const x_2d = try graph.reshape(x, &.{ B * T, C });
-
-        // 1. Q4 投影 Q, K, V (在 full_attention 下 attention_k_eq_v 为 true，V 与 K 共享投影权重)
-        const qkv = try self.projectQKV(graph, x_2d);
-        const q_raw = qkv.q;
-        const k_raw = qkv.k;
-        const v_raw = qkv.v;
-
-        // 2. Q-Norm 与 K-Norm，以及无参数 v_norm
-        const q_heads = try graph.reshape(q_raw, &.{ B * T * nh, hd });
-        const q_normed = try self.q_norm.forward(graph, q_heads);
-        const k_heads = try graph.reshape(k_raw, &.{ B * T * n_kv, hd });
-        const k_normed = try self.k_norm.forward(graph, k_heads);
-        const v_heads = try graph.reshape(v_raw, &.{ B * T * n_kv, hd });
-        const v_normed = try self.v_norm.forward(graph, v_heads);
-
-        // 3. 转置为四维头张量
-        const q = try nn.splitHeads(graph, q_normed, B, T, nh, hd);
-        const k_t_unrot = try nn.splitHeads(graph, k_normed, B, T, n_kv, hd);
-        const v = try nn.splitHeads(graph, v_normed, B, T, n_kv, hd);
-
-        // 4. 施加半切分 RoPE 旋转位置编码 (Split-Half RoPE, Gemma 官方标准)
-        const q_rot = try graph.rope(q, 0, self.rope);
-        const k_rot = try graph.rope(k_t_unrot, 0, self.rope);
-
-        // 5. 写入键值缓存 (Key-Value Cache, KVCache)
-        if (layer_cache) |cache| try gemma4.writePrefillKVCache(cache, k_rot.data, v.data, B, T);
-
-        // 6. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0，分组查询注意力直接按 kv_groups 索引)
-        const y_4d = try graph.attention(q_rot, k_rot, v, .{
-            .scale = 1.0,
-            .mask = self.attn_type.mask(self.sliding_window),
-            .kv_groups = groups,
-        });
-
-        // 7. 转置并输出投影
-        const y_3d = try nn.mergeHeads(graph, y_4d, B, T, nh, hd);
-        return try self.o_proj.forward(graph, y_3d);
-    }
-
-    /// 增量解码注意力特征图计算 (Decode Attention Feature Extraction)
-    /// 输出投影前的原始注意力聚合特征图 y_2d [1, num_heads * head_dim]
-    pub fn forwardDecodeAttention(
-        self: *const Gemma4Q4Attention,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: *Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
-
-        const C = self.hidden_size;
-        const nh = self.num_heads;
-        const n_kv = self.num_kv_heads;
-        const hd = self.head_dim;
-        const pos = layer_cache.core.curr_len;
-        if (pos >= layer_cache.core.max_seq_len) return error.ContextWindowExceeded;
-
-        const x_2d = if (x.shape.len == 2) x else try graph.reshape(x, &.{ 1, C });
-
-        // 1. Q4 投影单行向量 (GEMV)
-        const qkv = try self.projectQKV(graph, x_2d);
-        const q_raw = qkv.q;
-        const k_raw = qkv.k;
-        const v_raw = qkv.v;
-
-        // 2. Q-Norm 与 K-Norm，以及无参数 v_norm
-        const q_heads = try graph.reshape(q_raw, &.{ nh, hd });
-        const q_normed = try self.q_norm.forward(graph, q_heads);
-        const k_heads = try graph.reshape(k_raw, &.{ n_kv, hd });
-        const k_normed = try self.k_norm.forward(graph, k_heads);
-        const v_heads = try graph.reshape(v_raw, &.{ n_kv, hd });
-        const v_normed = try self.v_norm.forward(graph, v_heads);
-
-        // 3. 施加半切分旋转位置编码 (Split-Half RoPE, 当前时间步为 pos)
-        const q_4d = try graph.reshape(q_normed, &.{ 1, nh, 1, hd });
-        const k_4d = try graph.reshape(k_normed, &.{ 1, n_kv, 1, hd });
-        const q_rot = try graph.rope(q_4d, pos, self.rope);
-        const k_rot = try graph.rope(k_4d, pos, self.rope);
-
-        // 4. 写入键值缓存并执行单查询点积注意力 (Single Query Attention against Cached Keys & Values)
-        return gemma4.decodeAttention(graph, layer_cache, self.attn_type, self.sliding_window, nh, q_rot.data, k_rot.data, v_normed.data);
-    }
-
-    /// 增量解码阶段 (Decode Phase)：基于键值缓存 (Key-Value Cache, KVCache) 处理单个增量词元 (Token)
-    pub fn forwardDecode(
-        self: *const Gemma4Q4Attention,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: *Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        const y_2d = try self.forwardDecodeAttention(graph, x, layer_cache);
-        const out_2d = try self.o_proj.forward(graph, y_2d);
-        return try graph.reshape(out_2d, &.{ 1, 1, self.hidden_size });
-    }
-};
+pub const Gemma4Q4Attention = gemma4.Gemma4AttentionT(Q4Linear);
 
 /// Gemma 4 解码器层 (Q4 量化版本)
-pub const Gemma4Q4DecoderLayer = struct {
-    input_layernorm: RMSNorm,
-    self_attn: Gemma4Q4Attention,
-    post_attention_layernorm: RMSNorm,
-    pre_feedforward_layernorm: RMSNorm,
-    mlp: Gemma4Q4MLP,
-    post_feedforward_layernorm: RMSNorm,
-    layer_scalar: *Tensor,
-
-    name: ?[]const u8 = null,
-    module_type: []const u8 = "Gemma4Q4DecoderLayer",
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        attn_type: Gemma4AttentionType,
-        hidden_size: usize,
-        intermediate_size: usize,
-        num_heads: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-        sliding_window: usize,
-        rms_norm_eps: f32,
-        hidden_activation: backend.GeluApproximation,
-    ) !Gemma4Q4DecoderLayer {
-        const input_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&input_layernorm, allocator);
-        var self_attn = try Gemma4Q4Attention.init(
-            allocator,
-            attn_type,
-            hidden_size,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-            sliding_window,
-            rms_norm_eps,
-        );
-        errdefer self_attn.deinit(allocator);
-        const post_attention_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&post_attention_layernorm, allocator);
-        const pre_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&pre_feedforward_layernorm, allocator);
-        var mlp = try Gemma4Q4MLP.initGemma(allocator, hidden_size, intermediate_size, hidden_activation);
-        errdefer mlp.deinit(allocator);
-        const post_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&post_feedforward_layernorm, allocator);
-
-        const layer_scalar = try nn.createLayerScalar(allocator);
-
-        return Gemma4Q4DecoderLayer{
-            .input_layernorm = input_layernorm,
-            .self_attn = self_attn,
-            .post_attention_layernorm = post_attention_layernorm,
-            .pre_feedforward_layernorm = pre_feedforward_layernorm,
-            .mlp = mlp,
-            .post_feedforward_layernorm = post_feedforward_layernorm,
-            .layer_scalar = layer_scalar,
-        };
-    }
-
-    /// 构建无 CPU 权重实体的空解码层结构 (用于 GPU 硬件加速直通路径，彻底消除 4.5 GB 内存分配与零填充)
-    pub fn initEmpty(
-        allocator: std.mem.Allocator,
-        attn_type: Gemma4AttentionType,
-        hidden_size: usize,
-        intermediate_size: usize,
-        num_heads: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-        sliding_window: usize,
-        rms_norm_eps: f32,
-        hidden_activation: backend.GeluApproximation,
-    ) !Gemma4Q4DecoderLayer {
-        const input_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&input_layernorm, allocator);
-        var self_attn = try Gemma4Q4Attention.initEmpty(
-            allocator,
-            attn_type,
-            hidden_size,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-            sliding_window,
-            rms_norm_eps,
-        );
-        errdefer self_attn.deinit(allocator);
-        const post_attention_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&post_attention_layernorm, allocator);
-        const pre_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&pre_feedforward_layernorm, allocator);
-        const mlp = Gemma4Q4MLP.initEmpty(hidden_size, intermediate_size, nn.GatedActivation.fromGelu(hidden_activation));
-        const post_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&post_feedforward_layernorm, allocator);
-
-        const layer_scalar = try nn.createLayerScalar(allocator);
-
-        return Gemma4Q4DecoderLayer{
-            .input_layernorm = input_layernorm,
-            .self_attn = self_attn,
-            .post_attention_layernorm = post_attention_layernorm,
-            .pre_feedforward_layernorm = pre_feedforward_layernorm,
-            .mlp = mlp,
-            .post_feedforward_layernorm = post_feedforward_layernorm,
-            .layer_scalar = layer_scalar,
-        };
-    }
-
-    pub fn deinit(self: *Gemma4Q4DecoderLayer, allocator: std.mem.Allocator) void {
-        deinitModel(&self.input_layernorm, allocator);
-        self.self_attn.deinit(allocator);
-        deinitModel(&self.post_attention_layernorm, allocator);
-        deinitModel(&self.pre_feedforward_layernorm, allocator);
-        self.mlp.deinit(allocator);
-        deinitModel(&self.post_feedforward_layernorm, allocator);
-        freePersistentTensor(allocator, self.layer_scalar);
-    }
-
-    /// 为当前解码层所有 4-bit 量化投影启用 GPU 硬件加速卸载
-    pub fn enableHardwareOffload(self: *Gemma4Q4DecoderLayer, allocator: std.mem.Allocator) !void {
-        try self.self_attn.q_proj.enableOffload(allocator, null);
-        try self.self_attn.k_proj.enableOffload(allocator, null);
-        if (self.self_attn.v_proj) |*vp| try vp.enableOffload(allocator, null);
-        try self.self_attn.o_proj.enableOffload(allocator, null);
-        try self.mlp.gate_proj.enableOffload(allocator, null);
-        try self.mlp.up_proj.enableOffload(allocator, null);
-        try self.mlp.down_proj.enableOffload(allocator, null);
-    }
-
-    /// 注意力之后的公共残差尾部：PostAttnLN -> + x -> PreMLPLN -> MLP -> PostMLPLN -> + x1 -> * layer_scalar
-    fn residualTail(self: *const Gemma4Q4DecoderLayer, graph: *autodiff.Graph, x: *Tensor, attn_out: *Tensor) !*Tensor {
-        const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
-        const x1 = try graph.add(x, post_attn);
-
-        const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
-        const mlp_out = try self.mlp.forward(graph, pre_mlp);
-        const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
-        const x2 = try graph.add(x1, post_mlp);
-        return try graph.mulScalar(x2, self.layer_scalar.data[0]);
-    }
-
-    pub fn forward(self: *const Gemma4Q4DecoderLayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
-
-        const in_norm = try self.input_layernorm.forward(graph, x);
-        const attn_out = try self.self_attn.forward(graph, in_norm);
-        return self.residualTail(graph, x, attn_out);
-    }
-
-    pub fn forwardPrefill(
-        self: *const Gemma4Q4DecoderLayer,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: *Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
-
-        const in_norm = try self.input_layernorm.forward(graph, x);
-        const attn_out = try self.self_attn.forwardPrefill(graph, in_norm, layer_cache);
-        return self.residualTail(graph, x, attn_out);
-    }
-
-    pub fn forwardDecode(
-        self: *const Gemma4Q4DecoderLayer,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: *Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
-
-        const in_norm = try self.input_layernorm.forward(graph, x);
-        const attn_out = try self.self_attn.forwardDecode(graph, in_norm, layer_cache);
-        return self.residualTail(graph, x, attn_out);
-    }
-};
+pub const Gemma4Q4DecoderLayer = gemma4.Gemma4DecoderLayerT(Gemma4Q4Attention, Gemma4Q4MLP);
 
 /// 4-bit 量化因果语言模型 (Gemma4Q4ForCausalLM)
 /// 整体内存降低至原始全精度的 1/4 到 1/8，使得 12B 模型能够在 16GB 设备上完整运行！
@@ -504,6 +48,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
         embed_tokens: Embedding,
         embed_u16_mmap: ?[]const u16 = null,
+        mmap_bytes: ?[]const u8 = null,
         layers: []Gemma4Q4DecoderLayer,
         norm: RMSNorm,
         /// 尚未交给 GPU 解码上下文的独立 LM Head：只在 GPU 上下文不存在 (未启用或构建失败) 时持有；
@@ -896,6 +441,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 var res = Self{
                     .embed_tokens = embed_tokens,
                     .embed_u16_mmap = embed_u16_slice,
+                    .mmap_bytes = mmap_bytes,
                     .layers = layers,
                     .norm = norm,
                     .gpu_context = gpu_context,
@@ -960,6 +506,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             var res = Self{
                 .embed_tokens = embed_tokens,
                 .embed_u16_mmap = embed_u16_slice,
+                .mmap_bytes = mmap_bytes,
                 .layers = layers,
                 .norm = norm,
                 .lm_head_weights = lm_head_weights,
@@ -1328,6 +875,204 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             accepted_buf[0] = single_tok;
             return 1;
         }
+
+        pub const GenerateOptions = struct {
+            sampling: backend.sampling.SamplingOptions = .{},
+            max_new_tokens: usize = 256,
+            stop_tokens: []const usize = &default_stop_tokens,
+            enable_speculative: bool = true,
+            max_seq_len: usize = 2048,
+            mmap_bytes: ?[]const u8 = null,
+
+            pub fn defaultOptions() GenerateOptions {
+                return .{};
+            }
+        };
+
+        const default_stop_tokens = [_]usize{ gemma4.Gemma4Vocabulary.EOS, gemma4.Gemma4Vocabulary.EOT };
+
+        /// 开始一次自回归生成会话：统一封装预填充、键值缓存、投机验证与流式生成循环
+        pub fn generate(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            prompt_tokens: []const usize,
+            options: GenerateOptions,
+        ) !Generation {
+            if (prompt_tokens.len == 0) return error.EmptyPrompt;
+            const mmap_slice = options.mmap_bytes orelse (self.mmap_bytes orelse return error.MissingMmapBytes);
+
+            var history: std.ArrayList(usize) = .empty;
+            errdefer history.deinit(allocator);
+            try history.appendSlice(allocator, prompt_tokens);
+
+            var cache = try gemma4.Gemma4KVCache.init(allocator, config, .{ .max_seq_len = options.max_seq_len });
+            errdefer cache.deinit(allocator);
+
+            const use_gpu = (self.gpu_context != null and backend.offload.isAvailable());
+            var graph = autodiff.Graph.init(allocator, .{
+                .enable_grad = false,
+                .device = if (use_gpu) .gpu else .cpu,
+            });
+            errdefer graph.deinit();
+
+            var draft_engine: ?nn.SpeculativeDraftEngine = null;
+            if (options.enable_speculative and use_gpu) {
+                var de = nn.SpeculativeDraftEngine.initWithStopTokens(allocator, options.stop_tokens);
+                de.seedFromTokens(prompt_tokens) catch {};
+                draft_engine = de;
+            }
+
+            return Generation{
+                .model = self,
+                .allocator = allocator,
+                .options = options,
+                .sampler = Sampler.init(options.sampling),
+                .cache = cache,
+                .graph = graph,
+                .draft_engine = draft_engine,
+                .history = history,
+                .prompt_len = prompt_tokens.len,
+                .mmap_bytes = mmap_slice,
+            };
+        }
+
+        /// 自回归生成会话：`next` 逐个返回生成的词元，生成结束 (遇到停止词元或达到 `max_new_tokens`) 后返回 null
+        pub const Generation = struct {
+            model: *Self,
+            allocator: std.mem.Allocator,
+            options: GenerateOptions,
+            sampler: Sampler,
+            cache: gemma4.Gemma4KVCache,
+            graph: autodiff.Graph,
+            draft_engine: ?nn.SpeculativeDraftEngine = null,
+            history: std.ArrayList(usize),
+            prompt_len: usize,
+            started: bool = false,
+            finished: bool = false,
+            mmap_bytes: []const u8,
+
+            accepted_buf: [16]usize = undefined,
+            accepted_len: usize = 0,
+            accepted_pos: usize = 0,
+            speculative_hits: usize = 0,
+
+            pub fn deinit(self: *Generation) void {
+                if (self.draft_engine) |*de| de.deinit();
+                self.cache.deinit(self.allocator);
+                self.graph.deinit();
+                self.history.deinit(self.allocator);
+            }
+
+            pub fn generated(self: *const Generation) []const usize {
+                return self.history.items[self.prompt_len..];
+            }
+
+            pub fn tokens(self: *const Generation) []const usize {
+                return self.history.items;
+            }
+
+            fn isStopToken(self: *const Generation, tok: usize) bool {
+                for (self.options.stop_tokens) |st| {
+                    if (tok == st) return true;
+                }
+                return false;
+            }
+
+            fn emit(self: *Generation, tok: usize) !?usize {
+                try self.history.append(self.allocator, tok);
+                if (self.isStopToken(tok) or self.history.items.len - self.prompt_len >= self.options.max_new_tokens) {
+                    self.finished = true;
+                }
+                return tok;
+            }
+
+            pub fn next(self: *Generation) !?usize {
+                if (self.finished) return null;
+                if (self.options.max_new_tokens == 0) {
+                    self.finished = true;
+                    return null;
+                }
+
+                if (self.accepted_pos < self.accepted_len) {
+                    const tok = self.accepted_buf[self.accepted_pos];
+                    self.accepted_pos += 1;
+                    return try self.emit(tok);
+                }
+
+                if (!self.started) {
+                    self.graph.reset();
+                    const first_tok = try self.model.prefill(
+                        &self.graph,
+                        self.history.items,
+                        &self.cache,
+                        self.mmap_bytes,
+                        &self.sampler,
+                    );
+                    self.started = true;
+                    if (self.draft_engine) |*de| {
+                        const prev = self.history.items[self.history.items.len - 1];
+                        de.recordTransition(prev, first_tok) catch {};
+                    }
+                    return try self.emit(first_tok);
+                }
+
+                self.graph.reset();
+                const current_tok = self.history.items[self.history.items.len - 1];
+
+                if (self.draft_engine) |*de| {
+                    var cand_buf: [4]usize = undefined;
+                    const draft = de.proposeDraft(self.history.items, cand_buf[0..3]);
+                    if (draft) |cands| {
+                        var input_spec: [8]usize = undefined;
+                        input_spec[0] = current_tok;
+                        const spec_k = @min(cands.len, 3);
+                        for (0..spec_k) |idx| {
+                            input_spec[idx + 1] = cands[idx];
+                        }
+                        const spec_total = 1 + spec_k;
+                        var acc_buf: [8]usize = undefined;
+                        const num_acc = try self.model.decodeSpeculative(
+                            &self.graph,
+                            input_spec[0..spec_total],
+                            &self.cache,
+                            self.mmap_bytes,
+                            self.history.items,
+                            &self.sampler,
+                            acc_buf[0..spec_total],
+                        );
+
+                        if (num_acc > 0) {
+                            if (num_acc > 1) {
+                                self.speculative_hits += (num_acc - 1);
+                            }
+                            var prev = current_tok;
+                            for (0..num_acc) |acc_i| {
+                                const tok = acc_buf[acc_i];
+                                de.recordTransition(prev, tok) catch {};
+                                prev = tok;
+                                self.accepted_buf[acc_i] = tok;
+                            }
+                            self.accepted_len = num_acc;
+                            self.accepted_pos = 1;
+                            return try self.emit(acc_buf[0]);
+                        }
+                    }
+                }
+
+                const next_tok = try self.model.decodeStep(
+                    &self.graph,
+                    current_tok,
+                    &self.cache,
+                    self.mmap_bytes,
+                    self.history.items,
+                    &self.sampler,
+                );
+                if (self.draft_engine) |*de| {
+                    de.recordTransition(current_tok, next_tok) catch {};
+                }
+                return try self.emit(next_tok);
+            }
+        };
     };
 }
 

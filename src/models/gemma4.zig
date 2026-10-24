@@ -317,6 +317,10 @@ pub const Gemma4Config = struct {
     max_position_embeddings: usize = 262144,
     hidden_size_per_layer_input: usize = 0,
     num_kv_shared_layers: usize = 0,
+    attention_k_eq_v: bool = false,
+    sliding_rope: tensor.RopeOptions = Gemma4AttentionType.sliding_attention.ropeOptions(),
+    full_rope: tensor.RopeOptions = Gemma4AttentionType.full_attention.ropeOptions(),
+    layer_types: ?[]const Gemma4AttentionType = null,
     /// 前馈网络与逐层输入门控的激活函数：Gemma 4 官方配置为 `hidden_activation: gelu_pytorch_tanh`，
     /// 即高斯误差线性单元 (Gaussian Error Linear Unit, GELU) 的双曲正切 (Hyperbolic Tangent, Tanh) 近似形式
     hidden_activation: backend.GeluApproximation = .tanh,
@@ -348,14 +352,51 @@ pub const Gemma4Config = struct {
         num_kv_heads: usize,
     };
 
-    /// 每 6 层中最后一层为全局全注意力 (full_attention)，其余为滑动窗口注意力 (sliding_attention)
+    /// 获取解码层的注意力类型与几何规格 (支持显式 layer_types 配置或默认每 6 层全注意力)
     pub fn layerSpec(self: Gemma4Config, layer_idx: usize) LayerSpec {
-        const is_full = ((layer_idx + 1) % 6 == 0);
+        const attn_type: Gemma4AttentionType = if (self.layer_types) |types|
+            types[layer_idx]
+        else if ((layer_idx + 1) % 6 == 0)
+            .full_attention
+        else
+            .sliding_attention;
+        const is_full = (attn_type == .full_attention);
         return .{
-            .attn_type = if (is_full) .full_attention else .sliding_attention,
+            .attn_type = attn_type,
             .head_dim = if (is_full) self.global_head_dim else self.head_dim,
             .num_kv_heads = if (is_full) self.num_global_key_value_heads else self.num_key_value_heads,
         };
+    }
+
+    /// 获取特定注意力类型的旋转位置编码配置
+    pub fn ropeOptions(self: Gemma4Config, attn_type: Gemma4AttentionType) tensor.RopeOptions {
+        return switch (attn_type) {
+            .sliding_attention => self.sliding_rope,
+            .full_attention => self.full_rope,
+        };
+    }
+
+    /// 键值共享层 (KV-Shared Layers) 复用的源层索引：前 num_hidden_layers - num_kv_shared_layers 层各自持有键值缓存，
+    /// 其后各层复用最后一个同类型 (滑动窗口 / 全局) 非共享层的键值缓存
+    pub fn kvSourceLayer(self: Gemma4Config, layer_idx: usize) usize {
+        const first_shared = self.num_hidden_layers - self.num_kv_shared_layers;
+        if (layer_idx < first_shared) return layer_idx;
+        const attn_type = self.layerSpec(layer_idx).attn_type;
+        var j = first_shared;
+        while (j > 0) {
+            j -= 1;
+            if (self.layerSpec(j).attn_type == attn_type) return j;
+        }
+        unreachable;
+    }
+
+    /// 判断某个持有键值缓存的层是否被后续键值共享层复用
+    pub fn isKvSharedSource(self: Gemma4Config, layer_idx: usize) bool {
+        const first_shared = self.num_hidden_layers - self.num_kv_shared_layers;
+        for (first_shared..self.num_hidden_layers) |shared_idx| {
+            if (self.kvSourceLayer(shared_idx) == layer_idx) return true;
+        }
+        return false;
     }
 
     /// Gemma 4 E4B (4B 级高效端侧模型配置，42 层混合架构与逐层嵌入增强)
@@ -516,304 +557,480 @@ pub const Gemma4KVCache = struct {
 /// Gemma 4 门控前馈多层感知机 (Gemma4MLP)
 pub const Gemma4MLP = nn.GatedMLP(core.Linear);
 
-/// Gemma 4 混合注意力机制 (Gemma4Attention: 支持滑动窗口注意力和全局注意力)
-pub const Gemma4Attention = struct {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: ?Linear,
-    o_proj: Linear,
-    q_norm: RMSNorm,
-    k_norm: RMSNorm,
-    v_norm: RMSNorm,
+/// Gemma 4 泛型混合注意力机制 (Gemma4AttentionT: 支持滑动窗口注意力和全局注意力)
+pub fn Gemma4AttentionT(comptime Proj: type) type {
+    return struct {
+        const Self = @This();
 
-    attn_type: Gemma4AttentionType,
-    hidden_size: usize,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    sliding_window: usize,
-    rope: tensor.RopeOptions,
+        q_proj: Proj,
+        k_proj: Proj,
+        v_proj: ?Proj,
+        o_proj: Proj,
+        q_norm: RMSNorm,
+        k_norm: RMSNorm,
+        v_norm: RMSNorm,
 
-    name: ?[]const u8 = null,
-    module_type: []const u8 = "Gemma4Attention",
-
-    pub fn init(
-        allocator: std.mem.Allocator,
         attn_type: Gemma4AttentionType,
         hidden_size: usize,
         num_heads: usize,
         num_kv_heads: usize,
         head_dim: usize,
         sliding_window: usize,
-        rms_norm_eps: f32,
-    ) !Gemma4Attention {
-        const q_dim = num_heads * head_dim;
-        const kv_dim = num_kv_heads * head_dim;
+        rope: tensor.RopeOptions,
 
-        const q_proj = try Linear.initWithOptions(allocator, hidden_size, q_dim, .{ .bias = false });
-        errdefer deinitModel(&q_proj, allocator);
-        const k_proj = try Linear.initWithOptions(allocator, hidden_size, kv_dim, .{ .bias = false });
-        errdefer deinitModel(&k_proj, allocator);
-        const v_proj = if (attn_type == .full_attention) null else try Linear.initWithOptions(allocator, hidden_size, kv_dim, .{ .bias = false });
-        errdefer if (v_proj) |*vp| deinitModel(vp, allocator);
-        const o_proj = try Linear.initWithOptions(allocator, q_dim, hidden_size, .{ .bias = false });
-        errdefer deinitModel(&o_proj, allocator);
+        name: ?[]const u8 = null,
+        module_type: []const u8 = if (Proj == Linear) "Gemma4Attention" else "Gemma4Q4Attention",
 
-        const q_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
-        errdefer deinitModel(&q_norm, allocator);
-        const k_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
-        errdefer deinitModel(&k_norm, allocator);
-        const v_norm = RMSNorm.initUnscaled(.{ .eps = rms_norm_eps });
+        pub fn init(
+            allocator: std.mem.Allocator,
+            attn_type: Gemma4AttentionType,
+            hidden_size: usize,
+            num_heads: usize,
+            num_kv_heads: usize,
+            head_dim: usize,
+            sliding_window: usize,
+            rms_norm_eps: f32,
+        ) !Self {
+            const q_dim = num_heads * head_dim;
+            const kv_dim = num_kv_heads * head_dim;
 
-        return Gemma4Attention{
-            .q_proj = q_proj,
-            .k_proj = k_proj,
-            .v_proj = v_proj,
-            .o_proj = o_proj,
-            .q_norm = q_norm,
-            .k_norm = k_norm,
-            .v_norm = v_norm,
-            .attn_type = attn_type,
-            .hidden_size = hidden_size,
-            .num_heads = num_heads,
-            .num_kv_heads = num_kv_heads,
-            .head_dim = head_dim,
-            .sliding_window = sliding_window,
-            .rope = attn_type.ropeOptions(),
+            var q_proj = if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, hidden_size, q_dim, .{ .bias = false })
+            else
+                try Proj.init(allocator, hidden_size, q_dim);
+            errdefer deinitProj(&q_proj, allocator);
+
+            var k_proj = if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, hidden_size, kv_dim, .{ .bias = false })
+            else
+                try Proj.init(allocator, hidden_size, kv_dim);
+            errdefer deinitProj(&k_proj, allocator);
+
+            var v_proj: ?Proj = if (attn_type == .full_attention)
+                null
+            else if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, hidden_size, kv_dim, .{ .bias = false })
+            else
+                try Proj.init(allocator, hidden_size, kv_dim);
+            errdefer if (v_proj) |*vp| deinitProj(vp, allocator);
+
+            var o_proj = if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, q_dim, hidden_size, .{ .bias = false })
+            else
+                try Proj.init(allocator, q_dim, hidden_size);
+            errdefer deinitProj(&o_proj, allocator);
+
+            const q_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
+            errdefer deinitModel(&q_norm, allocator);
+            const k_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
+            errdefer deinitModel(&k_norm, allocator);
+            const v_norm = RMSNorm.initUnscaled(.{ .eps = rms_norm_eps });
+
+            return Self{
+                .q_proj = q_proj,
+                .k_proj = k_proj,
+                .v_proj = v_proj,
+                .o_proj = o_proj,
+                .q_norm = q_norm,
+                .k_norm = k_norm,
+                .v_norm = v_norm,
+                .attn_type = attn_type,
+                .hidden_size = hidden_size,
+                .num_heads = num_heads,
+                .num_kv_heads = num_kv_heads,
+                .head_dim = head_dim,
+                .sliding_window = sliding_window,
+                .rope = attn_type.ropeOptions(),
+            };
+        }
+
+        pub fn initEmpty(
+            allocator: std.mem.Allocator,
+            attn_type: Gemma4AttentionType,
+            hidden_size: usize,
+            num_heads: usize,
+            num_kv_heads: usize,
+            head_dim: usize,
+            sliding_window: usize,
+            rms_norm_eps: f32,
+        ) !Self {
+            if (!@hasDecl(Proj, "fromBlocks")) {
+                @compileError("initEmpty only supported for block-quantized projections");
+            }
+            const q_dim = num_heads * head_dim;
+            const kv_dim = num_kv_heads * head_dim;
+
+            const q_proj = Proj.fromBlocks(hidden_size, q_dim, &.{});
+            const k_proj = Proj.fromBlocks(hidden_size, kv_dim, &.{});
+            const v_proj = if (attn_type == .full_attention) null else Proj.fromBlocks(hidden_size, kv_dim, &.{});
+            const o_proj = Proj.fromBlocks(q_dim, hidden_size, &.{});
+
+            const q_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
+            errdefer deinitModel(&q_norm, allocator);
+            const k_norm = try RMSNorm.init(allocator, head_dim, rms_norm_eps);
+            errdefer deinitModel(&k_norm, allocator);
+            const v_norm = RMSNorm.initUnscaled(.{ .eps = rms_norm_eps });
+
+            return Self{
+                .q_proj = q_proj,
+                .k_proj = k_proj,
+                .v_proj = v_proj,
+                .o_proj = o_proj,
+                .q_norm = q_norm,
+                .k_norm = k_norm,
+                .v_norm = v_norm,
+                .attn_type = attn_type,
+                .hidden_size = hidden_size,
+                .num_heads = num_heads,
+                .num_kv_heads = num_kv_heads,
+                .head_dim = head_dim,
+                .sliding_window = sliding_window,
+                .rope = attn_type.ropeOptions(),
+            };
+        }
+
+        fn deinitProj(proj: *Proj, allocator: std.mem.Allocator) void {
+            if (@hasDecl(Proj, "deinit")) {
+                proj.deinit(allocator);
+            } else {
+                deinitModel(proj, allocator);
+            }
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            deinitProj(&self.q_proj, allocator);
+            deinitProj(&self.k_proj, allocator);
+            if (self.v_proj) |*vp| deinitProj(vp, allocator);
+            deinitProj(&self.o_proj, allocator);
+            deinitModel(&self.q_norm, allocator);
+            deinitModel(&self.k_norm, allocator);
+        }
+
+        pub const formula = "\\text{Attn}(Q, K, V) = \\text{softmax}\\left(Q K^T + M\\right) V W_o";
+
+        const QKVResult = struct {
+            q: *Tensor,
+            k: *Tensor,
+            v: *Tensor,
         };
-    }
 
-    pub const formula = "\\text{Attn}(Q, K, V) = \\text{softmax}\\left(Q K^T + M\\right) V W_o";
+        fn projectQKV(self: *const Self, graph: *autodiff.Graph, x_2d: *Tensor) !QKVResult {
+            const q_raw = try self.q_proj.forward(graph, x_2d);
+            const k_raw = try self.k_proj.forward(graph, x_2d);
+            const v_raw = if (self.v_proj) |*vp| try vp.forward(graph, x_2d) else k_raw;
+            return .{ .q = q_raw, .k = k_raw, .v = v_raw };
+        }
 
-    pub fn forward(self: *const Gemma4Attention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        return self.forwardPrefillOptional(graph, x, null);
-    }
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+            return self.forwardPrefillOptional(graph, x, null);
+        }
 
-    pub fn forwardPrefill(
-        self: *const Gemma4Attention,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: *Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        return self.forwardPrefillOptional(graph, x, layer_cache);
-    }
+        pub fn forwardPrefill(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            x: *Tensor,
+            layer_cache: *Gemma4KVCache.LayerCache,
+        ) !*Tensor {
+            return self.forwardPrefillOptional(graph, x, layer_cache);
+        }
 
-    fn forwardPrefillOptional(
-        self: *const Gemma4Attention,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: ?*Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
+        fn forwardPrefillOptional(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            x: *Tensor,
+            layer_cache: ?*Gemma4KVCache.LayerCache,
+        ) !*Tensor {
+            const module_scope = try enterModuleScope(graph, self);
+            defer module_scope.exit();
 
-        const B = x.shape.dims[0];
-        const T = x.shape.dims[1];
-        const C = self.hidden_size;
-        const nh = self.num_heads;
-        const n_kv = self.num_kv_heads;
-        const hd = self.head_dim;
-        const groups = nh / n_kv;
+            const B = x.shape.dims[0];
+            const T = x.shape.dims[1];
+            const C = self.hidden_size;
+            const nh = self.num_heads;
+            const n_kv = self.num_kv_heads;
+            const hd = self.head_dim;
+            const groups = nh / n_kv;
 
-        const x_2d = try graph.reshape(x, &.{ B * T, C });
+            const x_2d = try graph.reshape(x, &.{ B * T, C });
 
-        // 1. 投影 Q, K, V (在 full_attention 下 attention_k_eq_v 为 true，V 与 K 共享投影权重)
-        const q_raw = try self.q_proj.forward(graph, x_2d); // [B*T, nh * hd]
-        const k_raw = try self.k_proj.forward(graph, x_2d); // [B*T, n_kv * hd]
-        const v_raw = if (self.v_proj) |*vp| try vp.forward(graph, x_2d) else k_raw;
+            const qkv = try self.projectQKV(graph, x_2d);
 
-        // 2. 对每个头应用 Q-Norm 与 K-Norm，以及无参数 v_norm
-        const q_heads = try graph.reshape(q_raw, &.{ B * T * nh, hd });
-        const q_normed = try self.q_norm.forward(graph, q_heads);
-        const k_heads = try graph.reshape(k_raw, &.{ B * T * n_kv, hd });
-        const k_normed = try self.k_norm.forward(graph, k_heads);
-        const v_heads = try graph.reshape(v_raw, &.{ B * T * n_kv, hd });
-        const v_normed = try self.v_norm.forward(graph, v_heads);
+            const q_heads = try graph.reshape(qkv.q, &.{ B * T * nh, hd });
+            const q_normed = try self.q_norm.forward(graph, q_heads);
+            const k_heads = try graph.reshape(qkv.k, &.{ B * T * n_kv, hd });
+            const k_normed = try self.k_norm.forward(graph, k_heads);
+            const v_heads = try graph.reshape(qkv.v, &.{ B * T * n_kv, hd });
+            const v_normed = try self.v_norm.forward(graph, v_heads);
 
-        // 3. 转置为四维头张量: [B, nh, T, hd] 与 [B, n_kv, T, hd]
-        const q = try nn.splitHeads(graph, q_normed, B, T, nh, hd);
-        const k_t_unrot = try nn.splitHeads(graph, k_normed, B, T, n_kv, hd);
-        const v = try nn.splitHeads(graph, v_normed, B, T, n_kv, hd);
+            const q = try nn.splitHeads(graph, q_normed, B, T, nh, hd);
+            const k_t_unrot = try nn.splitHeads(graph, k_normed, B, T, n_kv, hd);
+            const v = try nn.splitHeads(graph, v_normed, B, T, n_kv, hd);
 
-        // 4. 施加半切分 RoPE 旋转位置编码 (Split-Half RoPE, Gemma 官方标准)
-        const q_rot = try graph.rope(q, 0, self.rope);
-        const k_rot = try graph.rope(k_t_unrot, 0, self.rope);
+            const q_rot = try graph.rope(q, 0, self.rope);
+            const k_rot = try graph.rope(k_t_unrot, 0, self.rope);
 
-        // 5. 写入键值缓存 (Key-Value Cache, KVCache)
-        if (layer_cache) |cache| try writePrefillKVCache(cache, k_rot.data, v.data, B, T);
+            if (layer_cache) |cache| try writePrefillKVCache(cache, k_rot.data, v.data, B, T);
 
-        // 6. 因果 / 滑动窗口掩码注意力 (官方实现中 scaling = 1.0)；分组查询注意力 (Grouped-Query Attention, GQA)
-        // 由每个键值头服务 groups 个查询头，不复制键值
-        const y_4d = try graph.attention(q_rot, k_rot, v, .{
-            .scale = 1.0,
-            .mask = self.attn_type.mask(self.sliding_window),
-            .kv_groups = groups,
-        });
+            const y_4d = try graph.attention(q_rot, k_rot, v, .{
+                .scale = 1.0,
+                .mask = self.attn_type.mask(self.sliding_window),
+                .kv_groups = groups,
+            });
 
-        // 7. 转置并融合输出
-        const y_3d = try nn.mergeHeads(graph, y_4d, B, T, nh, hd);
-        return try self.o_proj.forward(graph, y_3d);
-    }
+            const y_3d = try nn.mergeHeads(graph, y_4d, B, T, nh, hd);
+            return try self.o_proj.forward(graph, y_3d);
+        }
 
-    pub fn forwardDecode(
-        self: *const Gemma4Attention,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: *Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
+        pub fn forwardDecodeAttention(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            x: *Tensor,
+            layer_cache: *Gemma4KVCache.LayerCache,
+        ) !*Tensor {
+            const module_scope = try enterModuleScope(graph, self);
+            defer module_scope.exit();
 
-        const C = self.hidden_size;
-        const nh = self.num_heads;
-        const n_kv = self.num_kv_heads;
-        const hd = self.head_dim;
-        const pos = layer_cache.core.curr_len;
-        if (pos >= layer_cache.core.max_seq_len) return error.ContextWindowExceeded;
+            const C = self.hidden_size;
+            const nh = self.num_heads;
+            const n_kv = self.num_kv_heads;
+            const hd = self.head_dim;
+            const pos = layer_cache.core.curr_len;
+            if (pos >= layer_cache.core.max_seq_len) return error.ContextWindowExceeded;
 
-        const x_2d = if (x.shape.len == 2) x else try graph.reshape(x, &.{ 1, C });
+            const x_2d = if (x.shape.len == 2) x else try graph.reshape(x, &.{ 1, C });
 
-        const q_raw = try self.q_proj.forward(graph, x_2d);
-        const k_raw = try self.k_proj.forward(graph, x_2d);
-        const v_raw = if (self.v_proj) |*vp| try vp.forward(graph, x_2d) else k_raw;
+            const qkv = try self.projectQKV(graph, x_2d);
 
-        const q_heads = try graph.reshape(q_raw, &.{ nh, hd });
-        const q_normed = try self.q_norm.forward(graph, q_heads);
-        const k_heads = try graph.reshape(k_raw, &.{ n_kv, hd });
-        const k_normed = try self.k_norm.forward(graph, k_heads);
-        const v_heads = try graph.reshape(v_raw, &.{ n_kv, hd });
-        const v_normed = try self.v_norm.forward(graph, v_heads);
+            const q_heads = try graph.reshape(qkv.q, &.{ nh, hd });
+            const q_normed = try self.q_norm.forward(graph, q_heads);
+            const k_heads = try graph.reshape(qkv.k, &.{ n_kv, hd });
+            const k_normed = try self.k_norm.forward(graph, k_heads);
+            const v_heads = try graph.reshape(qkv.v, &.{ n_kv, hd });
+            const v_normed = try self.v_norm.forward(graph, v_heads);
 
-        const q_4d = try graph.reshape(q_normed, &.{ 1, nh, 1, hd });
-        const k_4d = try graph.reshape(k_normed, &.{ 1, n_kv, 1, hd });
-        const q_rot = try graph.rope(q_4d, pos, self.rope);
-        const k_rot = try graph.rope(k_4d, pos, self.rope);
+            const q_4d = try graph.reshape(q_normed, &.{ 1, nh, 1, hd });
+            const k_4d = try graph.reshape(k_normed, &.{ 1, n_kv, 1, hd });
+            const q_rot = try graph.rope(q_4d, pos, self.rope);
+            const k_rot = try graph.rope(k_4d, pos, self.rope);
 
-        const y_2d = try decodeAttention(graph, layer_cache, self.attn_type, self.sliding_window, nh, q_rot.data, k_rot.data, v_normed.data);
+            return decodeAttention(graph, layer_cache, self.attn_type, self.sliding_window, nh, q_rot.data, k_rot.data, v_normed.data);
+        }
 
-        const out_2d = try self.o_proj.forward(graph, y_2d);
-        return try graph.reshape(out_2d, &.{ 1, 1, C });
-    }
-};
+        pub fn forwardDecode(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            x: *Tensor,
+            layer_cache: *Gemma4KVCache.LayerCache,
+        ) !*Tensor {
+            const y_2d = try self.forwardDecodeAttention(graph, x, layer_cache);
+            const out_2d = try self.o_proj.forward(graph, y_2d);
+            return try graph.reshape(out_2d, &.{ 1, 1, self.hidden_size });
+        }
+    };
+}
 
-/// Gemma 4 变换器层 (Gemma4DecoderLayer)
-pub const Gemma4DecoderLayer = struct {
-    input_layernorm: RMSNorm,
-    self_attn: Gemma4Attention,
-    post_attention_layernorm: RMSNorm,
-    pre_feedforward_layernorm: RMSNorm,
-    mlp: Gemma4MLP,
-    post_feedforward_layernorm: RMSNorm,
-    layer_scalar: *Tensor, // [1]
+/// Gemma 4 混合注意力机制 (全精度 F32 线性层特化)
+pub const Gemma4Attention = Gemma4AttentionT(Linear);
 
-    name: ?[]const u8 = null,
-    module_type: []const u8 = "Gemma4DecoderLayer",
+/// Gemma 4 泛型变换器层 (Gemma4DecoderLayerT: 支持 F32 与 Q4 混合层组装)
+pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
+    return struct {
+        const Self = @This();
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        attn_type: Gemma4AttentionType,
-        hidden_size: usize,
-        intermediate_size: usize,
-        num_heads: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-        sliding_window: usize,
-        rms_norm_eps: f32,
-        hidden_activation: backend.GeluApproximation,
-    ) !Gemma4DecoderLayer {
-        const input_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&input_layernorm, allocator);
+        input_layernorm: RMSNorm,
+        self_attn: Attn,
+        post_attention_layernorm: RMSNorm,
+        pre_feedforward_layernorm: RMSNorm,
+        mlp: Mlp,
+        post_feedforward_layernorm: RMSNorm,
+        layer_scalar: *Tensor, // [1]
 
-        const self_attn = try Gemma4Attention.init(
-            allocator,
-            attn_type,
-            hidden_size,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-            sliding_window,
-            rms_norm_eps,
-        );
-        errdefer deinitModel(&self_attn, allocator);
+        name: ?[]const u8 = null,
+        module_type: []const u8 = "Gemma4DecoderLayer",
 
-        const post_attention_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&post_attention_layernorm, allocator);
+        pub fn init(
+            allocator: std.mem.Allocator,
+            attn_type: Gemma4AttentionType,
+            hidden_size: usize,
+            intermediate_size: usize,
+            num_heads: usize,
+            num_kv_heads: usize,
+            head_dim: usize,
+            sliding_window: usize,
+            rms_norm_eps: f32,
+            hidden_activation: backend.GeluApproximation,
+        ) !Self {
+            const input_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
+            errdefer deinitModel(&input_layernorm, allocator);
 
-        const pre_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&pre_feedforward_layernorm, allocator);
+            var self_attn = try Attn.init(
+                allocator,
+                attn_type,
+                hidden_size,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                sliding_window,
+                rms_norm_eps,
+            );
+            errdefer if (@hasDecl(Attn, "deinit")) self_attn.deinit(allocator) else deinitModel(&self_attn, allocator);
 
-        const mlp = try Gemma4MLP.initGemma(allocator, hidden_size, intermediate_size, hidden_activation);
-        errdefer deinitModel(&mlp, allocator);
+            const post_attention_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
+            errdefer deinitModel(&post_attention_layernorm, allocator);
 
-        const post_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
-        errdefer deinitModel(&post_feedforward_layernorm, allocator);
+            const pre_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
+            errdefer deinitModel(&pre_feedforward_layernorm, allocator);
 
-        const layer_scalar = try createLayerScalar(allocator);
-        errdefer freePersistentTensor(allocator, layer_scalar);
+            var mlp = try Mlp.initGemma(allocator, hidden_size, intermediate_size, hidden_activation);
+            errdefer if (@hasDecl(Mlp, "deinit")) mlp.deinit(allocator) else deinitModel(&mlp, allocator);
 
-        return Gemma4DecoderLayer{
-            .input_layernorm = input_layernorm,
-            .self_attn = self_attn,
-            .post_attention_layernorm = post_attention_layernorm,
-            .pre_feedforward_layernorm = pre_feedforward_layernorm,
-            .mlp = mlp,
-            .post_feedforward_layernorm = post_feedforward_layernorm,
-            .layer_scalar = layer_scalar,
-        };
-    }
+            const post_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
+            errdefer deinitModel(&post_feedforward_layernorm, allocator);
 
-    pub const formula = "\\begin{aligned} x_1 &= x + \\text{PostAttnLN}(\\text{Attn}(\\text{InputLN}(x))) \\\\ x_2 &= s \\cdot \\left(x_1 + \\text{PostMLPLN}(\\text{MLP}(\\text{PreMLPLN}(x_1)))\\right) \\end{aligned}";
+            const layer_scalar = try createLayerScalar(allocator);
+            errdefer freePersistentTensor(allocator, layer_scalar);
 
-    /// 注意力之后的公共残差尾部：PostAttnLN -> + x -> PreMLPLN -> MLP -> PostMLPLN -> + x1 -> * layer_scalar
-    /// 训练前向、预填充与增量解码三条路径共用，保证层缩放标量 (layer_scalar) 处处一致地生效
-    fn residualTail(self: *const Gemma4DecoderLayer, graph: *autodiff.Graph, x: *Tensor, attn_out: *Tensor) !*Tensor {
-        const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
-        const x1 = try graph.add(x, post_attn);
+            return Self{
+                .input_layernorm = input_layernorm,
+                .self_attn = self_attn,
+                .post_attention_layernorm = post_attention_layernorm,
+                .pre_feedforward_layernorm = pre_feedforward_layernorm,
+                .mlp = mlp,
+                .post_feedforward_layernorm = post_feedforward_layernorm,
+                .layer_scalar = layer_scalar,
+            };
+        }
 
-        const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
-        const mlp_out = try self.mlp.forward(graph, pre_mlp);
-        const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
-        const x2 = try graph.add(x1, post_mlp);
-        return try graph.mulScalar(x2, self.layer_scalar.data[0]);
-    }
+        pub fn initEmpty(
+            allocator: std.mem.Allocator,
+            attn_type: Gemma4AttentionType,
+            hidden_size: usize,
+            intermediate_size: usize,
+            num_heads: usize,
+            num_kv_heads: usize,
+            head_dim: usize,
+            sliding_window: usize,
+            rms_norm_eps: f32,
+            hidden_activation: backend.GeluApproximation,
+        ) !Self {
+            const input_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
+            errdefer deinitModel(&input_layernorm, allocator);
 
-    pub fn forward(self: *const Gemma4DecoderLayer, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
+            var self_attn = try Attn.initEmpty(
+                allocator,
+                attn_type,
+                hidden_size,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                sliding_window,
+                rms_norm_eps,
+            );
+            errdefer if (@hasDecl(Attn, "deinit")) self_attn.deinit(allocator) else deinitModel(&self_attn, allocator);
 
-        const in_norm = try self.input_layernorm.forward(graph, x);
-        const attn_out = try self.self_attn.forward(graph, in_norm);
-        return self.residualTail(graph, x, attn_out);
-    }
+            const post_attention_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
+            errdefer deinitModel(&post_attention_layernorm, allocator);
 
-    pub fn forwardPrefill(
-        self: *const Gemma4DecoderLayer,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: *Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
+            const pre_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
+            errdefer deinitModel(&pre_feedforward_layernorm, allocator);
 
-        const in_norm = try self.input_layernorm.forward(graph, x);
-        const attn_out = try self.self_attn.forwardPrefill(graph, in_norm, layer_cache);
-        return self.residualTail(graph, x, attn_out);
-    }
+            const mlp = Mlp.initEmpty(hidden_size, intermediate_size, nn.GatedActivation.fromGelu(hidden_activation));
 
-    pub fn forwardDecode(
-        self: *const Gemma4DecoderLayer,
-        graph: *autodiff.Graph,
-        x: *Tensor,
-        layer_cache: *Gemma4KVCache.LayerCache,
-    ) !*Tensor {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
+            const post_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
+            errdefer deinitModel(&post_feedforward_layernorm, allocator);
 
-        const in_norm = try self.input_layernorm.forward(graph, x);
-        const attn_out = try self.self_attn.forwardDecode(graph, in_norm, layer_cache);
-        return self.residualTail(graph, x, attn_out);
-    }
-};
+            const layer_scalar = try createLayerScalar(allocator);
+            errdefer freePersistentTensor(allocator, layer_scalar);
+
+            return Self{
+                .input_layernorm = input_layernorm,
+                .self_attn = self_attn,
+                .post_attention_layernorm = post_attention_layernorm,
+                .pre_feedforward_layernorm = pre_feedforward_layernorm,
+                .mlp = mlp,
+                .post_feedforward_layernorm = post_feedforward_layernorm,
+                .layer_scalar = layer_scalar,
+            };
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            deinitModel(&self.input_layernorm, allocator);
+            if (@hasDecl(Attn, "deinit")) self.self_attn.deinit(allocator) else deinitModel(&self.self_attn, allocator);
+            deinitModel(&self.post_attention_layernorm, allocator);
+            deinitModel(&self.pre_feedforward_layernorm, allocator);
+            if (@hasDecl(Mlp, "deinit")) self.mlp.deinit(allocator) else deinitModel(&self.mlp, allocator);
+            deinitModel(&self.post_feedforward_layernorm, allocator);
+            freePersistentTensor(allocator, self.layer_scalar);
+        }
+
+        pub fn enableHardwareOffload(self: *Self, allocator: std.mem.Allocator) !void {
+            if (@hasField(Attn, "q_proj") and @hasDecl(@TypeOf(self.self_attn.q_proj), "enableOffload")) {
+                try self.self_attn.q_proj.enableOffload(allocator, null);
+                try self.self_attn.k_proj.enableOffload(allocator, null);
+                if (self.self_attn.v_proj) |*vp| try vp.enableOffload(allocator, null);
+                try self.self_attn.o_proj.enableOffload(allocator, null);
+            }
+            if (@hasField(Mlp, "gate_proj") and @hasDecl(@TypeOf(self.mlp.gate_proj), "enableOffload")) {
+                try self.mlp.gate_proj.enableOffload(allocator, null);
+                try self.mlp.up_proj.enableOffload(allocator, null);
+                try self.mlp.down_proj.enableOffload(allocator, null);
+            }
+        }
+
+        pub const formula = "\\begin{aligned} x_1 &= x + \\text{PostAttnLN}(\\text{Attn}(\\text{InputLN}(x))) \\\\ x_2 &= s \\cdot \\left(x_1 + \\text{PostMLPLN}(\\text{MLP}(\\text{PreMLPLN}(x_1)))\\right) \\end{aligned}";
+
+        fn residualTail(self: *const Self, graph: *autodiff.Graph, x: *Tensor, attn_out: *Tensor) !*Tensor {
+            const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
+            const x1 = try graph.add(x, post_attn);
+
+            const pre_mlp = try self.pre_feedforward_layernorm.forward(graph, x1);
+            const mlp_out = try self.mlp.forward(graph, pre_mlp);
+            const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
+            const x2 = try graph.add(x1, post_mlp);
+            return try graph.mulScalar(x2, self.layer_scalar.data[0]);
+        }
+
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+            const module_scope = try enterModuleScope(graph, self);
+            defer module_scope.exit();
+
+            const in_norm = try self.input_layernorm.forward(graph, x);
+            const attn_out = try self.self_attn.forward(graph, in_norm);
+            return self.residualTail(graph, x, attn_out);
+        }
+
+        pub fn forwardPrefill(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            x: *Tensor,
+            layer_cache: *Gemma4KVCache.LayerCache,
+        ) !*Tensor {
+            const module_scope = try enterModuleScope(graph, self);
+            defer module_scope.exit();
+
+            const in_norm = try self.input_layernorm.forward(graph, x);
+            const attn_out = try self.self_attn.forwardPrefill(graph, in_norm, layer_cache);
+            return self.residualTail(graph, x, attn_out);
+        }
+
+        pub fn forwardDecode(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            x: *Tensor,
+            layer_cache: *Gemma4KVCache.LayerCache,
+        ) !*Tensor {
+            const module_scope = try enterModuleScope(graph, self);
+            defer module_scope.exit();
+
+            const in_norm = try self.input_layernorm.forward(graph, x);
+            const attn_out = try self.self_attn.forwardDecode(graph, in_norm, layer_cache);
+            return self.residualTail(graph, x, attn_out);
+        }
+    };
+}
+
+/// Gemma 4 变换器层 (全精度特化)
+pub const Gemma4DecoderLayer = Gemma4DecoderLayerT(Gemma4Attention, Gemma4MLP);
 
 
 /// Gemma 4 语言模型核心架构 (Gemma4ForCausalLM)
@@ -1172,136 +1389,45 @@ pub const Gemma4Vocabulary = struct {
 };
 
 /// 基于上下文 N-gram 匹配的投机采样候选生成器 (Prompt Lookup Decoding / N-gram Speculative Sampling)
-/// 在历史序列（Prompt 上下文 + 已生成词元）中反向查找当前尾部匹配的 N-gram，
-/// 提取历史上紧随其后的后续词元作为推测候选序列 (Draft Candidates)。
-/// 该算法零额外参数模型负担，完全基于自然语言/代码的局部重复性，与大模型一次性并行验证形成吞吐放大。
-pub fn promptLookup(
-    tokens: []const usize,
-    min_n: usize,
-    max_n: usize,
-    max_speculate: usize,
-) ?[]const usize {
-    // 空模式 (N = 0) 会平凡匹配任意位置，最小匹配长度至少为 1
-    const lo = @max(min_n, 1);
-    if (tokens.len < lo + 1) return null;
-    const cur_len = tokens.len;
+// ============================================================================
+// 投机采样推测草稿原语下沉至 nn.llm，此处保持重导出
+// ============================================================================
 
-    var n = @min(max_n, cur_len - 1);
-    while (n >= lo) : (n -= 1) {
-        const pattern = tokens[cur_len - n .. cur_len];
-        var search_idx: usize = cur_len - n;
-        while (search_idx > 0) {
-            search_idx -= 1;
-            if (std.mem.eql(usize, tokens[search_idx .. search_idx + n], pattern)) {
-                const draft_start = search_idx + n;
-                if (draft_start < cur_len) {
-                    const draft_end = @min(draft_start + max_speculate, cur_len);
-                    if (draft_end > draft_start) {
-                        return tokens[draft_start..draft_end];
-                    }
-                }
+pub const promptLookup = nn.promptLookup;
+pub const SpeculativeDraftEngine = nn.SpeculativeDraftEngine;
+
+/// 预注入通用语言与编程高频共现搭配 (Collocations)
+pub fn seedCommonCollocations(engine: *SpeculativeDraftEngine, vocab: *const Gemma4Vocabulary) !void {
+    const pairs = [_][2][]const u8{
+        .{ " language", " model" },
+        .{ " developed", " by" },
+        .{ " artificial", " intelligence" },
+        .{ " machine", " learning" },
+        .{ " neural", " network" },
+        .{ " deep", " learning" },
+        .{ " large", " language" },
+        .{ " in", " order" },
+        .{ " order", " to" },
+        .{ " as", " well" },
+        .{ " well", " as" },
+        .{ " for", " example" },
+        .{ " such", " as" },
+        .{ " based", " on" },
+        .{ " according", " to" },
+        .{ " thank", " you" },
+        .{ " help", " answer" },
+        .{ " answer", " your" },
+        .{ " your", " questions" },
+        .{ " Open", "AI" },
+        .{ "def", " __init__" },
+        .{ "pub", " fn" },
+        .{ "return", " error" },
+    };
+    for (pairs) |pair| {
+        if (vocab.findToken(pair[0])) |t1| {
+            if (vocab.findToken(pair[1])) |t2| {
+                try engine.recordTransition(t1, t2);
             }
         }
     }
-    return null;
 }
-
-/// 投机采样推测草稿引擎 (Speculative Draft Engine)
-/// 结合自适应多尺度 N-gram 历史回溯匹配与高频词元马尔可夫转移缓存 (Markov Transition Cache)
-pub const SpeculativeDraftEngine = struct {
-    allocator: std.mem.Allocator,
-    transitions: std.AutoHashMapUnmanaged(usize, usize),
-
-    pub fn init(allocator: std.mem.Allocator) SpeculativeDraftEngine {
-        return .{
-            .allocator = allocator,
-            .transitions = .{},
-        };
-    }
-
-    pub fn deinit(self: *SpeculativeDraftEngine) void {
-        self.transitions.deinit(self.allocator);
-    }
-
-    /// 根据 Prompt 与已知词元预填充转移图
-    pub fn seedFromTokens(self: *SpeculativeDraftEngine, tokens: []const usize) !void {
-        if (tokens.len < 2) return;
-        for (0..tokens.len - 1) |i| {
-            try self.transitions.put(self.allocator, tokens[i], tokens[i + 1]);
-        }
-    }
-
-    /// 记录新生成的词元转移
-    pub fn recordTransition(self: *SpeculativeDraftEngine, from: usize, to: usize) !void {
-        try self.transitions.put(self.allocator, from, to);
-    }
-
-    /// 预注入通用语言与编程高频共现搭配 (Collocations)
-    pub fn seedCommonCollocations(self: *SpeculativeDraftEngine, vocab: *const Gemma4Vocabulary) !void {
-        const pairs = [_][2][]const u8{
-            .{ " language", " model" },
-            .{ " developed", " by" },
-            .{ " artificial", " intelligence" },
-            .{ " machine", " learning" },
-            .{ " neural", " network" },
-            .{ " deep", " learning" },
-            .{ " large", " language" },
-            .{ " in", " order" },
-            .{ " order", " to" },
-            .{ " as", " well" },
-            .{ " well", " as" },
-            .{ " for", " example" },
-            .{ " such", " as" },
-            .{ " based", " on" },
-            .{ " according", " to" },
-            .{ " thank", " you" },
-            .{ " help", " answer" },
-            .{ " answer", " your" },
-            .{ " your", " questions" },
-            .{ " Open", "AI" },
-            .{ "def", " __init__" },
-            .{ "pub", " fn" },
-            .{ "return", " error" },
-        };
-        for (pairs) |pair| {
-            if (vocab.findToken(pair[0])) |t1| {
-                if (vocab.findToken(pair[1])) |t2| {
-                    try self.transitions.put(self.allocator, t1, t2);
-                }
-            }
-        }
-    }
-
-    /// 提出推测草稿候选词元 (Propose Draft Candidates)
-    pub fn proposeDraft(
-        self: *const SpeculativeDraftEngine,
-        current_tokens: []const usize,
-        out_buf: []usize,
-    ) ?[]const usize {
-        if (current_tokens.len == 0 or out_buf.len == 0) return null;
-
-        // 1. 优先使用 N-gram 历史回溯匹配 (N=4, 3, 2)
-        if (promptLookup(current_tokens, 2, 4, out_buf.len)) |draft| {
-            return draft;
-        }
-
-        // 2. 马尔可夫多阶转移预测 (Token-to-Token Markov Chain)
-        const cur_tok = current_tokens[current_tokens.len - 1];
-        var count: usize = 0;
-        var probe = cur_tok;
-        while (count < out_buf.len) {
-            if (self.transitions.get(probe)) |nxt| {
-                if (nxt == probe or nxt == Gemma4Vocabulary.EOS or nxt == Gemma4Vocabulary.EOT) break;
-                out_buf[count] = nxt;
-                count += 1;
-                probe = nxt;
-            } else {
-                break;
-            }
-        }
-        if (count > 0) {
-            return out_buf[0..count];
-        }
-        return null;
-    }
-};

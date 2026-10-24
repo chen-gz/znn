@@ -415,4 +415,121 @@ pub fn grpoLossGraph(
     return graph.grpoLoss(old_logps, new_logps, advantages, ref_logps, beta, clip_eps);
 }
 
+// ============================================================================
+// 4. 投机采样推测草稿引擎 (Speculative Draft Engine & Prompt Lookup)
+// ============================================================================
+
+/// 在历史序列（Prompt 上下文 + 已生成词元）中反向查找当前尾部匹配的 N-gram，
+/// 提取历史上紧随其后的后续词元作为推测候选序列 (Draft Candidates)。
+/// 该算法零额外参数模型负担，完全基于自然语言/代码的局部重复性，与大模型一次性并行验证形成吞吐放大。
+pub fn promptLookup(
+    tokens: []const usize,
+    min_n: usize,
+    max_n: usize,
+    max_speculate: usize,
+) ?[]const usize {
+    const lo = @max(min_n, 1);
+    if (tokens.len < lo + 1) return null;
+    const cur_len = tokens.len;
+
+    var n = @min(max_n, cur_len - 1);
+    while (n >= lo) : (n -= 1) {
+        const pattern = tokens[cur_len - n .. cur_len];
+        var search_idx: usize = cur_len - n;
+        while (search_idx > 0) {
+            search_idx -= 1;
+            if (std.mem.eql(usize, tokens[search_idx .. search_idx + n], pattern)) {
+                const draft_start = search_idx + n;
+                if (draft_start < cur_len) {
+                    const draft_end = @min(draft_start + max_speculate, cur_len);
+                    if (draft_end > draft_start) {
+                        return tokens[draft_start..draft_end];
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}
+
+/// 投机采样推测草稿引擎 (Speculative Draft Engine)
+/// 结合自适应多尺度 N-gram 历史回溯匹配与高频词元马尔可夫转移缓存 (Markov Transition Cache)
+pub const SpeculativeDraftEngine = struct {
+    allocator: std.mem.Allocator,
+    transitions: std.AutoHashMapUnmanaged(usize, usize),
+    stop_tokens: []const usize = &.{},
+
+    pub fn init(allocator: std.mem.Allocator) SpeculativeDraftEngine {
+        return .{
+            .allocator = allocator,
+            .transitions = .{},
+        };
+    }
+
+    pub fn initWithStopTokens(allocator: std.mem.Allocator, stop_tokens: []const usize) SpeculativeDraftEngine {
+        return .{
+            .allocator = allocator,
+            .transitions = .{},
+            .stop_tokens = stop_tokens,
+        };
+    }
+
+    pub fn deinit(self: *SpeculativeDraftEngine) void {
+        self.transitions.deinit(self.allocator);
+    }
+
+    /// 根据 Prompt 与已知词元预填充转移图
+    pub fn seedFromTokens(self: *SpeculativeDraftEngine, tokens: []const usize) !void {
+        if (tokens.len < 2) return;
+        for (0..tokens.len - 1) |i| {
+            try self.transitions.put(self.allocator, tokens[i], tokens[i + 1]);
+        }
+    }
+
+    /// 记录新生成的词元转移
+    pub fn recordTransition(self: *SpeculativeDraftEngine, from: usize, to: usize) !void {
+        try self.transitions.put(self.allocator, from, to);
+    }
+
+    fn isStopToken(self: *const SpeculativeDraftEngine, tok: usize) bool {
+        for (self.stop_tokens) |st| {
+            if (tok == st) return true;
+        }
+        return false;
+    }
+
+    /// 提出推测草稿候选词元 (Propose Draft Candidates)
+    pub fn proposeDraft(
+        self: *const SpeculativeDraftEngine,
+        current_tokens: []const usize,
+        out_buf: []usize,
+    ) ?[]const usize {
+        if (current_tokens.len == 0 or out_buf.len == 0) return null;
+
+        // 1. 优先使用 N-gram 历史回溯匹配 (N=4, 3, 2)
+        if (promptLookup(current_tokens, 2, 4, out_buf.len)) |draft| {
+            return draft;
+        }
+
+        // 2. 马尔可夫多阶转移预测 (Token-to-Token Markov Chain)
+        const cur_tok = current_tokens[current_tokens.len - 1];
+        var count: usize = 0;
+        var probe = cur_tok;
+        while (count < out_buf.len) {
+            if (self.transitions.get(probe)) |nxt| {
+                if (nxt == probe or self.isStopToken(nxt)) break;
+                out_buf[count] = nxt;
+                count += 1;
+                probe = nxt;
+            } else {
+                break;
+            }
+        }
+        if (count > 0) {
+            return out_buf[0..count];
+        }
+        return null;
+    }
+};
+
 

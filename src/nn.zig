@@ -131,10 +131,6 @@ pub const RopeOptions = tensor.RopeOptions;
 pub const MLACache = transformer.MLACache;
 pub const MLALayer = transformer.MLALayer;
 pub const TransformerBlock = transformer.TransformerBlock;
-pub const TransformerDecoder = transformer.TransformerDecoder;
-pub const GPTConfig = transformer.GPTConfig;
-pub const GPT = transformer.GPT;
-pub const DefaultGPT = transformer.DefaultGPT;
 pub const LoRALinear = transformer.LoRALinear;
 pub const maskedCrossEntropyLoss = transformer.maskedCrossEntropyLoss;
 pub const maskedCrossEntropyLossGraph = transformer.maskedCrossEntropyLossGraph;
@@ -144,6 +140,8 @@ pub const computeGroupAdvantages = transformer.computeGroupAdvantages;
 pub const computeGRPOLoss = transformer.computeGRPOLoss;
 pub const grpoLoss = transformer.grpoLoss;
 pub const grpoLossGraph = transformer.grpoLossGraph;
+pub const promptLookup = llm.promptLookup;
+pub const SpeculativeDraftEngine = llm.SpeculativeDraftEngine;
 
 // 6. 权重序列化 (Serialization - Safetensors)
 pub const saveModel = serialization.saveModel;

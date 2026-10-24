@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **统一 Gemma 4 CPU 泛型模块、配置驱动架构与模型统一生成前端 (`src/models/`, `src/backend/`, `src/nn/`, `examples/`)**:
+  - **泛型注意力与解码层原语 (`Gemma4AttentionT`, `Gemma4DecoderLayerT`)**：以 `Gemma4AttentionT(comptime Proj: type)` 与 `Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type)` 统一全精度 F32 与 4-bit 量化 Q4 CPU 模型的前向、预填充、增量解码与残差尾部实现；消除 `src/models/gemma4_q4.zig` 中原本 450 行重复手写的注意力机制与解码层样板代码。
+  - **配置驱动架构扩展 (`Gemma4Config`, `SamplingOptions`)**：在 `Gemma4Config` 中增加显式 `layer_types`、`sliding_rope`、`full_rope`、`attention_k_eq_v`，并将 `kvSourceLayer` 与 `isKvSharedSource` 深度内聚进配置层；在 `backend.sampling.SamplingOptions` 中增加统一的 `repetition_window: ?usize = null`。
+  - **统一自回归生成会话前端 (`Gemma4Q4ForCausalLM.generate -> Generation`)**：为 12B `Gemma4Q4ForCausalLM` 提供与 E4B 一致的统一生成入口 `generate(allocator, prompt, GenerateOptions) -> Generation`（`next()`），将预填充、键值缓存管理、动态 n-gram 搭配转移学习与端到端 GPU 投机采样批量验证（`decodeSpeculative`）彻底内聚于会话内部；重构 `examples/gemma4.zig` 生成主循环。
+  - **GPT 模型解耦与草稿推测引擎下沉 (`src/models/gpt.zig`, `src/nn/llm.zig`)**：将 `GPTConfig`、`TransformerDecoder`、`GPT` 与 `DefaultGPT` 从 `src/nn/transformer.zig` 迁至 `src/models/gpt.zig`，消除 `nn` 层次对模型级完整拓扑的耦合；将 `promptLookup` 与通用 `SpeculativeDraftEngine` 下沉至 `src/nn/llm.zig`；移动测试文件至 `src/models/tests_vis.zig` 确保包依赖单向检查完全通过。
+  - **基于 MLX 组合块组装 12B `Gemma4GpuLayer` 与 E4B `GpuLayerE4B`**：在 `Gemma4GpuLayer.mlpResidual` 中直接复用 `backend.mlx_blocks.gatedMlp` 与 `residualScale`，进一步收敛 GPU 算子实现。
+
 - **共享 MLX GPU 组合原语与量化抽象下沉 (`src/backend/`, `src/models/`, `src/nn/`)**:
   - **下沉 MLX GPU 组合原语 (`src/backend/mlx_blocks.zig`)**：新增 `Rope`、`projectHeads`、`gatedMlp`、`residualScale` 与 `finalHidden`，统一单步解码与多步预填充的 Q/K/V 头归一化与旋转、门控多层感知机（支持门控/上升融合与独立量化矩阵）以及带缩放残差连接；删除 `offload.qkvForwardOffload` 与 `mlpForwardOffload`。
   - **通用量化权重与量化块布局 (`QuantWeights`, `QuantLayout`, `LmHead`)**：将 `Q4Weights` 重命名并推广为通用 `QuantWeights`，新增 `QuantWeights.gatherRows(ids, scale)` 统一词元嵌入查表与反量化缩放；统一量化布局计算 `QuantLayout` 并替换 `Gemma4E4BModel.q4ByteLengths`；引入统一词表输出头 `LmHead = union(enum) { dense, quant }`。

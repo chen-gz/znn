@@ -4,6 +4,7 @@ const autodiff = @import("../autodiff.zig");
 const tensor = @import("../tensor.zig");
 const nn = @import("../nn.zig");
 const models = @import("../models.zig");
+const testing_init = @import("../nn/testing_init.zig");
 
 const Tensor = tensor.Tensor;
 const gemma4 = models.gemma4;
@@ -12,6 +13,10 @@ const gemma4_e4b = models.gemma4_e4b;
 const gemma4_gpu = models.gemma4_gpu;
 const sampling = backend.sampling;
 const Gemma4E4BModel = gemma4_e4b.Gemma4E4BModel;
+
+test {
+    _ = @import("tests_vis.zig");
+}
 
 test "Gemma 4 specialized operators, modules, and CausalLM forward" {
     const allocator = std.testing.allocator;
@@ -280,6 +285,26 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
             const input_spec = [_]usize{ next_gpu_2, 10, 25 };
             const num_acc = try mmap_model.decodeSpeculative(&g_gpu_spec, &input_spec, &cache, mock_mmap, &prompt, &greedy, &accepted_buf);
             try std.testing.expect(num_acc >= 1);
+        }
+
+        // 验证统一自回归生成会话 generate / next
+        {
+            var gen = try mmap_model.generate(allocator, &prompt, .{
+                .sampling = .{ .temperature = 0.0 },
+                .max_new_tokens = 3,
+                .stop_tokens = &.{},
+                .enable_speculative = false,
+            });
+            defer gen.deinit();
+
+            var gen_count: usize = 0;
+            while (try gen.next()) |tok| {
+                try std.testing.expect(tok < gemma4_q4.TinyQ4Gemma4.config.vocab_size);
+                gen_count += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 3), gen_count);
+            try std.testing.expectEqual(@as(usize, 3), gen.generated().len);
+            try std.testing.expectEqual(@as(usize, 6), gen.tokens().len);
         }
 
         cache.reset();
@@ -1188,5 +1213,98 @@ test "Gemma 4 GPU candidate selection matches the CPU sampler for identical logi
         var sel_sampler = sampling.Sampler.init(opts);
         const tok = try gemma4_gpu.selectToken(allocator, logits_arr, cfg, &mask, &recent, &sel_sampler, stream);
         try std.testing.expect(!cfg.isSamplingExcluded(tok));
+    }
+}
+
+test "GPT Module" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    const config = models.GPTConfig{
+        .vocab_size = 10,
+        .block_size = 5,
+        .n_embd = 8,
+        .n_head = 2,
+        .n_layer = 2,
+    };
+
+    var gpt = try models.GPT(config).init(arena);
+    try testing_init.initFromOnes(&gpt, arena, random, &.{ 1, 2 });
+    defer nn.deinitModel(&gpt, arena);
+
+    const x = try arena.create(Tensor);
+    const shape = tensor.Shape.init(&.{ 2, 3 });
+    x.* = Tensor{
+        .data = try arena.alloc(f32, 6),
+        .grad = &.{},
+        .shape = shape,
+        .strides = tensor.computeContiguousStrides(shape),
+        .requires_grad = false,
+        .creator = null,
+    };
+    defer {
+        arena.free(x.data);
+        arena.destroy(x);
+    }
+    x.data[0] = 0;
+    x.data[1] = 1;
+    x.data[2] = 2;
+    x.data[3] = 3;
+    x.data[4] = 4;
+    x.data[5] = 5;
+
+    var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
+    defer y_eager_graph.deinit();
+    const y_eager = try gpt.forward(&y_eager_graph, x);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 10 }, y_eager.shape.dims[0..y_eager.shape.len]);
+
+    var graph = autodiff.Graph.initDefault(arena);
+    defer graph.deinit();
+
+    const x_node = try graph.tensorND(&.{ 2, 3 }, false);
+    @memcpy(x_node.data, x.data);
+
+    const y = try gpt.forward(&graph, x_node);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 10 }, y.shape.dims[0..y.shape.len]);
+
+    @memset(y.grad, 1.0);
+    try graph.backward(y);
+
+    var token_embedding_grad_sum: f32 = 0.0;
+    for (gpt.token_embedding.weight.grad) |g| token_embedding_grad_sum += @abs(g);
+    try std.testing.expect(token_embedding_grad_sum > 0.0);
+}
+
+test "GPT Module Save and Load" {
+    const arena = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    const config = models.GPTConfig{
+        .vocab_size = 10,
+        .block_size = 5,
+        .n_embd = 8,
+        .n_head = 2,
+        .n_layer = 2,
+    };
+
+    var gpt = try models.GPT(config).init(arena);
+    try testing_init.initFromOnes(&gpt, arena, random, &.{ 1, 2 });
+    defer nn.deinitModel(&gpt, arena);
+
+    try nn.saveModel(&gpt, std.testing.io, "test_gpt_model.safetensors", arena);
+    defer {
+        std.Io.Dir.cwd().deleteFile(std.testing.io, "test_gpt_model.safetensors") catch {};
+    }
+
+    var gpt2 = try models.GPT(config).init(arena);
+    try testing_init.initFromOnes(&gpt2, arena, random, &.{ 1, 2 });
+    defer nn.deinitModel(&gpt2, arena);
+
+    try nn.loadModel(&gpt2, std.testing.io, "test_gpt_model.safetensors", arena);
+
+    for (gpt.token_embedding.weight.data, gpt2.token_embedding.weight.data) |w1, w2| {
+        try std.testing.expectEqual(w1, w2);
     }
 }

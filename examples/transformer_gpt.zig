@@ -3,6 +3,7 @@ const zig_ml = @import("zig_ml");
 const nn = zig_ml.nn;
 const autodiff = zig_ml.autodiff;
 const tensor = zig_ml.tensor;
+const models = zig_ml.models;
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -22,7 +23,7 @@ pub fn main() !void {
     const vocab_size = 5;
     const block_size = 6; // Context length
 
-    const config = nn.GPTConfig{
+    const config = models.GPTConfig{
         .vocab_size = vocab_size,
         .block_size = block_size,
         .n_embd = 16,
@@ -31,8 +32,8 @@ pub fn main() !void {
     };
 
     // Wrap GPT in Module for easy training
-    const GPTModel = nn.Module(nn.GPT(config));
-    var model = try GPTModel.init(allocator, try nn.GPT(config).init(allocator));
+    const GPTModel = nn.Module(models.GPT(config));
+    var model = try GPTModel.init(allocator, try models.GPT(config).init(allocator));
     defer model.deinit();
     // 用一条长度为 block_size 的样本 token 序列建立前向计算图，依据计算图初始化参数
     const init_ids = try tensor.zeros(allocator, &.{ 1, block_size });

@@ -3,6 +3,7 @@ const zig_ml = @import("zig_ml");
 const nn = zig_ml.nn;
 const autodiff = zig_ml.autodiff;
 const tensor = zig_ml.tensor;
+const models = zig_ml.models;
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -17,7 +18,7 @@ pub fn main() !void {
     std.debug.print("=================================================================\n\n", .{});
 
     // 1. 配置标准多层 GPT 模型结构 (2 层 Transformer Decoder)
-    const config = nn.GPTConfig{
+    const config = models.GPTConfig{
         .vocab_size = 256,
         .block_size = 32,
         .n_embd = 64,
@@ -32,7 +33,7 @@ pub fn main() !void {
     std.debug.print("  * Attention Heads: {d}\n", .{config.n_head});
     std.debug.print("  * Decoder Layers:  {d}\n\n", .{config.n_layer});
 
-    var gpt = try nn.GPT(config).init(allocator);
+    var gpt = try models.GPT(config).init(allocator);
     defer nn.deinitModel(&gpt, allocator);
 
     // 2. 赋予顶级层次化模块命名 (自动递归设置至所有子模块与参数)

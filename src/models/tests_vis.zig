@@ -1,8 +1,9 @@
 const std = @import("std");
-const testing_init = @import("testing_init.zig");
+const testing_init = @import("../nn/testing_init.zig");
 const autodiff = @import("../autodiff.zig");
 const tensor = @import("../tensor.zig");
 const nn = @import("../nn.zig");
+const models = @import("../models.zig");
 
 const Tensor = tensor.Tensor;
 const Op = autodiff.Op;
@@ -30,8 +31,9 @@ const MoELayer = nn.MoELayer;
 const CausalSelfAttention = nn.CausalSelfAttention;
 const MLALayer = nn.MLALayer;
 const TransformerBlock = nn.TransformerBlock;
-const GPTConfig = nn.GPTConfig;
-const GPT = nn.GPT;
+const TransformerDecoder = models.TransformerDecoder;
+const GPTConfig = models.GPTConfig;
+const GPT = models.GPT;
 const LoRALinear = nn.LoRALinear;
 
 test "Hierarchical module naming and interactive HTML report export" {
@@ -211,7 +213,7 @@ test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivit
     const random = prng.random();
 
     // 1. 配置 2 层标准 GPT 模型
-    const config = transformer.GPTConfig{
+    const config = GPTConfig{
         .vocab_size = 128,
         .block_size = 16,
         .n_embd = 32,
@@ -219,7 +221,7 @@ test "End-to-End Multi-layer GPT JSON Graph Topology and Cross-layer Connectivit
         .n_layer = 2,
     };
 
-    var gpt = try transformer.GPT(config).init(allocator);
+    var gpt = try GPT(config).init(allocator);
     try testing_init.initFromOnes(&gpt, allocator, random, &.{ 1, 2 });
     defer nn.deinitModel(&gpt, allocator);
     var names = std.heap.ArenaAllocator.init(allocator);
@@ -359,8 +361,8 @@ test "Explicit module scopes attribute ops and tensors to the executing module" 
     var prng = std.Random.DefaultPrng.init(24680);
     const random = prng.random();
 
-    const config = transformer.GPTConfig{ .vocab_size = 128, .block_size = 16, .n_embd = 32, .n_head = 2, .n_layer = 2 };
-    var gpt = try transformer.GPT(config).init(allocator);
+    const config = GPTConfig{ .vocab_size = 128, .block_size = 16, .n_embd = 32, .n_head = 2, .n_layer = 2 };
+    var gpt = try GPT(config).init(allocator);
     try testing_init.initFromOnes(&gpt, allocator, random, &.{ 1, 2 });
     defer nn.deinitModel(&gpt, allocator);
     var names = std.heap.ArenaAllocator.init(allocator);
@@ -431,8 +433,8 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     var prng = std.Random.DefaultPrng.init(97531);
     const random = prng.random();
 
-    const config = transformer.GPTConfig{ .vocab_size = 128, .block_size = 16, .n_embd = 32, .n_head = 2, .n_layer = 2 };
-    var gpt = try transformer.GPT(config).init(allocator);
+    const config = GPTConfig{ .vocab_size = 128, .block_size = 16, .n_embd = 32, .n_head = 2, .n_layer = 2 };
+    var gpt = try GPT(config).init(allocator);
     try testing_init.initFromOnes(&gpt, allocator, random, &.{ 1, 2 });
     defer nn.deinitModel(&gpt, allocator);
     var names = std.heap.ArenaAllocator.init(allocator);
@@ -667,8 +669,8 @@ test "Model graph JSON export conforms to the published JSON Schema" {
 
     // 1. 多层 GPT：覆盖端口、缓冲区边、折叠变换与残差边
     {
-        const config = transformer.GPTConfig{ .vocab_size = 64, .block_size = 8, .n_embd = 16, .n_head = 2, .n_layer = 2 };
-        var gpt = try transformer.GPT(config).init(allocator);
+        const config = GPTConfig{ .vocab_size = 64, .block_size = 8, .n_embd = 16, .n_head = 2, .n_layer = 2 };
+        var gpt = try GPT(config).init(allocator);
         try testing_init.initFromOnes(&gpt, allocator, random, &.{ 1, 2 });
         defer nn.deinitModel(&gpt, allocator);
         var names = std.heap.ArenaAllocator.init(allocator);
