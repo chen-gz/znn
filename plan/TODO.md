@@ -256,8 +256,35 @@
 
 ### Phase 3 (P2): 现代 LLM 架构与算子完备度 (Modern LLM & Layer Architecture)
 
-- [ ] **3.1 注意力机制升级 (Memory-Efficient & FlashAttention)**
-  - [ ] 实现基于 Tiling 分块与在线 Softmax 统计更新的 **FlashAttention** 前向与反向算子（避免显式存储 $O(T^2)$ 注意力分数矩阵），以显式 `Attention` 算子实现，并统一 `ScaledDotProductAttention`、`Gemma4Attention` 与 `Gemma4Q4Attention`（设计 Phase 3）。
+- [ ] **3.1 注意力机制升级与共享算子模块化 (Attention & Shared Modular Operators)**
+  - [x] **共享注意力掩码与内核 (`backend/attention_mask.zig`, `tensor/attention_kernels.zig`, `autodiff/`)**：
+    - [x] 在 [`backend/attention_mask.zig`](../src/backend/attention_mask.zig) 中统一掩码定义 `Mask = union(enum) { none, causal, sliding: usize }`、`visibleRange`、`isSlidingWindowVisible`（$0 \le p - k < W$）与 `fillAdditiveMask`，供 CPU 张量内核、增量解码与 MLX GPU 卸载共同复用，并修复 Gemma 4 E4B 超窗预填充 ($T > W$) 的滑动窗口加性掩码。
+    - [x] 在 [`tensor/attention_kernels.zig`](../src/tensor/attention_kernels.zig) 中实现单步注意力 `attendOneQuery` 与批处理 `attentionForward`（支持 `Tq != Tk`、因果/滑动窗口掩码与不物化 `repeatKV` 的分组查询注意力 (Grouped-Query Attention, GQA)）；统一 [`Graph.attention`](../src/autodiff/graph_nn.zig)（`OpType.Attention`）前向与反向传播，替代 `ScaledDotProductAttention.forwardCore` 的多算子拆分、[`gemma4.prefillAttention`](../src/models/gemma4.zig) 与 `decodeAttention` 的重复实现。
+    - [x] 统一 [`Tensor.rmsNorm`](../src/tensor/nn_kernels.zig) / [`Graph.rmsNorm`](../src/autodiff/graph_nn.zig) 支持可选权重 `w: ?*Tensor` 与 `weight_offset`；新增一等算子 [`OpType.Softcap`](../src/autodiff/types.zig) / `Graph.softcap` 与 [`OpType.GeluTanh`](../src/autodiff/types.zig)（精确 `erf` 与 `tanh` 近似双版本 [`GeluApproximation`](../src/backend/activation.zig)，Gemma 4 全路径使用 `.tanh`）；统一 `Graph` 各算子 GPU 分支与 CPU 分支一致注册 `Op` 节点，确保计算图导出与设备无关。
+  - [ ] 实现基于 Tiling 分块与在线 Softmax 统计更新的 **FlashAttention** 前向与反向算子（避免显式存储 $O(T^2)$ 注意力分数矩阵）。
+  - [ ] **阶段 P3 — 共享 `nn` 模块抽象 (`src/nn/`)**：
+    - [ ] 扩展 [`nn.RMSNorm`](../src/nn/normalization.zig) 支持可选权重 `weight: ?*Tensor` 与 `RmsNormOptions{ .eps, .weight_offset }`，删除 [`src/models/gemma4.zig`](../src/models/gemma4.zig) 中的 `GemmaRMSNorm` 与 `GemmaUnscaledRMSNorm`。
+    - [ ] 为 [`nn.Linear`](../src/nn/core.zig) 增加 `Options{ .bias: bool = true }`（Gemma 4 使用 `.bias = false`，消除零偏置张量与冗余加偏置算子），并移除 `MLP`、`SwiGLU`、`MLALayer` 与 Gemma 4 MLP 中冗余的手动 3D↔2D `reshape`。
+    - [ ] 将 `Q4Linear` 从 [`src/models/gemma4_q4.zig`](../src/models/gemma4_q4.zig) 下沉至 `src/nn/`（`nn.Q4Linear`），在 [`src/tensor/quant.zig`](../src/tensor/quant.zig) 新增 `quantizeSliceBf16` 替代 `Q4Linear.quantizeFromBF16`，定义 `Linear` 与 `Q4Linear` 共用的投影契约。
+    - [ ] 新增泛型门控前馈模块 `nn.GatedMLP(comptime Proj)`（支持 `.silu | .gelu | .gelu_tanh`），统一替代 `nn.SwiGLU`、`Gemma4MLP` 与 `Gemma4Q4MLP`，并使 `MoELayer` 支持可配置专家激活函数。
+    - [ ] 新增泛型分组查询注意力模块 `nn.GQAAttention(comptime Proj)`（支持 `qk_norm`、无缩放 `v_norm`、`rope: RopeOptions`、`scale`、`mask`、`k_eq_v`、`num_kv_heads` 及共享 `splitHeads`/`mergeHeads`），供 `CausalSelfAttention`、`Gemma4Attention` 与 `Gemma4Q4Attention` 复用。
+    - [ ] 新增 CPU 单层键值缓存原语 `nn.LayerKVCache`（提供 `append`、`writePrefill`、`visibleRange`、`packWindow`/`writeWindow` 及写入前 `ContextWindowExceeded` 校验），使 `nn.KVCache` 与 `Gemma4KVCache.LayerCache` 成为其轻量封装。
+    - [ ] 删除 [`src/nn/llm.zig`](../src/nn/llm.zig) 中重复的 `sampleTopP` / `sampleTopK`，统一使用 `backend.sampling.Sampler`，并更新 `examples/llm_training.zig` 与 `examples/train_shakespeare.zig`；将 `releaseModuleGrads` 与 `createLayerScalar` 迁入 `nn.core`。
+  - [ ] **阶段 P4 — 共享 MLX GPU 组合原语 (`src/backend/`)**：
+    - [ ] 将模型无关的 MLX 组合块（`Rope`、`projectHeads`、`gatedMlp`、`residualScale`、`finalHidden`）提取至 `src/backend/`，消除 `Gemma4GpuLayer.normHeads`/`projectQkv` 与 `gemma4_e4b.zig` 中 4 处内联 QKV 归一化/旋转重复代码；删除 `offload.qkvForwardOffload` / `mlpForwardOffload`。
+    - [ ] 将 `Q4Weights` 重命名为 `QuantWeights`（统一覆盖 4-bit 与 8-bit），统一量化块布局计算 `QuantLayout`（移除 `Gemma4E4BModel.q4ByteLengths`），新增 `QuantWeights.gatherRows(ids, scale)` 替代 E4B 4 处反量化查表缩放副本，并以 `LmHead = union(enum){ dense, quant }` 统一词表输出头。
+    - [ ] 统一 `GpuKvCache`（支持 `dtype` 参数、块式扩容、可选环形滑动窗口、投机解码 `truncate` 回滚与 CPU 窗口同步 `exportWindow`/`importWindow`），替换 12B `Gemma4GpuContext` 每步动态 `concatenate` 的 KV 数组。
+    - [ ] 将设备端对数几率处理（`softcapLogits`、`penalizeDevice`、`deviceCandidates`、`selectToken`、`selectTokenFromHidden`）下沉至 `src/backend/` 并以 `LogitsProcessor` 参数化，解除对 `Gemma4Config` 的依赖。
+    - [ ] 在 [`src/backend/mlx.zig`](../src/backend/mlx.zig) 新增类型安全的 `compileFn(comptime n_in, comptime n_out, Ctx, fn, shapeless)` 封装，统一 5 处手写 `mlx_vector_array_*` 编译闭包样板，并使 E4B 编译闭包直接调用单一前向函数。
+  - [ ] **阶段 P5 — 模型层组装与统一生成前端 (`src/models/`)**：
+    - [ ] 以 `Gemma4AttentionT(Proj)` 与 `Gemma4DecoderLayerT(Attn, Mlp)` 统一 Gemma 4 F32 与 Q4 CPU 模型的前向、预填充、单步解码与残差尾部实现。
+    - [ ] 基于阶段 P4 的 GPU 组合块统一组装 12B `Gemma4GpuLayer` 与 E4B `GpuLayerE4B`。
+    - [ ] 将 `Gemma4Config` 改为配置驱动（显式携带 `layer_types`、按注意力类型的 `rope_parameters`、`attention_k_eq_v`，并将 `kvSourceLayer`/`isKvSharedSource` 迁入配置）；在 `SamplingOptions` 中增加统一的 `repetition_window: ?usize = null`。
+    - [ ] 为 12B `Gemma4Q4ForCausalLM` 提供与 E4B 一致的单一生成入口 `generate(allocator, prompt, GenerateOptions) -> Generation`（`next()`），将 `examples/gemma4.zig` 中的投机解码循环内聚至生成会话中。
+    - [ ] 将 `GPT` / `GPTConfig` / `TransformerDecoder` / `DefaultGPT` 从 `src/nn/transformer.zig` 迁至 `src/models/`，将 `SpeculativeDraftEngine` / `promptLookup` 下沉至 `src/nn/llm.zig`。
+  - [ ] **阶段 P6 — 共享损失核与循环层收敛 (`src/tensor/losses.zig`, `src/nn/recurrent.zig`)**：
+    - [ ] 新增 `src/tensor/losses.zig`（`ceRow`、`dpoTerm`、`grpoTerm`），供 `autodiff/op.zig` 前向与 `backward_core.zig` 反向共用；扩展 `Tensor.softmaxCrossEntropy` 支持任意整型标签；删除 `src/nn/llm.zig` 中手写梯度的即时模式重复实现（`maskedCrossEntropyLoss` 手写梯度分支、即时 `dpoLoss`、`computeGRPOLoss`、`grpoLoss`），并在 `computeGroupAdvantages` 中复用 `backend.vec_math`。
+    - [ ] 在 [`src/nn/recurrent.zig`](../src/nn/recurrent.zig) 中提取泛型时间步展开器 `Recurrent(comptime Cell)`，供 `RNN` 与 `GRU` 共用。
   - [x] 实现通用 **RoPE** 旋转位置编码的前向与反向 Autograd 算子（[`OpType.RoPE`](../src/autodiff/types.zig)、[`Graph.rope`](../src/autodiff/graph_nn.zig)、[`Tensor.rope`](../src/tensor/nn_kernels.zig) 统一接收 [`RopeOptions`](../src/backend/rope.zig)）并接入 [`MLALayer.forward`](../src/nn/attention.zig)。
   - [x] **共享旋转表 [`RopeTable`](../src/tensor/rope.zig)**：CPU 前向内核、RoPE 反向传播 (逆旋转，不再逐元素重算幂函数与三角函数)、`MLALayer` 增量解码 (频率基数随 `MLALayer.rope` 配置，不再写死 10000) 共用一份旋转实现；频率公式与比例旋转位置编码 (Proportional RoPE) 预设 `RopeOptions.proportional` 位于 [`backend/rope.zig`](../src/backend/rope.zig)，Gemma 4 GPU `GpuRope` 的周期表也由它生成。
   - [x] **补全 Split-Half 与 Partial Rotary RoPE 的静态图重演与反向传播支持 (`graph_nn.zig`, `op.zig`, `backward_nn.zig`, `models/gemma4.zig`)**：
