@@ -9,10 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Gemma 4 端到端极速推理引擎 (`src/models/gemma4_e4b.zig`, `src/models/gemma4_q4.zig`, `src/engine.zig`, `src/models.zig`, `examples/`)**:
-  - **端到端推理模块 (`Gemma4E4BEngine`, `Gemma4Q4Engine`)**：对齐 Python `mlx_lm` 与 Hugging Face `pipeline`，封装模型加载、262K 词表零拷贝映射、Metal 算子预热、Instruct 提示词模板注入、流式生成迭代器（`TextStream`）与完整性能基准报告（`GenerationStats`）。
-  - **简化调用入口**：提供 `generateText`（文本输入到文本输出，返回 `TextResult`）与 `streamPrint`（自动流式打印与评测耗时统计），彻底消除调用方手写 Token ID 遍历、时间戳计算与吞吐计算样板代码。
-  - **示例脚本极简化 (`examples/gemma4_e4b.zig`, `examples/gemma4.zig`)**：重构 12B Q4 与 E4B 演示脚本，固化默认参数，剔除繁复的命令行解析和冗余的控制台阶段打印，全流程收敛为简洁的 `engine.streamPrint` 调用。
+- **统一 LLM 推理流水线与模型/引擎职责解耦 (`src/engine/pipeline.zig`, `src/engine/stats.zig`, `src/engine/causal_lm.zig`, `src/engine.zig`, `src/models/`, `examples/`)**:
+  - **架构下沉与单向分层对齐 (`engine` Layer 5 vs `models` Layer 4)**：彻底删除 `src/models/gemma4_e4b.zig` 中的 `Gemma4E4BEngine` 以及 `src/models/gemma4_q4.zig` 中的 `Gemma4Q4Engine`，消除 `models` 包对上层端到端执行流与评测样板代码的耦合；`models` 严格作为纯粹的模型定义库（`Gemma4E4BModel`、`DefaultGemma4Q4`、`GPT`）。
+  - **统一推理流水线 (`engine.LLMPipeline`)**：在 `src/engine/pipeline.zig` 中实现 `LLMPipeline`，提供自动模型架构嗅探（`detectModelArchitecture` 自动识别 E4B 目录与 12B Q4 二进制文件魔数）、多态模型容器（`AnyModel`）、多态生成会话（`AnyGeneration`）、高层流式文本迭代器（`TextStream`，首字解码与精确 TTFT 首字延迟测算）以及统一的 `streamPrint`、`generateText` 与 `load` 接口。
+  - **因果语言模型训练辅助器 (`engine.causal_lm`)**：在 Layer 5 增加 `trainCausalLMStep` 与 `CausalLMStepResult`，完整保留自回归因果语言模型（如 GPT、Gemma 4）的单步训练、交叉熵损失计算、自动微分反向传播与可选梯度裁剪，确保大模型预训练与微调能力。
+  - **统一示例接口 (`examples/gemma4_e4b.zig`, `examples/gemma4.zig`)**：重构 12B Q4 与 E4B 演示脚本直接调用 `zig_ml.engine.LLMPipeline`，无任何历史包袱与重复样板代码。
 
 
 - **Gemma 4 Instruct 对话模板与提示词拼接抽象 (`src/models/gemma4.zig`, `examples/gemma4.zig`, `examples/gemma4_e4b.zig`, `src/models/tests.zig`)**:

@@ -4,12 +4,12 @@
 const std = @import("std");
 
 pub const gemma4 = @import("models/gemma4.zig");
+pub const Gemma4ForCausalLM = gemma4.Gemma4ForCausalLM;
 pub const gemma4_q4 = @import("models/gemma4_q4.zig");
-pub const Gemma4Q4Engine = gemma4_q4.Gemma4Q4Engine;
+pub const DefaultGemma4Q4 = gemma4_q4.DefaultGemma4Q4;
 pub const gemma4_gpu = @import("models/gemma4_gpu.zig");
 pub const gemma4_e4b = @import("models/gemma4_e4b.zig");
 pub const Gemma4E4BModel = gemma4_e4b.Gemma4E4BModel;
-pub const Gemma4E4BEngine = gemma4_e4b.Gemma4E4BEngine;
 
 pub const gpt = @import("models/gpt.zig");
 pub const GPTConfig = gpt.GPTConfig;
