@@ -277,7 +277,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 @memset(out.grad, 1.0);
                 nn.zeroGradModel(&self.swiglu);
                 try graph.backward(out);
-                std.mem.doNotOptimizeAway(self.swiglu.w_gate.weight.grad.ptr);
+                std.mem.doNotOptimizeAway(self.swiglu.gate_proj.weight.grad.ptr);
             }
         };
 
@@ -843,7 +843,7 @@ pub fn runOptimizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
                 errdefer nn.deinitModel(&linear, alloc);
 
                 @memset(linear.weight.grad, 0.05);
-                @memset(linear.bias.grad, 0.01);
+                @memset(linear.bias.?.grad, 0.01);
 
                 const opt = try optim.AdamWOptimizer.init(alloc, &linear, .{
                     .lr = 1e-3,
@@ -889,7 +889,7 @@ pub fn runOptimizerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Alloc
                 errdefer nn.deinitModel(&linear, alloc);
 
                 @memset(linear.weight.grad, 0.05);
-                @memset(linear.bias.grad, 0.01);
+                @memset(linear.bias.?.grad, 0.01);
 
                 const opt = try optim.SGDOptimizer.init(alloc, &linear, .{
                     .lr = 0.01,
@@ -1683,7 +1683,7 @@ fn runWholeModelScaleBenchmarks(
             s: *WholeF32BenchCtx,
             pub fn run(self: *@This()) !void {
                 _ = self.s.arena.reset(.retain_capacity);
-                for (self.s.cache.layers) |*cl| cl.curr_len = 8;
+                for (self.s.cache.layers) |*cl| cl.core.curr_len = 8;
                 var g = autodiff.Graph.init(self.s.arena.allocator(), .{
                     .enable_grad = false,
                     .io = self.s.threaded.io(),
@@ -1825,7 +1825,7 @@ fn runWholeModelScaleBenchmarks(
             s: *WholeQ4BenchCtx,
             pub fn run(self: *@This()) !void {
                 _ = self.s.arena.reset(.retain_capacity);
-                for (self.s.cache.layers) |*cl| cl.curr_len = 8;
+                for (self.s.cache.layers) |*cl| cl.core.curr_len = 8;
                 var g = autodiff.Graph.init(self.s.arena.allocator(), .{
                     .enable_grad = false,
                     .io = self.s.threaded.io(),

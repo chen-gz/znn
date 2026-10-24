@@ -2,6 +2,7 @@ const std = @import("std");
 const testing_init = @import("testing_init.zig");
 const autodiff = @import("../autodiff.zig");
 const tensor = @import("../tensor.zig");
+const backend = @import("../backend.zig");
 const nn = @import("../nn.zig");
 
 const Tensor = tensor.Tensor;
@@ -88,8 +89,6 @@ const computeGroupAdvantages = nn.computeGroupAdvantages;
 const computeGRPOLoss = nn.computeGRPOLoss;
 const grpoLoss = nn.grpoLoss;
 const grpoLossGraph = nn.grpoLossGraph;
-const sampleTopP = nn.sampleTopP;
-const sampleTopK = nn.sampleTopK;
 
 const saveModel = nn.saveModel;
 const loadModel = nn.loadModel;
@@ -199,7 +198,7 @@ test "RMSNorm Module" {
     try graph.backward(y);
 
     var norm_g_grad_sum: f32 = 0.0;
-    for (norm.weight.grad) |g| norm_g_grad_sum += @abs(g);
+    for (norm.weight.?.grad) |g| norm_g_grad_sum += @abs(g);
     try std.testing.expect(norm_g_grad_sum > 0.0);
 
     var x_grad_sum: f32 = 0.0;
@@ -288,7 +287,6 @@ test "CausalSelfAttention Module" {
     const y_eager = try attn.forward(&y_eager_graph, x_3d);
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, 8 }, y_eager.shape.dims[0..y_eager.shape.len]);
 
-    const backend = @import("../backend.zig");
     if (backend.mlx.has_mlx) {
         var y_gpu_graph = autodiff.Graph.init(arena, .{ .enable_grad = false, .device = .gpu });
         defer y_gpu_graph.deinit();
@@ -477,15 +475,15 @@ test "SwiGLU forward and backward autograd" {
     try graph.backward(y);
 
     var gate_grad: f32 = 0.0;
-    for (swiglu.w_gate.weight.grad) |g| gate_grad += @abs(g);
+    for (swiglu.gate_proj.weight.grad) |g| gate_grad += @abs(g);
     try std.testing.expect(gate_grad > 0.0);
 
     var up_grad: f32 = 0.0;
-    for (swiglu.w_up.weight.grad) |g| up_grad += @abs(g);
+    for (swiglu.up_proj.weight.grad) |g| up_grad += @abs(g);
     try std.testing.expect(up_grad > 0.0);
 
     var down_grad: f32 = 0.0;
-    for (swiglu.w_down.weight.grad) |g| down_grad += @abs(g);
+    for (swiglu.down_proj.weight.grad) |g| down_grad += @abs(g);
     try std.testing.expect(down_grad > 0.0);
 }
 
@@ -869,7 +867,7 @@ test "LSTMCell and LSTM forward and backward autograd" {
     defer nn.deinitModel(&cell, allocator);
 
     // Verify forget gate bias is initialized to 1.0
-    for (cell.w_ih_f.bias.data) |b| {
+    for (cell.w_ih_f.bias.?.data) |b| {
         try std.testing.expectApproxEqAbs(@as(f32, 1.0), b, 1e-6);
     }
 
@@ -1009,29 +1007,6 @@ test "GRUCell and GRU forward and backward autograd" {
     for (x_seq_0.grad) |g| x_seq_grad_sum += @abs(g);
     for (x_seq_1.grad) |g| x_seq_grad_sum += @abs(g);
     try std.testing.expect(x_seq_grad_sum > 1e-4);
-}
-
-test "sampleTopP and sampleTopK edge cases and deterministic argmax" {
-    const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(42);
-    const random = prng.random();
-
-    // Logits: highest at index 3 (value 10.0)
-    const logits = [_]f32{ 0.1, 1.0, 2.0, 10.0, 0.5 };
-
-    // 1. sampleTopK with k=1 must be strictly deterministic and return index 3
-    for (0..5) |_| {
-        const picked_k1 = try sampleTopK(&logits, 5, 0.1, 1, random, allocator);
-        try std.testing.expectEqual(@as(u32, 3), picked_k1);
-    }
-
-    // 2. sampleTopK with k >= vocab_size
-    const picked_kall = try sampleTopK(&logits, 5, 1.0, 10, random, allocator);
-    try std.testing.expect(picked_kall < 5);
-
-    // 3. sampleTopP with low temperature and top_p=0.1
-    const picked_p_low = try sampleTopP(&logits, 5, 0.01, 0.1, random, allocator);
-    try std.testing.expectEqual(@as(u32, 3), picked_p_low);
 }
 
 test "computeGroupAdvantages zero-variance and grpoLoss clipping" {
@@ -1302,7 +1277,7 @@ test "Safetensors serialization supports slice modules, optional bias, and out-o
     defer std.Io.Dir.cwd().deleteFile(std.testing.io, ooo_path) catch {};
 
     try loadModel(&lin, std.testing.io, ooo_path, allocator);
-    try std.testing.expectEqualSlices(f32, &[_]f32{ 10.0, 20.0 }, lin.bias.data);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 10.0, 20.0 }, lin.bias.?.data);
     try std.testing.expectEqualSlices(f32, &[_]f32{ 1.0, 2.0, 3.0, 4.0 }, lin.weight.data);
 }
 
@@ -1513,10 +1488,10 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
 
     // Force gate weights so expert 0 wins for positive inputs while keeping finite logits
     @memset(moe.gate.weight.data, 0.0);
-    @memset(moe.gate.bias.data, 0.0);
-    moe.gate.bias.data[0] = 2.0;
-    moe.gate.bias.data[1] = -1.0;
-    moe.gate.bias.data[2] = -1.0;
+    @memset(moe.gate.bias.?.data, 0.0);
+    moe.gate.bias.?.data[0] = 2.0;
+    moe.gate.bias.?.data[1] = -1.0;
+    moe.gate.bias.?.data[2] = -1.0;
 
     var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
@@ -1561,7 +1536,7 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
     try std.testing.expect(gate_w_grad_norm > 0.0);
 
     var gate_b_grad_norm: f32 = 0.0;
-    for (moe.gate.bias.grad) |g| gate_b_grad_norm += @abs(g);
+    for (moe.gate.bias.?.grad) |g| gate_b_grad_norm += @abs(g);
     try std.testing.expect(gate_b_grad_norm > 0.0);
 
     // Inference mode forward should match Graph mode output
@@ -1575,9 +1550,9 @@ test "MoELayer sparse top-k expert execution skips inactive experts" {
     // Static graph replay (`graph.forward()`) when router preference switches from Expert 0 to Expert 2:
     // Because TopK and GatherMatMul have zero host-side `if` graph pruning, replaying the static graph
     // dynamically routes to Expert 2 without rebuilding the graph.
-    moe.gate.bias.data[0] = -1.0;
-    moe.gate.bias.data[1] = -1.0;
-    moe.gate.bias.data[2] = 3.0;
+    moe.gate.bias.?.data[0] = -1.0;
+    moe.gate.bias.?.data[1] = -1.0;
+    moe.gate.bias.?.data[2] = 3.0;
     graph.zeroGrad();
     nn.zeroGradModel(&moe);
     try graph.forward();
@@ -1756,7 +1731,7 @@ test "Linear forward supports 3D and 1D inputs with autograd" {
         3.0, 4.0,
         5.0, 6.0,
     });
-    @memcpy(linear.bias.data, &[_]f32{ 0.1, 0.2 });
+    @memcpy(linear.bias.?.data, &[_]f32{ 0.1, 0.2 });
 
     var graph = autodiff.Graph.initDefault(allocator);
     defer graph.deinit();
@@ -1790,50 +1765,6 @@ test "Linear forward supports 3D and 1D inputs with autograd" {
     // y = [1, 1, 1] * W + [0.1, 0.2] = [1+3+5 + 0.1, 2+4+6 + 0.2] = [9.1, 12.2]
     try std.testing.expectApproxEqAbs(@as(f32, 9.1), y_1d.data[0], 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 12.2), y_1d.data[1], 1e-5);
-}
-
-test "sampleTopP samples from the nucleus of highest-probability tokens" {
-    const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(1);
-    const random = prng.random();
-
-    // p ≈ [0.043, 0.043, 0.043, 0.87]：top_p = 0.05 时核只含词元 3
-    const peaked = [_]f32{ 0, 0, 0, 3 };
-    for (0..200) |_| {
-        try std.testing.expectEqual(@as(u32, 3), try sampleTopP(&peaked, 4, 1.0, 0.05, random, allocator));
-    }
-
-    // 均匀分布 + top_p = 0.5：核为下标最小的两个词元，二者近似各占一半
-    const uniform = [_]f32{ 0, 0, 0, 0 };
-    var counts: [4]usize = @splat(0);
-    for (0..4000) |_| counts[try sampleTopP(&uniform, 4, 1.0, 0.5, random, allocator)] += 1;
-    try std.testing.expectEqual(@as(usize, 0), counts[2] + counts[3]);
-    try std.testing.expect(counts[0] > 1600 and counts[1] > 1600);
-
-    // top_p = 1.0：全词表采样，每个词元都会出现
-    @memset(&counts, 0);
-    for (0..4000) |_| counts[try sampleTopP(&uniform, 4, 1.0, 1.0, random, allocator)] += 1;
-    for (counts) |c| try std.testing.expect(c > 700);
-
-    // top_p = 0：贪心解码
-    const logits = [_]f32{ 0.1, 1.0, 2.0, 10.0, 0.5 };
-    try std.testing.expectEqual(@as(u32, 3), try sampleTopP(&logits, 5, 1.0, 0.0, random, allocator));
-    try std.testing.expectError(error.InvalidArgument, sampleTopP(&logits, 0, 1.0, 0.9, random, allocator));
-}
-
-test "sampleTopK restricts sampling to the k most likely tokens and rejects k = 0" {
-    const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(3);
-    const random = prng.random();
-
-    const logits = [_]f32{ 0.1, 1.0, 2.0, 10.0, 0.5 };
-    var counts: [5]usize = @splat(0);
-    // 高温使前两名概率接近，确保两者都会被采到且其余词元从不出现
-    for (0..2000) |_| counts[try sampleTopK(&logits, 5, 100.0, 2, random, allocator)] += 1;
-    try std.testing.expectEqual(@as(usize, 0), counts[0] + counts[1] + counts[4]);
-    try std.testing.expect(counts[2] > 500 and counts[3] > 500);
-
-    try std.testing.expectError(error.InvalidArgument, sampleTopK(&logits, 5, 1.0, 0, random, allocator));
 }
 
 test "maskedCrossEntropyLoss eager gradient matches the graph version" {

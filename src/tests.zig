@@ -3,6 +3,7 @@ const testing_init = @import("nn/testing_init.zig");
 const VERSION = root.VERSION;
 const version = root.version;
 const tensor = root.tensor;
+const backend = root.backend;
 const nn = root.nn;
 const dataset = root.dataset;
 const autodiff = root.autodiff;
@@ -724,10 +725,12 @@ test "End-to-End LLM Pipeline integration demo" {
 
     // 4. Sampling test
     const mock_logits = [_]f32{ 0.1, 0.4, 2.5, 0.2, 0.8 };
-    const sampled_top_p = try nn.sampleTopP(&mock_logits, 5, 0.7, 0.9, random, allocator);
+    var sampler_p = backend.sampling.Sampler.init(.{ .temperature = 0.7, .top_p = 0.9, .seed = 42 });
+    const sampled_top_p = try sampler_p.sampleLogits(.{}, allocator, &mock_logits);
     try std.testing.expect(sampled_top_p < 5);
 
-    const sampled_top_k = try nn.sampleTopK(&mock_logits, 5, 0.7, 2, random, allocator);
+    var sampler_k = backend.sampling.Sampler.init(.{ .temperature = 0.7, .top_k = 2, .seed = 42 });
+    const sampled_top_k = try sampler_k.sampleLogits(.{}, allocator, &mock_logits);
     try std.testing.expect(sampled_top_k < 5);
 }
 
@@ -1456,7 +1459,7 @@ test "nameModules copies the root name and names survive moving the module" {
     const seq = nn.sequential(.{lin});
     try std.testing.expectEqualStrings("layer_7", seq.layers[0].name.?);
     try std.testing.expectEqualStrings("layer_7.weight", seq.layers[0].weight.getName().?);
-    try std.testing.expectEqualStrings("layer_7.bias", lin.bias.getName().?);
+    try std.testing.expectEqualStrings("layer_7.bias", lin.bias.?.getName().?);
 }
 
 test "Config defaults and initDefault ergonomics across modules" {

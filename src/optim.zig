@@ -1401,7 +1401,7 @@ test "Optimizer loadCheckpoint leaves state untouched on mismatch or truncation"
             try nn.Linear.init(allocator, 2, 2),
         });
         defer nn.deinitModel(&seq, allocator);
-        for ([_]*Tensor{ seq.layers[0].weight, seq.layers[0].bias, seq.layers[1].weight, seq.layers[1].bias }) |t| {
+        for ([_]*Tensor{ seq.layers[0].weight, seq.layers[0].bias.?, seq.layers[1].weight, seq.layers[1].bias.? }) |t| {
             @memset(t.data, 0.1);
         }
 
@@ -1535,7 +1535,7 @@ test "Optimizer loadCheckpoint is transactional on per-parameter length mismatch
         var src = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.002 });
         defer src.deinit();
         @memset(linear.weight.grad, 0.3);
-        @memset(linear.bias.grad, -0.2);
+        @memset(linear.bias.?.grad, -0.2);
         src.step();
         src.step();
         try src.saveCheckpoint(io, path);
@@ -1551,7 +1551,7 @@ test "Optimizer loadCheckpoint is transactional on per-parameter length mismatch
         var dst = try AdamWOptimizer.init(allocator, &linear, .{ .lr = 0.001 });
         defer dst.deinit();
         @memset(linear.weight.grad, 1.0);
-        @memset(linear.bias.grad, 1.0);
+        @memset(linear.bias.?.grad, 1.0);
         dst.step();
         const m_before = try allocator.dupe(f32, dst.m[0]);
         defer allocator.free(m_before);

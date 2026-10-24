@@ -59,7 +59,7 @@ test "Hierarchical module naming and interactive HTML report export" {
 
     // 验证子层参数名称是否按层次正确拼接
     try std.testing.expectEqualStrings("gpt.wte.weight", emb.weight.name.?);
-    try std.testing.expectEqualStrings("gpt.layers.0.ln_1.weight", block.ln_1.weight.name.?);
+    try std.testing.expectEqualStrings("gpt.layers.0.ln_1.weight", block.ln_1.weight.?.name.?);
     try std.testing.expectEqualStrings("gpt.layers.0.attn.q_attn.weight", block.attn.q_attn.weight.name.?);
     try std.testing.expectEqualStrings("gpt.layers.0.attn.k_attn.weight", block.attn.k_attn.weight.name.?);
     try std.testing.expectEqualStrings("gpt.layers.0.attn.v_attn.weight", block.attn.v_attn.weight.name.?);

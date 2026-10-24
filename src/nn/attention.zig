@@ -1,31 +1,145 @@
 const std = @import("std");
+const backend = @import("../backend.zig");
+const vec_math = backend.vec_math;
+const attention_mask = backend.attention_mask;
 const tensor = @import("../tensor.zig");
-const vec_math = @import("../backend.zig").vec_math;
 const attention_kernels = tensor.attention_kernels;
 const autodiff = @import("../autodiff.zig");
 const core = @import("core.zig");
 const deinitModel = core.deinitModel;
 const enterModuleScope = core.enterModuleScope;
+const normalization = @import("normalization.zig");
 
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
 const Linear = core.Linear;
+const RMSNorm = normalization.RMSNorm;
+const InitOptions = core.InitOptions;
 const createPersistentTensor = core.createPersistentTensor;
+const createCacheTensor = core.createCacheTensor;
 const freePersistentTensor = core.freePersistentTensor;
 
 // ============================================================================
-// 1. 键值缓存 (Key-Value Cache, KVCache)
+// 1. 键值缓存 (Key-Value Cache, KVCache & LayerKVCache)
 // ============================================================================
 
-/// 分配全零、无梯度的多维缓存张量 (由调用方分配器持有，`freePersistentTensor` 释放)
-fn createCacheTensor(allocator: std.mem.Allocator, dims: []const usize) !*Tensor {
-    var numel: usize = 1;
-    for (dims) |d| numel *= d;
-    const t = try createPersistentTensor(allocator, 1, numel, false);
-    t.shape = Shape.init(dims);
-    t.strides = tensor.computeContiguousStrides(t.shape);
-    return t;
-}
+/// 单层键值缓存 (Layer Key-Value Cache) 原语：
+/// 维护当前层键 (Key, K) 与值 (Value, V) 的连续显存/内存缓冲区 [num_kv_heads, max_seq_len, head_dim]，
+/// 支持追加单步词元 (append)、预填充写入 (writePrefill)、可见窗口打包 (packWindow) 与窗口覆写 (writeWindow)。
+pub const LayerKVCache = struct {
+    k: []f32,
+    v: []f32,
+    num_kv_heads: usize,
+    head_dim: usize,
+    max_seq_len: usize,
+    sliding_window: ?usize = null,
+    curr_len: usize = 0,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        num_kv_heads: usize,
+        head_dim: usize,
+        max_seq_len: usize,
+        sliding_window: ?usize,
+    ) !LayerKVCache {
+        const numel = num_kv_heads * max_seq_len * head_dim;
+        const k = try allocator.alloc(f32, numel);
+        errdefer allocator.free(k);
+        const v = try allocator.alloc(f32, numel);
+        @memset(k, 0.0);
+        @memset(v, 0.0);
+        return LayerKVCache{
+            .k = k,
+            .v = v,
+            .num_kv_heads = num_kv_heads,
+            .head_dim = head_dim,
+            .max_seq_len = max_seq_len,
+            .sliding_window = sliding_window,
+            .curr_len = 0,
+        };
+    }
+
+    pub fn deinit(self: *LayerKVCache, allocator: std.mem.Allocator) void {
+        allocator.free(self.k);
+        allocator.free(self.v);
+    }
+
+    pub fn reset(self: *LayerKVCache) void {
+        self.curr_len = 0;
+    }
+
+    pub inline fn windowLen(self: *const LayerKVCache) usize {
+        if (self.sliding_window) |w| return @min(self.curr_len, w);
+        return self.curr_len;
+    }
+
+    pub fn visibleRange(self: *const LayerKVCache, pos: usize) attention_mask.KeyRange {
+        const mask: attention_mask.Mask = if (self.sliding_window) |w|
+            .{ .sliding = w }
+        else
+            .causal;
+        return attention_mask.visibleRange(pos, 0, self.curr_len, mask);
+    }
+
+    pub fn append(self: *LayerKVCache, step_k: []const f32, step_v: []const f32) !void {
+        if (self.curr_len >= self.max_seq_len) return error.ContextWindowExceeded;
+        const hd = self.head_dim;
+        const expected = self.num_kv_heads * hd;
+        if (step_k.len != expected or step_v.len != expected) return error.ShapeMismatch;
+        for (0..self.num_kv_heads) |kv_h| {
+            const dest = (kv_h * self.max_seq_len + self.curr_len) * hd;
+            const src = kv_h * hd;
+            @memcpy(self.k[dest .. dest + hd], step_k[src .. src + hd]);
+            @memcpy(self.v[dest .. dest + hd], step_v[src .. src + hd]);
+        }
+        self.curr_len += 1;
+    }
+
+    pub fn writePrefill(self: *LayerKVCache, k_seq: []const f32, v_seq: []const f32, seq_len: usize) !void {
+        if (seq_len > self.max_seq_len) return error.ContextWindowExceeded;
+        const hd = self.head_dim;
+        const expected = self.num_kv_heads * seq_len * hd;
+        if (k_seq.len != expected or v_seq.len != expected) return error.ShapeMismatch;
+        for (0..self.num_kv_heads) |kv_h| {
+            const dest = kv_h * self.max_seq_len * hd;
+            const src = kv_h * seq_len * hd;
+            @memcpy(self.k[dest .. dest + seq_len * hd], k_seq[src .. src + seq_len * hd]);
+            @memcpy(self.v[dest .. dest + seq_len * hd], v_seq[src .. src + seq_len * hd]);
+        }
+        self.curr_len = seq_len;
+    }
+
+    pub fn packWindow(self: *const LayerKVCache, out_k: []f32, out_v: []f32) !void {
+        const win = self.windowLen();
+        const hd = self.head_dim;
+        const n = self.num_kv_heads * win * hd;
+        if (out_k.len != n or out_v.len != n) return error.ShapeMismatch;
+        const start = self.curr_len - win;
+        for (0..self.num_kv_heads) |kv_h| {
+            const src = (kv_h * self.max_seq_len + start) * hd;
+            const dst = kv_h * win * hd;
+            @memcpy(out_k[dst .. dst + win * hd], self.k[src .. src + win * hd]);
+            @memcpy(out_v[dst .. dst + win * hd], self.v[src .. src + win * hd]);
+        }
+    }
+
+    pub fn writeWindow(self: *LayerKVCache, packed_k: []const f32, packed_v: []const f32, win_len: usize, len: usize) !void {
+        if (len > self.max_seq_len) return error.ContextWindowExceeded;
+        const required = if (self.sliding_window) |w| @min(len, w) else len;
+        if (win_len > len or win_len < required) return error.ShapeMismatch;
+        const hd = self.head_dim;
+        const n = self.num_kv_heads * win_len * hd;
+        if (packed_k.len != n or packed_v.len != n) return error.ShapeMismatch;
+        const start = len - win_len;
+        for (0..self.num_kv_heads) |kv_h| {
+            const dst = (kv_h * self.max_seq_len + start) * hd;
+            const src = kv_h * win_len * hd;
+            @memcpy(self.k[dst .. dst + win_len * hd], packed_k[src .. src + win_len * hd]);
+            @memcpy(self.v[dst .. dst + win_len * hd], packed_v[src .. src + win_len * hd]);
+        }
+        self.curr_len = len;
+    }
+};
 
 /// 键值缓存 (Key-Value Cache, KVCache)，用于大语言模型 (Large Language Model, LLM) 自回归增量推理 (O(T) 生成复杂度)
 pub const KVCache = struct {
@@ -56,12 +170,281 @@ pub const KVCache = struct {
     pub fn reset(self: *KVCache) void {
         self.curr_len = 0;
     }
+
+    pub fn asLayer(self: *KVCache) LayerKVCache {
+        const n_head = self.k.shape.dims[1];
+        const head_dim = self.k.shape.dims[3];
+        return LayerKVCache{
+            .k = self.k.data,
+            .v = self.v.data,
+            .num_kv_heads = n_head,
+            .head_dim = head_dim,
+            .max_seq_len = self.max_len,
+            .sliding_window = null,
+            .curr_len = self.curr_len,
+        };
+    }
 };
 
 // ============================================================================
-// 2. 注意力机制：缩放点积注意力 (Scaled Dot-Product Attention, SDPA)、
-//    因果自注意力 (Causal Self-Attention) 与多头潜在注意力 (Multi-Head Latent Attention, MLA)
+// 2. 注意力机制：头拆分/合并辅助函数、缩放点积注意力 (SDPA)、
+//    泛型分组查询注意力 (GQAAttention)、因果自注意力 (CausalSelfAttention) 与多头潜在注意力 (MLA)
 // ============================================================================
+
+/// 将 2D/3D 张量 [B, T, num_heads * head_dim] 拆分为 4D 头张量并转置为 [B, num_heads, T, head_dim]
+pub fn splitHeads(graph: *autodiff.Graph, x: *Tensor, B: usize, T: usize, num_heads: usize, head_dim: usize) !*Tensor {
+    const x_4d = try graph.reshape(x, &.{ B, T, num_heads, head_dim });
+    return graph.transposeND(x_4d, 1, 2);
+}
+
+/// 将 4D 头张量 [B, num_heads, T, head_dim] 转置并合并为 3D 张量 [B, T, num_heads * head_dim]
+pub fn mergeHeads(graph: *autodiff.Graph, y_4d: *Tensor, B: usize, T: usize, num_heads: usize, head_dim: usize) !*Tensor {
+    const y_trans = try graph.transposeND(y_4d, 1, 2);
+    return graph.reshape(y_trans, &.{ B, T, num_heads * head_dim });
+}
+
+/// 泛型分组查询注意力 (Grouped-Query Attention, GQA) 模块
+/// 统一适用于全精度 Linear 与量化 Q4Linear，
+/// 支持标准 MHA (num_kv_heads == num_heads)、GQA (num_kv_heads < num_heads) 与 MQA (num_kv_heads == 1)，
+/// 可配置 qk_norm、无缩放 v_norm、RoPE、注意力缩放 scale、因果/滑动窗口掩码 mask 与 k_eq_v。
+pub fn GQAAttention(comptime Proj: type) type {
+    return struct {
+        const Self = @This();
+
+        q_proj: Proj,
+        k_proj: Proj,
+        v_proj: ?Proj,
+        o_proj: Proj,
+
+        q_norm: ?RMSNorm = null,
+        k_norm: ?RMSNorm = null,
+        v_norm: ?RMSNorm = null,
+
+        hidden_size: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        sliding_window: usize = 0,
+        rope: ?tensor.RopeOptions = null,
+        scale: ?f32 = null,
+        mask: tensor.AttentionMask = .causal,
+
+        name: ?[]const u8 = null,
+        module_type: []const u8 = "GQAAttention",
+
+        pub const Options = struct {
+            num_kv_heads: ?usize = null,
+            head_dim: ?usize = null,
+            sliding_window: usize = 0,
+            bias: bool = false,
+            k_eq_v: bool = false,
+            qk_norm: bool = false,
+            qk_norm_eps: f32 = 1e-6,
+            v_norm: bool = false,
+            v_norm_eps: f32 = 1e-6,
+            rope: ?tensor.RopeOptions = null,
+            scale: ?f32 = null,
+            mask: tensor.AttentionMask = .causal,
+
+            pub fn defaultOptions() Options {
+                return .{};
+            }
+        };
+
+        pub fn init(
+            allocator: std.mem.Allocator,
+            hidden_size: usize,
+            num_heads: usize,
+            options: Options,
+        ) !Self {
+            if (num_heads == 0) return error.InvalidConfiguration;
+            const n_kv = options.num_kv_heads orelse num_heads;
+            if (n_kv == 0 or num_heads % n_kv != 0) return error.InvalidConfiguration;
+
+            const hd = options.head_dim orelse (hidden_size / num_heads);
+            const q_dim = num_heads * hd;
+            const kv_dim = n_kv * hd;
+
+            const q_proj = if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, hidden_size, q_dim, .{ .bias = options.bias })
+            else
+                try Proj.init(allocator, hidden_size, q_dim);
+            errdefer deinitModel(&q_proj, allocator);
+
+            const k_proj = if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, hidden_size, kv_dim, .{ .bias = options.bias })
+            else
+                try Proj.init(allocator, hidden_size, kv_dim);
+            errdefer deinitModel(&k_proj, allocator);
+
+            const v_proj: ?Proj = if (options.k_eq_v)
+                null
+            else if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, hidden_size, kv_dim, .{ .bias = options.bias })
+            else
+                try Proj.init(allocator, hidden_size, kv_dim);
+            errdefer if (v_proj) |*vp| deinitModel(vp, allocator);
+
+            const o_proj = if (@hasDecl(Proj, "initWithOptions"))
+                try Proj.initWithOptions(allocator, q_dim, hidden_size, .{ .bias = options.bias })
+            else
+                try Proj.init(allocator, q_dim, hidden_size);
+            errdefer deinitModel(&o_proj, allocator);
+
+            const q_norm: ?RMSNorm = if (options.qk_norm) try RMSNorm.init(allocator, hd, options.qk_norm_eps) else null;
+            errdefer if (q_norm) |*qn| deinitModel(qn, allocator);
+
+            const k_norm: ?RMSNorm = if (options.qk_norm) try RMSNorm.init(allocator, hd, options.qk_norm_eps) else null;
+            errdefer if (k_norm) |*kn| deinitModel(kn, allocator);
+
+            const v_norm: ?RMSNorm = if (options.v_norm) RMSNorm.initUnscaled(.{ .eps = options.v_norm_eps }) else null;
+
+            return Self{
+                .q_proj = q_proj,
+                .k_proj = k_proj,
+                .v_proj = v_proj,
+                .o_proj = o_proj,
+                .q_norm = q_norm,
+                .k_norm = k_norm,
+                .v_norm = v_norm,
+                .hidden_size = hidden_size,
+                .num_heads = num_heads,
+                .num_kv_heads = n_kv,
+                .head_dim = hd,
+                .sliding_window = options.sliding_window,
+                .rope = options.rope,
+                .scale = options.scale,
+                .mask = options.mask,
+            };
+        }
+
+        pub fn initEmpty(
+            hidden_size: usize,
+            num_heads: usize,
+            num_kv_heads: usize,
+            head_dim: usize,
+            k_eq_v: bool,
+            qk_norm_eps: f32,
+            v_norm_eps: f32,
+            sliding_window: usize,
+            rope: ?tensor.RopeOptions,
+            mask: tensor.AttentionMask,
+        ) Self {
+            if (Proj == core.Q4Linear) {
+                const q_dim = num_heads * head_dim;
+                const kv_dim = num_kv_heads * head_dim;
+                return Self{
+                    .q_proj = Proj.fromBlocks(hidden_size, q_dim, &.{}),
+                    .k_proj = Proj.fromBlocks(hidden_size, kv_dim, &.{}),
+                    .v_proj = if (k_eq_v) null else Proj.fromBlocks(hidden_size, kv_dim, &.{}),
+                    .o_proj = Proj.fromBlocks(q_dim, hidden_size, &.{}),
+                    .q_norm = RMSNorm.initUnscaled(.{ .eps = qk_norm_eps }),
+                    .k_norm = RMSNorm.initUnscaled(.{ .eps = qk_norm_eps }),
+                    .v_norm = RMSNorm.initUnscaled(.{ .eps = v_norm_eps }),
+                    .hidden_size = hidden_size,
+                    .num_heads = num_heads,
+                    .num_kv_heads = num_kv_heads,
+                    .head_dim = head_dim,
+                    .sliding_window = sliding_window,
+                    .rope = rope,
+                    .scale = 1.0,
+                    .mask = mask,
+                };
+            }
+            @compileError("initEmpty only supported for Q4Linear");
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            if (@hasDecl(Proj, "deinit")) {
+                self.q_proj.deinit(allocator);
+                self.k_proj.deinit(allocator);
+                if (self.v_proj) |*vp| vp.deinit(allocator);
+                self.o_proj.deinit(allocator);
+            } else {
+                deinitModel(&self.q_proj, allocator);
+                deinitModel(&self.k_proj, allocator);
+                if (self.v_proj) |*vp| deinitModel(vp, allocator);
+                deinitModel(&self.o_proj, allocator);
+            }
+            if (self.q_norm) |*qn| deinitModel(qn, allocator);
+            if (self.k_norm) |*kn| deinitModel(kn, allocator);
+        }
+
+        pub fn resetParameters(self: *Self, random: std.Random, options: InitOptions) void {
+            if (@hasDecl(Proj, "resetParameters")) {
+                self.q_proj.resetParameters(random, options);
+                self.k_proj.resetParameters(random, options);
+                if (self.v_proj) |*vp| vp.resetParameters(random, options);
+                self.o_proj.resetParameters(random, options);
+            }
+        }
+
+        pub const formula = "\\text{Attn}(Q, K, V) = \\text{softmax}\\left(\\frac{Q K^T}{\\sqrt{d_k}} + M\\right) V W_o";
+
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+            return self.forwardPrefillOptional(graph, x, null);
+        }
+
+        pub fn forwardPrefill(self: *const Self, graph: *autodiff.Graph, x: *Tensor, layer_cache: *LayerKVCache) !*Tensor {
+            return self.forwardPrefillOptional(graph, x, layer_cache);
+        }
+
+        fn forwardPrefillOptional(self: *const Self, graph: *autodiff.Graph, x: *Tensor, layer_cache: ?*LayerKVCache) !*Tensor {
+            const module_scope = try enterModuleScope(graph, self);
+            defer module_scope.exit();
+
+            const B = x.shape.dims[0];
+            const T = x.shape.dims[1];
+            const nh = self.num_heads;
+            const n_kv = self.num_kv_heads;
+            const hd = self.head_dim;
+            const groups = nh / n_kv;
+
+            const q_raw = try self.q_proj.forward(graph, x);
+            const k_raw = try self.k_proj.forward(graph, x);
+            const v_raw = if (self.v_proj) |*vp| try vp.forward(graph, x) else k_raw;
+
+            const q_normed = if (self.q_norm) |*qn| blk: {
+                const q_heads = try graph.reshape(q_raw, &.{ B * T * nh, hd });
+                break :blk try qn.forward(graph, q_heads);
+            } else q_raw;
+
+            const k_normed = if (self.k_norm) |*kn| blk: {
+                const k_heads = try graph.reshape(k_raw, &.{ B * T * n_kv, hd });
+                break :blk try kn.forward(graph, k_heads);
+            } else k_raw;
+
+            const v_normed = if (self.v_norm) |*vn| blk: {
+                const v_heads = try graph.reshape(v_raw, &.{ B * T * n_kv, hd });
+                break :blk try vn.forward(graph, v_heads);
+            } else v_raw;
+
+            var q = try splitHeads(graph, q_normed, B, T, nh, hd);
+            var k = try splitHeads(graph, k_normed, B, T, n_kv, hd);
+            const v = try splitHeads(graph, v_normed, B, T, n_kv, hd);
+
+            if (self.rope) |rope_opts| {
+                q = try graph.rope(q, 0, rope_opts);
+                k = try graph.rope(k, 0, rope_opts);
+            }
+
+            if (layer_cache) |cache| {
+                if (B != 1) return error.InvalidBatchSize;
+                try cache.writePrefill(k.data, v.data, T);
+            }
+
+            const scale = self.scale orelse (1.0 / @sqrt(@as(f32, @floatFromInt(hd))));
+            const y_4d = try graph.attention(q, k, v, .{
+                .scale = scale,
+                .mask = self.mask,
+                .kv_groups = groups,
+            });
+
+            const y_3d = try mergeHeads(graph, y_4d, B, T, nh, hd);
+            return try self.o_proj.forward(graph, y_3d);
+        }
+    };
+}
 
 /// 缩放点积注意力核心模块 (Scaled Dot-Product Attention, SDPA)
 /// 负责对四维 (4-Dimensional, 4D) 多头张量 Q \in [B, H_q, T_q, d_k]、K \in [B, H_kv, T_k, d_k] 与 V \in [B, H_kv, T_k, d_v] 执行核心注意力运算：
@@ -185,48 +568,25 @@ pub const CausalSelfAttention = struct {
         const n_kv = self.num_kv_heads;
         const hs = C / nh; // 每个注意力头的维度大小 (Head Size, hs)
 
-        // 1. 将三维 (3-Dimensional, 3D) 输入 [B, T, C] 展平为二维 (2-Dimensional, 2D) [B*T, C] 便于做常规的线性矩阵映射
-        const x_2d = try graph.reshape(x, &.{ B * T, C });
+        // 1. 投影计算查询 (Query, Q)、键 (Key, K) 与值 (Value, V)
+        const q_raw = try self.q_attn.forward(graph, x);
+        const k_raw = try self.k_attn.forward(graph, x);
+        const v_raw = try self.v_attn.forward(graph, x);
 
-        // 2. 投影计算查询 (Query, Q)、键 (Key, K) 与值 (Value, V)
-        const q_2d = try self.q_attn.forward(graph, x_2d);
-        const k_2d = try self.k_attn.forward(graph, x_2d);
-        const v_2d = try self.v_attn.forward(graph, x_2d);
+        // 2. 拆分多头并转置: [B, T, nh*hs] -> [B, nh, T, hs]
+        const q = try splitHeads(graph, q_raw, B, T, nh, hs);
+        const k = try splitHeads(graph, k_raw, B, T, n_kv, hs);
+        const v = try splitHeads(graph, v_raw, B, T, n_kv, hs);
 
-        // 3. 将投影后的数据重新塑形为四维 (4-Dimensional, 4D) 多头结构:
-        // q: [B*T, C] -> [B, T, nh, hs]
-        // k, v: [B*T, n_kv*hs] -> [B, T, n_kv, hs]
-        const q_4d = try graph.reshape(q_2d, &.{ B, T, nh, hs });
-        const k_4d = try graph.reshape(k_2d, &.{ B, T, n_kv, hs });
-        const v_4d = try graph.reshape(v_2d, &.{ B, T, n_kv, hs });
-
-        // 4. 转置特征轴，使得注意力头 (Head) 维度排在前部以进行批量矩阵乘法 (Batch Matrix Multiplication, BMM)
-        // q: [B, T, nh, hs] -> [B, nh, T, hs]
-        // k, v: [B, T, n_kv, hs] -> [B, n_kv, T, hs]
-        const q = try graph.transposeND(q_4d, 1, 2);
-        const k = try graph.transposeND(k_4d, 1, 2);
-        const v = try graph.transposeND(v_4d, 1, 2);
-
-        // 5. 委托给缩放点积注意力核心子模块 (ScaledDotProductAttention) 执行 softmax(Q K^T / sqrt(hs) + M) V；
+        // 3. 委托给缩放点积注意力核心子模块 (ScaledDotProductAttention) 执行 softmax(Q K^T / sqrt(hs) + M) V；
         // n_kv < nh 时按分组查询注意力 (Grouped-Query Attention, GQA) 由每个键值头服务 nh / n_kv 个查询头，不复制键值
         const y_4d = try self.core.forward(graph, q, k, v);
 
-        // 6. 将多头的输出转置回去，重新展平拼接成单头向量表示
-        // 转置: [B, nh, T, hs] -> [B, T, nh, hs]
-        const y_trans = try graph.transposeND(y_4d, 1, 2);
+        // 4. 将多头的输出转置回去并整合: [B, nh, T, hs] -> [B, T, C]
+        const y_3d = try mergeHeads(graph, y_4d, B, T, nh, hs);
 
-        // 整合形状为三维 (3-Dimensional, 3D): [B, T, nh * hs] = [B, T, C]
-        const y_3d = try graph.reshape(y_trans, &.{ B, T, C });
-
-        // 7. 将输出展平为二维 (2-Dimensional, 2D)，以便穿过最后的输出投影线性层 (Output Projection, c_proj)
-        // 重塑: [B, T, C] -> [B*T, C]
-        const y_2d = try graph.reshape(y_3d, &.{ B * T, C });
-
-        // 投影输出映射: [B*T, C] -> [B*T, C]
-        const out_2d = try self.c_proj.forward(graph, y_2d);
-
-        // 8. 恢复并输出最终的三维 (3-Dimensional, 3D) 表示: [B, T, C]
-        return try graph.reshape(out_2d, &.{ B, T, C });
+        // 5. 投影输出映射: [B, T, C] -> [B, T, C]
+        return try self.c_proj.forward(graph, y_3d);
     }
 
     /// 基于键值缓存 (Key-Value Cache, KVCache) 的单步增量自回归推理 (O(1) 增量键值计算，O(T) 点积注意力)
@@ -418,22 +778,17 @@ pub const MLALayer = struct {
         const dr = self.d_r;
         const q_head_dim = hd + dr;
 
-        var x_2d = x;
-        if (is_3d) {
-            x_2d = try graph.reshape(x, &.{ B * T, C });
-        }
-
         // 1. 投影查询 (Query, Q)、潜在键值向量 (Latent Key-Value, c_kv) 与解耦旋转位置编码键 (Decoupled Rotary Position Embedding Key, k_r)
-        const q_all = try self.q_proj.forward(graph, x_2d); // [B*T, nh * (hd + dr)]
+        const q_all = try self.q_proj.forward(graph, x);
 
-        const c_kv = try self.w_dkv.forward(graph, x_2d); // [B*T, d_c]
+        const c_kv = try self.w_dkv.forward(graph, x);
 
-        const k_r_2d = try self.w_kr.forward(graph, x_2d); // [B*T, d_r]
+        const k_r = try self.w_kr.forward(graph, x);
 
         // 2. 上投影还原内容键 (Content Key, Kc) 与内容值 (Content Value, Vc)
-        const k_c_2d = try self.w_uk.forward(graph, c_kv); // [B*T, nh * hd]
+        const k_c = try self.w_uk.forward(graph, c_kv);
 
-        const v_c_2d = try self.w_uv.forward(graph, c_kv); // [B*T, nh * hd]
+        const v_c = try self.w_uv.forward(graph, c_kv);
 
         // 3. 重塑并转置为四维 (4-Dimensional, 4D) 多头结构，对查询 (Query) 的旋转位置编码 (Rotary Position Embedding, RoPE) 子空间与共享 k_r 施加旋转位置编码
         const q_4d = try graph.reshape(q_all, &.{ B, T, nh, q_head_dim });
@@ -442,17 +797,17 @@ pub const MLALayer = struct {
         q_rope.rotary_offset += hd;
         const q_rot = try graph.rope(q_trans, 0, q_rope);
 
-        const k_c_4d = try graph.reshape(k_c_2d, &.{ B, T, nh, hd });
-        const k_c = try graph.transposeND(k_c_4d, 1, 2);
+        const k_c_4d = try graph.reshape(k_c, &.{ B, T, nh, hd });
+        const k_c_trans = try graph.transposeND(k_c_4d, 1, 2);
 
-        const k_r_4d = try graph.reshape(k_r_2d, &.{ B, 1, T, dr });
+        const k_r_4d = try graph.reshape(k_r, &.{ B, 1, T, dr });
         const k_r_rot = try graph.rope(k_r_4d, 0, self.rope);
 
         const k_r_heads = if (nh > 1) try graph.repeatKV(k_r_rot, nh) else k_r_rot;
 
-        const k_full = try graph.concat(&.{ k_c, k_r_heads }, 3);
+        const k_full = try graph.concat(&.{ k_c_trans, k_r_heads }, 3);
 
-        const v_4d = try graph.reshape(v_c_2d, &.{ B, T, nh, hd });
+        const v_4d = try graph.reshape(v_c, &.{ B, T, nh, hd });
         const v = try graph.transposeND(v_4d, 1, 2);
 
         // 4. 委托给缩放点积注意力核心 (Scaled Dot-Product Attention, SDPA): Softmax((Q * K^T) / sqrt(hd + dr) + M) * V
@@ -460,16 +815,10 @@ pub const MLALayer = struct {
 
         // 5. 合并多头并经输出投影 (Output Projection, o_proj) 输出特征
         const y_trans = try graph.transposeND(y_4d, 1, 2);
-
-        const y_2d = try graph.reshape(y_trans, &.{ B * T, nh * hd });
-
-        const out_2d = try self.o_proj.forward(graph, y_2d);
-
-        if (is_3d) {
-            return try graph.reshape(out_2d, &.{ B, T, C });
-        }
-
-        return out_2d;
+        const y_merged = try graph.reshape(y_trans, &.{ B, T, nh * hd });
+        const out = try self.o_proj.forward(graph, y_merged);
+        if (is_3d) return out;
+        return try graph.reshape(out, &.{ T, C });
     }
 
     /// 多头潜在注意力 (Multi-Head Latent Attention, MLA) 推理期权重矩阵吸收 (Weight Matrix Absorption) 单步自回归生成
@@ -558,7 +907,11 @@ pub const MLALayer = struct {
                 // 还原头输出: y_h = (W_i^{UV})^T u_h + b_i^{UV} \in R^{hd}
                 // 注意力权重之和为 1，因此值偏置 b^{UV} 原样出现在输出中；按 c -> k 顺序连续读取 W^{UV} 的行
                 const y_head_dest = y_concat[(b * nh + h) * hd .. (b * nh + h + 1) * hd];
-                @memcpy(y_head_dest, self.w_uv.bias.data[h * hd .. (h + 1) * hd]);
+                if (self.w_uv.bias) |bias| {
+                    @memcpy(y_head_dest, bias.data[h * hd .. (h + 1) * hd]);
+                } else {
+                    @memset(y_head_dest, 0.0);
+                }
                 for (u_latent, 0..) |u, c_idx| {
                     vec_math.axpy(y_head_dest, u, self.w_uv.weight.data[c_idx * kv_cols + h * hd .. c_idx * kv_cols + (h + 1) * hd]);
                 }
