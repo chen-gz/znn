@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **共享 MLX GPU 组合原语与量化抽象下沉 (`src/backend/`, `src/models/`, `src/nn/`)**:
+  - **下沉 MLX GPU 组合原语 (`src/backend/mlx_blocks.zig`)**：新增 `Rope`、`projectHeads`、`gatedMlp`、`residualScale` 与 `finalHidden`，统一单步解码与多步预填充的 Q/K/V 头归一化与旋转、门控多层感知机（支持门控/上升融合与独立量化矩阵）以及带缩放残差连接；删除 `offload.qkvForwardOffload` 与 `mlpForwardOffload`。
+  - **通用量化权重与量化块布局 (`QuantWeights`, `QuantLayout`, `LmHead`)**：将 `Q4Weights` 重命名并推广为通用 `QuantWeights`，新增 `QuantWeights.gatherRows(ids, scale)` 统一词元嵌入查表与反量化缩放；统一量化布局计算 `QuantLayout` 并替换 `Gemma4E4BModel.q4ByteLengths`；引入统一词表输出头 `LmHead = union(enum) { dense, quant }`。
+  - **统一 GPU 键值缓存原语 (`src/backend/offload.zig::GpuKvCache`)**：支持 `dtype` 参数、块式扩容、可选环形滑动窗口、投机解码回滚（`truncate`）与 CPU 双向同步（`importWindow` / `exportWindow`）；在 12B `Gemma4GpuContext` 中替换原先每步动态 `concatenate` 的 KV 数组，并在投机验证中直接调用 `truncate`。
+  - **设备端对数几率处理与候选生成 (`src/backend/logits_processor.zig`)**：下沉 `softcapLogits`、`penalizeDevice`、`deviceCandidates`、`selectToken`、`selectTokenFromHidden` 以及面向对象的 `LogitsProcessor`，彻底解耦对特定模型配置 `Gemma4Config` 的依赖。
+  - **类型安全 MLX 编译闭包封装 (`src/backend/mlx.zig::compileFn`)**：提供泛型与编译期反射驱动的 `compileFn`，消除手写 `mlx_vector_array_*` 的 C API 样板代码与类型转换开销；使 E4B 步首预计算（`PlePrepContext`）与层尾计算（`GpuLayerE4B.forwardTail`）直接复用同一前向函数。
+
 - **共享 `nn` 模块抽象与架构原语统一 (`src/nn/`, `src/models/`, `src/tensor/quant.zig`, `examples/`)**:
   - **统一可缩放与无缩放 `RMSNorm` (`nn.RMSNorm`)**：扩展 `RMSNorm` 支持可选权重 `weight: ?*Tensor`、偏置偏移 `weight_offset` 与 `initUnscaled`，删除 `src/models/gemma4.zig` 中专有的 `GemmaRMSNorm` 与 `GemmaUnscaledRMSNorm`。
   - **`Linear` 支持可选偏置并消除 3D↔2D 重塑冗余 (`nn.Linear`)**：新增 `Linear.Options{ .bias: bool = true }` 与 `Linear.initWithOptions`；重构 `Linear.forward` 直接接收任意维度张量并在内部利用批量/2D SGEMM 处理，彻底移除 `MLP`、`SwiGLU`、`MLALayer` 与 `Gemma4MLP` 中冗余的手动 3D↔2D `reshape`。

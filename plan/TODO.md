@@ -270,12 +270,12 @@
     - [x] 新增泛型分组查询注意力模块 `nn.GQAAttention(comptime Proj)`（支持 `qk_norm`、无缩放 `v_norm`、`rope: RopeOptions`、`scale`、`mask`、`k_eq_v`、`num_kv_heads` 及共享 `splitHeads`/`mergeHeads`），供 `CausalSelfAttention`、`Gemma4Attention` 与 `Gemma4Q4Attention` 复用。
     - [x] 新增 CPU 单层键值缓存原语 `nn.LayerKVCache`（提供 `append`、`writePrefill`、`visibleRange`、`packWindow`/`writeWindow` 及写入前 `ContextWindowExceeded` 校验），使 `nn.KVCache` 与 `Gemma4KVCache.LayerCache` 成为其轻量封装。
     - [x] 删除 [`src/nn/llm.zig`](../src/nn/llm.zig) 中重复的 `sampleTopP` / `sampleTopK`，统一使用 `backend.sampling.Sampler`，并更新 `examples/llm_training.zig` 与 `examples/train_shakespeare.zig`；将 `releaseModuleGrads` 与 `createLayerScalar` 迁入 `nn.core`。
-  - [ ] **阶段 P4 — 共享 MLX GPU 组合原语 (`src/backend/`)**：
-    - [ ] 将模型无关的 MLX 组合块（`Rope`、`projectHeads`、`gatedMlp`、`residualScale`、`finalHidden`）提取至 `src/backend/`，消除 `Gemma4GpuLayer.normHeads`/`projectQkv` 与 `gemma4_e4b.zig` 中 4 处内联 QKV 归一化/旋转重复代码；删除 `offload.qkvForwardOffload` / `mlpForwardOffload`。
-    - [ ] 将 `Q4Weights` 重命名为 `QuantWeights`（统一覆盖 4-bit 与 8-bit），统一量化块布局计算 `QuantLayout`（移除 `Gemma4E4BModel.q4ByteLengths`），新增 `QuantWeights.gatherRows(ids, scale)` 替代 E4B 4 处反量化查表缩放副本，并以 `LmHead = union(enum){ dense, quant }` 统一词表输出头。
-    - [ ] 统一 `GpuKvCache`（支持 `dtype` 参数、块式扩容、可选环形滑动窗口、投机解码 `truncate` 回滚与 CPU 窗口同步 `exportWindow`/`importWindow`），替换 12B `Gemma4GpuContext` 每步动态 `concatenate` 的 KV 数组。
-    - [ ] 将设备端对数几率处理（`softcapLogits`、`penalizeDevice`、`deviceCandidates`、`selectToken`、`selectTokenFromHidden`）下沉至 `src/backend/` 并以 `LogitsProcessor` 参数化，解除对 `Gemma4Config` 的依赖。
-    - [ ] 在 [`src/backend/mlx.zig`](../src/backend/mlx.zig) 新增类型安全的 `compileFn(comptime n_in, comptime n_out, Ctx, fn, shapeless)` 封装，统一 5 处手写 `mlx_vector_array_*` 编译闭包样板，并使 E4B 编译闭包直接调用单一前向函数。
+  - [x] **阶段 P4 — 共享 MLX GPU 组合原语 (`src/backend/`)**：
+    - [x] 将模型无关的 MLX 组合块（`Rope`、`projectHeads`、`gatedMlp`、`residualScale`、`finalHidden`）提取至 `src/backend/`，消除 `Gemma4GpuLayer.normHeads`/`projectQkv` 与 `gemma4_e4b.zig` 中 4 处内联 QKV 归一化/旋转重复代码；删除 `offload.qkvForwardOffload` / `mlpForwardOffload`。
+    - [x] 将 `Q4Weights` 重命名为 `QuantWeights`（统一覆盖 4-bit 与 8-bit），统一量化块布局计算 `QuantLayout`（移除 `Gemma4E4BModel.q4ByteLengths`），新增 `QuantWeights.gatherRows(ids, scale)` 替代 E4B 4 处反量化查表缩放副本，并以 `LmHead = union(enum){ dense, quant }` 统一词表输出头。
+    - [x] 统一 `GpuKvCache`（支持 `dtype` 参数、块式扩容、可选环形滑动窗口、投机解码 `truncate` 回滚与 CPU 窗口同步 `exportWindow`/`importWindow`），替换 12B `Gemma4GpuContext` 每步动态 `concatenate` 的 KV 数组。
+    - [x] 将设备端对数几率处理（`softcapLogits`、`penalizeDevice`、`deviceCandidates`、`selectToken`、`selectTokenFromHidden`）下沉至 `src/backend/` 并以 `LogitsProcessor` 参数化，解除对 `Gemma4Config` 的依赖。
+    - [x] 在 [`src/backend/mlx.zig`](../src/backend/mlx.zig) 新增类型安全的 `compileFn(comptime n_in, comptime n_out, Ctx, fn, shapeless)` 封装，统一 5 处手写 `mlx_vector_array_*` 编译闭包样板，并使 E4B 编译闭包直接调用单一前向函数。
   - [ ] **阶段 P5 — 模型层组装与统一生成前端 (`src/models/`)**：
     - [ ] 以 `Gemma4AttentionT(Proj)` 与 `Gemma4DecoderLayerT(Attn, Mlp)` 统一 Gemma 4 F32 与 Q4 CPU 模型的前向、预填充、单步解码与残差尾部实现。
     - [ ] 基于阶段 P4 的 GPU 组合块统一组装 12B `Gemma4GpuLayer` 与 E4B `GpuLayerE4B`。

@@ -1600,7 +1600,7 @@ test "GpuKvCache sliding-window steps match a per-query reference (prefill longe
     };
 
     for (scenarios) |steps| {
-        var cache = try GpuKvCache.init(window, num_kv, head_dim, stream);
+        var cache = try GpuKvCache.initDefault(window, num_kv, head_dim, stream);
         defer cache.deinit();
         for (steps) |step| {
             var q = try syntheticAttnStep(allocator, q_kind, num_heads, step.pos, step.len, head_dim, stream);
@@ -1656,7 +1656,7 @@ test "GpuKvCache sliding-window steps match a per-query reference (prefill longe
     }
 
     // 环形覆写之后的多词元步被拒绝 (缓存槽位已不按绝对位置排列)
-    var ring = try GpuKvCache.init(window, num_kv, head_dim, stream);
+    var ring = try GpuKvCache.initDefault(window, num_kv, head_dim, stream);
     defer ring.deinit();
     for (0..window + 2) |p| {
         var k_new = try syntheticAttnStep(allocator, k_kind, num_kv, p, 1, head_dim, stream);
@@ -1676,4 +1676,169 @@ test "GpuKvCache sliding-window steps match a per-query reference (prefill longe
     var v_chunk = try syntheticAttnStep(allocator, v_kind, num_kv, window + 2, 2, head_dim, stream);
     defer v_chunk.deinit();
     try std.testing.expectError(error.SlidingWindowCacheWrapped, ring.writeStep(k_chunk, v_chunk, true, window, window + 2, 2, stream));
+}
+
+test "QuantLayout layout and byte size calculations" {
+    const layout4 = offload.QuantLayout.initDefault(3840, 262144, 64, 4);
+    try std.testing.expectEqual(@as(usize, 262144), layout4.w_dims[0]);
+    try std.testing.expectEqual(@as(usize, 480), layout4.w_dims[1]);
+    try std.testing.expectEqual(@as(usize, 262144), layout4.sb_dims[0]);
+    try std.testing.expectEqual(@as(usize, 60), layout4.sb_dims[1]);
+    // 3840 / 8 = 480 u32 -> 1920 bytes / row * 262144 = 503,316,480 bytes
+    try std.testing.expectEqual(@as(usize, 262144 * 480 * 4), layout4.w_q_bytes);
+    // 3840 / 64 = 60 u16 -> 120 bytes / row * 262144 = 31,457,280 bytes
+    try std.testing.expectEqual(@as(usize, 262144 * 60 * 2), layout4.sb_bytes);
+    try std.testing.expectEqual(layout4.w_q_bytes + layout4.sb_bytes * 2, layout4.totalBytes());
+}
+
+test "mlx_blocks residualScale and finalHidden primitives" {
+    if (!has_mlx) return;
+    var stream = try Stream.defaultGpu();
+    defer stream.deinit();
+
+    const x_vals = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+    const r_vals = [_]f32{ 0.5, 0.5, 0.5, 0.5 };
+    const sc_vals = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
+
+    var x = try Array.fromSlice(&x_vals, &.{ 1, 4 });
+    defer x.deinit();
+    var r = try Array.fromSlice(&r_vals, &.{ 1, 4 });
+    defer r.deinit();
+    var sc = try Array.fromSlice(&sc_vals, &.{ 1, 4 });
+    defer sc.deinit();
+
+    // 1. 无 scale 残差相加
+    var res_no_scale = try offload.mlx_blocks.residualScale(x, r, null, stream);
+    defer res_no_scale.deinit();
+    const data_no_scale = try res_no_scale.dataFloat32();
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), data_no_scale[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.5), data_no_scale[3], 1e-4);
+
+    // 2. 带 scale 残差相加并缩放
+    var res_scaled = try offload.mlx_blocks.residualScale(x, r, sc, stream);
+    defer res_scaled.deinit();
+    const data_scaled = try res_scaled.dataFloat32();
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), data_scaled[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 9.0), data_scaled[3], 1e-4);
+
+    // 3. finalHidden 最终行归一化
+    const seq_vals = [_]f32{
+        1.0, 1.0, 1.0, 1.0, // token 0
+        2.0, 2.0, 2.0, 2.0, // token 1
+        3.0, 3.0, 3.0, 3.0, // token 2
+    };
+    var seq_x = try Array.fromSlice(&seq_vals, &.{ 1, 3, 4 });
+    defer seq_x.deinit();
+    const weight_vals = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
+    var norm_w = try Array.fromSlice(&weight_vals, &.{4});
+    defer norm_w.deinit();
+
+    // 提取尾部 1 行并归一化：全 3.0 的向量 RMSNorm 后全为 1.0
+    var tail_norm = try offload.mlx_blocks.finalHidden(seq_x, norm_w, 1e-5, 1, 4, stream);
+    defer tail_norm.deinit();
+    const tail_data = try tail_norm.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 4), tail_data.len);
+    for (tail_data) |v| {
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), v, 1e-3);
+    }
+}
+
+test "logits_processor softcap and device repetition penalty" {
+    if (!has_mlx) return;
+    const allocator = std.testing.allocator;
+    var stream = try Stream.defaultGpu();
+    defer stream.deinit();
+
+    // 1. softcapLogits
+    const raw_logits = [_]f32{ -100.0, 0.0, 10.0, 100.0 };
+    var l_arr = try Array.fromSlice(&raw_logits, &.{ 1, 4 });
+    defer l_arr.deinit();
+
+    var capped = try offload.logits_processor.softcapLogits(l_arr, 15.0, stream);
+    defer capped.deinit();
+    const cap_data = try capped.dataFloat32();
+    try std.testing.expect(cap_data[3] < 15.0);
+    try std.testing.expect(cap_data[3] > 14.99);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), cap_data[1], 1e-4);
+
+    // 2. penalizeDevice
+    const test_logits = [_]f32{ 2.0, 4.0, 6.0, 8.0 };
+    var pen_arr = try Array.fromSlice(&test_logits, &.{ 1, 4 });
+    defer pen_arr.deinit();
+
+    // 对词元 3 施加 2.0 惩罚: 8.0 / 2.0 = 4.0
+    const recent = [_]usize{3};
+    var penalized = try offload.logits_processor.penalizeDevice(allocator, pen_arr, 4, &recent, 2.0, stream);
+    try std.testing.expect(penalized != null);
+    defer penalized.?.deinit();
+    const pen_data = try penalized.?.dataFloat32();
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), pen_data[0], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), pen_data[1], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), pen_data[2], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.0), pen_data[3], 1e-3);
+
+    // 3. LogitsProcessor 选词
+    var proc = try offload.logits_processor.LogitsProcessor.init(allocator, .{
+        .vocab_size = 4,
+        .final_logit_softcapping = 10.0,
+        .sampling_excluded_tokens = &.{sampling.TokenRange.single(2)}, // 排除词元 2 (原得分 6.0)
+    });
+    defer proc.deinit();
+
+    var sampler = sampling.Sampler.initDefault();
+    // 原始得分为 [2, 4, 6(排除), 8(受罚至4)] -> 词元 1 与词元 3 得分并列 4.0，按序或并列选出合理合法词元且绝非排除词元 2
+    const selected = try proc.selectToken(allocator, pen_arr, &recent, &sampler, stream);
+    try std.testing.expect(selected != 2);
+}
+
+test "LmHead union with dense LmHeadWeights and GpuKvCache truncate rollback" {
+    if (!has_mlx) return;
+    const allocator = std.testing.allocator;
+    var stream = try Stream.defaultGpu();
+    defer stream.deinit();
+
+    // 1. LmHead dense 包装验证
+    const w_data = [_]u16{
+        0x3f80, 0, // 1.0, 0.0 in bf16
+        0, 0x3f80, // 0.0, 1.0
+        0x3f80, 0x3f80, // 1.0, 1.0
+    };
+    var dense_w = try LmHeadWeights.init(&w_data, 3, 2, stream);
+    defer dense_w.deinit();
+
+    var head = offload.LmHead{ .dense = dense_w };
+    try std.testing.expectEqual(@as(usize, 3), head.vocabSize());
+    try std.testing.expectEqual(@as(usize, 2), head.hiddenSize());
+
+    const h_in = [_]f32{ 0.5, 2.0 };
+    var x = try Array.fromSlice(&h_in, &.{ 1, 2 });
+    defer x.deinit();
+
+    var logits = try head.forwardArray(x, stream);
+    defer logits.deinit();
+    var logits_f32 = try logits.astype(.float32, stream);
+    defer logits_f32.deinit();
+    const l_data = try logits_f32.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 3), l_data.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), l_data[0], 1e-2);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), l_data[1], 1e-2);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.5), l_data[2], 1e-2);
+
+    // 2. GpuKvCache truncate 回滚验证 (投机解码支持)
+    var cache = try GpuKvCache.initDefault(16, 2, 4, stream);
+    defer cache.deinit();
+
+    var k1 = try syntheticAttnStep(allocator, 1.0, 2, 0, 5, 4, stream);
+    defer k1.deinit();
+    var v1 = try syntheticAttnStep(allocator, 2.0, 2, 0, 5, 4, stream);
+    defer v1.deinit();
+
+    _ = try cache.writeStep(k1, v1, false, 16, 0, 5, stream);
+    try std.testing.expectEqual(@as(usize, 5), cache.curr_len);
+
+    cache.truncate(3);
+    try std.testing.expectEqual(@as(usize, 3), cache.curr_len);
+
+    cache.reset();
+    try std.testing.expectEqual(@as(usize, 0), cache.curr_len);
 }
