@@ -1,4 +1,5 @@
 const std = @import("std");
+const vec_math = @import("../backend/vec_math.zig");
 const shape_mod = @import("shape.zig");
 pub const Shape = shape_mod.Shape;
 pub const computeContiguousStrides = shape_mod.computeContiguousStrides;
@@ -49,8 +50,7 @@ pub const bf16 = packed struct {
     }
 
     pub fn toF32(self: bf16) f32 {
-        const u: u32 = @as(u32, self.bits) << 16;
-        return @bitCast(u);
+        return vec_math.bf16ToF32(self.bits);
     }
 };
 
@@ -93,25 +93,6 @@ pub const PoolOptions = struct {
     }
 };
 
-/// 旋转位置编码可选参数配置 (Rotary Position Embedding Options, RopeOptions)
-pub const RopeOptions = struct {
-    rotary_offset: usize = 0, // 旋转子空间起始偏移量，默认为 0 (对全部维度应用旋转位置编码 (Rotary Position Embedding, RoPE))
-    base: f32 = 10000.0, // 频率基数，默认为 10000.0
-    mode: Mode = .interleaved, // 旋转配对拓扑模式：相邻配对 (interleaved) 或半切分配对 (split_half)
-    partial_rotary_factor: f32 = 1.0, // 部分旋转因子 (0.0 < factor <= 1.0)，仅对前该比例的角度进行旋转，其余保持恒等
-
-    pub const Mode = enum {
-        interleaved, // 传统 RoPE 相邻配对拓扑 (2i, 2i+1)
-        split_half, // 现代 GPT-NeoX / LLaMA / Gemma 规范的半切分配对拓扑 (i, i + D/2)
-    };
-
-    pub const default: RopeOptions = .{};
-
-    pub fn defaultOptions() RopeOptions {
-        return .{};
-    }
-};
-
 /// 将任意张量标量元素安全转换为非负索引 (`usize`)，并对越界或非有限值返回 `IndexOutOfBounds`
 pub inline fn indexScalarToUsize(comptime IdxT: type, raw: IdxT, bound: usize) !usize {
     const idx: usize = switch (@typeInfo(IdxT)) {
@@ -129,6 +110,13 @@ pub inline fn indexScalarToUsize(comptime IdxT: type, raw: IdxT, bound: usize) !
     };
     if (idx >= bound) return error.IndexOutOfBounds;
     return idx;
+}
+
+/// 校验索引切片的每个元素都是 [0, bound) 内的非负整数值 (元素可为任意整数或浮点类型，规则同 `indexScalarToUsize`)，
+/// 否则返回 `error.IndexOutOfBounds`；用于在修改任何状态之前提前校验词元 ID 等索引
+pub fn checkIndices(indices: anytype, bound: usize) !void {
+    const IdxT = std.meta.Elem(@TypeOf(indices));
+    for (indices) |raw| _ = try indexScalarToUsize(IdxT, raw, bound);
 }
 
 /// 通用标量类型转换函数

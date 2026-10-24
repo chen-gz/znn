@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const backend = @import("../backend.zig");
+const tensor = @import("../tensor.zig");
 const nn = @import("../nn.zig");
 const gemma4 = @import("gemma4.zig");
 const gemma4_gpu = @import("gemma4_gpu.zig");
@@ -731,7 +732,7 @@ pub const Gemma4E4BModel = struct {
         errdefer if (scalar.arr) |*arr| arr.deinit();
 
         // 全局注意力层采用 partial_rotary_factor = 0.25 的比例旋转位置编码 (与 12B GPU 路径共用同一实现)
-        const rope = try gemma4_gpu.GpuRope.init(hd, spec.attn_type.partialRotaryFactor(), spec.attn_type.ropeTheta());
+        const rope = try gemma4_gpu.GpuRope.init(hd, spec.attn_type.ropeOptions());
 
         return .{
             .qkv_proj = qkv_proj,
@@ -939,14 +940,14 @@ pub const Gemma4E4BModel = struct {
                 }
                 self.writeCache(&bits);
             }
-            const value: f32 = @bitCast(@as(u32, std.mem.readInt(u16, &bits, .little)) << 16);
+            const value = backend.vec_math.bf16ToF32(std.mem.readInt(u16, &bits, .little));
             const arr: ?mlx.Array = if (value != 1.0) try mlx.Array.fromRawData(@ptrCast(&bits), &.{1}, .bfloat16) else null;
             return .{ .value = value, .arr = arr };
         }
     };
 
     fn createTokenIndicesArray(self: *const Gemma4E4BModel, tokens: []const usize) !mlx.Array {
-        try gemma4.validateTokenIds(tokens, self.config.vocab_size);
+        try tensor.checkIndices(tokens, self.config.vocab_size);
         const T = tokens.len;
         const single_tok = [_]i32{if (T > 0) @intCast(tokens[0]) else 0};
         if (T == 1) {

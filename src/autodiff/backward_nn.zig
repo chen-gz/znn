@@ -1072,68 +1072,27 @@ pub fn backwardNN(self: *Op) !void {
         .RoPE => {
             const X = self.inputs[0];
             const Y = self.outputs[0];
-            if (X.requires_grad) {
+            if (X.requires_grad and X.shape.numel() > 0) {
+                // 旋转矩阵是正交矩阵：dX = R^T dY，即对上游梯度逐行施加共享旋转表的逆旋转 (未旋转分量的梯度原样传递)
                 const start_pos = self.context.RoPE.start_pos;
-                const rotary_offset = self.context.RoPE.rotary_offset;
-                const base = self.context.RoPE.base;
-                const mode = self.context.RoPE.mode;
-                const factor = std.math.clamp(self.context.RoPE.partial_rotary_factor, 0.0, 1.0);
                 const D = X.shape.dims[X.shape.len - 1];
                 const T = if (X.shape.len >= 2) X.shape.dims[X.shape.len - 2] else 1;
                 const outer = X.shape.numel() / (T * D);
-                const rot_dim = D - rotary_offset;
-                const half = rot_dim / 2;
-                const rot_dim_f = @as(f32, @floatFromInt(rot_dim));
-                const num_angles = @as(usize, @intFromFloat(@as(f32, @floatFromInt(half)) * factor));
+                const table = try tensor_mod.RopeTable.init(D, self.context.RoPE.options);
 
-                for (0..outer) |o| {
-                    for (0..T) |t| {
-                        const dx_row = X.grad[(o * T + t) * D .. (o * T + t + 1) * D];
-                        const dy_row = Y.grad[(o * T + t) * D .. (o * T + t + 1) * D];
-                        for (0..rotary_offset) |j| {
-                            dx_row[j] += dy_row[j];
-                        }
-                        const pos_f = @as(f32, @floatFromInt(start_pos + t));
-                        switch (mode) {
-                            .interleaved => {
-                                for (0..num_angles) |i| {
-                                    const freq = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
-                                    const theta = pos_f * freq;
-                                    const cos_t = @cos(theta);
-                                    const sin_t = @sin(theta);
-                                    const dy0 = dy_row[rotary_offset + 2 * i];
-                                    const dy1 = dy_row[rotary_offset + 2 * i + 1];
-                                    dx_row[rotary_offset + 2 * i] += dy0 * cos_t + dy1 * sin_t;
-                                    dx_row[rotary_offset + 2 * i + 1] += -dy0 * sin_t + dy1 * cos_t;
-                                }
-                                for (num_angles..half) |i| {
-                                    dx_row[rotary_offset + 2 * i] += dy_row[rotary_offset + 2 * i];
-                                    dx_row[rotary_offset + 2 * i + 1] += dy_row[rotary_offset + 2 * i + 1];
-                                }
-                                if (2 * half < rot_dim) {
-                                    dx_row[D - 1] += dy_row[D - 1];
-                                }
-                            },
-                            .split_half => {
-                                for (0..num_angles) |i| {
-                                    const freq = 1.0 / std.math.pow(f32, base, @as(f32, @floatFromInt(2 * i)) / rot_dim_f);
-                                    const theta = pos_f * freq;
-                                    const cos_t = @cos(theta);
-                                    const sin_t = @sin(theta);
-                                    const dy0 = dy_row[rotary_offset + i];
-                                    const dy1 = dy_row[rotary_offset + i + half];
-                                    dx_row[rotary_offset + i] += dy0 * cos_t + dy1 * sin_t;
-                                    dx_row[rotary_offset + i + half] += -dy0 * sin_t + dy1 * cos_t;
-                                }
-                                for (num_angles..half) |i| {
-                                    dx_row[rotary_offset + i] += dy_row[rotary_offset + i];
-                                    dx_row[rotary_offset + i + half] += dy_row[rotary_offset + i + half];
-                                }
-                                if (2 * half < rot_dim) {
-                                    dx_row[D - 1] += dy_row[D - 1];
-                                }
-                            },
-                        }
+                const allocator = std.heap.c_allocator;
+                const scratch = try allocator.alloc(f32, D + 2 * table.num_angles);
+                defer allocator.free(scratch);
+                const row = scratch[0..D];
+                const cos_tab = scratch[D..][0..table.num_angles];
+                const sin_tab = scratch[D + table.num_angles ..][0..table.num_angles];
+                for (0..T) |t| {
+                    table.angles(start_pos + t, cos_tab, sin_tab);
+                    for (0..outer) |o| {
+                        const off = (o * T + t) * D;
+                        @memcpy(row, Y.grad[off..][0..D]);
+                        table.applyRow(row, cos_tab, sin_tab, true);
+                        for (X.grad[off..][0..D], row) |*dx, g| dx.* += g;
                     }
                 }
             }

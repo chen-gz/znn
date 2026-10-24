@@ -1,5 +1,6 @@
 const std = @import("std");
 const tensor = @import("../tensor.zig");
+const vec_math = @import("../backend.zig").vec_math;
 const autodiff = @import("../autodiff.zig");
 const core = @import("core.zig");
 const enterModuleScope = core.enterModuleScope;
@@ -181,19 +182,15 @@ pub fn maskedCrossEntropyLoss(
         if (w <= 0.0) continue;
 
         const row = logits.data[i * V .. (i + 1) * V];
-        var max_v = row[0];
-        for (row) |v| max_v = @max(max_v, v);
-
-        var sum_exp: f32 = 0.0;
-        for (row) |v| sum_exp += @exp(v - max_v);
+        const lse = vec_math.logSumExpRow(row, 1.0);
         const label: usize = targets[i];
-        total_loss += (max_v + @log(sum_exp) - row[label]) * w;
+        total_loss += (lse - row[label]) * w;
 
         if (write_grad) {
+            // softmax(z)_j = exp(z_j - log Σ exp(z))
             const scale = w / total_weight;
-            const inv_sum = 1.0 / sum_exp;
             const grad_row = logits.grad[i * V .. (i + 1) * V];
-            for (grad_row, row) |*g, v| g.* += scale * @exp(v - max_v) * inv_sum;
+            for (grad_row, row) |*g, v| g.* += scale * @exp(v - lse);
             grad_row[label] -= scale;
         }
     }

@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const Executor = @import("executor.zig").Executor;
+const vec_math = @import("vec_math.zig");
 
 /// 词元 ID 闭区间 [first, last]
 pub const TokenRange = struct {
@@ -336,47 +337,24 @@ pub fn selectTopK(
     return out[0..heap.len];
 }
 
-/// 缩放对数几率的在线 Softmax 归约结果：max 为可采样词元缩放对数几率的最大值，sum 为 Σ exp(scaled - max)
-const LogSumExpPartial = struct {
-    max: f32 = -std.math.inf(f32),
-    sum: f64 = 0.0,
-
-    fn merge(a: LogSumExpPartial, b: LogSumExpPartial) LogSumExpPartial {
-        if (b.max == -std.math.inf(f32)) return a;
-        if (a.max == -std.math.inf(f32)) return b;
-        const m = @max(a.max, b.max);
-        return .{
-            .max = m,
-            .sum = a.sum * @exp(@as(f64, a.max - m)) + b.sum * @exp(@as(f64, b.max - m)),
-        };
-    }
-};
-
-fn logSumExpPartial(executor: Executor, logits: []const f32, inv_temperature: f32) !LogSumExpPartial {
+/// 按固定分块有序并行归约整个词表的对数求和指数 (Log-Sum-Exp, LSE) 部分结果 (跳过 NaN)
+fn logSumExpParallel(executor: Executor, logits: []const f32, inv_temperature: f32) !vec_math.LogSumExp {
     const Context = struct {
         logits: []const f32,
         inv_temperature: f32,
 
-        fn map(ctx: @This(), begin: usize, end: usize) LogSumExpPartial {
-            var m: f32 = -std.math.inf(f32);
-            for (ctx.logits[begin..end]) |logit| {
-                if (usableLogit(logit)) m = @max(m, logit * ctx.inv_temperature);
-            }
-            if (m == -std.math.inf(f32)) return .{};
-            var sum: f64 = 0.0;
-            for (ctx.logits[begin..end]) |logit| {
-                if (usableLogit(logit)) sum += @exp(@as(f64, logit * ctx.inv_temperature - m));
-            }
-            return .{ .max = m, .sum = sum };
+        fn map(ctx: @This(), begin: usize, end: usize) vec_math.LogSumExp {
+            // NaN 的概率视为 0；排除词元 (-inf) 对和式贡献 0
+            return vec_math.logSumExpPartial(ctx.logits[begin..end], ctx.inv_temperature, .skip);
         }
     };
     return executor.parallelReduce(
-        LogSumExpPartial,
+        vec_math.LogSumExp,
         logits.len,
         16384,
         Context{ .logits = logits, .inv_temperature = inv_temperature },
         Context.map,
-        LogSumExpPartial.merge,
+        vec_math.LogSumExp.merge,
         .{},
     );
 }
@@ -384,9 +362,7 @@ fn logSumExpPartial(executor: Executor, logits: []const f32, inv_temperature: f3
 /// 完整词表的对数配分函数 (Log-Partition)：log Σ_v exp(logit_v * inv_temperature)，跳过排除词元 (-inf) 与 NaN；
 /// 全部被排除时返回 -inf。按固定分块有序归约，结果与线程数无关。
 pub fn logSumExpScaled(executor: Executor, logits: []const f32, inv_temperature: f32) !f32 {
-    const p = try logSumExpPartial(executor, logits, inv_temperature);
-    if (p.max == -std.math.inf(f32)) return p.max;
-    return p.max + @as(f32, @floatCast(@log(p.sum)));
+    return (try logSumExpParallel(executor, logits, inv_temperature)).value();
 }
 
 /// 就地施加重复惩罚：recent_tokens 中出现的每个词元 (越界 ID 被忽略) 恰好惩罚一次，重复出现不会叠加
@@ -632,7 +608,7 @@ pub const Sampler = struct {
 
     /// 完整 Softmax 分布的 O(V) 逆累积分布抽样 (Inverse CDF Sampling)：按词元 ID 顺序累加权重
     fn sampleFull(self: *Sampler, executor: Executor, logits: []const f32, inv_temperature: f32) !usize {
-        const p = try logSumExpPartial(executor, logits, inv_temperature);
+        const p = try logSumExpParallel(executor, logits, inv_temperature);
         if (p.max == -std.math.inf(f32)) return 0;
         const target = self.random().float(f64) * p.sum;
         var cum: f64 = 0.0;

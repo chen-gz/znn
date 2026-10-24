@@ -353,8 +353,7 @@ pub const Tensor = struct {
     pub fn silu(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         return self.unaryMathEager(allocator, struct {
             fn op(a_val: f32) f32 {
-                const sig = if (a_val >= 0.0) 1.0 / (1.0 + @exp(-a_val)) else @exp(a_val) / (1.0 + @exp(a_val));
-                return a_val * sig;
+                return a_val * backend.vec_math.sigmoid(a_val);
             }
         }.op);
     }
@@ -381,12 +380,7 @@ pub const Tensor = struct {
     pub fn sigmoid(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
         return self.unaryMathEager(allocator, struct {
             fn op(a_val: f32) f32 {
-                if (a_val >= 0.0) {
-                    return 1.0 / (1.0 + @exp(-a_val));
-                } else {
-                    const e = @exp(a_val);
-                    return e / (1.0 + e);
-                }
+                return backend.vec_math.sigmoid(a_val);
             }
         }.op);
     }
@@ -556,17 +550,7 @@ pub const Tensor = struct {
         var loss_sum: f32 = 0.0;
         for (0..B) |i| {
             const logits_row = x_c.data[i * N .. (i + 1) * N];
-            var max_val = logits_row[0];
-            for (logits_row[1..]) |val| {
-                if (val > max_val) max_val = val;
-            }
-
-            var exp_sum: f32 = 0.0;
-            for (logits_row) |val| {
-                exp_sum += @exp(val - max_val);
-            }
-
-            loss_sum += @log(exp_sum) + max_val - logits_row[targets[i]];
+            loss_sum += backend.vec_math.logSumExpRow(logits_row, 1.0) - logits_row[targets[i]];
         }
         const loss = try zeros(allocator, &.{ 1, 1 });
         loss.data[0] = loss_sum / @as(f32, @floatFromInt(B));

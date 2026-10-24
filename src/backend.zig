@@ -15,7 +15,11 @@ pub const mlx = @import("backend/mlx.zig");
 
 pub const offload = @import("backend/offload.zig");
 
+pub const rope = @import("backend/rope.zig");
+
 pub const sampling = @import("backend/sampling.zig");
+
+pub const vec_math = @import("backend/vec_math.zig");
 
 test {
     std.testing.refAllDecls(@This());
@@ -24,6 +28,8 @@ test {
     _ = @import("backend/cblas.zig");
     _ = @import("backend/mlx.zig");
     _ = @import("backend/offload.zig");
+    _ = @import("backend/rope.zig");
     _ = @import("backend/sampling.zig");
+    _ = @import("backend/vec_math.zig");
     _ = @import("backend/tests.zig");
 }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const backend = @import("backend.zig");
 
 pub const shape = @import("tensor/shape.zig");
 pub const types = @import("tensor/types.zig");
@@ -11,7 +12,7 @@ pub const static = @import("tensor/static.zig");
 pub const linalg = @import("tensor/linalg.zig");
 pub const weight_init = @import("tensor/weight_init.zig");
 pub const quant = @import("tensor/quant.zig");
-pub const vec_math = @import("tensor/vec_math.zig");
+pub const rope = @import("tensor/rope.zig");
 pub const Q4Block = quant.Q4Block;
 
 // --- Re-export Linear Algebra Results ---
@@ -34,8 +35,10 @@ pub const bf16 = types.bf16;
 pub const SliceRange = types.SliceRange;
 pub const ConvOptions = types.ConvOptions;
 pub const PoolOptions = types.PoolOptions;
-pub const RopeOptions = types.RopeOptions;
+pub const RopeOptions = backend.rope.RopeOptions;
+pub const RopeTable = rope.RopeTable;
 pub const convertScalar = types.convertScalar;
+pub const checkIndices = types.checkIndices;
 pub const isTruthyScalar = types.isTruthyScalar;
 pub const GenericTensor = types.GenericTensor;
 pub const FloatTensor = types.FloatTensor;
@@ -46,6 +49,9 @@ pub const BoolTensor = types.BoolTensor;
 pub const BFloat16Tensor = types.BFloat16Tensor;
 pub const UsizeTensor = types.UsizeTensor;
 pub const StaticTensor = static.StaticTensor;
+
+// --- Re-export kernels shared by eager, graph and decode paths ---
+pub const embeddingLookupInto = nn_kernels.embeddingLookupInto;
 
 // --- Re-export core Tensor ---
 pub const Tensor = core.Tensor;
@@ -94,8 +100,6 @@ pub const solveRidgeAnalytical = ops.solveRidgeAnalytical;
 pub const qr = ops.qr;
 pub const symeig = ops.symeig;
 pub const svd = ops.svd;
-pub const applyRoPE = ops.applyRoPE;
-pub const applyRoPETensor = ops.applyRoPETensor;
 
 test {
     std.testing.refAllDecls(@This());

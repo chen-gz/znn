@@ -569,6 +569,21 @@ test "gradcheck: rope interleaved and split_half with offset and partial rotatio
     }, &.{.{ .shape = &.{ 2, 3, 10 } }}, .{});
 }
 
+test "gradcheck: rope proportional preset and odd rotary dimension" {
+    // 比例旋转位置编码 (Proportional RoPE)：head_dim = 16 时只旋转前 floor(8 * 0.25) = 2 个角度，配对间距仍为 8
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.rope(t[0], 5, tensor.RopeOptions.proportional(50.0, 0.25));
+        }
+    }, &.{.{ .shape = &.{ 1, 2, 3, 16 } }}, .{});
+    // 奇数旋转维度：最后一个分量不参与旋转，梯度原样传递
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.rope(t[0], 2, .{ .rotary_offset = 2, .base = 30.0 });
+        }
+    }, &.{.{ .shape = &.{ 3, 9 } }}, .{});
+}
+
 test "gradcheck: embedding" {
     try expectGradientsMatch(struct {
         fn build(g: *Graph, t: []const *Tensor) !*Tensor {

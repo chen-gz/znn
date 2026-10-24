@@ -15,93 +15,10 @@ const freePersistentTensor = core.freePersistentTensor;
 const deinitModel = core.deinitModel;
 const enterModuleScope = core.enterModuleScope;
 const sampling = backend.sampling;
+const vec_math = backend.vec_math;
 const TokenRange = sampling.TokenRange;
 const Sampler = sampling.Sampler;
 const SamplingOptions = sampling.SamplingOptions;
-
-// ============================================================================
-// Gemma 4 专用非通用算子 (Split-Half & Proportional RoPE)
-// ============================================================================
-
-/// 标准 GPT-NeoX / LLaMA / Gemma 规范的半切分旋转位置编码张量前向核函数 (Split-Half RoPE)
-/// 算法原理：将输入维度分为前半段 x1 与后半段 x2，rotate_half(x) = [-x2, x1]
-/// 对于每个旋转角 i (0 <= i < num_angles):
-/// out[i] = x[i] * cos(theta_i) - x[i + half] * sin(theta_i)
-/// out[i + half] = x[i + half] * cos(theta_i) + x[i] * sin(theta_i)
-/// 当 partial_rotary_factor < 1.0 (例如 Gemma 4 的 proportional RoPE) 时，
-/// 仅前 num_angles = int(partial_rotary_factor * D / 2) 个分量参与旋转，其余分量保持原始值 (cos=1, sin=0)。
-pub fn tensorRopeSplitHalf(
-    self: *Tensor,
-    start_pos: usize,
-    partial_rotary_factor: f32,
-    rope_theta: f32,
-    allocator: std.mem.Allocator,
-) !*Tensor {
-    return self.rope(start_pos, .{
-        .mode = .split_half,
-        .partial_rotary_factor = partial_rotary_factor,
-        .base = rope_theta,
-    }, allocator);
-}
-
-/// Gemma 4 计算图级半切分旋转位置编码算子
-pub fn ropeSplitHalf(
-    graph: *autodiff.Graph,
-    X: *Tensor,
-    start_pos: usize,
-    partial_rotary_factor: f32,
-    rope_theta: f32,
-) !*Tensor {
-    return graph.rope(X, start_pos, .{
-        .mode = .split_half,
-        .partial_rotary_factor = partial_rotary_factor,
-        .base = rope_theta,
-    });
-}
-
-// ============================================================================
-// 单指令多数据 (Single Instruction Multiple Data, SIMD) 点积内核
-// ============================================================================
-
-const dot_lanes = 16;
-const F32Vec = @Vector(dot_lanes, f32);
-const U32Vec = @Vector(dot_lanes, u32);
-
-/// 单精度浮点 (F32) 向量点积：按 16 路 SIMD 累加，尾部逐元素补齐
-pub fn dotF32(a: []const f32, b: []const f32) f32 {
-    std.debug.assert(a.len == b.len);
-    var acc: F32Vec = @splat(0.0);
-    var i: usize = 0;
-    while (i + dot_lanes <= a.len) : (i += dot_lanes) {
-        const va: F32Vec = a[i..][0..dot_lanes].*;
-        const vb: F32Vec = b[i..][0..dot_lanes].*;
-        acc += va * vb;
-    }
-    var sum = @reduce(.Add, acc);
-    while (i < a.len) : (i += 1) sum += a[i] * b[i];
-    return sum;
-}
-
-/// 单精度浮点 (F32) 与脑浮点 (Brain Floating Point 16, BF16) 原始位向量点积：
-/// BF16 位模式左移 16 位即为等值 F32，整段以 SIMD 完成类型提升与乘加
-pub fn dotF32Bf16(a: []const f32, b_bits: []const u16) f32 {
-    std.debug.assert(a.len == b_bits.len);
-    var acc: F32Vec = @splat(0.0);
-    var i: usize = 0;
-    while (i + dot_lanes <= a.len) : (i += dot_lanes) {
-        const va: F32Vec = a[i..][0..dot_lanes].*;
-        const raw: @Vector(dot_lanes, u16) = b_bits[i..][0..dot_lanes].*;
-        const widened: U32Vec = @as(U32Vec, raw) << @splat(16);
-        const vb: F32Vec = @bitCast(widened);
-        acc += va * vb;
-    }
-    var sum = @reduce(.Add, acc);
-    while (i < a.len) : (i += 1) {
-        const b: tensor.bf16 = .{ .bits = b_bits[i] };
-        sum += a[i] * b.toF32();
-    }
-    return sum;
-}
 
 // ============================================================================
 // Gemma 4 混合注意力共享核心 (F32 与 Q4 两条推理路径共用)
@@ -205,50 +122,36 @@ pub fn decodeAttention(
         const kv_base = (h / groups) * max_len;
         const q_head = q_rot[h * hd .. (h + 1) * hd];
 
-        var max_score: f32 = -std.math.inf(f32);
         for (scores, start_idx..) |*s, j| {
-            s.* = dotF32(q_head, cache.k[(kv_base + j) * hd .. (kv_base + j + 1) * hd]);
-            max_score = @max(max_score, s.*);
+            s.* = vec_math.dot(q_head, cache.k[(kv_base + j) * hd .. (kv_base + j + 1) * hd]);
         }
-
-        var exp_sum: f32 = 0.0;
-        for (scores) |*s| {
-            s.* = @exp(s.* - max_score);
-            exp_sum += s.*;
-        }
-        const inv_sum = 1.0 / exp_sum;
+        vec_math.softmaxRowInPlace(scores);
 
         const y_head = y_2d.data[h * hd .. (h + 1) * hd];
-        for (scores, start_idx..) |s, j| {
-            const weight = s * inv_sum;
-            const v_cached = cache.v[(kv_base + j) * hd .. (kv_base + j + 1) * hd];
-            for (y_head, v_cached) |*yv, vv| yv.* += weight * vv;
+        for (scores, start_idx..) |weight, j| {
+            vec_math.axpy(y_head, weight, cache.v[(kv_base + j) * hd .. (kv_base + j + 1) * hd]);
         }
     }
     return y_2d;
 }
 
-/// 校验词元 ID 均落在词表范围内，防止嵌入查表越界读取
-pub fn validateTokenIds(tokens: []const usize, vocab_size: usize) !void {
-    for (tokens) |tok| {
-        if (tok >= vocab_size) return error.InvalidTokenId;
-    }
+/// 词元嵌入查表并施加 Gemma 嵌入缩放 sqrt(hidden_size)，返回 [1, T, hidden_size] (F32 与 Q4 CPU 路径共用)。
+/// table 为 [vocab_size, hidden_size] 行主序嵌入表 (单精度 f32 或脑浮点 16 (Brain Floating Point 16, BF16) 原始位 u16)，越界词元 ID 返回 `error.IndexOutOfBounds`。
+pub fn embedTokensScaled(comptime Elem: type, graph: *autodiff.Graph, table: []const Elem, hidden_size: usize, tokens: []const usize) !*Tensor {
+    const tok_emb = try graph.tensorND(&.{ 1, tokens.len, hidden_size }, false);
+    const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(hidden_size)));
+    try tensor.embeddingLookupInto(Elem, table, tokens, hidden_size, sqrt_d, tok_emb.data);
+    return tok_emb;
 }
 
 // ============================================================================
 // 采样共享核心：最终对数几率截断、重复惩罚与随机采样 (F32 / Q4 CPU 路径与 GPU 路径共用同一顺序)
 // ============================================================================
 
-/// 最终对数几率截断 (Final Logit Softcapping)：cap * tanh(x / cap)；cap <= 0 时不截断
-pub fn softcapLogit(raw: f32, cap: f32) f32 {
-    if (cap <= 0.0) return raw;
-    return cap * std.math.tanh(raw / cap);
-}
-
 /// 采样使用的最终对数几率：先施加最终对数几率截断，再对最近出现过的词元施加重复惩罚，
 /// 与 Hugging Face (logits 处理器作用于截断后的输出) 及 E4B GPU 路径的顺序一致
 pub fn samplingLogit(raw: f32, cap: f32, penalized: bool, repetition_penalty: f32) f32 {
-    const capped = softcapLogit(raw, cap);
+    const capped = vec_math.softcap(raw, cap);
     return if (penalized) sampling.applyRepetitionPenalty(capped, repetition_penalty) else capped;
 }
 
@@ -302,7 +205,7 @@ pub fn greedyLmHeadCpu(
             for (start_v..end_v) |v| {
                 if (cfg.isSamplingExcluded(v)) continue;
                 const row = ctx.embed[v * hidden ..][0..hidden];
-                const raw = if (Elem == f32) dotF32(ctx.h_last, row) else dotF32Bf16(ctx.h_last, row);
+                const raw = if (Elem == f32) vec_math.dot(ctx.h_last, row) else vec_math.dotBf16(ctx.h_last, row);
                 const penalized = ctx.apply_penalty and (ctx.recent_bitset[v / 64] >> @intCast(v % 64)) & 1 != 0;
                 if (penalized) {
                     const val = samplingLogit(raw, cfg.final_logit_softcapping, true, ctx.repetition_penalty);
@@ -311,7 +214,7 @@ pub fn greedyLmHeadCpu(
                     best_plain = .{ .id = v, .val = raw };
                 }
             }
-            if (best_plain.id != std.math.maxInt(usize)) best_plain.val = softcapLogit(best_plain.val, cfg.final_logit_softcapping);
+            if (best_plain.id != std.math.maxInt(usize)) best_plain.val = vec_math.softcap(best_plain.val, cfg.final_logit_softcapping);
             return best_plain.better(best_penalized);
         }
 
@@ -371,8 +274,8 @@ pub fn lmHeadLogitsCpu(
             const hidden = cfg.hidden_size;
             for (start_v..end_v) |v| {
                 const row = ctx.embed[v * hidden ..][0..hidden];
-                const raw = if (Elem == f32) dotF32(ctx.h_last, row) else dotF32Bf16(ctx.h_last, row);
-                ctx.out[v] = softcapLogit(raw, cfg.final_logit_softcapping);
+                const raw = if (Elem == f32) vec_math.dot(ctx.h_last, row) else vec_math.dotBf16(ctx.h_last, row);
+                ctx.out[v] = vec_math.softcap(raw, cfg.final_logit_softcapping);
             }
         }
     };
@@ -412,19 +315,13 @@ pub const Gemma4AttentionType = enum {
     sliding_attention,
     full_attention,
 
-    /// 旋转位置编码频率基数 (Rotary Position Embedding Theta, RoPE Theta)
-    pub fn ropeTheta(self: Gemma4AttentionType) f32 {
+    /// 旋转位置编码 (Rotary Position Embedding, RoPE) 配置：两类层都在完整 head_dim 上半切分配对；
+    /// 滑动窗口层为频率基数 10000 的标准 RoPE，全局注意力层为频率基数 1000000、仅前 25% 旋转角参与旋转的
+    /// 比例旋转位置编码 (Proportional RoPE)。CPU 与 GPU 路径共用这一份配置。
+    pub fn ropeOptions(self: Gemma4AttentionType) tensor.RopeOptions {
         return switch (self) {
-            .sliding_attention => 10000.0,
-            .full_attention => 1000000.0,
-        };
-    }
-
-    /// 部分旋转因子：全局注意力层采用比例旋转位置编码 (Proportional RoPE)，仅前 25% 的旋转角参与旋转
-    pub fn partialRotaryFactor(self: Gemma4AttentionType) f32 {
-        return switch (self) {
-            .sliding_attention => 1.0,
-            .full_attention => 0.25,
+            .sliding_attention => .proportional(10000.0, 1.0),
+            .full_attention => .proportional(1000000.0, 0.25),
         };
     }
 };
@@ -843,8 +740,7 @@ pub const Gemma4Attention = struct {
     num_kv_heads: usize,
     head_dim: usize,
     sliding_window: usize,
-    rope_theta: f32,
-    partial_rotary_factor: f32,
+    rope: tensor.RopeOptions,
 
     name: ?[]const u8 = null,
     module_type: []const u8 = "Gemma4Attention",
@@ -892,8 +788,7 @@ pub const Gemma4Attention = struct {
             .num_kv_heads = num_kv_heads,
             .head_dim = head_dim,
             .sliding_window = sliding_window,
-            .rope_theta = attn_type.ropeTheta(),
-            .partial_rotary_factor = attn_type.partialRotaryFactor(),
+            .rope = attn_type.ropeOptions(),
         };
     }
 
@@ -954,8 +849,8 @@ pub const Gemma4Attention = struct {
         const v = try graph.transposeND(v_4d, 1, 2);
 
         // 4. 施加半切分 RoPE 旋转位置编码 (Split-Half RoPE, Gemma 官方标准)
-        const q_rot = try ropeSplitHalf(graph, q, 0, self.partial_rotary_factor, self.rope_theta);
-        const k_rot = try ropeSplitHalf(graph, k_t_unrot, 0, self.partial_rotary_factor, self.rope_theta);
+        const q_rot = try graph.rope(q, 0, self.rope);
+        const k_rot = try graph.rope(k_t_unrot, 0, self.rope);
 
         // 5. 写入键值缓存 (Key-Value Cache, KVCache)
         if (layer_cache) |cache| try writePrefillKVCache(cache, k_rot.data, v.data, B, T);
@@ -1010,8 +905,8 @@ pub const Gemma4Attention = struct {
 
         const q_4d = try graph.reshape(q_normed, &.{ 1, nh, 1, hd });
         const k_4d = try graph.reshape(k_normed, &.{ 1, n_kv, 1, hd });
-        const q_rot = try ropeSplitHalf(graph, q_4d, pos, self.partial_rotary_factor, self.rope_theta);
-        const k_rot = try ropeSplitHalf(graph, k_4d, pos, self.partial_rotary_factor, self.rope_theta);
+        const q_rot = try graph.rope(q_4d, pos, self.rope);
+        const k_rot = try graph.rope(k_4d, pos, self.rope);
 
         const y_2d = try decodeAttention(graph, layer_cache, self.attn_type, self.sliding_window, nh, q_rot.data, k_rot.data, v_normed.data);
 
@@ -1280,19 +1175,6 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             return sampleLmHeadCpu(config, f32, graph, self.embed_tokens.weight.data, h_last, recentWindow(recent_tokens), sampler);
         }
 
-        /// 词元嵌入查表并施加 Gemma 嵌入缩放 sqrt(hidden_size)，返回 [1, T, hidden_size]
-        fn embedScaled(self: *const Self, graph: *autodiff.Graph, tokens: []const usize) !*Tensor {
-            const H = config.hidden_size;
-            const tok_emb = try graph.tensorND(&.{ 1, tokens.len, H }, false);
-            const sqrt_d: f32 = @sqrt(@as(f32, @floatFromInt(H)));
-            const embed_f32 = self.embed_tokens.weight.data;
-            for (tokens, 0..) |tok, t_idx| {
-                const emb_row = embed_f32[tok * H .. (tok + 1) * H];
-                for (tok_emb.data[t_idx * H .. (t_idx + 1) * H], emb_row) |*dst, e| dst.* = e * sqrt_d;
-            }
-            return tok_emb;
-        }
-
         /// 全精度 (F32) 预填充阶段 (Prefill)：处理 Prompt 词元序列并写入 KVCache，按 sampler 选取并返回首个预测词元
         pub fn prefill(
             self: *const Self,
@@ -1303,10 +1185,8 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
         ) !usize {
             const T = prompt_tokens.len;
             if (T == 0) return error.EmptyPrompt;
-            try validateTokenIds(prompt_tokens, config.vocab_size);
+            const tok_emb = try embedTokensScaled(f32, graph, self.embed_tokens.weight.data, config.hidden_size, prompt_tokens);
             cache.reset();
-
-            const tok_emb = try self.embedScaled(graph, prompt_tokens);
 
             var h = tok_emb;
             for (self.layers, 0..) |*layer, l_idx| {
@@ -1327,9 +1207,7 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             recent_tokens: []const usize,
             sampler: *Sampler,
         ) !usize {
-            const tokens = [_]usize{token};
-            try validateTokenIds(&tokens, config.vocab_size);
-            const tok_emb = try self.embedScaled(graph, &tokens);
+            const tok_emb = try embedTokensScaled(f32, graph, self.embed_tokens.weight.data, config.hidden_size, &.{token});
 
             var h = tok_emb;
             for (self.layers, 0..) |*layer, l_idx| {
