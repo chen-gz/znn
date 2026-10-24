@@ -1081,3 +1081,271 @@ pub const DefaultGemma4Q4 = Gemma4Q4ForCausalLM(Gemma4Config.default);
 
 /// 测试配置的微型 Q4 量化 Gemma 4 模型类型
 pub const TinyQ4Gemma4 = Gemma4Q4ForCausalLM(Gemma4Config.tiny_test);
+
+/// Gemma 4 12B Q4 量化端到端极速推理引擎 (Inference Engine)
+/// 对齐 Gemma4E4BEngine 与 Python mlx_lm，提供极其简洁的端到端加载、流式生成与基准评测接口。
+pub const Gemma4Q4Engine = struct {
+    allocator: std.mem.Allocator,
+    mmap_ptr: []const u8,
+    model: DefaultGemma4Q4,
+    vocab: gemma4.Gemma4Vocabulary,
+    load_time_s: f64,
+
+    pub const Options = struct {
+        model_path: ?[]const u8 = null,
+        vocab_path: []const u8 = "gemma4_vocab.bin",
+        lm_head_mode: backend.offload.QuantMode = .bf16,
+        warmup: bool = true,
+
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    pub const GenerateOptions = struct {
+        sampling: backend.sampling.SamplingOptions = DefaultGemma4Q4.config.generation,
+        max_new_tokens: usize = 256,
+        stop_tokens: []const usize = &default_stop_tokens,
+        enable_speculative: bool = true,
+        max_seq_len: usize = 2048,
+        apply_chat_template: bool = true,
+        verbose: bool = false,
+
+        pub fn defaultOptions() GenerateOptions {
+            return .{};
+        }
+    };
+
+    pub const default_stop_tokens = [_]usize{ gemma4.Gemma4Vocabulary.EOS, gemma4.Gemma4Vocabulary.EOT };
+
+    pub const GenerationStats = struct {
+        load_time_s: f64 = 0.0,
+        prefill_time_ms: f64 = 0.0,
+        decode_time_s: f64 = 0.0,
+        total_time_s: f64 = 0.0,
+        prompt_tokens: usize = 0,
+        generated_tokens: usize = 0,
+        prefill_tps: f64 = 0.0,
+        decode_tps: f64 = 0.0,
+        speculative_hits: usize = 0,
+
+        pub fn printReport(self: GenerationStats) void {
+            std.debug.print(
+                \\
+                \\================================================================================
+                \\📊 Gemma 4 12B Q4 性能基准测试报告 (Performance Benchmark):
+                \\================================================================================
+                \\   - 模型冷启动加载耗时 : {d:.3} 秒 (零拷贝 mmap 直通)
+                \\   - Prompt 预填充耗时  : {d:.2} 毫秒 (TTFT 首字延迟)
+                \\   - 预填充吞吐速率     : {d:.1} token/s
+                \\   - 生成词元总数       : {} tokens
+                \\   - 增量解码速率       : {d:.2} token/s
+                \\   - 端到端总生成耗时   : {d:.2} 秒
+                \\================================================================================
+                \\
+            , .{
+                self.load_time_s,
+                self.prefill_time_ms,
+                self.prefill_tps,
+                self.generated_tokens,
+                self.decode_tps,
+                self.total_time_s,
+            });
+        }
+    };
+
+    pub const TextResult = struct {
+        text: []const u8,
+        stats: GenerationStats,
+
+        pub fn deinit(self: *TextResult, allocator: std.mem.Allocator) void {
+            allocator.free(self.text);
+        }
+    };
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, options: Options) !Gemma4Q4Engine {
+        var timer_load: std.posix.system.timespec = undefined;
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_load);
+        const load_start_ns = @as(u64, @intCast(timer_load.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_load.nsec));
+
+        const cwd = std.Io.Dir.cwd();
+        var file = if (options.model_path) |p|
+            try cwd.openFile(io, p, .{})
+        else cwd.openFile(io, "gemma-4-12B-direct.bin", .{}) catch blk: {
+            break :blk try cwd.openFile(io, "gemma-4-12B-q4.bin", .{});
+        };
+        defer file.close(io);
+
+        const stat = try file.stat(io);
+        const mmap_ptr = try std.posix.mmap(
+            null,
+            @as(usize, @intCast(stat.size)),
+            .{ .READ = true },
+            .{ .TYPE = .SHARED },
+            file.handle,
+            0,
+        );
+        errdefer std.posix.munmap(mmap_ptr);
+
+        var model = try DefaultGemma4Q4.loadFromMmapWithOptions(allocator, mmap_ptr, .{
+            .lm_head_mode = options.lm_head_mode,
+            .warmup = options.warmup,
+        });
+        errdefer model.deinit(allocator);
+
+        var vocab = try gemma4.Gemma4Vocabulary.openFile(io, options.vocab_path);
+        errdefer vocab.deinit();
+        try vocab.buildLookupTable(allocator);
+
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_load);
+        const load_end_ns = @as(u64, @intCast(timer_load.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_load.nsec));
+        const load_time_s = @as(f64, @floatFromInt(load_end_ns - load_start_ns)) / 1e9;
+
+        return .{
+            .allocator = allocator,
+            .mmap_ptr = mmap_ptr,
+            .model = model,
+            .vocab = vocab,
+            .load_time_s = load_time_s,
+        };
+    }
+
+    pub fn deinit(self: *Gemma4Q4Engine) void {
+        self.model.deinit(self.allocator);
+        self.vocab.deinit();
+        std.posix.munmap(@alignCast(self.mmap_ptr));
+    }
+
+    pub const TextStream = struct {
+        engine: *Gemma4Q4Engine,
+        generation: DefaultGemma4Q4.Generation,
+        prompt_tokens: []const usize,
+        start_ns: u64,
+        decode_start_ns: u64 = 0,
+        prefill_time_ms: f64 = 0.0,
+        finished: bool = false,
+
+        pub fn deinit(self: *TextStream) void {
+            self.generation.deinit();
+            self.engine.allocator.free(self.prompt_tokens);
+        }
+
+        pub fn next(self: *TextStream) !?[]const u8 {
+            if (self.finished) return null;
+            const maybe_tok = try self.generation.next();
+            if (maybe_tok) |tok| {
+                if (self.generation.generated().len == 1) {
+                    var ts: std.posix.system.timespec = undefined;
+                    _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
+                    self.decode_start_ns = @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+                    self.prefill_time_ms = @as(f64, @floatFromInt(self.decode_start_ns - self.start_ns)) / 1e6;
+                }
+                return self.engine.vocab.decode(tok);
+            }
+            self.finished = true;
+            return null;
+        }
+
+        pub fn stats(self: *const TextStream) GenerationStats {
+            var ts: std.posix.system.timespec = undefined;
+            _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &ts);
+            const end_ns = @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+            const total_s = @as(f64, @floatFromInt(end_ns - self.start_ns)) / 1e9;
+            const decode_s = if (self.decode_start_ns > 0) @as(f64, @floatFromInt(end_ns - self.decode_start_ns)) / 1e9 else 0.0;
+            const gen_count = self.generation.generated().len;
+            const decode_count = if (gen_count > 1) gen_count - 1 else 0;
+            const decode_tps = if (decode_s > 0.0) @as(f64, @floatFromInt(decode_count)) / decode_s else 0.0;
+            const prefill_tps = if (self.prefill_time_ms > 0.0)
+                @as(f64, @floatFromInt(self.prompt_tokens.len)) / (self.prefill_time_ms / 1000.0)
+            else
+                0.0;
+
+            return .{
+                .load_time_s = self.engine.load_time_s,
+                .prefill_time_ms = self.prefill_time_ms,
+                .decode_time_s = decode_s,
+                .total_time_s = total_s,
+                .prompt_tokens = self.prompt_tokens.len,
+                .generated_tokens = gen_count,
+                .prefill_tps = prefill_tps,
+                .decode_tps = decode_tps,
+                .speculative_hits = self.generation.speculative_hits,
+            };
+        }
+    };
+
+    pub fn stream(self: *Gemma4Q4Engine, prompt: []const u8, options: GenerateOptions) !TextStream {
+        const prompt_tokens = if (options.apply_chat_template)
+            try self.vocab.formatInstructPrompt(self.allocator, prompt)
+        else
+            try self.vocab.encode(self.allocator, prompt);
+        errdefer self.allocator.free(prompt_tokens);
+
+        var timer_ts: std.posix.system.timespec = undefined;
+        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
+        const start_ns = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
+
+        const generation = try self.model.generate(self.allocator, prompt_tokens, .{
+            .sampling = options.sampling,
+            .max_new_tokens = options.max_new_tokens,
+            .stop_tokens = options.stop_tokens,
+            .enable_speculative = options.enable_speculative,
+            .max_seq_len = options.max_seq_len,
+            .mmap_bytes = self.mmap_ptr,
+        });
+
+        return .{
+            .engine = self,
+            .generation = generation,
+            .prompt_tokens = prompt_tokens,
+            .start_ns = start_ns,
+        };
+    }
+
+    pub fn streamPrint(
+        self: *Gemma4Q4Engine,
+        prompt: []const u8,
+        options: GenerateOptions,
+    ) !GenerationStats {
+        var s = try self.stream(prompt, options);
+        defer s.deinit();
+
+        while (try s.next()) |chunk| {
+            if (chunk.len > 0) {
+                std.debug.print("{s}", .{chunk});
+            }
+        }
+
+        const gen_stats = s.stats();
+        if (options.verbose) {
+            gen_stats.printReport();
+        }
+        return gen_stats;
+    }
+
+    pub fn generateText(
+        self: *Gemma4Q4Engine,
+        allocator: std.mem.Allocator,
+        prompt: []const u8,
+        options: GenerateOptions,
+    ) !TextResult {
+        var s = try self.stream(prompt, options);
+        defer s.deinit();
+
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(allocator);
+
+        while (try s.next()) |chunk| {
+            try buf.appendSlice(allocator, chunk);
+        }
+
+        const gen_stats = s.stats();
+        if (options.verbose) {
+            gen_stats.printReport();
+        }
+        return .{
+            .text = try buf.toOwnedSlice(allocator),
+            .stats = gen_stats,
+        };
+    }
+};

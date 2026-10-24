@@ -6,6 +6,7 @@ const nn = @import("nn.zig");
 const models = @import("models.zig");
 
 pub const Gemma4E4BEngine = models.Gemma4E4BEngine;
+pub const Gemma4Q4Engine = models.Gemma4Q4Engine;
 
 pub const ClassificationStepResult = struct {
     loss: f32,
