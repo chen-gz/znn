@@ -8,8 +8,160 @@ const std = @import("std");
 const backend = @import("../backend.zig");
 const tensor = @import("../tensor.zig");
 const nn = @import("../nn.zig");
+const autodiff = @import("../autodiff.zig");
 const gemma4 = @import("gemma4.zig");
+const gemma4_q4 = @import("gemma4_q4.zig");
 const gemma4_gpu = @import("gemma4_gpu.zig");
+
+const Tensor = tensor.Tensor;
+const Embedding = nn.transformer.Embedding;
+const RMSNorm = nn.RMSNorm;
+const deinitModel = nn.core.deinitModel;
+const enterModuleScope = nn.core.enterModuleScope;
+
+pub const Gemma4Q4Attention = gemma4_q4.Gemma4Q4Attention;
+pub const Gemma4Q4MLP = gemma4_q4.Gemma4Q4MLP;
+pub const Gemma4PleLayer = gemma4.Gemma4PleLayer(nn.Q4Linear);
+pub const Gemma4PleEmbedding = gemma4.Gemma4PleEmbedding(nn.Q4Linear);
+
+/// Gemma 4 E4B 变换器解码层 (泛型模块装配：Q4 注意力 + Q4 门控 MLP + Q4 PLE 模块)
+pub const Gemma4E4BDecoderLayer = gemma4.Gemma4DecoderLayerT(
+    Gemma4Q4Attention,
+    Gemma4Q4MLP,
+    Gemma4PleLayer,
+);
+
+/// Gemma 4 E4B 语言模型核心架构 (Gemma4E4BForCausalLM: 纯 PyTorch / JAX 风格模块化定义，完全解耦硬件后端)
+pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
+    return struct {
+        pub const config: Gemma4Config = cfg;
+        const Self = @This();
+
+        embed_tokens: Embedding,
+        embed_tokens_per_layer: Embedding,
+        ple_embed: Gemma4PleEmbedding,
+        layers: []Gemma4E4BDecoderLayer,
+        norm: RMSNorm,
+
+        name: ?[]const u8 = null,
+        module_type: []const u8 = "Gemma4E4BForCausalLM",
+
+        pub fn init(allocator: std.mem.Allocator) !Self {
+            const embed_tokens = try Embedding.init(allocator, config.vocab_size, config.hidden_size);
+            errdefer deinitModel(&embed_tokens, allocator);
+
+            const embed_tokens_per_layer = try Embedding.init(
+                allocator,
+                config.vocab_size,
+                config.num_hidden_layers * config.hidden_size_per_layer_input,
+            );
+            errdefer deinitModel(&embed_tokens_per_layer, allocator);
+
+            var ple_embed = try Gemma4PleEmbedding.init(
+                allocator,
+                config.hidden_size,
+                config.num_hidden_layers,
+                config.hidden_size_per_layer_input,
+                config.rms_norm_eps,
+            );
+            errdefer ple_embed.deinit(allocator);
+
+            const layers = try allocator.alloc(Gemma4E4BDecoderLayer, config.num_hidden_layers);
+            errdefer allocator.free(layers);
+            var initialized_layers: usize = 0;
+            errdefer for (layers[0..initialized_layers]) |*layer| layer.deinit(allocator);
+
+            for (0..config.num_hidden_layers) |i| {
+                const spec = config.layerSpec(i);
+                layers[i] = try Gemma4E4BDecoderLayer.initWithPle(
+                    allocator,
+                    spec.attn_type,
+                    config.hidden_size,
+                    config.intermediate_size,
+                    config.num_attention_heads,
+                    spec.num_kv_heads,
+                    spec.head_dim,
+                    config.sliding_window,
+                    config.rms_norm_eps,
+                    config.hidden_activation,
+                    config.hidden_size_per_layer_input,
+                );
+                initialized_layers += 1;
+            }
+
+            const norm = try RMSNorm.init(allocator, config.hidden_size, config.rms_norm_eps);
+
+            return Self{
+                .embed_tokens = embed_tokens,
+                .embed_tokens_per_layer = embed_tokens_per_layer,
+                .ple_embed = ple_embed,
+                .layers = layers,
+                .norm = norm,
+            };
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            deinitModel(&self.embed_tokens, allocator);
+            deinitModel(&self.embed_tokens_per_layer, allocator);
+            self.ple_embed.deinit(allocator);
+            for (self.layers) |*layer| {
+                layer.deinit(allocator);
+            }
+            allocator.free(self.layers);
+            deinitModel(&self.norm, allocator);
+        }
+
+        pub fn enableHardwareOffload(self: *Self, allocator: std.mem.Allocator) !void {
+            try self.ple_embed.enableHardwareOffload(allocator);
+            for (self.layers) |*layer| {
+                try layer.enableHardwareOffload(allocator);
+            }
+        }
+
+        pub fn forward(self: *const Self, graph: *autodiff.Graph, token_ids: anytype) !*Tensor {
+            const module_scope = try enterModuleScope(graph, self);
+            defer module_scope.exit();
+
+            const B = token_ids.shape.dims[0];
+            const T = token_ids.shape.dims[1];
+
+            // 1. 词嵌入与 Gemma 嵌入缩放 sqrt(hidden_size)
+            const tok_emb = try self.embed_tokens.forward(graph, token_ids);
+            const scale = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
+            var h = try graph.mulScalar(tok_emb, scale);
+
+            // 2. 逐层嵌入输入提取并重塑为 4D [B, T, num_layers, ple_dim]
+            const ple_tok_flat = try self.embed_tokens_per_layer.forward(graph, token_ids);
+            const ple_tokens = try graph.reshape(ple_tok_flat, &.{ B, T, config.num_hidden_layers, config.hidden_size_per_layer_input });
+
+            // 3. 逐层输入预处理 (PLE Preprocessing)
+            const ple_inputs = try self.ple_embed.forward(graph, h, ple_tokens);
+
+            // 4. 逐层前向传播
+            for (self.layers, 0..) |*layer, layer_idx| {
+                const ple_slice_4d = try graph.slice(ple_inputs, &.{
+                    .{},
+                    .{},
+                    .{ .start = layer_idx, .end = layer_idx + 1 },
+                    .{},
+                });
+                const ple_slice = try graph.squeeze(ple_slice_4d, 2);
+                h = try layer.forwardWithPle(graph, h, ple_slice);
+            }
+
+            // 5. 最终层 RMSNorm
+            const h_norm = try self.norm.forward(graph, h);
+
+            // 6. 绑定权重投影 (Tie Word Embeddings) 与软截断
+            const h_2d = try graph.reshape(h_norm, &.{ B * T, config.hidden_size });
+            const embed_t = try graph.transposeND(self.embed_tokens.weight, 0, 1);
+            const logits_raw_2d = try graph.matmul(h_2d, embed_t);
+            const capped_logits_2d = try graph.softcap(logits_raw_2d, config.final_logit_softcapping);
+
+            return try graph.reshape(capped_logits_2d, &.{ B, T, config.vocab_size });
+        }
+    };
+}
 
 const mlx = backend.mlx;
 pub const Gemma4Config = gemma4.Gemma4Config;

@@ -833,13 +833,18 @@ pub fn Gemma4AttentionT(comptime Proj: type) type {
     };
 }
 
+pub const ple = @import("gemma4_ple.zig");
+pub const Gemma4PleLayer = ple.Gemma4PleLayer;
+pub const Gemma4PleEmbedding = ple.Gemma4PleEmbedding;
+
 /// Gemma 4 混合注意力机制 (全精度 F32 线性层特化)
 pub const Gemma4Attention = Gemma4AttentionT(Linear);
 
-/// Gemma 4 泛型变换器层 (Gemma4DecoderLayerT: 支持 F32 与 Q4 混合层组装)
-pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
+/// Gemma 4 泛型变换器层 (Gemma4DecoderLayerT: 支持 F32、Q4 与可选 PLE 混合层组装)
+pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type, comptime Ple: type) type {
     return struct {
         const Self = @This();
+        pub const PleType = if (Ple != void) Ple else struct {};
 
         input_layernorm: RMSNorm,
         self_attn: Attn,
@@ -847,6 +852,7 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
         pre_feedforward_layernorm: RMSNorm,
         mlp: Mlp,
         post_feedforward_layernorm: RMSNorm,
+        ple: PleType,
         layer_scalar: *Tensor, // [1]
 
         name: ?[]const u8 = null,
@@ -863,6 +869,34 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
             sliding_window: usize,
             rms_norm_eps: f32,
             hidden_activation: backend.GeluApproximation,
+        ) !Self {
+            return initWithPle(
+                allocator,
+                attn_type,
+                hidden_size,
+                intermediate_size,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                sliding_window,
+                rms_norm_eps,
+                hidden_activation,
+                0,
+            );
+        }
+
+        pub fn initWithPle(
+            allocator: std.mem.Allocator,
+            attn_type: Gemma4AttentionType,
+            hidden_size: usize,
+            intermediate_size: usize,
+            num_heads: usize,
+            num_kv_heads: usize,
+            head_dim: usize,
+            sliding_window: usize,
+            rms_norm_eps: f32,
+            hidden_activation: backend.GeluApproximation,
+            ple_dim: usize,
         ) !Self {
             const input_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
             errdefer deinitModel(&input_layernorm, allocator);
@@ -891,6 +925,14 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
             const post_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
             errdefer deinitModel(&post_feedforward_layernorm, allocator);
 
+            var ple_sub: PleType = if (Ple != void) blk: {
+                const p = try Ple.init(allocator, hidden_size, ple_dim, rms_norm_eps, hidden_activation);
+                break :blk p;
+            } else .{};
+            errdefer if (Ple != void) {
+                if (@hasDecl(Ple, "deinit")) ple_sub.deinit(allocator) else deinitModel(&ple_sub, allocator);
+            };
+
             const layer_scalar = try createLayerScalar(allocator);
             errdefer freePersistentTensor(allocator, layer_scalar);
 
@@ -901,6 +943,7 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
                 .pre_feedforward_layernorm = pre_feedforward_layernorm,
                 .mlp = mlp,
                 .post_feedforward_layernorm = post_feedforward_layernorm,
+                .ple = ple_sub,
                 .layer_scalar = layer_scalar,
             };
         }
@@ -916,6 +959,34 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
             sliding_window: usize,
             rms_norm_eps: f32,
             hidden_activation: backend.GeluApproximation,
+        ) !Self {
+            return initEmptyWithPle(
+                allocator,
+                attn_type,
+                hidden_size,
+                intermediate_size,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                sliding_window,
+                rms_norm_eps,
+                hidden_activation,
+                0,
+            );
+        }
+
+        pub fn initEmptyWithPle(
+            allocator: std.mem.Allocator,
+            attn_type: Gemma4AttentionType,
+            hidden_size: usize,
+            intermediate_size: usize,
+            num_heads: usize,
+            num_kv_heads: usize,
+            head_dim: usize,
+            sliding_window: usize,
+            rms_norm_eps: f32,
+            hidden_activation: backend.GeluApproximation,
+            ple_dim: usize,
         ) !Self {
             const input_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
             errdefer deinitModel(&input_layernorm, allocator);
@@ -943,6 +1014,14 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
             const post_feedforward_layernorm = try RMSNorm.init(allocator, hidden_size, rms_norm_eps);
             errdefer deinitModel(&post_feedforward_layernorm, allocator);
 
+            var ple_sub: PleType = if (Ple != void) blk: {
+                const p = try Ple.initEmpty(allocator, hidden_size, ple_dim, rms_norm_eps, hidden_activation);
+                break :blk p;
+            } else .{};
+            errdefer if (Ple != void) {
+                if (@hasDecl(Ple, "deinit")) ple_sub.deinit(allocator) else deinitModel(&ple_sub, allocator);
+            };
+
             const layer_scalar = try createLayerScalar(allocator);
             errdefer freePersistentTensor(allocator, layer_scalar);
 
@@ -953,6 +1032,7 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
                 .pre_feedforward_layernorm = pre_feedforward_layernorm,
                 .mlp = mlp,
                 .post_feedforward_layernorm = post_feedforward_layernorm,
+                .ple = ple_sub,
                 .layer_scalar = layer_scalar,
             };
         }
@@ -964,6 +1044,9 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
             deinitModel(&self.pre_feedforward_layernorm, allocator);
             if (@hasDecl(Mlp, "deinit")) self.mlp.deinit(allocator) else deinitModel(&self.mlp, allocator);
             deinitModel(&self.post_feedforward_layernorm, allocator);
+            if (Ple != void) {
+                if (@hasDecl(Ple, "deinit")) self.ple.deinit(allocator) else deinitModel(&self.ple, allocator);
+            }
             freePersistentTensor(allocator, self.layer_scalar);
         }
 
@@ -979,11 +1062,16 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
                 try self.mlp.up_proj.enableOffload(allocator, null);
                 try self.mlp.down_proj.enableOffload(allocator, null);
             }
+            if (Ple != void) {
+                if (@hasDecl(Ple, "enableHardwareOffload")) {
+                    try self.ple.enableHardwareOffload(allocator);
+                }
+            }
         }
 
         pub const formula = "\\begin{aligned} x_1 &= x + \\text{PostAttnLN}(\\text{Attn}(\\text{InputLN}(x))) \\\\ x_2 &= s \\cdot \\left(x_1 + \\text{PostMLPLN}(\\text{MLP}(\\text{PreMLPLN}(x_1)))\\right) \\end{aligned}";
 
-        fn residualTail(self: *const Self, graph: *autodiff.Graph, x: *Tensor, attn_out: *Tensor) !*Tensor {
+        fn residualTail(self: *const Self, graph: *autodiff.Graph, x: *Tensor, attn_out: *Tensor, ple_slice: ?*Tensor) !*Tensor {
             const post_attn = try self.post_attention_layernorm.forward(graph, attn_out);
             const x1 = try graph.add(x, post_attn);
 
@@ -991,16 +1079,26 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
             const mlp_out = try self.mlp.forward(graph, pre_mlp);
             const post_mlp = try self.post_feedforward_layernorm.forward(graph, mlp_out);
             const x2 = try graph.add(x1, post_mlp);
+
+            if (Ple != void) {
+                if (ple_slice) |ps| {
+                    return try self.ple.forward(graph, x2, ps, self.layer_scalar);
+                }
+            }
             return try graph.mulScalar(x2, self.layer_scalar.data[0]);
         }
 
         pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+            return self.forwardWithPle(graph, x, null);
+        }
+
+        pub fn forwardWithPle(self: *const Self, graph: *autodiff.Graph, x: *Tensor, ple_slice: ?*Tensor) !*Tensor {
             const module_scope = try enterModuleScope(graph, self);
             defer module_scope.exit();
 
             const in_norm = try self.input_layernorm.forward(graph, x);
             const attn_out = try self.self_attn.forward(graph, in_norm);
-            return self.residualTail(graph, x, attn_out);
+            return self.residualTail(graph, x, attn_out, ple_slice);
         }
 
         pub fn forwardPrefill(
@@ -1009,12 +1107,22 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
             x: *Tensor,
             layer_cache: *Gemma4KVCache.LayerCache,
         ) !*Tensor {
+            return self.forwardPrefillWithPle(graph, x, layer_cache, null);
+        }
+
+        pub fn forwardPrefillWithPle(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            x: *Tensor,
+            layer_cache: *Gemma4KVCache.LayerCache,
+            ple_slice: ?*Tensor,
+        ) !*Tensor {
             const module_scope = try enterModuleScope(graph, self);
             defer module_scope.exit();
 
             const in_norm = try self.input_layernorm.forward(graph, x);
             const attn_out = try self.self_attn.forwardPrefill(graph, in_norm, layer_cache);
-            return self.residualTail(graph, x, attn_out);
+            return self.residualTail(graph, x, attn_out, ple_slice);
         }
 
         pub fn forwardDecode(
@@ -1023,18 +1131,28 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
             x: *Tensor,
             layer_cache: *Gemma4KVCache.LayerCache,
         ) !*Tensor {
+            return self.forwardDecodeWithPle(graph, x, layer_cache, null);
+        }
+
+        pub fn forwardDecodeWithPle(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            x: *Tensor,
+            layer_cache: *Gemma4KVCache.LayerCache,
+            ple_slice: ?*Tensor,
+        ) !*Tensor {
             const module_scope = try enterModuleScope(graph, self);
             defer module_scope.exit();
 
             const in_norm = try self.input_layernorm.forward(graph, x);
             const attn_out = try self.self_attn.forwardDecode(graph, in_norm, layer_cache);
-            return self.residualTail(graph, x, attn_out);
+            return self.residualTail(graph, x, attn_out, ple_slice);
         }
     };
 }
 
 /// Gemma 4 变换器层 (全精度特化)
-pub const Gemma4DecoderLayer = Gemma4DecoderLayerT(Gemma4Attention, Gemma4MLP);
+pub const Gemma4DecoderLayer = Gemma4DecoderLayerT(Gemma4Attention, Gemma4MLP, void);
 
 /// Gemma 4 语言模型核心架构 (Gemma4ForCausalLM)
 pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {

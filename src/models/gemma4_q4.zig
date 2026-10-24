@@ -37,7 +37,7 @@ pub const Gemma4Q4MLP = nn.GatedMLP(nn.Q4Linear);
 pub const Gemma4Q4Attention = gemma4.Gemma4AttentionT(Q4Linear);
 
 /// Gemma 4 解码器层 (Q4 量化版本)
-pub const Gemma4Q4DecoderLayer = gemma4.Gemma4DecoderLayerT(Gemma4Q4Attention, Gemma4Q4MLP);
+pub const Gemma4Q4DecoderLayer = gemma4.Gemma4DecoderLayerT(Gemma4Q4Attention, Gemma4Q4MLP, void);
 
 /// 4-bit 量化因果语言模型 (Gemma4Q4ForCausalLM)
 /// 整体内存降低至原始全精度的 1/4 到 1/8，使得 12B 模型能够在 16GB 设备上完整运行！

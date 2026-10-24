@@ -10,6 +10,8 @@ pub const DefaultGemma4Q4 = gemma4_q4.DefaultGemma4Q4;
 pub const gemma4_gpu = @import("models/gemma4_gpu.zig");
 pub const gemma4_e4b = @import("models/gemma4_e4b.zig");
 pub const Gemma4E4BModel = gemma4_e4b.Gemma4E4BModel;
+pub const Gemma4E4BDecoderLayer = gemma4_e4b.Gemma4E4BDecoderLayer;
+pub const Gemma4E4BForCausalLM = gemma4_e4b.Gemma4E4BForCausalLM;
 
 pub const gpt = @import("models/gpt.zig");
 pub const GPTConfig = gpt.GPTConfig;
