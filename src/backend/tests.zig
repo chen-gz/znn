@@ -73,7 +73,7 @@ test "MLX GPU backend matmul and fast kernels" {
     const q_data: [64]f32 = @splat(0.1);
     var q = try Array.fromSlice(&q_data, &.{ 1, 2, 4, 8 });
     defer q.deinit();
-    var sdpa_res = try Array.fastScaledDotProductAttention(q, q, q, 1.0 / @sqrt(8.0), false, stream);
+    var sdpa_res = try Array.fastScaledDotProductAttention(q, q, q, 1.0 / @sqrt(8.0), .none, stream);
     defer sdpa_res.deinit();
     sdpa_res.eval();
     const sdpa_out = try sdpa_res.dataFloat32();
@@ -89,7 +89,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var v_dec = try Array.fromSlice(&kv_cached, &.{ 1, 1, 4, 8 });
     defer v_dec.deinit();
 
-    var gqa_sdpa = try Array.fastScaledDotProductAttention(q_dec, k_dec, v_dec, 1.0 / @sqrt(8.0), false, stream);
+    var gqa_sdpa = try Array.fastScaledDotProductAttention(q_dec, k_dec, v_dec, 1.0 / @sqrt(8.0), .none, stream);
     defer gqa_sdpa.deinit();
     gqa_sdpa.eval();
     const gqa_out = try gqa_sdpa.dataFloat32();
@@ -105,7 +105,7 @@ test "MLX GPU backend matmul and fast kernels" {
     defer k_pref_arr.deinit();
     var v_pref_arr = try Array.fromSlice(&kv_prefix, &.{ 1, 1, 5, 8 });
     defer v_pref_arr.deinit();
-    var pref_sdpa = try Array.fastScaledDotProductAttention(q_pref_arr, k_pref_arr, v_pref_arr, 1.0 / @sqrt(8.0), true, stream);
+    var pref_sdpa = try Array.fastScaledDotProductAttention(q_pref_arr, k_pref_arr, v_pref_arr, 1.0 / @sqrt(8.0), .causal, stream);
     defer pref_sdpa.deinit();
     pref_sdpa.eval();
     const pref_out = try pref_sdpa.dataFloat32();
@@ -182,7 +182,7 @@ test "MLX GPU backend matmul and fast kernels" {
     defer k_sub.deinit();
     var v_sub = try updated_arr.sliceAxis(2, 0, 3, stream);
     defer v_sub.deinit();
-    var sdpa_sub = try Array.fastScaledDotProductAttention(q_single, k_sub, v_sub, 1.0, false, stream);
+    var sdpa_sub = try Array.fastScaledDotProductAttention(q_single, k_sub, v_sub, 1.0, .none, stream);
     defer sdpa_sub.deinit();
     sdpa_sub.eval();
     const sdpa_sub_out = try sdpa_sub.dataFloat32();
@@ -402,7 +402,7 @@ test "MLX GPU backend matmul and fast kernels" {
     // 7. 验证切片视图直接送入 fastScaledDotProductAttention 正常执行
     var q_probe = try Array.zeros(&.{ 1, 2, 1, 2 }, .float32, stream);
     defer q_probe.deinit();
-    var attn = try Array.fastScaledDotProductAttention(q_probe, view_2, view_2, 1.0, false, stream);
+    var attn = try Array.fastScaledDotProductAttention(q_probe, view_2, view_2, 1.0, .none, stream);
     defer attn.deinit();
     attn.eval();
     stream.synchronize();
@@ -419,7 +419,7 @@ test "MLX GPU backend matmul and fast kernels" {
     var view_3 = try cache_4d.slice4dAxis2(2, 0, 3, 2, stream);
     defer view_3.deinit();
 
-    var attn2 = try Array.fastScaledDotProductAttention(q_probe, view_3, view_3, 1.0, false, stream);
+    var attn2 = try Array.fastScaledDotProductAttention(q_probe, view_3, view_3, 1.0, .none, stream);
     defer attn2.deinit();
     attn2.eval();
     stream.synchronize();
@@ -866,7 +866,7 @@ test "Q4Weights initFromDirectBuffers fast path" {
 
 test "GpuKvCache rotating sliding-window wrap-around range calculation" {
     // 1. 局部滑动窗口层在未满窗口容量时按线性偏移写入并切片
-    const r_prefill = GpuKvCache.computeWriteRange(512, true, 512, 0, 12);
+    const r_prefill = try GpuKvCache.computeWriteRange(512, true, 512, 0, 12);
     try std.testing.expectEqual(@as(usize, 0), r_prefill.write_start);
     try std.testing.expectEqual(@as(usize, 12), r_prefill.write_stop);
     try std.testing.expectEqual(@as(usize, 0), r_prefill.slice_start);
@@ -874,7 +874,7 @@ test "GpuKvCache rotating sliding-window wrap-around range calculation" {
     try std.testing.expect(!r_prefill.use_full_buffer);
 
     // 2. 局部滑动窗口层恰好填满第 512 个词元槽位 (pos = 511, seq_len = 1) 时启用整块缓冲区零切片复用
-    const r_exact = GpuKvCache.computeWriteRange(512, true, 512, 511, 1);
+    const r_exact = try GpuKvCache.computeWriteRange(512, true, 512, 511, 1);
     try std.testing.expectEqual(@as(usize, 511), r_exact.write_start);
     try std.testing.expectEqual(@as(usize, 512), r_exact.write_stop);
     try std.testing.expectEqual(@as(usize, 0), r_exact.slice_start);
@@ -882,25 +882,108 @@ test "GpuKvCache rotating sliding-window wrap-around range calculation" {
     try std.testing.expect(r_exact.use_full_buffer);
 
     // 3. 局部滑动窗口层超出 512 窗口 (pos = 512, 513, 1025) 时环形回绕覆写最旧槽位并保持整块缓冲区零切片复用
-    const r_wrap0 = GpuKvCache.computeWriteRange(512, true, 512, 512, 1);
+    const r_wrap0 = try GpuKvCache.computeWriteRange(512, true, 512, 512, 1);
     try std.testing.expectEqual(@as(usize, 0), r_wrap0.write_start);
     try std.testing.expectEqual(@as(usize, 1), r_wrap0.write_stop);
     try std.testing.expectEqual(@as(usize, 0), r_wrap0.slice_start);
     try std.testing.expectEqual(@as(usize, 512), r_wrap0.slice_stop);
     try std.testing.expect(r_wrap0.use_full_buffer);
 
-    const r_wrap1 = GpuKvCache.computeWriteRange(512, true, 512, 1025, 1);
+    const r_wrap1 = try GpuKvCache.computeWriteRange(512, true, 512, 1025, 1);
     try std.testing.expectEqual(@as(usize, 1), r_wrap1.write_start);
     try std.testing.expectEqual(@as(usize, 2), r_wrap1.write_stop);
     try std.testing.expect(r_wrap1.use_full_buffer);
 
     // 4. 全局全注意力层 (is_sliding = false) 保持线性追加增长
-    const r_global = GpuKvCache.computeWriteRange(768, false, 512, 512, 1);
+    const r_global = try GpuKvCache.computeWriteRange(768, false, 512, 512, 1);
     try std.testing.expectEqual(@as(usize, 512), r_global.write_start);
     try std.testing.expectEqual(@as(usize, 513), r_global.write_stop);
     try std.testing.expectEqual(@as(usize, 0), r_global.slice_start);
     try std.testing.expectEqual(@as(usize, 513), r_global.slice_stop);
     try std.testing.expect(!r_global.use_full_buffer);
+
+    // 5. 滑动窗口层预填充长度超过窗口 (T = 600 > 512)：线性写入全部键，读取 [0, 600) 并须施加滑动窗口掩码
+    const r_long = try GpuKvCache.computeWriteRange(512, true, 512, 0, 600);
+    try std.testing.expectEqual(@as(usize, 0), r_long.write_start);
+    try std.testing.expectEqual(@as(usize, 600), r_long.write_stop);
+    try std.testing.expectEqual(@as(usize, 0), r_long.slice_start);
+    try std.testing.expectEqual(@as(usize, 600), r_long.slice_stop);
+    try std.testing.expect(!r_long.use_full_buffer);
+    try std.testing.expect(GpuKvCache.visibleKeyRange(true, 512, 0, 600).needs_window_mask);
+
+    // 6. 长预填充之后的单步解码 (容量已扩至 768，不再环形覆写)：恰好读取最近 512 个键，无需掩码
+    const r_after = try GpuKvCache.computeWriteRange(768, true, 512, 600, 1);
+    try std.testing.expectEqual(@as(usize, 600), r_after.write_start);
+    try std.testing.expectEqual(@as(usize, 89), r_after.slice_start);
+    try std.testing.expectEqual(@as(usize, 601), r_after.slice_stop);
+    try std.testing.expect(!GpuKvCache.visibleKeyRange(true, 512, 600, 1).needs_window_mask);
+
+    // 7. 线性布局下的多词元步 (pos = 600, T = 5)：保留首个查询窗口内的 511 个历史键 [89, 605) 并施加掩码
+    const r_chunk = try GpuKvCache.computeWriteRange(768, true, 512, 600, 5);
+    try std.testing.expectEqual(@as(usize, 89), r_chunk.slice_start);
+    try std.testing.expectEqual(@as(usize, 605), r_chunk.slice_stop);
+    try std.testing.expect(GpuKvCache.visibleKeyRange(true, 512, 600, 5).needs_window_mask);
+
+    // 8. 容量恰为窗口：位置 512 处尚未环形覆写，多词元步仍可线性追加；一旦越过 512 (已环形覆写) 则拒绝多词元步
+    const r_edge = try GpuKvCache.computeWriteRange(512, true, 512, 512, 4);
+    try std.testing.expectEqual(@as(usize, 512), r_edge.write_start);
+    try std.testing.expectEqual(@as(usize, 1), r_edge.slice_start);
+    try std.testing.expectEqual(@as(usize, 516), r_edge.slice_stop);
+    try std.testing.expectError(error.SlidingWindowCacheWrapped, GpuKvCache.computeWriteRange(512, true, 512, 513, 4));
+    try std.testing.expectError(error.SlidingWindowCacheWrapped, GpuKvCache.computeWriteRange(512, true, 512, 1025, 2));
+}
+
+test "GpuKvCache visible key range with the attention mask gives every query exactly its sliding window" {
+    // 对每个查询 p ∈ [pos, pos + T)，读取的键范围 [start, stop) 与所选掩码 (滑动窗口掩码或右下对齐因果掩码) 的交集
+    // 必须恰为 {k : 0 <= p - k < window} (与 mlx-lm 及 CPU F32 预填充 / 解码路径的窗口语义一致)
+    const windows = [_]usize{ 1, 3, 4, 7 };
+    for (windows) |window| {
+        for (0..12) |pos| {
+            for (1..10) |seq_len| {
+                const range = GpuKvCache.visibleKeyRange(true, window, pos, seq_len);
+                try std.testing.expectEqual(pos + seq_len, range.stop);
+                const tk = range.stop - range.start;
+                for (0..seq_len) |i| {
+                    const p = pos + i;
+                    for (0..p + 1) |k| {
+                        const expected = p - k < window;
+                        const in_view = k >= range.start and k < range.stop;
+                        // 右下对齐因果掩码：第 i 个查询可见视图中前 i + tk - seq_len + 1 个键
+                        const causal_visible = in_view and (k - range.start) <= i + tk - seq_len;
+                        const window_visible = in_view and offload.isSlidingWindowVisible(p, k, window);
+                        const got = if (range.needs_window_mask) window_visible else causal_visible;
+                        try std.testing.expectEqual(expected, got);
+                    }
+                }
+            }
+        }
+    }
+
+    // 全局注意力层：读取全部历史键，右下对齐因果掩码即精确
+    const global = GpuKvCache.visibleKeyRange(false, 4, 10, 6);
+    try std.testing.expectEqual(@as(usize, 0), global.start);
+    try std.testing.expectEqual(@as(usize, 16), global.stop);
+    try std.testing.expect(!global.needs_window_mask);
+}
+
+test "fillSlidingWindowMask marks exactly the keys inside each query window" {
+    const tq = 4;
+    const tk = 6;
+    var mask: [tq * tk]f32 = undefined;
+    // 查询绝对位置 5..8，键绝对位置 3..8，窗口 3
+    offload.fillSlidingWindowMask(&mask, tq, tk, 3, 5, 3);
+    const expected = [tq][tk]bool{
+        .{ true, true, true, false, false, false }, // p = 5: k ∈ {3, 4, 5}
+        .{ false, true, true, true, false, false }, // p = 6: k ∈ {4, 5, 6}
+        .{ false, false, true, true, true, false }, // p = 7: k ∈ {5, 6, 7}
+        .{ false, false, false, true, true, true }, // p = 8: k ∈ {6, 7, 8}
+    };
+    for (0..tq) |i| {
+        for (0..tk) |j| {
+            const want: f32 = if (expected[i][j]) 0.0 else -1e9;
+            try std.testing.expectEqual(want, mask[i * tk + j]);
+        }
+    }
 }
 
 test "Executor parallelFor and parallelReduce with grain near maxInt(usize) do not overflow" {
@@ -1467,4 +1550,129 @@ test "MLX candidate selection bindings: argpartition, take/put along axis, logsu
     var shared = try logits.share();
     defer shared.deinit();
     try std.testing.expectEqualSlices(f32, &data, try shared.dataFloat32());
+}
+
+/// 合成注意力输入：第 p 个位置、第 h 个头、第 d 维的取值 (已按脑浮点数 (Brain Floating Point 16-bit, bfloat16) 舍入，
+/// 使主机端参考实现与 GPU 读取完全相同的输入)
+fn syntheticAttnValue(kind: f32, p: usize, h: usize, d: usize) f32 {
+    const x = @sin(kind * 1.7 + @as(f32, @floatFromInt(p)) * 1.3 + @as(f32, @floatFromInt(h)) * 0.7 + @as(f32, @floatFromInt(d)) * 0.37);
+    const bits: u32 = @as(u32, Array.f32ToBf16Bits(x)) << 16;
+    return @bitCast(bits);
+}
+
+/// 构建本步 `[1, heads, seq_len, head_dim]` 的 bfloat16 输入张量 (绝对位置 pos..pos + seq_len)
+fn syntheticAttnStep(allocator: std.mem.Allocator, kind: f32, heads: usize, pos: usize, seq_len: usize, head_dim: usize, stream: Stream) !Array {
+    const buf = try allocator.alloc(f32, heads * seq_len * head_dim);
+    defer allocator.free(buf);
+    for (0..heads) |h| {
+        for (0..seq_len) |t| {
+            for (0..head_dim) |d| buf[(h * seq_len + t) * head_dim + d] = syntheticAttnValue(kind, pos + t, h, d);
+        }
+    }
+    var f32_arr = try Array.fromSlice(buf, &.{ 1, heads, seq_len, head_dim });
+    defer f32_arr.deinit();
+    return f32_arr.astype(.bfloat16, stream);
+}
+
+test "GpuKvCache sliding-window steps match a per-query reference (prefill longer than the window, ring decode, chunked steps)" {
+    if (!isAvailable()) return;
+    const allocator = std.testing.allocator;
+    var stream = try Stream.defaultGpu();
+    defer stream.deinit();
+
+    const num_heads = 4;
+    const num_kv = 2;
+    const head_dim = 8;
+    const window = 3;
+    const groups = num_heads / num_kv;
+    const scale: f32 = 1.0 / @sqrt(@as(f32, head_dim));
+    const q_kind: f32 = 0.0;
+    const k_kind: f32 = 1.0;
+    const v_kind: f32 = 2.0;
+
+    // 每个场景为一串 (pos, seq_len) 步：长预填充 + 解码、短预填充 + 环形覆写解码、线性布局下的分块多词元步
+    const Step = struct { pos: usize, len: usize };
+    const scenarios = [_][]const Step{
+        &.{ .{ .pos = 0, .len = 7 }, .{ .pos = 7, .len = 1 }, .{ .pos = 8, .len = 1 }, .{ .pos = 9, .len = 1 } },
+        &.{ .{ .pos = 0, .len = 2 }, .{ .pos = 2, .len = 1 }, .{ .pos = 3, .len = 1 }, .{ .pos = 4, .len = 1 }, .{ .pos = 5, .len = 1 }, .{ .pos = 6, .len = 1 } },
+        &.{ .{ .pos = 0, .len = 5 }, .{ .pos = 5, .len = 4 }, .{ .pos = 9, .len = 1 }, .{ .pos = 10, .len = 2 } },
+    };
+
+    for (scenarios) |steps| {
+        var cache = try GpuKvCache.init(window, num_kv, head_dim, stream);
+        defer cache.deinit();
+        for (steps) |step| {
+            var q = try syntheticAttnStep(allocator, q_kind, num_heads, step.pos, step.len, head_dim, stream);
+            defer q.deinit();
+            var k_new = try syntheticAttnStep(allocator, k_kind, num_kv, step.pos, step.len, head_dim, stream);
+            defer k_new.deinit();
+            var v_new = try syntheticAttnStep(allocator, v_kind, num_kv, step.pos, step.len, head_dim, stream);
+            defer v_new.deinit();
+
+            const view = try cache.writeStep(k_new, v_new, true, window, step.pos, step.len, stream);
+            defer if (view.is_slice) {
+                var vk = view.k;
+                vk.deinit();
+                var vv = view.v;
+                vv.deinit();
+            };
+            var out = try offload.cachedAttention(allocator, q, view.k, view.v, scale, true, window, step.pos, step.len, stream);
+            defer out.deinit();
+            var out_f32 = try out.astype(.float32, stream);
+            defer out_f32.deinit();
+            out_f32.eval();
+            const got = try out_f32.dataFloat32();
+            try std.testing.expectEqual(@as(usize, num_heads * step.len * head_dim), got.len);
+
+            // 逐查询参考：绝对位置 p 的查询只与 [max(0, p - window + 1), p] 内的键做 Softmax 加权
+            for (0..num_heads) |h| {
+                const kv_h = h / groups;
+                for (0..step.len) |t| {
+                    const p = step.pos + t;
+                    const k_lo = if (p + 1 > window) p + 1 - window else 0;
+                    var scores: [window]f32 = undefined;
+                    var max_score: f32 = -std.math.inf(f32);
+                    for (k_lo..p + 1, 0..) |kp, idx| {
+                        var dot: f32 = 0.0;
+                        for (0..head_dim) |d| dot += syntheticAttnValue(q_kind, p, h, d) * syntheticAttnValue(k_kind, kp, kv_h, d);
+                        scores[idx] = dot * scale;
+                        max_score = @max(max_score, scores[idx]);
+                    }
+                    const n_keys = p + 1 - k_lo;
+                    var sum: f32 = 0.0;
+                    for (scores[0..n_keys]) |*sc| {
+                        sc.* = @exp(sc.* - max_score);
+                        sum += sc.*;
+                    }
+                    for (0..head_dim) |d| {
+                        var expected: f32 = 0.0;
+                        for (k_lo..p + 1, 0..) |kp, idx| expected += scores[idx] / sum * syntheticAttnValue(v_kind, kp, kv_h, d);
+                        try std.testing.expectApproxEqAbs(expected, got[(h * step.len + t) * head_dim + d], 3e-2);
+                    }
+                }
+            }
+        }
+    }
+
+    // 环形覆写之后的多词元步被拒绝 (缓存槽位已不按绝对位置排列)
+    var ring = try GpuKvCache.init(window, num_kv, head_dim, stream);
+    defer ring.deinit();
+    for (0..window + 2) |p| {
+        var k_new = try syntheticAttnStep(allocator, k_kind, num_kv, p, 1, head_dim, stream);
+        defer k_new.deinit();
+        var v_new = try syntheticAttnStep(allocator, v_kind, num_kv, p, 1, head_dim, stream);
+        defer v_new.deinit();
+        const view = try ring.writeStep(k_new, v_new, true, window, p, 1, stream);
+        if (view.is_slice) {
+            var vk = view.k;
+            vk.deinit();
+            var vv = view.v;
+            vv.deinit();
+        }
+    }
+    var k_chunk = try syntheticAttnStep(allocator, k_kind, num_kv, window + 2, 2, head_dim, stream);
+    defer k_chunk.deinit();
+    var v_chunk = try syntheticAttnStep(allocator, v_kind, num_kv, window + 2, 2, head_dim, stream);
+    defer v_chunk.deinit();
+    try std.testing.expectError(error.SlidingWindowCacheWrapped, ring.writeStep(k_chunk, v_chunk, true, window, window + 2, 2, stream));
 }

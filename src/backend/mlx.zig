@@ -1418,21 +1418,40 @@ pub const Array = struct {
         return res;
     }
 
+    /// 缩放点积注意力 (Scaled Dot-Product Attention, SDPA) 的掩码方式
+    pub const AttentionMask = union(enum) {
+        /// 无掩码：每个查询可见全部键
+        none,
+        /// 右下对齐的因果掩码：第 i 个查询可见前 `i + tk - tq + 1` 个键
+        causal,
+        /// 显式加性掩码 (可广播至 `[B, num_heads, tq, tk]`；dtype 须可提升至查询的 dtype，不可见位置取极大负值)
+        additive: Array,
+    };
+
     /// 快速缩放点积注意力 (Scaled Dot-Product Attention, SDPA) / FlashAttention
+    /// 原生支持分组查询注意力 (Grouped-Query Attention, GQA)：查询头数须为键值头数的整数倍
     pub fn fastScaledDotProductAttention(
         queries: Array,
         keys: Array,
         values: Array,
         scale: f32,
-        is_causal: bool,
+        mask: AttentionMask,
         stream: ?Stream,
     ) !Array {
         if (!has_mlx) return error.MlxNotSupported;
         var res = Array.init();
         const s = try resolveStream(stream);
 
-        const mask_mode: [*c]const u8 = if (is_causal) "causal" else "";
         const empty_arr = c.mlx_array{ .ctx = null };
+        const mask_mode: [*c]const u8 = switch (mask) {
+            .none => "",
+            .causal => "causal",
+            .additive => "array",
+        };
+        const mask_arr = switch (mask) {
+            .additive => |arr| arr.handle,
+            .none, .causal => empty_arr,
+        };
         const rc = c.mlx_fast_scaled_dot_product_attention(
             &res.handle,
             queries.handle,
@@ -1440,7 +1459,7 @@ pub const Array = struct {
             values.handle,
             scale,
             mask_mode,
-            empty_arr,
+            mask_arr,
             empty_arr,
             false,
             s,

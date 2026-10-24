@@ -1418,37 +1418,19 @@ pub const Gemma4E4BModel = struct {
                 self.gpu_kv[l_idx] = try GpuKvCache.init(initial_cap, l.num_kv_heads, l.head_dim, s);
             }
             const cache = &self.gpu_kv[l_idx].?;
-            const range = GpuKvCache.computeWriteRange(cache.capacity, l.is_sliding, l.sliding_window, pos, seq_len);
-            try cache.ensureCapacity(range.write_stop, s);
-            {
-                var next_k = try cache.k.sliceUpdate4dAxis2(k_rot, l.num_kv_heads, range.write_start, range.write_stop, l.head_dim, s);
-                errdefer next_k.deinit();
-                const next_v = try cache.v.sliceUpdate4dAxis2(v_4d, l.num_kv_heads, range.write_start, range.write_stop, l.head_dim, s);
-                cache.k.deinit();
-                cache.v.deinit();
-                cache.k = next_k;
-                cache.v = next_v;
-            }
-
-            if (range.use_full_buffer) {
-                eff_k = cache.k;
-                eff_v = cache.v;
+            const view = try cache.writeStep(k_rot, v_4d, l.is_sliding, l.sliding_window, pos, seq_len, s);
+            eff_k = view.k;
+            eff_v = view.v;
+            if (!view.is_slice) {
                 if (l.is_kv_shared_source) cache.clearStepSlices();
+            } else if (l.is_kv_shared_source) {
+                // 本步有效键值切片交由缓存持有，供后续键值共享层复用 (共享层与源层注意力类型相同，可见键范围一致)
+                cache.clearStepSlices();
+                cache.step_eff_k = view.k;
+                cache.step_eff_v = view.v;
             } else {
-                var sliced_k = try cache.k.slice4dAxis2(l.num_kv_heads, range.slice_start, range.slice_stop, l.head_dim, s);
-                errdefer sliced_k.deinit();
-                const sliced_v = try cache.v.slice4dAxis2(l.num_kv_heads, range.slice_start, range.slice_stop, l.head_dim, s);
-                eff_k = sliced_k;
-                eff_v = sliced_v;
-                if (l.is_kv_shared_source) {
-                    // 本步有效键值切片交由缓存持有，供后续键值共享层复用
-                    cache.clearStepSlices();
-                    cache.step_eff_k = sliced_k;
-                    cache.step_eff_v = sliced_v;
-                } else {
-                    eff_k_free = sliced_k;
-                    eff_v_free = sliced_v;
-                }
+                eff_k_free = view.k;
+                eff_v_free = view.v;
             }
         } else {
             if (seq_len == 1) {
@@ -1473,9 +1455,9 @@ pub const Gemma4E4BModel = struct {
         }
         const q_rot = q_rot_opt.?;
 
-        // 缩放点积注意力 (Scaled Dot-Product Attention, SDPA, scaling = 1.0)
-        const is_causal = (seq_len > 1);
-        var attn_out_4d = try mlx.Array.fastScaledDotProductAttention(q_rot, eff_k, eff_v, 1.0, is_causal, s);
+        // 缩放点积注意力 (Scaled Dot-Product Attention, SDPA, scaling = 1.0)：单词元解码与键数不超过窗口的多词元步走融合因果内核，
+        // 滑动窗口层上键数超过窗口的多词元步 (如长 Prompt 预填充) 施加逐查询滑动窗口掩码
+        var attn_out_4d = try backend.offload.cachedAttention(self.allocator, q_rot, eff_k, eff_v, 1.0, l.is_sliding, l.sliding_window, pos, seq_len, s);
         defer attn_out_4d.deinit();
 
         var attn_2d = if (seq_len == 1)
