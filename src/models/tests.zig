@@ -1160,10 +1160,10 @@ test "Gemma 4 GPU candidate selection matches the CPU sampler for identical logi
 
         var cpu_buf: [128]sampling.Candidate = undefined;
         const cpu_cands = try sampling.selectTopK(backend.Executor.serial, allocator, &processed, cpu_buf[0..opts.candidateCount(cfg.vocab_size)]);
-        _ = sampling.buildDistribution(host.candidates, .{ .temperature = 1.0 }, null);
-        _ = sampling.buildDistribution(cpu_cands, .{ .temperature = 1.0 }, null);
-        try std.testing.expectEqual(cpu_cands.len, host.candidates.len);
-        for (cpu_cands, host.candidates) |c_cand, g_cand| {
+        const host_dist = sampling.buildDistribution(host.candidates, .{ .temperature = 1.0 }, null);
+        const cpu_dist = sampling.buildDistribution(cpu_cands, .{ .temperature = 1.0 }, null);
+        try std.testing.expectEqual(cpu_dist.candidates.len, host_dist.candidates.len);
+        for (cpu_dist.candidates, host_dist.candidates) |c_cand, g_cand| {
             try std.testing.expectEqual(c_cand.id, g_cand.id);
             try std.testing.expectApproxEqAbs(c_cand.logit, g_cand.logit, 1e-4);
         }

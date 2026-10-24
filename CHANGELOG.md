@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **修复基准测试编译与 GPU/CPU 候选采样一致性单测 (`src/bench/mlx_suite.zig`, `src/models/tests.zig`)**:
+  - **更新基准测试至统一算子接口 (`src/bench/mlx_suite.zig`)**：将 `mlx_suite.zig` 中遗留的 `Graph.scaledDotProductAttention` 统一更新为 `Graph.attention(q, k, v, .{ .scale = scale, .mask = .causal })`，将 `Graph.rmsNorm` 调用更新为传入 `RmsNormOptions{ .eps = 1e-5 }`，修复 `zig build e4b` / `zig build bench` 编译失败。
+  - **修复 GPU 候选采样与 CPU 选取的一致性断言 (`src/models/tests.zig`)**：断言对比经 `sampling.buildDistribution` 剔除不可采样词元并排序后的终结候选分布，消除未截断前原始有界切片与 CPU 堆部分选择的长度与排序偏差。
+
 - **共享注意力、RMSNorm、Softcap 算子与计算图统一设备分发 (`src/backend/attention_mask.zig`, `src/tensor/attention_kernels.zig`, `src/tensor/`, `src/autodiff/`, `src/nn/`, `src/models/`, `examples/models/*.json`, `web/`)**:
   - **共享注意力掩码与内核 (`backend/attention_mask.zig`, `tensor/attention_kernels.zig`, `autodiff/`)**：新增 `backend/attention_mask.zig`（统一 `Mask = union(enum) { none, causal, sliding: usize }`、`visibleRange`、`isSlidingWindowVisible` 与 `fillAdditiveMask`）与 `tensor/attention_kernels.zig`（单查询步 `attendOneQuery` 与批处理 `attentionForward`，支持 `Tq != Tk`、因果/滑动窗口掩码与不物化 `repeatKV` 的分组查询注意力 (Grouped-Query Attention, GQA)）；扩展一等算子 `OpType.Attention` / `Graph.attention` 支持 `AttentionOptions` 及无 `repeatKV` 反向传播与有限差分梯度检查，替换 `ScaledDotProductAttention.forwardCore` 的多算子拆分、`gemma4.prefillAttention` 与 `gemma4.decodeAttention`，并在 `CausalSelfAttention.forwardInference` 中复用 `attendOneQuery`。
   - **统一 RMSNorm 可选权重、偏置偏移与反向上下文保存 (`tensor/nn_kernels.zig`, `autodiff/`)**：`Tensor.rmsNorm` 与 `Graph.rmsNorm` 统一接收可选缩放权重 `w: ?*Tensor` 与 `RmsNormOptions{ .eps, .weight_offset }`，支持无缩放 RMSNorm 与 $(1 + w)$ 偏移模式。

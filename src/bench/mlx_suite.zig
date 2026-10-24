@@ -250,7 +250,7 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
                 const k = try g.tensorNDWithData(&.{ B, H, L, D }, self.k_raw, false);
                 const v = try g.tensorNDWithData(&.{ B, H, L, D }, self.v_raw, false);
 
-                const out = try g.scaledDotProductAttention(q, k, v, scale, true);
+                const out = try g.attention(q, k, v, .{ .scale = scale, .mask = .causal });
                 if (self.device == .gpu) self.stream.synchronize();
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
@@ -276,8 +276,8 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
         const qg = try g_g.tensorNDWithData(&.{ B, H, L, D }, gpu_sdpa.q_raw, false);
         const kg = try g_g.tensorNDWithData(&.{ B, H, L, D }, gpu_sdpa.k_raw, false);
         const vg = try g_g.tensorNDWithData(&.{ B, H, L, D }, gpu_sdpa.v_raw, false);
-        const out_c = try g_c.scaledDotProductAttention(qc, kc, vc, scale, true);
-        const out_g = try g_g.scaledDotProductAttention(qg, kg, vg, scale, true);
+        const out_c = try g_c.attention(qc, kc, vc, .{ .scale = scale, .mask = .causal });
+        const out_g = try g_g.attention(qg, kg, vg, .{ .scale = scale, .mask = .causal });
         stream.synchronize();
 
         var max_diff: f32 = 0.0;
@@ -378,7 +378,7 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
                 const k = try g.tensorNDWithData(&.{ B, H, L, D }, self.k_raw, false);
                 const v = try g.tensorNDWithData(&.{ B, H, L, D }, self.v_raw, false);
 
-                const out = try g.scaledDotProductAttention(q, k, v, scale, true);
+                const out = try g.attention(q, k, v, .{ .scale = scale, .mask = .causal });
                 if (self.device == .gpu) self.stream.synchronize();
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
@@ -400,8 +400,8 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
         const qg = try g_g.tensorNDWithData(&.{ B, H, L, D }, gpu_long.q_raw, false);
         const kg = try g_g.tensorNDWithData(&.{ B, H, L, D }, gpu_long.k_raw, false);
         const vg = try g_g.tensorNDWithData(&.{ B, H, L, D }, gpu_long.v_raw, false);
-        const out_c = try g_c.scaledDotProductAttention(qc, kc, vc, scale, true);
-        const out_g = try g_g.scaledDotProductAttention(qg, kg, vg, scale, true);
+        const out_c = try g_c.attention(qc, kc, vc, .{ .scale = scale, .mask = .causal });
+        const out_g = try g_g.attention(qg, kg, vg, .{ .scale = scale, .mask = .causal });
         stream.synchronize();
 
         var max_diff: f32 = 0.0;
@@ -488,7 +488,7 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
 
                 const x = try g.tensorNDWithData(&.{ M, D }, self.x_raw, false);
                 const w = try g.tensorNDWithData(&.{D}, self.w_raw, false);
-                const out = try g.rmsNorm(x, w, 1e-5);
+                const out = try g.rmsNorm(x, w, .{ .eps = 1e-5 });
                 if (self.device == .gpu) self.stream.synchronize();
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
@@ -508,8 +508,8 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
         const wc = try g_c.tensorNDWithData(&.{D}, cpu_rms.w_raw, false);
         const xg = try g_g.tensorNDWithData(&.{ M, D }, gpu_rms.x_raw, false);
         const wg = try g_g.tensorNDWithData(&.{D}, gpu_rms.w_raw, false);
-        const out_c = try g_c.rmsNorm(xc, wc, 1e-5);
-        const out_g = try g_g.rmsNorm(xg, wg, 1e-5);
+        const out_c = try g_c.rmsNorm(xc, wc, .{ .eps = 1e-5 });
+        const out_g = try g_g.rmsNorm(xg, wg, .{ .eps = 1e-5 });
         stream.synchronize();
 
         var max_diff: f32 = 0.0;
