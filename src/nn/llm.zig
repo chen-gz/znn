@@ -182,17 +182,12 @@ pub fn maskedCrossEntropyLoss(
         if (w <= 0.0) continue;
 
         const row = logits.data[i * V .. (i + 1) * V];
-        const lse = vec_math.logSumExpRow(row, 1.0);
         const label: usize = targets[i];
-        total_loss += (lse - row[label]) * w;
+        const grad_row = if (write_grad) logits.grad[i * V .. (i + 1) * V] else null;
+        const scale = if (write_grad) w / total_weight else 0.0;
 
-        if (write_grad) {
-            // softmax(z)_j = exp(z_j - log Σ exp(z))
-            const scale = w / total_weight;
-            const grad_row = logits.grad[i * V .. (i + 1) * V];
-            for (grad_row, row) |*g, v| g.* += scale * @exp(v - lse);
-            grad_row[label] -= scale;
-        }
+        const row_loss = try tensor.losses.ceRow(row, label, null, grad_row, scale);
+        total_loss += row_loss * w;
     }
     return total_loss / total_weight;
 }
@@ -226,17 +221,14 @@ pub fn dpoLoss(
 
     var total_loss: f32 = 0.0;
     for (0..N) |i| {
-        const log_ratio_chosen = pi_chosen_logps[i] - ref_chosen_logps[i];
-        const log_ratio_rejected = pi_rejected_logps[i] - ref_rejected_logps[i];
-        const logits = beta * (log_ratio_chosen - log_ratio_rejected);
-
-        // -log(sigmoid(z)) = log(1 + exp(-z))
-        const loss_i = if (logits > 0.0)
-            @log(1.0 + @exp(-logits))
-        else
-            -logits + @log(1.0 + @exp(logits));
-
-        total_loss += loss_i;
+        total_loss += tensor.losses.dpoTerm(
+            pi_chosen_logps[i],
+            pi_rejected_logps[i],
+            ref_chosen_logps[i],
+            ref_rejected_logps[i],
+            beta,
+            null,
+        );
     }
     return total_loss / @as(f32, @floatFromInt(N));
 }
@@ -272,15 +264,8 @@ pub fn computeGroupAdvantages(
         const start = g * group_size;
         const group_rewards = rewards[start .. start + group_size];
 
-        var sum: f32 = 0.0;
-        for (group_rewards) |r| sum += r;
-        const mean = sum / @as(f32, @floatFromInt(group_size));
-
-        var var_sum: f32 = 0.0;
-        for (group_rewards) |r| {
-            const diff = r - mean;
-            var_sum += diff * diff;
-        }
+        const mean = vec_math.sum(group_rewards) / @as(f32, @floatFromInt(group_size));
+        const var_sum = vec_math.sumSquaredDeviations(group_rewards, mean);
         const std_dev = @sqrt(var_sum / @as(f32, @floatFromInt(group_size)));
 
         for (group_rewards, 0..) |r, j| {
@@ -310,21 +295,16 @@ pub fn computeGRPOLoss(
 
     var total_obj: f32 = 0.0;
     for (0..N) |i| {
-        const ratio = @exp(new_logps[i] - old_logps[i]);
-        const adv = advantages[i];
-        const s1 = ratio * adv;
-        const clipped_ratio = std.math.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps);
-        const s2 = clipped_ratio * adv;
-        const surrogate = @min(s1, s2);
-
-        var kl: f32 = 0.0;
-        if (beta > 0.0) {
-            const ref = if (ref_logps) |refs| refs[i] else old_logps[i];
-            const u = ref - new_logps[i];
-            kl = @exp(u) - u - 1.0;
-        }
-
-        total_obj += (surrogate - beta * kl);
+        const ref = if (ref_logps) |refs| refs[i] else null;
+        total_obj += tensor.losses.grpoTerm(
+            new_logps[i],
+            old_logps[i],
+            advantages[i],
+            ref,
+            beta,
+            clip_eps,
+            null,
+        );
     }
 
     return -(total_obj / @as(f32, @floatFromInt(N)));
@@ -347,46 +327,24 @@ pub fn grpoLoss(
 
     var total_obj: f32 = 0.0;
     const inv_n = 1.0 / @as(f32, @floatFromInt(N));
+    const write_grad = new_logps.requires_grad and new_logps.grad.len == N;
 
     for (0..N) |i| {
-        const ratio = @exp(new_logps.data[i] - old_logps.data[i]);
-        const adv = advantages[i];
-        const s1 = ratio * adv;
-        const clipped_ratio = std.math.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps);
-        const s2 = clipped_ratio * adv;
-        const surrogate = @min(s1, s2);
+        const ref = if (ref_logps) |refs| refs[i] else null;
+        var d_obj: f32 = undefined;
+        const obj = tensor.losses.grpoTerm(
+            new_logps.data[i],
+            old_logps.data[i],
+            advantages[i],
+            ref,
+            beta,
+            clip_eps,
+            if (write_grad) &d_obj else null,
+        );
+        total_obj += obj;
 
-        var kl: f32 = 0.0;
-        const ref = if (ref_logps) |refs| refs[i] else old_logps.data[i];
-        if (beta > 0.0) {
-            const u = ref - new_logps.data[i];
-            kl = @exp(u) - u - 1.0;
-        }
-
-        total_obj += (surrogate - beta * kl);
-
-        if (new_logps.requires_grad and new_logps.grad.len == N) {
-            // 计算代理项梯度 d(surrogate) / d(new_logp)
-            var d_surrogate: f32 = 0.0;
-            if (adv >= 0.0) {
-                if (ratio <= 1.0 + clip_eps) {
-                    d_surrogate = ratio * adv;
-                }
-            } else {
-                if (ratio >= 1.0 - clip_eps) {
-                    d_surrogate = ratio * adv;
-                }
-            }
-
-            // 计算库尔贝克-莱布勒散度 (Kullback-Leibler Divergence, KL Divergence) 项梯度 d(kl) / d(new_logp)
-            var d_kl: f32 = 0.0;
-            if (beta > 0.0) {
-                d_kl = 1.0 - @exp(ref - new_logps.data[i]);
-            }
-
-            // d(Loss) / d(new_logp) = - inv_n * (d_surrogate - beta * d_kl)
-            const d_loss = -inv_n * (d_surrogate - beta * d_kl);
-            new_logps.grad[i] += d_loss;
+        if (write_grad) {
+            new_logps.grad[i] += -inv_n * d_obj;
         }
     }
 

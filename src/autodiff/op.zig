@@ -69,12 +69,9 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
                 if (w <= 0.0) continue;
 
                 const row = logits.data[i * D .. (i + 1) * D];
-                if (probs.len == B_size * D) vec_math.softmaxRow(row, probs[i * D .. (i + 1) * D]);
-
-                // 对数求和指数 (Log-Sum-Exp, LSE) 形式：-log softmax(z)_y = log Σ exp(z) - z_y，
-                // 目标类别概率下溢为 0 时依然给出精确损失，而不是被截断
-                const log_sum_exp = vec_math.logSumExpRow(row, 1.0);
-                loss_sum += (log_sum_exp - row[targets[i]]) * w;
+                const p_row = if (probs.len == B_size * D) probs[i * D .. (i + 1) * D] else null;
+                const row_loss = try tensor_mod.losses.ceRow(row, targets[i], p_row, null, 0.0);
+                loss_sum += row_loss * w;
                 total_w += w;
             }
 
@@ -90,14 +87,14 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
 
             var total_loss: f32 = 0.0;
             for (0..N) |i| {
-                const log_ratio_chosen = pi_chosen.data[i] - ctx.ref_chosen[i];
-                const log_ratio_rejected = pi_rejected.data[i] - ctx.ref_rejected[i];
-                const z = ctx.beta * (log_ratio_chosen - log_ratio_rejected);
-                const loss_i = if (z > 0.0)
-                    @log(1.0 + @exp(-z))
-                else
-                    -z + @log(1.0 + @exp(z));
-                total_loss += loss_i;
+                total_loss += tensor_mod.losses.dpoTerm(
+                    pi_chosen.data[i],
+                    pi_rejected.data[i],
+                    ctx.ref_chosen[i],
+                    ctx.ref_rejected[i],
+                    ctx.beta,
+                    null,
+                );
             }
             loss.data[0] = if (N > 0) total_loss / @as(f32, @floatFromInt(N)) else 0.0;
         },
@@ -110,20 +107,16 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
 
             var total_obj: f32 = 0.0;
             for (0..N) |i| {
-                const ratio = @exp(new_logps.data[i] - old_logps.data[i]);
-                const adv = ctx.advantages[i];
-                const s1 = ratio * adv;
-                const clipped_ratio = std.math.clamp(ratio, 1.0 - ctx.clip_eps, 1.0 + ctx.clip_eps);
-                const s2 = clipped_ratio * adv;
-                const surrogate = @min(s1, s2);
-
-                var kl: f32 = 0.0;
-                if (ctx.beta > 0.0) {
-                    const ref = if (ctx.ref_logps) |refs| refs[i] else old_logps.data[i];
-                    const u = ref - new_logps.data[i];
-                    kl = @exp(u) - u - 1.0;
-                }
-                total_obj += (surrogate - ctx.beta * kl);
+                const ref = if (ctx.ref_logps) |refs| refs[i] else null;
+                total_obj += tensor_mod.losses.grpoTerm(
+                    new_logps.data[i],
+                    old_logps.data[i],
+                    ctx.advantages[i],
+                    ref,
+                    ctx.beta,
+                    ctx.clip_eps,
+                    null,
+                );
             }
             loss.data[0] = if (N > 0) -(total_obj / @as(f32, @floatFromInt(N))) else 0.0;
         },

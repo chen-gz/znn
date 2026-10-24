@@ -26,6 +26,7 @@ const tensorSplit = ops_mod.split;
 
 const nn_kernels = @import("nn_kernels.zig");
 const reductions = @import("reductions.zig");
+const losses = @import("losses.zig");
 pub const linalg = @import("linalg.zig");
 pub const QRResult = linalg.QRResult;
 pub const SymEigResult = linalg.SymEigResult;
@@ -541,17 +542,62 @@ pub const Tensor = struct {
         reductions.mapInPlace(self, &state, UniformFill.next);
     }
 
+    fn getTargetsLen(targets: anytype) usize {
+        const T = @TypeOf(targets);
+        switch (@typeInfo(T)) {
+            .pointer => |ptr| switch (ptr.size) {
+                .slice => return targets.len,
+                .one => switch (@typeInfo(ptr.child)) {
+                    .array => |a| return a.len,
+                    .@"struct" => |s| return s.field_names.len,
+                    else => return targets.len,
+                },
+                else => return targets.len,
+            },
+            .@"struct" => |s| return s.field_names.len,
+            .array => |a| return a.len,
+            else => return targets.len,
+        }
+    }
+
+    fn getTarget(targets: anytype, i: usize) usize {
+        const T = @TypeOf(targets);
+        switch (@typeInfo(T)) {
+            .pointer => |ptr| switch (ptr.size) {
+                .slice => return @intCast(targets[i]),
+                .one => switch (@typeInfo(ptr.child)) {
+                    .array => return @intCast(targets[i]),
+                    .@"struct" => |s| {
+                        inline for (s.field_names, 0..) |name, idx| {
+                            if (idx == i) return @intCast(@field(targets, name));
+                        }
+                        unreachable;
+                    },
+                    else => return @intCast(targets[i]),
+                },
+                else => return @intCast(targets[i]),
+            },
+            .@"struct" => |s| {
+                inline for (s.field_names, 0..) |name, idx| {
+                    if (idx == i) return @intCast(@field(targets, name));
+                }
+                unreachable;
+            },
+            .array => return @intCast(targets[i]),
+            else => return @intCast(targets[i]),
+        }
+    }
+
     /// Softmax 交叉熵损失：按对数和指数 (Log-Sum-Exp, LSE) 形式计算
-    /// `loss = log(sum(exp(x - max))) + max - x[label]`，即使正确类别概率下溢为 0 也能得到精确损失
-    pub fn softmaxCrossEntropy(self: *Tensor, targets: []const u8, allocator: std.mem.Allocator) !*Tensor {
+    /// `loss = log(sum(exp(x - max))) + max - x[label]`，即使正确类别概率下溢为 0 也能得到精确损失。
+    /// targets 支持 u8 / u32 / usize 等任意整型切片与元组。
+    pub fn softmaxCrossEntropy(self: *Tensor, targets: anytype, allocator: std.mem.Allocator) !*Tensor {
         if (self.shape.len != 2) return error.IncompatibleDimensions;
         const B = self.shape.dims[0];
         const N = self.shape.dims[1];
-        if (B != targets.len) return error.ShapeMismatch;
+        const num_targets = getTargetsLen(targets);
+        if (B != num_targets) return error.ShapeMismatch;
         if (B == 0 or N == 0) return error.EmptyInputs;
-        for (targets) |label| {
-            if (label >= N) return error.IndexOutOfBounds;
-        }
 
         const x_c = if (self.isContiguous()) self else try self.contiguous(allocator);
         defer if (x_c != self) x_c.deinit(allocator);
@@ -559,7 +605,8 @@ pub const Tensor = struct {
         var loss_sum: f32 = 0.0;
         for (0..B) |i| {
             const logits_row = x_c.data[i * N .. (i + 1) * N];
-            loss_sum += backend.vec_math.logSumExpRow(logits_row, 1.0) - logits_row[targets[i]];
+            const target = getTarget(targets, i);
+            loss_sum += try losses.ceRow(logits_row, target, null, null, 0.0);
         }
         const loss = try zeros(allocator, &.{ 1, 1 });
         loss.data[0] = loss_sum / @as(f32, @floatFromInt(B));

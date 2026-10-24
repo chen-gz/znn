@@ -290,9 +290,7 @@ pub fn backwardCore(self: *Op) !void {
                         const label = ctx.targets[i];
                         const p_row = ctx.probs[i * N .. (i + 1) * N];
                         const dLogits_row = logits.grad[i * N .. (i + 1) * N];
-                        for (0..N) |j| {
-                            dLogits_row[j] += scale * (p_row[j] - (if (j == label) @as(f32, 1.0) else 0.0));
-                        }
+                        tensor.losses.accumulateCeGradRow(p_row, label, dLogits_row, scale);
                     }
                 }
             }
@@ -307,17 +305,21 @@ pub fn backwardCore(self: *Op) !void {
             if (N > 0) {
                 const inv_n = dL / @as(f32, @floatFromInt(N));
                 for (0..N) |i| {
-                    const log_ratio_chosen = pi_chosen.data[i] - ctx.ref_chosen[i];
-                    const log_ratio_rejected = pi_rejected.data[i] - ctx.ref_rejected[i];
-                    const z = ctx.beta * (log_ratio_chosen - log_ratio_rejected);
-                    // d/dz (-log(sigmoid(z))) = -sigmoid(-z) = -1 / (1 + exp(z))
-                    const sig_neg_z = vec_math.sigmoid(-z);
-                    const dz = -inv_n * ctx.beta * sig_neg_z;
+                    var dz: f32 = undefined;
+                    _ = tensor.losses.dpoTerm(
+                        pi_chosen.data[i],
+                        pi_rejected.data[i],
+                        ctx.ref_chosen[i],
+                        ctx.ref_rejected[i],
+                        ctx.beta,
+                        &dz,
+                    );
+                    const scaled_dz = inv_n * dz;
                     if (pi_chosen.requires_grad) {
-                        pi_chosen.grad[i] += dz;
+                        pi_chosen.grad[i] += scaled_dz;
                     }
                     if (pi_rejected.requires_grad) {
-                        pi_rejected.grad[i] -= dz;
+                        pi_rejected.grad[i] -= scaled_dz;
                     }
                 }
             }
@@ -332,26 +334,18 @@ pub fn backwardCore(self: *Op) !void {
             if (N > 0 and new_logps.requires_grad) {
                 const inv_n = dL / @as(f32, @floatFromInt(N));
                 for (0..N) |i| {
-                    const ratio = @exp(new_logps.data[i] - old_logps.data[i]);
-                    const adv = ctx.advantages[i];
-                    var d_surrogate: f32 = 0.0;
-                    if (adv >= 0.0) {
-                        if (ratio <= 1.0 + ctx.clip_eps) {
-                            d_surrogate = ratio * adv;
-                        }
-                    } else {
-                        if (ratio >= 1.0 - ctx.clip_eps) {
-                            d_surrogate = ratio * adv;
-                        }
-                    }
-
-                    var d_kl: f32 = 0.0;
-                    if (ctx.beta > 0.0) {
-                        const ref = if (ctx.ref_logps) |refs| refs[i] else old_logps.data[i];
-                        d_kl = 1.0 - @exp(ref - new_logps.data[i]);
-                    }
-
-                    new_logps.grad[i] += -inv_n * (d_surrogate - ctx.beta * d_kl);
+                    const ref = if (ctx.ref_logps) |refs| refs[i] else null;
+                    var d_obj: f32 = undefined;
+                    _ = tensor.losses.grpoTerm(
+                        new_logps.data[i],
+                        old_logps.data[i],
+                        ctx.advantages[i],
+                        ref,
+                        ctx.beta,
+                        ctx.clip_eps,
+                        &d_obj,
+                    );
+                    new_logps.grad[i] += -inv_n * d_obj;
                 }
             }
         },

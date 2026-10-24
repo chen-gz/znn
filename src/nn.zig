@@ -100,6 +100,8 @@ pub const AdaptiveAvgPool1D = normalization.AdaptiveAvgPool1D;
 pub const AdaptiveAvgPool2D = normalization.AdaptiveAvgPool2D;
 
 // 4. 循环神经网络 (Recurrent Neural Networks, RNN)
+pub const RecurrentResult = recurrent.RecurrentResult;
+pub const Recurrent = recurrent.Recurrent;
 pub const RNNCell = recurrent.RNNCell;
 pub const RNN = recurrent.RNN;
 pub const RNNResult = recurrent.RNNResult;

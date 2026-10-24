@@ -74,67 +74,88 @@ pub const RNNCell = struct {
     }
 };
 
-/// Elman 循环神经网络 (Recurrent Neural Network, RNN) 序列前向传播返回结果
-pub const RNNResult = struct {
+/// 循环神经网络序列前向传播返回结果
+pub const RecurrentResult = struct {
     outputs: []*Tensor,
     h_n: *Tensor,
 };
 
+/// Elman 循环神经网络 (Recurrent Neural Network, RNN) 序列前向传播返回结果
+pub const RNNResult = RecurrentResult;
+
+/// 泛型沿时间展开的循环神经网络序列容器 (Generic Recurrent Sequence Container)
+/// 接收任何满足 `cell.forward(graph, x_t, h_prev) !*Tensor` 的循环单元（如 `RNNCell`、`GRUCell`）
+pub fn Recurrent(comptime Cell: type) type {
+    return struct {
+        const Self = @This();
+
+        cell: Cell,
+        input_dim: usize,
+        hidden_dim: usize,
+        name: ?[]const u8 = null,
+        module_type: []const u8 = if (Cell == RNNCell)
+            "RNN"
+        else if (Cell == GRUCell)
+            "GRU"
+        else
+            "Recurrent",
+
+        pub const formula = if (Cell == RNNCell)
+            "h_{1:T} = \\text{RNN}(x_{1:T}, h_0)"
+        else if (Cell == GRUCell)
+            "h_{1:T} = \\text{GRU}(x_{1:T}, h_0)"
+        else
+            "h_{1:T} = \\text{Recurrent}(x_{1:T}, h_0)";
+
+        pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize) !Self {
+            const cell = try Cell.init(allocator, input_dim, hidden_dim);
+            return Self{
+                .cell = cell,
+                .input_dim = input_dim,
+                .hidden_dim = hidden_dim,
+            };
+        }
+
+        /// 序列时序展开前向传播
+        /// inputs: 长度为 seq_len 的 Tensor 切片，每个形状为 [batch_size, input_dim]
+        /// h_0: 初始隐状态 [batch_size, hidden_dim]，若为 null 则自动置零
+        pub fn forward(
+            self: *const Self,
+            graph: *autodiff.Graph,
+            inputs: []const *Tensor,
+            h_0: ?*Tensor,
+        ) !RecurrentResult {
+            const module_scope = try enterModuleScope(graph, self);
+            defer module_scope.exit();
+
+            if (inputs.len == 0) return error.EmptyInputs;
+            const seq_len = inputs.len;
+            const outputs = try graph.arenaAllocator().alloc(*Tensor, seq_len);
+
+            var h_curr: *Tensor = undefined;
+            if (h_0) |h| {
+                h_curr = h;
+            } else {
+                const batch_size = inputs[0].shape.dims[0];
+                h_curr = try zeroState(graph, self.name, batch_size, self.hidden_dim, "h_0", .{});
+            }
+
+            for (inputs, 0..) |x_t, t| {
+                const h_next = try self.cell.forward(graph, x_t, h_curr);
+                outputs[t] = h_next;
+                h_curr = h_next;
+            }
+
+            return .{
+                .outputs = outputs,
+                .h_n = h_curr,
+            };
+        }
+    };
+}
+
 /// 沿时间展开的 Elman 循环神经网络 (Recurrent Neural Network, RNN) 序列容器
-pub const RNN = struct {
-    cell: RNNCell,
-    input_dim: usize,
-    hidden_dim: usize,
-    name: ?[]const u8 = null,
-    module_type: []const u8 = "RNN",
-
-    pub const formula = "h_{1:T} = \\text{RNN}(x_{1:T}, h_0)";
-
-    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize) !RNN {
-        const cell = try RNNCell.init(allocator, input_dim, hidden_dim);
-        return RNN{
-            .cell = cell,
-            .input_dim = input_dim,
-            .hidden_dim = hidden_dim,
-        };
-    }
-
-    /// 序列时序展开前向传播
-    /// inputs: 长度为 seq_len 的 Tensor 切片，每个形状为 [batch_size, input_dim]
-    /// h_0: 初始隐状态 [batch_size, hidden_dim]，若为 null 则自动置零
-    pub fn forward(
-        self: *const RNN,
-        graph: *autodiff.Graph,
-        inputs: []const *Tensor,
-        h_0: ?*Tensor,
-    ) !RNNResult {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
-
-        if (inputs.len == 0) return error.EmptyInputs;
-        const seq_len = inputs.len;
-        const outputs = try graph.arenaAllocator().alloc(*Tensor, seq_len);
-
-        var h_curr: *Tensor = undefined;
-        if (h_0) |h| {
-            h_curr = h;
-        } else {
-            const batch_size = inputs[0].shape.dims[0];
-            h_curr = try zeroState(graph, self.name, batch_size, self.hidden_dim, "h_0", .{});
-        }
-
-        for (inputs, 0..) |x_t, t| {
-            const h_next = try self.cell.forward(graph, x_t, h_curr);
-            outputs[t] = h_next;
-            h_curr = h_next;
-        }
-
-        return .{
-            .outputs = outputs,
-            .h_n = h_curr,
-        };
-    }
-};
+pub const RNN = Recurrent(RNNCell);
 
 /// 长短期记忆网络 (Long Short-Term Memory, LSTM) 单元内部状态对 (h_t, c_t)
 pub const LSTMState = struct {
@@ -548,60 +569,7 @@ pub const GRUCell = struct {
 };
 
 /// 单层门控循环单元 (Gated Recurrent Unit, GRU) 序列前向传播返回结果
-pub const GRUResult = struct {
-    outputs: []*Tensor,
-    h_n: *Tensor,
-};
+pub const GRUResult = RecurrentResult;
 
 /// 沿时间展开的单层门控循环单元 (Gated Recurrent Unit, GRU) 序列容器
-pub const GRU = struct {
-    cell: GRUCell,
-    input_dim: usize,
-    hidden_dim: usize,
-    name: ?[]const u8 = null,
-    module_type: []const u8 = "GRU",
-
-    pub const formula = "h_{1:T} = \\text{GRU}(x_{1:T}, h_0)";
-
-    pub fn init(allocator: std.mem.Allocator, input_dim: usize, hidden_dim: usize) !GRU {
-        const cell = try GRUCell.init(allocator, input_dim, hidden_dim);
-        return GRU{
-            .cell = cell,
-            .input_dim = input_dim,
-            .hidden_dim = hidden_dim,
-        };
-    }
-
-    pub fn forward(
-        self: *const GRU,
-        graph: *autodiff.Graph,
-        inputs: []const *Tensor,
-        h_0: ?*Tensor,
-    ) !GRUResult {
-        const module_scope = try enterModuleScope(graph, self);
-        defer module_scope.exit();
-
-        if (inputs.len == 0) return error.EmptyInputs;
-        const seq_len = inputs.len;
-        const outputs = try graph.arenaAllocator().alloc(*Tensor, seq_len);
-
-        var h_curr: *Tensor = undefined;
-        if (h_0) |h| {
-            h_curr = h;
-        } else {
-            const batch_size = inputs[0].shape.dims[0];
-            h_curr = try zeroState(graph, self.name, batch_size, self.hidden_dim, "h_0", .{});
-        }
-
-        for (inputs, 0..) |x_t, t| {
-            const h_next = try self.cell.forward(graph, x_t, h_curr);
-            outputs[t] = h_next;
-            h_curr = h_next;
-        }
-
-        return .{
-            .outputs = outputs,
-            .h_n = h_curr,
-        };
-    }
-};
+pub const GRU = Recurrent(GRUCell);
