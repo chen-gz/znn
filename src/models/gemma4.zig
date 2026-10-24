@@ -111,6 +111,11 @@ pub fn recentWindow(tokens: []const usize) []const usize {
     return if (tokens.len > repetition_window) tokens[tokens.len - repetition_window ..] else tokens;
 }
 
+/// 按采样选项的 `repetition_window` (若未指定则回退到默认 `repetition_window`) 截取最近词元窗口
+pub fn recentWindowFor(tokens: []const usize, options: SamplingOptions) []const usize {
+    return options.recentTokens(tokens, repetition_window);
+}
+
 /// 词表投影、最终对数几率截断、重复惩罚与贪婪采样融合的 CPU 多核并行实现 (Fused LM Head Projection & Greedy Sampling)，
 /// 是贪婪采样的快车道：不物化完整对数几率。
 /// embed 为 [vocab_size, hidden_size] 行主序词表嵌入矩阵，元素类型为单精度浮点 (f32) 或脑浮点 16 (Brain Floating Point 16, BF16) 原始位 (u16)。
@@ -552,7 +557,6 @@ pub const Gemma4KVCache = struct {
         }
     }
 };
-
 
 /// Gemma 4 门控前馈多层感知机 (Gemma4MLP)
 pub const Gemma4MLP = nn.GatedMLP(core.Linear);
@@ -1032,7 +1036,6 @@ pub fn Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type) type {
 /// Gemma 4 变换器层 (全精度特化)
 pub const Gemma4DecoderLayer = Gemma4DecoderLayerT(Gemma4Attention, Gemma4MLP);
 
-
 /// Gemma 4 语言模型核心架构 (Gemma4ForCausalLM)
 pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
     return struct {
@@ -1142,7 +1145,7 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             sampler: *Sampler,
             graph: *autodiff.Graph,
         ) !usize {
-            return sampleLmHeadCpu(config, f32, graph, self.embed_tokens.weight.data, h_last, recentWindow(recent_tokens), sampler);
+            return sampleLmHeadCpu(config, f32, graph, self.embed_tokens.weight.data, h_last, recentWindowFor(recent_tokens, sampler.options), sampler);
         }
 
         /// 全精度 (F32) 预填充阶段 (Prefill)：处理 Prompt 词元序列并写入 KVCache，按 sampler 选取并返回首个预测词元

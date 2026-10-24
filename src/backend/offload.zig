@@ -1070,4 +1070,3 @@ pub const DeviceCandidates = logits_processor.DeviceCandidates;
 pub const HostCandidates = logits_processor.HostCandidates;
 pub const LogitsProcessorOptions = logits_processor.LogitsProcessorOptions;
 pub const LogitsProcessor = logits_processor.LogitsProcessor;
-

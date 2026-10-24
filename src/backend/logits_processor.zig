@@ -148,9 +148,10 @@ pub fn deviceCandidates(
     s: ?Stream,
 ) !DeviceCandidates {
     if (logits.ndim() != 2 or logits.dimSize(0) != 1 or logits.dimSize(1) != opts.vocab_size) return error.ShapeMismatch;
+    const recent = if (sampling_opts.repetition_window) |win| sampling_opts.recentTokens(recent_tokens, win) else recent_tokens;
     var capped = try softcapLogits(logits, opts.final_logit_softcapping, s);
     defer capped.deinit();
-    var penalized_opt = try penalizeDevice(allocator, capped, opts.vocab_size, recent_tokens, sampling_opts.repetition_penalty, s);
+    var penalized_opt = try penalizeDevice(allocator, capped, opts.vocab_size, recent, sampling_opts.repetition_penalty, s);
     defer if (penalized_opt) |*a| a.deinit();
     var masked = try mask.apply(penalized_opt orelse capped, s);
     defer masked.deinit();
@@ -190,6 +191,7 @@ pub fn selectToken(
     s: ?Stream,
 ) !usize {
     const s_opts = sampler.options;
+    const recent = if (s_opts.repetition_window) |win| s_opts.recentTokens(recent_tokens, win) else recent_tokens;
     if (s_opts.isPlainGreedy()) {
         var best = try mask.argmax(logits, s);
         defer best.deinit();
@@ -200,10 +202,10 @@ pub fn selectToken(
         defer capped.deinit();
         const data = try capped.dataFloat32();
         if (data.len != opts.vocab_size) return error.ShapeMismatch;
-        return sampling.argmaxWithPenalty(data, opts.vocab_size, opts.sampling_excluded_tokens, recent_tokens, s_opts.repetition_penalty);
+        return sampling.argmaxWithPenalty(data, opts.vocab_size, opts.sampling_excluded_tokens, recent, s_opts.repetition_penalty);
     }
 
-    var pending = try deviceCandidates(allocator, logits, opts, mask, recent_tokens, s_opts, s);
+    var pending = try deviceCandidates(allocator, logits, opts, mask, recent, s_opts, s);
     defer pending.deinit();
     const buf = try allocator.alloc(sampling.Candidate, pending.len());
     defer allocator.free(buf);

@@ -653,7 +653,7 @@ pub const Gemma4GpuContext = struct {
         defer h_norm.deinit();
         var logits = try self.lm_head.forwardArrayBf16(h_norm, s);
         defer logits.deinit();
-        const next = try selectToken(self.allocator, logits, self.config, &self.exclusion_mask, gemma4.recentWindow(prompt_tokens), sampler, s);
+        const next = try selectToken(self.allocator, logits, self.config, &self.exclusion_mask, gemma4.recentWindowFor(prompt_tokens, sampler.options), sampler, s);
         self.curr_len = T;
         return next;
     }
@@ -711,7 +711,7 @@ pub const Gemma4GpuContext = struct {
         defer h_norm.deinit();
         var logits = try self.lm_head.forwardArrayBf16(h_norm, s);
         defer logits.deinit();
-        const next = try selectToken(self.allocator, logits, self.config, &self.exclusion_mask, gemma4.recentWindow(recent_tokens), sampler, s);
+        const next = try selectToken(self.allocator, logits, self.config, &self.exclusion_mask, gemma4.recentWindowFor(recent_tokens, sampler.options), sampler, s);
         self.curr_len = pos + 1;
         return next;
     }
@@ -791,7 +791,7 @@ pub const Gemma4GpuContext = struct {
 
         // 3. 逐位校验候选词元
         const num_accepted = if (sampler.isGreedy())
-            try self.verifyGreedy(logits_raw, input_tokens, history.items, recent_tokens.len, sampler.options.repetition_penalty, accepted_tokens, s)
+            try self.verifyGreedy(logits_raw, input_tokens, history.items, recent_tokens.len, sampler.options, accepted_tokens, s)
         else
             try self.verifySampled(logits_raw, input_tokens, history.items, recent_tokens.len, sampler, accepted_tokens, s);
 
@@ -813,7 +813,7 @@ pub const Gemma4GpuContext = struct {
         input_tokens: []const usize,
         history: []const usize,
         recent_len: usize,
-        repetition_penalty: f32,
+        sampling_opts: SamplingOptions,
         accepted_tokens: []usize,
         s: Stream,
     ) !usize {
@@ -826,8 +826,8 @@ pub const Gemma4GpuContext = struct {
 
         for (0..M) |i| {
             const row = logits_slice[i * V .. (i + 1) * V];
-            const window = gemma4.recentWindow(history[0 .. recent_len + i]);
-            const pred = sampling.argmaxWithPenalty(row, V, self.config.sampling_excluded_tokens, window, repetition_penalty);
+            const window = gemma4.recentWindowFor(history[0 .. recent_len + i], sampling_opts);
+            const pred = sampling.argmaxWithPenalty(row, V, self.config.sampling_excluded_tokens, window, sampling_opts.repetition_penalty);
             accepted_tokens[i] = pred;
             if (i + 1 < M and pred != input_tokens[i + 1]) return i + 1;
         }
@@ -853,7 +853,7 @@ pub const Gemma4GpuContext = struct {
         for (0..M) |i| {
             var row = try logits_raw.sliceAxis(0, i, i + 1, s);
             defer row.deinit();
-            const window = gemma4.recentWindow(history[0 .. recent_len + i]);
+            const window = gemma4.recentWindowFor(history[0 .. recent_len + i], sampler.options);
             pending[i] = try deviceCandidates(self.allocator, row, self.config, &self.exclusion_mask, window, sampler.options, s);
             built += 1;
         }

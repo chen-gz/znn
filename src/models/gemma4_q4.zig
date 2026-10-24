@@ -659,7 +659,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             sampler: *Sampler,
             graph: *autodiff.Graph,
         ) !usize {
-            const recent = gemma4.recentWindow(recent_tokens);
+            const recent = gemma4.recentWindowFor(recent_tokens, sampler.options);
             // 1. 优先通过 GPU 常驻 LM Head 执行巨型词表投影与采样 (消除 2.3 秒延迟至 5~10 ms)；GPU 执行失败时回退 CPU。
             //    GPU 路径只在成功读回结果之后才消耗随机数，回退不会打乱采样器的随机序列
             if (graph.options.device == .gpu and backend.offload.isAvailable()) {
@@ -859,7 +859,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 const accepted_count = try gpu_ctx.decodeSpeculative(
                     input_tokens,
                     embed_u16,
-                    gemma4.recentWindow(recent_tokens),
+                    gemma4.recentWindowFor(recent_tokens, sampler.options),
                     sampler,
                     graph.options.mlx_stream,
                     accepted_buf,
@@ -877,7 +877,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         }
 
         pub const GenerateOptions = struct {
-            sampling: backend.sampling.SamplingOptions = .{},
+            sampling: backend.sampling.SamplingOptions = config.generation,
             max_new_tokens: usize = 256,
             stop_tokens: []const usize = &default_stop_tokens,
             enable_speculative: bool = true,
