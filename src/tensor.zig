@@ -1,6 +1,8 @@
 const std = @import("std");
 const backend = @import("backend.zig");
 
+pub const Device = backend.Device;
+
 pub const shape = @import("tensor/shape.zig");
 pub const types = @import("tensor/types.zig");
 pub const core = @import("tensor/core.zig");

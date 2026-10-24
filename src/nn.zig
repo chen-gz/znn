@@ -4,6 +4,7 @@ const tensor = @import("tensor.zig");
 
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
+pub const Device = tensor.Device;
 
 // ============================================================================
 // 领域驱动子模块 (Domain-driven Submodules)

@@ -14,6 +14,8 @@ pub const Executor = executor.Executor;
 pub const cblas = @import("backend/cblas.zig");
 
 pub const mlx = @import("backend/mlx.zig");
+pub const Device = mlx.DeviceType;
+pub const DeviceType = mlx.DeviceType;
 
 pub const mlx_blocks = @import("backend/mlx_blocks.zig");
 pub const Rope = mlx_blocks.Rope;
@@ -37,6 +39,13 @@ pub const offload = @import("backend/offload.zig");
 
 pub const rope = @import("backend/rope.zig");
 
+pub const safetensors = @import("backend/safetensors.zig");
+pub const SafetensorsArchive = safetensors.SafetensorsArchive;
+pub const TensorMeta = safetensors.TensorMeta;
+
+pub const e4b_offload = @import("backend/e4b_offload.zig");
+pub const gemma4_offload = @import("backend/gemma4_offload.zig");
+
 pub const sampling = @import("backend/sampling.zig");
 
 pub const vec_math = @import("backend/vec_math.zig");
@@ -49,6 +58,9 @@ test {
     _ = @import("backend/cblas.zig");
     _ = @import("backend/mlx.zig");
     _ = @import("backend/offload.zig");
+    _ = @import("backend/safetensors.zig");
+    _ = @import("backend/e4b_offload.zig");
+    _ = @import("backend/gemma4_offload.zig");
     _ = @import("backend/rope.zig");
     _ = @import("backend/sampling.zig");
     _ = @import("backend/vec_math.zig");
