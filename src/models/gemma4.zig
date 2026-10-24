@@ -155,8 +155,8 @@ pub fn prefillAttention(
     for (0..T) |i| {
         const row = mask_node.data[i * T .. (i + 1) * T];
         for (row, 0..) |*m, j| {
-            // 未来位置因果遮蔽，以及超出局部滑动窗口的历史位置遮蔽
-            const visible = j <= i and i < j + sliding_window;
+            // 未来位置因果遮蔽，以及超出局部滑动窗口的历史位置遮蔽 (与 GPU 路径共用同一可见性规则)
+            const visible = backend.offload.isSlidingWindowVisible(i, j, sliding_window);
             m.* = if (visible) 0.0 else -1e9;
         }
     }

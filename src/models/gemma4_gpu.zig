@@ -491,10 +491,6 @@ pub const Gemma4GpuLayer = struct {
         };
     }
 
-    fn heads(self: *const Gemma4GpuLayer) offload.AttentionHeads {
-        return .{ .num_heads = self.num_heads, .num_kv_heads = self.num_kv_heads, .head_dim = self.head_dim };
-    }
-
     /// 门控多层感知机残差块：x2 = (x1 + post_mlp_norm(down_proj(GeGLU(fused_gate_up(pre_mlp_norm(x1)))))) * layer_scalar
     pub fn mlpResidual(self: *const Gemma4GpuLayer, x1: mlx.Array, stream: ?Stream) !mlx.Array {
         var pre_mlp = try mlx.Array.fastRmsNorm(x1, self.pre_mlp_w, self.rms_norm_eps, stream);
@@ -938,9 +934,9 @@ pub const Gemma4GpuContext = struct {
 
             // (3) 带因果与滑动窗口掩码的缩放点积注意力 (scale = 1.0)
             var attn_out = if (lw.attn_type == .full_attention or T <= lw.sliding_window)
-                try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, qkv.k_rot, qkv.v, 1.0, true, s)
+                try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, qkv.k_rot, qkv.v, 1.0, .causal, s)
             else
-                try offload.slidingWindowAttention(self.allocator, lw.heads(), qkv.q_rot, qkv.k_rot, qkv.v, 1.0, lw.sliding_window, T, T, 0, 0, s);
+                try offload.slidingWindowAttention(self.allocator, qkv.q_rot, qkv.k_rot, qkv.v, 1.0, lw.sliding_window, 0, 0, s);
             defer attn_out.deinit();
 
             // (4) 输出投影、残差与门控多层感知机 (预填充序列长度可变，逐算子调度以避免形状特化闭包重编译)
@@ -989,7 +985,7 @@ pub const Gemma4GpuContext = struct {
             try self.trimSlidingKv(l, lw, s);
 
             // 单查询注意力：缓存中的全部键均可见 (滑动窗口层缓存已截取至窗口长度)
-            var attn_out = try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, false, s);
+            var attn_out = try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, .none, s);
             defer attn_out.deinit();
 
             // 单步解码形状固定，启用静态编译的门控多层感知机宏内核
@@ -1053,9 +1049,9 @@ pub const Gemma4GpuContext = struct {
             // 因果注意力：缓存中的第 j 个键对应绝对位置 pos + M - kv_len + j；
             // 滑动窗口层的缓存超过窗口长度时，较早的查询会看到窗口之外的键，必须改用显式滑动窗口掩码
             var attn_out = if (lw.attn_type == .full_attention or kv_len <= lw.sliding_window)
-                try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, true, s)
+                try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, .causal, s)
             else
-                try offload.slidingWindowAttention(self.allocator, lw.heads(), qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, lw.sliding_window, M, kv_len, pos, pos + M - kv_len, s);
+                try offload.slidingWindowAttention(self.allocator, qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, lw.sliding_window, pos, pos + M - kv_len, s);
             defer attn_out.deinit();
 
             const x_next = try layerTail(lw, x_cur, attn_out, M, true, s);

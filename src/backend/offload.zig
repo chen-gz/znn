@@ -121,7 +121,7 @@ pub fn scaledDotProductAttention(
         k_mlx,
         v_mlx,
         scale,
-        is_causal,
+        if (is_causal) .causal else .none,
         stream,
     );
     defer out_mlx.deinit();
@@ -777,69 +777,84 @@ pub fn q4MatMul(
     return weights.forward(X, out, stream);
 }
 
-/// 分组查询注意力 (Grouped-Query Attention, GQA) 的头几何规格
-pub const AttentionHeads = struct {
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-};
+/// 滑动窗口注意力的可见性规则 (与 mlx-lm `create_causal_mask(window_size=...)` 一致)：
+/// 绝对位置为 q_pos 的查询仅可见满足 0 <= q_pos - k_pos < sliding_window 的键 (含自身，共最多 sliding_window 个)
+pub fn isSlidingWindowVisible(q_pos: usize, k_pos: usize, sliding_window: usize) bool {
+    return k_pos <= q_pos and q_pos - k_pos < sliding_window;
+}
+
+/// 在主机端构建 `[tq, tk]` 滑动窗口加性掩码：第 i 个查询的绝对位置为 q_pos0 + i，第 j 个键的绝对位置为 k_pos0 + j，
+/// 可见位置为 0，不可见位置为 -1e9
+pub fn fillSlidingWindowMask(
+    mask: []f32,
+    tq: usize,
+    tk: usize,
+    sliding_window: usize,
+    q_pos0: usize,
+    k_pos0: usize,
+) void {
+    std.debug.assert(mask.len == tq * tk);
+    for (0..tq) |i| {
+        const row = mask[i * tk .. (i + 1) * tk];
+        for (row, 0..) |*m, j| {
+            m.* = if (isSlidingWindowVisible(q_pos0 + i, k_pos0 + j, sliding_window)) 0.0 else -1e9;
+        }
+    }
+}
 
 /// 带滑动窗口掩码的分组查询缩放点积注意力 (Sliding Window Grouped-Query Scaled Dot-Product Attention)
-/// q: [1, num_heads, tq, head_dim]，k / v: [1, num_kv_heads, tk, head_dim]；第 i 个查询的绝对位置为 q_pos0 + i，
-/// 第 j 个键的绝对位置为 k_pos0 + j，仅当 0 <= q_pos - k_pos < sliding_window 时可见（不可见位置施加 -1e9 加性掩码）。
-/// 打分在 Softmax 前乘以 scale（scale 为 1 时省略乘法）。
+/// q: [1, num_heads, tq, head_dim]，k / v: [1, num_kv_heads, tk, head_dim]（num_heads 为 num_kv_heads 的整数倍，dtype 任意且一致）；
+/// 第 i 个查询的绝对位置为 q_pos0 + i，第 j 个键的绝对位置为 k_pos0 + j，可见性见 `isSlidingWindowVisible`。
+/// 掩码按查询的 dtype 构建并交给融合缩放点积注意力内核 (`mask_mode = "array"`)，打分在 Softmax 前乘以 scale。
 pub fn slidingWindowAttention(
     allocator: std.mem.Allocator,
-    heads: AttentionHeads,
     q: mlx.Array,
     k: mlx.Array,
     v: mlx.Array,
     scale: f32,
     sliding_window: usize,
-    tq: usize,
-    tk: usize,
     q_pos0: usize,
     k_pos0: usize,
     stream: ?Stream,
 ) OffloadError!mlx.Array {
     if (!isAvailable()) return error.OffloadNotSupported;
-    if (heads.num_kv_heads == 0 or heads.num_heads % heads.num_kv_heads != 0) return error.InvalidShape;
-    const groups = heads.num_heads / heads.num_kv_heads;
-    var k_trans = try k.transposeAxes(&.{ 0, 1, 3, 2 }, stream);
-    defer k_trans.deinit();
-    // 同一键值头的 groups 个查询头在头维度上相邻，重排为 [1, num_kv_heads, groups * tq, head_dim] 后共享同一组键值
-    var q_grouped = try q.reshape(&.{ 1, heads.num_kv_heads, groups * tq, heads.head_dim }, stream);
-    defer q_grouped.deinit();
-    var scores_grouped = try mlx.Array.matmul(q_grouped, k_trans, stream);
-    defer scores_grouped.deinit();
-    var scores_raw = try scores_grouped.reshape(&.{ 1, heads.num_heads, tq, tk }, stream);
-    defer scores_raw.deinit();
-    var scaled_scores: ?mlx.Array = if (scale != 1.0) try scores_raw.mulScalar(scale, stream) else null;
-    defer if (scaled_scores) |*sc| sc.deinit();
-    const scores = scaled_scores orelse scores_raw;
+    if (q.ndim() != 4 or k.ndim() != 4) return error.InvalidShape;
+    const tq = q.dimSize(2);
+    const tk = k.dimSize(2);
 
     const mask_buf = try allocator.alloc(f32, tq * tk);
     defer allocator.free(mask_buf);
-    for (0..tq) |i| {
-        const q_pos = q_pos0 + i;
-        for (0..tk) |j| {
-            const k_pos = k_pos0 + j;
-            const visible = k_pos <= q_pos and q_pos - k_pos < sliding_window;
-            mask_buf[i * tk + j] = if (visible) 0.0 else -1e9;
-        }
-    }
-    var mask_arr = try mlx.Array.fromSlice(mask_buf, &.{ 1, 1, tq, tk });
-    defer mask_arr.deinit();
-    var masked_scores = try mlx.Array.add(scores, mask_arr, stream);
-    defer masked_scores.deinit();
-    var probs = try mlx.Array.softmax(masked_scores, 3, stream);
-    defer probs.deinit();
+    fillSlidingWindowMask(mask_buf, tq, tk, sliding_window, q_pos0, k_pos0);
+    var mask_f32 = try mlx.Array.fromSlice(mask_buf, &.{ 1, 1, tq, tk });
+    defer mask_f32.deinit();
+    // 加性掩码的 dtype 须可提升至查询的 dtype (如 bfloat16)，-1e9 在 bfloat16 中仍为有限的极大负值
+    const q_dtype = q.dtype();
+    var mask_cast: ?mlx.Array = if (q_dtype != .float32) try mask_f32.astype(q_dtype, stream) else null;
+    defer if (mask_cast) |*m| m.deinit();
 
-    var probs_grouped = try probs.reshape(&.{ 1, heads.num_kv_heads, groups * tq, tk }, stream);
-    defer probs_grouped.deinit();
-    var out_grouped = try mlx.Array.matmul(probs_grouped, v, stream);
-    defer out_grouped.deinit();
-    return out_grouped.reshape(&.{ 1, heads.num_heads, tq, heads.head_dim }, stream);
+    return mlx.Array.fastScaledDotProductAttention(q, k, v, scale, .{ .additive = mask_cast orelse mask_f32 }, stream);
+}
+
+/// 键值缓存一步前向的注意力：键值视图须为 `GpuKvCache.writeStep` 返回的视图 (或与其覆盖相同绝对位置的视图)。
+/// - 可见键范围随查询变化 (`KeyRange.needs_window_mask`)：滑动窗口加性掩码 (`slidingWindowAttention`)
+/// - 多词元步：右下对齐因果掩码；单词元解码步：无掩码 (视图恰为该查询的可见键，含环形覆写的完整缓存)
+pub fn cachedAttention(
+    allocator: std.mem.Allocator,
+    q: mlx.Array,
+    k: mlx.Array,
+    v: mlx.Array,
+    scale: f32,
+    is_sliding: bool,
+    sliding_window: usize,
+    pos: usize,
+    seq_len: usize,
+    stream: ?Stream,
+) OffloadError!mlx.Array {
+    const range = GpuKvCache.visibleKeyRange(is_sliding, sliding_window, pos, seq_len);
+    if (range.needs_window_mask) {
+        return slidingWindowAttention(allocator, q, k, v, scale, sliding_window, pos, range.start, stream);
+    }
+    return mlx.Array.fastScaledDotProductAttention(q, k, v, scale, if (seq_len > 1) .causal else .none, stream);
 }
 
 /// 块式预分配显存键值缓存 (Pre-allocated Chunked GPU Key-Value Cache, GPU KVCache)
@@ -884,6 +899,24 @@ pub const GpuKvCache = struct {
         self.v.deinit();
     }
 
+    /// 本步查询 [pos, pos + seq_len) 共同需要的键的绝对位置范围 [start, stop)
+    pub const KeyRange = struct {
+        start: usize,
+        stop: usize,
+        /// 各查询的可见键范围不同 (键数超过滑动窗口)，须施加滑动窗口掩码；为 false 时右下对齐因果掩码即精确
+        needs_window_mask: bool,
+    };
+
+    /// 计算本步查询共同需要的键范围：全局注意力层为 [0, pos + seq_len)；滑动窗口层为
+    /// [max(0, pos + 1 - sliding_window), pos + seq_len)，即首个查询窗口的起点到末个查询自身
+    /// (与 mlx-lm `RotatingKVCache` 多词元更新保留最近 sliding_window - 1 个历史键的规则一致)
+    pub fn visibleKeyRange(is_sliding: bool, sliding_window: usize, pos: usize, seq_len: usize) KeyRange {
+        const stop = pos + seq_len;
+        if (!is_sliding) return .{ .start = 0, .stop = stop, .needs_window_mask = false };
+        const start = if (pos + 1 > sliding_window) pos + 1 - sliding_window else 0;
+        return .{ .start = start, .stop = stop, .needs_window_mask = stop - start > sliding_window };
+    }
+
     pub const WriteRange = struct {
         write_start: usize,
         write_stop: usize,
@@ -892,18 +925,26 @@ pub const GpuKvCache = struct {
         use_full_buffer: bool,
     };
 
+    pub const WriteRangeError = error{
+        /// 滑动窗口层的缓存已进入环形覆写布局 (槽位不再按绝对位置排列)，无法再追加多词元步；须先重置缓存再预填充
+        SlidingWindowCacheWrapped,
+    };
+
     /// 计算键值缓存写入与注意力读取范围（支持局部滑动窗口层的固定容量环形覆写 RotatingKVCache）
-    /// 当局部滑动窗口层处于单步解码 (`seq_len == 1`) 且序列位置达到窗口容量上限 (`pos >= sliding_window`) 时，
-    /// 直接以 `pos % sliding_window` 原地环形覆写最旧词元槽位并直接复用完整缓存张量，消除扩容拷贝与切片视图分配开销
+    /// - 当局部滑动窗口层处于单步解码 (`seq_len == 1`) 且序列位置达到窗口容量上限 (`pos >= sliding_window`) 时，
+    ///   直接以 `pos % sliding_window` 原地环形覆写最旧词元槽位并直接复用完整缓存张量，消除扩容拷贝与切片视图分配开销
+    /// - 其余情况按绝对位置线性写入 [pos, pos + seq_len)，读取 `visibleKeyRange` 给出的键范围：多词元步保留首个查询窗口内的全部历史键，
+    ///   由注意力的滑动窗口掩码区分各查询的可见键
     pub fn computeWriteRange(
         capacity: usize,
         is_sliding: bool,
         sliding_window: usize,
         pos: usize,
         seq_len: usize,
-    ) WriteRange {
+    ) WriteRangeError!WriteRange {
         const total_len = pos + seq_len;
-        if (is_sliding and seq_len == 1 and pos >= sliding_window and capacity == sliding_window) {
+        const ring_capacity = is_sliding and capacity == sliding_window;
+        if (ring_capacity and seq_len == 1 and pos >= sliding_window) {
             const write_idx = pos % sliding_window;
             return .{
                 .write_start = write_idx,
@@ -913,17 +954,54 @@ pub const GpuKvCache = struct {
                 .use_full_buffer = true,
             };
         }
-        var start_k: usize = 0;
-        if (is_sliding and total_len > sliding_window) {
-            start_k = total_len - sliding_window;
-        }
+        // 容量恰为窗口且 pos 已越过窗口，说明位置 sliding_window 处已发生过环形覆写
+        if (ring_capacity and seq_len > 1 and pos > sliding_window) return error.SlidingWindowCacheWrapped;
+        const range = visibleKeyRange(is_sliding, sliding_window, pos, seq_len);
         return .{
             .write_start = pos,
             .write_stop = total_len,
-            .slice_start = start_k,
-            .slice_stop = total_len,
-            .use_full_buffer = (start_k == 0 and total_len == capacity),
+            .slice_start = range.start,
+            .slice_stop = range.stop,
+            .use_full_buffer = (range.start == 0 and total_len == capacity),
         };
+    }
+
+    /// 本步注意力读取的键值视图
+    pub const StepView = struct {
+        k: mlx.Array,
+        v: mlx.Array,
+        /// 为 true 时视图是新建的切片 (调用方负责释放或转交)；为 false 时视图即缓存张量本身 (由缓存持有)
+        is_slice: bool,
+    };
+
+    /// 将本步旋转后的键与值 (`[1, num_kv, seq_len, head_dim]`) 按 `computeWriteRange` 写入缓存 (必要时扩容)，
+    /// 返回注意力应读取的键值视图 (覆盖 `visibleKeyRange` 的绝对位置，或环形覆写时的完整缓存)
+    pub fn writeStep(
+        self: *GpuKvCache,
+        k_new: mlx.Array,
+        v_new: mlx.Array,
+        is_sliding: bool,
+        sliding_window: usize,
+        pos: usize,
+        seq_len: usize,
+        stream: Stream,
+    ) !StepView {
+        const range = try computeWriteRange(self.capacity, is_sliding, sliding_window, pos, seq_len);
+        try self.ensureCapacity(range.write_stop, stream);
+        {
+            var next_k = try self.k.sliceUpdate4dAxis2(k_new, self.num_kv, range.write_start, range.write_stop, self.head_dim, stream);
+            errdefer next_k.deinit();
+            const next_v = try self.v.sliceUpdate4dAxis2(v_new, self.num_kv, range.write_start, range.write_stop, self.head_dim, stream);
+            self.k.deinit();
+            self.v.deinit();
+            self.k = next_k;
+            self.v = next_v;
+        }
+        if (range.use_full_buffer) return .{ .k = self.k, .v = self.v, .is_slice = false };
+        var sliced_k = try self.k.slice4dAxis2(self.num_kv, range.slice_start, range.slice_stop, self.head_dim, stream);
+        errdefer sliced_k.deinit();
+        const sliced_v = try self.v.slice4dAxis2(self.num_kv, range.slice_start, range.slice_stop, self.head_dim, stream);
+        return .{ .k = sliced_k, .v = sliced_v, .is_slice = true };
     }
 
     pub fn ensureCapacity(self: *GpuKvCache, required: usize, stream: Stream) !void {
