@@ -911,11 +911,8 @@ pub const Gemma4GpuContext = struct {
                 self.replaceKv(l, k_copy, v_copy);
             }
 
-            // (3) 带因果与滑动窗口掩码的缩放点积注意力 (scale = 1.0)
-            var attn_out = if (lw.attn_type == .full_attention or T <= lw.sliding_window)
-                try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, qkv.k_rot, qkv.v, 1.0, .causal, s)
-            else
-                try offload.slidingWindowAttention(self.allocator, qkv.q_rot, qkv.k_rot, qkv.v, 1.0, lw.sliding_window, 0, 0, s);
+            // (3) 带因果与滑动窗口掩码的缩放点积注意力 (scale = 1.0)：窗口覆盖整个序列时掩码化简为融合内核的因果模式
+            var attn_out = try offload.maskedAttention(self.allocator, qkv.q_rot, qkv.k_rot, qkv.v, 1.0, lw.attn_type.mask(lw.sliding_window), 0, 0, s);
             defer attn_out.deinit();
 
             // (4) 输出投影、残差与门控多层感知机 (预填充序列长度可变，逐算子调度以避免形状特化闭包重编译)
@@ -1026,11 +1023,8 @@ pub const Gemma4GpuContext = struct {
             const kv_len = self.gpu_k[l].?.dimSize(2);
 
             // 因果注意力：缓存中的第 j 个键对应绝对位置 pos + M - kv_len + j；
-            // 滑动窗口层的缓存超过窗口长度时，较早的查询会看到窗口之外的键，必须改用显式滑动窗口掩码
-            var attn_out = if (lw.attn_type == .full_attention or kv_len <= lw.sliding_window)
-                try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, .causal, s)
-            else
-                try offload.slidingWindowAttention(self.allocator, qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, lw.sliding_window, pos, pos + M - kv_len, s);
+            // 滑动窗口层的缓存超过窗口长度时，较早的查询会看到窗口之外的键，掩码化简后保留显式滑动窗口掩码
+            var attn_out = try offload.maskedAttention(self.allocator, qkv.q_rot, self.gpu_k[l].?, self.gpu_v[l].?, 1.0, lw.attn_type.mask(lw.sliding_window), pos, pos + M - kv_len, s);
             defer attn_out.deinit();
 
             const x_next = try layerTail(lw, x_cur, attn_out, M, true, s);

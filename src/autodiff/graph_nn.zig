@@ -471,51 +471,65 @@ pub fn adaptiveAvgPool2d(self: *Graph, A: *Tensor, output_size: [2]usize) !*Tens
     );
 }
 
+/// 沿最后一维的数值稳定归一化指数函数 (Softmax)；统一设备分派：GPU 计算图且输出不需要梯度时由 MLX 执行前向
 pub fn softmax(self: *Graph, A_in: *Tensor) !*Tensor {
     const allocator = self.arena.allocator();
     const A = try self.contiguous(A_in);
-    const C = try A.softmax(allocator);
-    return self.registerSingleOutputOp(
-        C,
-        &.{A},
-        .Softmax,
-        .{ .Softmax = {} },
-        self.enable_grad and A.requires_grad,
-    );
+    const req_grad = self.enable_grad and A.requires_grad;
+    const C = if (self.useDevice(req_grad)) blk: {
+        if (A.shape.len == 0) return error.IncompatibleDimensions;
+        const out = try tensor_mod.zeros(allocator, A.shape.dims[0..A.shape.len]);
+        try backend.offload.softmax(A, out, -1, self.options.mlx_stream);
+        break :blk out;
+    } else try A.softmax(allocator);
+    return self.registerSingleOutputOp(C, &.{A}, .Softmax, .{ .Softmax = {} }, req_grad);
 }
 
-pub fn rmsNorm(self: *Graph, X_in: *Tensor, G_in: *Tensor, eps: f32) !*Tensor {
+/// 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)：y = x / sqrt(mean(x^2) + eps) * (w + weight_offset)，
+/// 沿最后一维归一化；W 为 null 时不缩放 (无参数 RMSNorm)。需要梯度时在算子上下文中保存每行的均方根倒数，
+/// 反向传播直接复用。统一设备分派：GPU 计算图且输出不需要梯度时由 MLX 快速 RMSNorm 执行 (weight_offset 为 0 时)。
+pub fn rmsNorm(self: *Graph, X_in: *Tensor, W_in: ?*Tensor, options: tensor_mod.RmsNormOptions) !*Tensor {
     const allocator = self.arena.allocator();
     const X = try self.contiguous(X_in);
-    const G = try self.contiguous(G_in);
-    if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
-        const Y = try self.tensorND(X.shape.dims[0..X.shape.len], false);
-        try backend.offload.rmsNorm(X, G, Y, eps, self.options.mlx_stream);
-        return Y;
-    }
+    const W: ?*Tensor = if (W_in) |w| try self.contiguous(w) else null;
+    if (X.shape.len == 0) return error.IncompatibleDimensions;
+    const D = X.shape.dims[X.shape.len - 1];
+    if (D == 0) return error.DivisionByZero;
+    const req_grad = self.enable_grad and (X.requires_grad or (W != null and W.?.requires_grad));
+    const inv_rms: []f32 = if (req_grad) try allocator.alloc(f32, X.shape.numel() / D) else &.{};
 
-    const Y = try X.rmsNorm(G, eps, allocator);
-    return self.registerSingleOutputOp(
-        Y,
-        &.{ X, G },
-        .RmsNorm,
-        .{ .RmsNorm = .{ .eps = eps } },
-        self.enable_grad and (X.requires_grad or G.requires_grad),
-    );
+    const Y = if (self.useDevice(req_grad) and (W == null or options.weight_offset == 0.0)) blk: {
+        if (W) |w| if (w.shape.numel() != D) return error.ShapeMismatch;
+        const out = try tensor_mod.zeros(allocator, X.shape.dims[0..X.shape.len]);
+        try backend.offload.rmsNorm(X, W, out, options.eps, self.options.mlx_stream);
+        break :blk out;
+    } else try X.rmsNorm(W, options, if (req_grad) inv_rms else null, allocator);
+
+    const ctx: OpContext = .{ .RmsNorm = .{ .options = options, .inv_rms = inv_rms } };
+    if (W) |w| return self.registerSingleOutputOp(Y, &.{ X, w }, .RmsNorm, ctx, req_grad);
+    return self.registerSingleOutputOp(Y, &.{X}, .RmsNorm, ctx, req_grad);
 }
 
+/// 层归一化 (Layer Normalization, LayerNorm)：需要梯度时在算子上下文中保存每行的均值与标准差倒数，反向传播直接复用
 pub fn layerNorm(self: *Graph, X_in: *Tensor, G_in: *Tensor, B_in: *Tensor, eps: f32) !*Tensor {
     const allocator = self.arena.allocator();
     const X = try self.contiguous(X_in);
     const G = try self.contiguous(G_in);
     const B = try self.contiguous(B_in);
-    const Y = try X.layerNorm(G, B, eps, allocator);
+    if (X.shape.len == 0) return error.IncompatibleDimensions;
+    const D = X.shape.dims[X.shape.len - 1];
+    if (D == 0) return error.DivisionByZero;
+    const req_grad = self.enable_grad and (X.requires_grad or G.requires_grad or B.requires_grad);
+    const rows = X.shape.numel() / D;
+    const save_mean: []f32 = if (req_grad) try allocator.alloc(f32, rows) else &.{};
+    const save_inv_std: []f32 = if (req_grad) try allocator.alloc(f32, rows) else &.{};
+    const Y = try X.layerNorm(G, B, eps, if (req_grad) save_mean else null, if (req_grad) save_inv_std else null, allocator);
     return self.registerSingleOutputOp(
         Y,
         &.{ X, G, B },
         .LayerNorm,
-        .{ .LayerNorm = .{ .eps = eps } },
-        self.enable_grad and (X.requires_grad or G.requires_grad or B.requires_grad),
+        .{ .LayerNorm = .{ .eps = eps, .save_mean = save_mean, .save_inv_std = save_inv_std } },
+        req_grad,
     );
 }
 
@@ -701,100 +715,72 @@ pub fn dropout(self: *Graph, X_in: *Tensor, p: f32, random: std.Random) !*Tensor
     );
 }
 
+/// 旋转位置编码 (Rotary Position Embedding, RoPE)：第 t 行的绝对位置为 start_pos + t。
+/// 统一设备分派：GPU 计算图且输出不需要梯度时由 MLX 执行 (部分旋转 / 比例旋转经共享周期表，旋转子空间带偏移时回退 CPU)
 pub fn rope(self: *Graph, X_in: *Tensor, start_pos: usize, options: tensor_mod.RopeOptions) !*Tensor {
-    const X = try self.contiguous(X_in);
-    if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad and options.rotary_offset == 0 and options.partial_rotary_factor == 1.0) {
-        const D = X.shape.dims[X.shape.len - 1];
-        if (D % 2 == 0) {
-            const traditional = (options.mode == .interleaved);
-            const Y = try self.tensorND(X.shape.dims[0..X.shape.len], false);
-            try backend.offload.rope(X, Y, D, traditional, options.base, 1.0, start_pos, self.options.mlx_stream);
-            return Y;
-        }
-    }
-
     const allocator = self.arena.allocator();
-    const Y = try X.rope(start_pos, options, allocator);
+    const X = try self.contiguous(X_in);
+    if (X.shape.len == 0) return error.IncompatibleDimensions;
+    const req_grad = self.enable_grad and X.requires_grad;
+    const D = X.shape.dims[X.shape.len - 1];
+    const Y = if (self.useDevice(req_grad) and backend.offload.ropeSupported(D, options)) blk: {
+        const out = try tensor_mod.zeros(allocator, X.shape.dims[0..X.shape.len]);
+        try backend.offload.rope(X, out, options, start_pos, self.options.mlx_stream);
+        break :blk out;
+    } else try X.rope(start_pos, options, allocator);
     return self.registerSingleOutputOp(
         Y,
         &.{X},
         .RoPE,
         .{ .RoPE = .{ .start_pos = start_pos, .options = options } },
-        self.enable_grad and X.requires_grad,
+        req_grad,
     );
 }
 
+/// 批量矩阵乘法 [B, H, M, K] x [B, H, K, N]；统一设备分派：GPU 计算图且输出不需要梯度时由 MLX 执行
 pub fn batchMatMul(self: *Graph, A_in: *Tensor, B_in: *Tensor) !*Tensor {
     const allocator = self.arena.allocator();
     const A = try self.contiguous(A_in);
     const B = try self.contiguous(B_in);
-    if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
-        const ndim = A.shape.len;
-        var out_shape: [8]usize = undefined;
-        for (0..ndim - 2) |i| {
-            out_shape[i] = A.shape.dims[i];
-        }
-        out_shape[ndim - 2] = A.shape.dims[ndim - 2];
-        out_shape[ndim - 1] = B.shape.dims[B.shape.len - 1];
-
-        const C = try self.tensorND(out_shape[0..ndim], false);
-        try backend.offload.matmul(A, B, C, self.options.mlx_stream);
-        return C;
-    }
-
-    const C = try A.batchMatMul(B, allocator);
-    return self.registerSingleOutputOp(
-        C,
-        &.{ A, B },
-        .BatchMatMul,
-        .{ .BatchMatMul = {} },
-        self.enable_grad and (A.requires_grad or B.requires_grad),
-    );
+    const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
+    const C = if (self.useDevice(req_grad)) blk: {
+        if (A.shape.len != 4 or B.shape.len != 4) return error.IncompatibleDimensions;
+        if (A.shape.dims[0] != B.shape.dims[0] or A.shape.dims[1] != B.shape.dims[1] or A.shape.dims[3] != B.shape.dims[2]) return error.ShapeMismatch;
+        const out = try tensor_mod.zeros(allocator, &.{ A.shape.dims[0], A.shape.dims[1], A.shape.dims[2], B.shape.dims[3] });
+        try backend.offload.matmul(A, B, out, self.options.mlx_stream);
+        break :blk out;
+    } else try A.batchMatMul(B, allocator);
+    return self.registerSingleOutputOp(C, &.{ A, B }, .BatchMatMul, .{ .BatchMatMul = {} }, req_grad);
 }
 
-/// 缩放点积注意力 (Scaled Dot-Product Attention, SDPA) 算子：
-/// 在开启 Apple Silicon GPU 硬件加速且无需求导时，卸载至 MLX FlashAttention Metal 融合内核执行；
-/// 否则回退至通用多维计算图分解求值（支持端到端自动微分 Autograd）。
-pub fn scaledDotProductAttention(
-    self: *Graph,
-    q: *Tensor,
-    k: *Tensor,
-    v: *Tensor,
-    scale: f32,
-    is_causal: bool,
-) !*Tensor {
-    if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
-        const B = q.shape.dims[0];
-        const H = q.shape.dims[1];
-        const T = q.shape.dims[2];
-        const d_v = v.shape.dims[3];
-        const out_tensor = try self.tensorND(&.{ B, H, T, d_v }, false);
-        try backend.offload.scaledDotProductAttention(q, k, v, out_tensor, scale, is_causal, self.options.mlx_stream);
-        return out_tensor;
-    }
+/// 缩放点积注意力 (Scaled Dot-Product Attention, SDPA) 算子：O = softmax(scale * Q K^T + M) V。
+/// q [B, q_heads, tq, d]、k [B, kv_heads, tk, d]、v [B, kv_heads, tk, dv]，q_heads = kv_heads * kv_groups：
+/// 分组查询注意力 (Grouped-Query Attention, GQA) 直接按组共享键值，不物化复制后的键值；查询数与键数可以不同，
+/// 第 i 个查询 / 第 j 个键的绝对位置为 q_pos0 + i / k_pos0 + j，掩码可见性由 `tensor.AttentionMask` 定义。
+/// 需要梯度时保存注意力概率，反向传播 (`backward_nn`) 直接复用。
+/// 统一设备分派：GPU 计算图且输出不需要梯度时由 MLX 融合缩放点积注意力执行 (掩码化简后使用内置因果模式或加性掩码)。
+pub fn attention(self: *Graph, q_in: *Tensor, k_in: *Tensor, v_in: *Tensor, options: tensor_mod.AttentionOptions) !*Tensor {
+    const allocator = self.arena.allocator();
+    const q = try self.contiguous(q_in);
+    const k = try self.contiguous(k_in);
+    const v = try self.contiguous(v_in);
+    const shape = try tensor_mod.attention_kernels.Shape.init(q, k, v, options);
+    const req_grad = self.enable_grad and (q.requires_grad or k.requires_grad or v.requires_grad);
 
-    // 通用计算图分解路径
-    const k_t = try self.transposeND(k, 2, 3);
-    const att = try self.batchMatMul(q, k_t);
-    var scores = try self.mulScalar(att, scale);
-    const T = q.shape.dims[2];
-    if (is_causal) {
-        const mask_node = try self.tensorND(&.{ 1, 1, T, T }, false);
-        mask_node.is_buffer = true;
-        @memset(mask_node.data, 0.0);
-        for (0..T) |i| {
-            for (i + 1..T) |j| {
-                mask_node.data[i * T + j] = -1e9;
-            }
-        }
-        const scope = self.currentScope();
-        if (scope.len > 0) {
-            mask_node.name = try std.fmt.allocPrint(self.arenaAllocator(), "{s}.causal_mask", .{scope});
-        }
-        scores = try self.add(scores, mask_node);
+    const out = try tensor_mod.zeros(allocator, &.{ shape.batch, shape.q_heads, shape.tq, shape.v_dim });
+    const probs: []f32 = if (req_grad) try allocator.alloc(f32, shape.probsLen()) else &.{};
+    if (self.useDevice(req_grad)) {
+        try backend.offload.attention(self.backing_allocator, q, k, v, out, options.resolveScale(shape.head_dim), options.mask, options.q_pos0, options.k_pos0, self.options.mlx_stream);
+    } else {
+        try tensor_mod.attention_kernels.attentionInto(q, k, v, out, if (req_grad) probs else null, options, self.backing_allocator);
     }
-    const att_sm = try self.softmax(scores);
-    return try self.batchMatMul(att_sm, v);
+    return self.registerSingleOutputOp(
+        out,
+        &.{ q, k, v },
+        .Attention,
+        .{ .Attention = .{ .options = options, .probs = probs } },
+        req_grad,
+    );
 }
 
 pub fn embedding(self: *Graph, W_in: *Tensor, X: anytype) !*Tensor {

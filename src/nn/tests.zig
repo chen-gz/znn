@@ -1687,7 +1687,7 @@ test "ScaledDotProductAttention standalone causal and non-causal forward and bac
     try std.testing.expectApproxEqAbs(@as(f32, 2.0), out_causal.data[0], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 4.0), out_causal.data[1], 1e-4);
 
-    const sdpa_bidir = transformer.ScaledDotProductAttention.init(.{ .causal = false });
+    const sdpa_bidir = transformer.ScaledDotProductAttention.init(.{ .mask = .none });
     const out_bidir = try sdpa_bidir.forward(&g, q, k, v);
     // Without causal mask, position 0 also attends to position 1 with non-zero weight, so output[0] > v[0]
     try std.testing.expect(out_bidir.data[0] > 2.5);

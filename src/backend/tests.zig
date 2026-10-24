@@ -7,6 +7,7 @@ const mlx = @import("mlx.zig");
 const offload = @import("offload.zig");
 const sampling = @import("sampling.zig");
 const activation = @import("activation.zig");
+const attention_mask = @import("attention_mask.zig");
 const cblas = @import("cblas.zig");
 const Executor = @import("executor.zig").Executor;
 
@@ -950,7 +951,7 @@ test "GpuKvCache visible key range with the attention mask gives every query exa
                         const in_view = k >= range.start and k < range.stop;
                         // 右下对齐因果掩码：第 i 个查询可见视图中前 i + tk - seq_len + 1 个键
                         const causal_visible = in_view and (k - range.start) <= i + tk - seq_len;
-                        const window_visible = in_view and offload.isSlidingWindowVisible(p, k, window);
+                        const window_visible = in_view and (attention_mask.Mask{ .sliding = window }).isVisible(p, k);
                         const got = if (range.needs_window_mask) window_visible else causal_visible;
                         try std.testing.expectEqual(expected, got);
                     }
@@ -966,12 +967,12 @@ test "GpuKvCache visible key range with the attention mask gives every query exa
     try std.testing.expect(!global.needs_window_mask);
 }
 
-test "fillSlidingWindowMask marks exactly the keys inside each query window" {
+test "fillAdditiveMask with a sliding window marks exactly the keys inside each query window" {
     const tq = 4;
     const tk = 6;
     var mask: [tq * tk]f32 = undefined;
     // 查询绝对位置 5..8，键绝对位置 3..8，窗口 3
-    offload.fillSlidingWindowMask(&mask, tq, tk, 3, 5, 3);
+    attention_mask.fillAdditiveMask(&mask, tq, tk, 5, 3, .{ .sliding = 3 });
     const expected = [tq][tk]bool{
         .{ true, true, true, false, false, false }, // p = 5: k ∈ {3, 4, 5}
         .{ false, true, true, true, false, false }, // p = 6: k ∈ {4, 5, 6}

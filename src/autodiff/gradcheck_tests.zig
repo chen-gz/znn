@@ -481,10 +481,10 @@ test "gradcheck: max/avg/adaptive pooling" {
 // 归一化 (Normalization)
 // ============================================================================
 
-test "gradcheck: rmsNorm and layerNorm" {
+test "gradcheck: rmsNorm (weighted, unweighted, weight_offset) and layerNorm" {
     try expectGradientsMatch(struct {
         fn build(g: *Graph, t: []const *Tensor) !*Tensor {
-            const r = try g.rmsNorm(t[0], t[1], 1e-5);
+            const r = try g.rmsNorm(t[0], t[1], .{ .eps = 1e-5 });
             return g.layerNorm(r, t[2], t[3], 1e-5);
         }
     }, &.{
@@ -492,6 +492,36 @@ test "gradcheck: rmsNorm and layerNorm" {
         .{ .shape = &.{4}, .offset = 1.0, .scale = 0.3 },
         .{ .shape = &.{4}, .offset = 1.0, .scale = 0.3 },
         .{ .shape = &.{4} },
+    }, .{});
+    // 无缩放权重 (Unweighted RMSNorm, weight = null)
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.rmsNorm(t[0], null, .{ .eps = 1e-5 });
+        }
+    }, &.{
+        .{ .shape = &.{ 3, 5 } },
+    }, .{});
+    // 带权重偏移的均方根层归一化 (RMSNorm with weight_offset = 1.0, Gemma 3 风格)
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.rmsNorm(t[0], t[1], .{ .eps = 1e-5, .weight_offset = 1.0 });
+        }
+    }, &.{
+        .{ .shape = &.{ 3, 4 } },
+        .{ .shape = &.{4}, .offset = -0.1, .scale = 0.3 },
+    }, .{});
+}
+
+test "gradcheck: softcap positive cap and non-positive identity" {
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            const capped = try g.softcap(t[0], 3.0);
+            const ident = try g.softcap(t[1], 0.0);
+            return g.add(capped, ident);
+        }
+    }, &.{
+        .{ .shape = &.{ 3, 4 }, .scale = 2.0 },
+        .{ .shape = &.{ 3, 4 } },
     }, .{});
 }
 
@@ -642,15 +672,56 @@ test "gradcheck: gatherMatMul with shared and per-slot inputs" {
     }, .{});
 }
 
-test "gradcheck: scaled dot-product attention with causal mask" {
+test "gradcheck: attention (none, causal, sliding window, GQA, and Tq != Tk)" {
+    // 1. 因果掩码 (Causal Mask)
     try expectGradientsMatch(struct {
         fn build(g: *Graph, t: []const *Tensor) !*Tensor {
-            return g.scaledDotProductAttention(t[0], t[1], t[2], 0.5, true);
+            return g.attention(t[0], t[1], t[2], .{ .scale = 0.5, .mask = .causal });
         }
     }, &.{
         .{ .shape = &.{ 1, 2, 3, 4 } },
         .{ .shape = &.{ 1, 2, 3, 4 } },
         .{ .shape = &.{ 1, 2, 3, 4 } },
+    }, .{});
+    // 2. 无掩码 (No Mask)
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.attention(t[0], t[1], t[2], .{ .scale = 0.5, .mask = .none });
+        }
+    }, &.{
+        .{ .shape = &.{ 1, 2, 3, 3 } },
+        .{ .shape = &.{ 1, 2, 3, 3 } },
+        .{ .shape = &.{ 1, 2, 3, 3 } },
+    }, .{});
+    // 3. 滑动窗口掩码 + 分组查询注意力 (Sliding Window + Grouped-Query Attention, GQA: Hq=4, Hkv=2, kv_groups=2)
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.attention(t[0], t[1], t[2], .{
+                .scale = 0.5,
+                .mask = .{ .sliding = 2 },
+                .kv_groups = 2,
+            });
+        }
+    }, &.{
+        .{ .shape = &.{ 1, 4, 4, 3 } },
+        .{ .shape = &.{ 1, 2, 4, 3 } },
+        .{ .shape = &.{ 1, 2, 4, 3 } },
+    }, .{});
+    // 4. 查询与键序列长度不等 (Tq != Tk) 且带起始位置偏移 (q_pos0, k_pos0) 与 GQA
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.attention(t[0], t[1], t[2], .{
+                .scale = 0.5,
+                .mask = .{ .sliding = 3 },
+                .kv_groups = 2,
+                .q_pos0 = 2,
+                .k_pos0 = 0,
+            });
+        }
+    }, &.{
+        .{ .shape = &.{ 1, 2, 2, 3 } },
+        .{ .shape = &.{ 1, 1, 4, 3 } },
+        .{ .shape = &.{ 1, 1, 4, 3 } },
     }, .{});
 }
 

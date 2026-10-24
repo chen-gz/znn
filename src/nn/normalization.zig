@@ -48,7 +48,7 @@ pub const RMSNorm = struct {
     pub fn forward(self: *const RMSNorm, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        return try graph.rmsNorm(x, self.weight, self.eps);
+        return try graph.rmsNorm(x, self.weight, .{ .eps = self.eps });
     }
 };
 

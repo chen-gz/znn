@@ -515,22 +515,22 @@ pub const Graph = struct {
         }
 
         const allocator = self.arena.allocator();
-        if (self.options.device == .gpu and backend.offload.isAvailable() and !self.enable_grad) {
-            const M = A.shape.dims[0];
-            const N = B.shape.dims[1];
-            const C = try self.tensorND(&.{ M, N }, false);
-            try backend.offload.matmul(A, B, C, self.options.mlx_stream);
-            return C;
-        }
+        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
+        const C = if (self.useDevice(req_grad)) blk: {
+            if (A.shape.len != 2 or B.shape.len != 2) return error.IncompatibleDimensions;
+            if (A.shape.dims[1] != B.shape.dims[0]) return error.ShapeMismatch;
+            const out = try tensor_mod.zeros(allocator, &.{ A.shape.dims[0], B.shape.dims[1] });
+            try backend.offload.matmul(A, B, out, self.options.mlx_stream);
+            break :blk out;
+        } else try A.matmul(B, allocator);
+        return self.registerSingleOutputOp(C, &.{ A, B }, .MatMul, .{ .MatMul = {} }, req_grad);
+    }
 
-        const C = try A.matmul(B, allocator);
-        return self.registerSingleOutputOp(
-            C,
-            &.{ A, B },
-            .MatMul,
-            .{ .MatMul = {} },
-            self.enable_grad and (A.requires_grad or B.requires_grad),
-        );
+    /// 统一设备分派规则：计算图配置为 GPU、MLX 可用且算子输出不需要梯度时，由设备执行该算子的前向计算。
+    /// 无论在哪个设备上计算，算子都以相同的 `Op` 类型、输入与上下文注册 (输出 `requires_grad` 为 false)，
+    /// 因此计算图结构与导出的模型图与设备无关；前向重演 (`Graph.forward`) 统一使用 CPU 内核。
+    pub fn useDevice(self: *const Graph, req_grad: bool) bool {
+        return self.options.device == .gpu and backend.offload.isAvailable() and !req_grad;
     }
 
     // 偏置相加算子前向传播：C = A + bias (直接路由到通用广播加法)
@@ -593,6 +593,22 @@ pub const Graph = struct {
             &.{A},
             .Tanh,
             .{ .Tanh = {} },
+            self.enable_grad and A.requires_grad,
+        );
+    }
+
+    /// 软截断 (Soft Capping)：y = cap * tanh(x / cap)，把取值平滑限制在 (-cap, cap) 内 (如 Gemma 的最终对数几率截断)；
+    /// cap <= 0 时为恒等映射，直接返回输入
+    pub fn softcap(self: *Graph, A_in: *Tensor, cap: f32) !*Tensor {
+        if (cap <= 0.0) return A_in;
+        const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
+        const C = try A.softcap(cap, allocator);
+        return self.registerSingleOutputOp(
+            C,
+            &.{A},
+            .Softcap,
+            .{ .Softcap = .{ .cap = cap } },
             self.enable_grad and A.requires_grad,
         );
     }
@@ -773,7 +789,7 @@ pub const Graph = struct {
     pub const topK = graph_nn.topK;
     pub const gatherMatMul = graph_nn.gatherMatMul;
     pub const q4MatMul = graph_nn.q4MatMul;
-    pub const scaledDotProductAttention = graph_nn.scaledDotProductAttention;
+    pub const attention = graph_nn.attention;
 
     pub fn sqrt(self: *Graph, A: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();

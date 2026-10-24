@@ -6,6 +6,8 @@ const std = @import("std");
 pub const activation = @import("backend/activation.zig");
 pub const GeluApproximation = activation.GeluApproximation;
 
+pub const attention_mask = @import("backend/attention_mask.zig");
+
 pub const executor = @import("backend/executor.zig");
 pub const Executor = executor.Executor;
 
@@ -24,6 +26,7 @@ pub const vec_math = @import("backend/vec_math.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = @import("backend/activation.zig");
+    _ = @import("backend/attention_mask.zig");
     _ = @import("backend/executor.zig");
     _ = @import("backend/cblas.zig");
     _ = @import("backend/mlx.zig");

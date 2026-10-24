@@ -475,7 +475,7 @@ pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator
                 const q = try g.tensorNDWithData(&.{ 1, 8, 256, 64 }, self.q_raw, false);
                 const k = try g.tensorNDWithData(&.{ 1, 8, 256, 64 }, self.k_raw, false);
                 const v = try g.tensorNDWithData(&.{ 1, 8, 256, 64 }, self.v_raw, false);
-                const out = try g.scaledDotProductAttention(q, k, v, 0.125, true);
+                const out = try g.attention(q, k, v, .{ .scale = 0.125, .mask = .causal });
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
         };

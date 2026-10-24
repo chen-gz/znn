@@ -393,6 +393,15 @@ pub const Tensor = struct {
         }.op);
     }
 
+    /// 软截断 (Soft Capping)：y = cap * tanh(x / cap) (与 `vec_math.softcap` 逐元素一致)，cap <= 0 时为恒等映射
+    pub fn softcap(self: *Tensor, cap: f32, allocator: std.mem.Allocator) !*Tensor {
+        return self.mapEager(allocator, cap, struct {
+            fn op(a_val: f32, cap_val: f32) f32 {
+                return backend.vec_math.softcap(a_val, cap_val);
+            }
+        }.op);
+    }
+
     pub fn leakyRelu(self: *Tensor, alpha: f32, allocator: std.mem.Allocator) !*Tensor {
         return self.mapEager(allocator, alpha, struct {
             fn op(a_val: f32, slope: f32) f32 {

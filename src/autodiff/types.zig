@@ -41,6 +41,7 @@ pub const OpType = enum {
     Silu, // Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU / Swish) 激活函数
     Sigmoid, // 激活函数 Sigmoid
     Tanh, // 双曲正切函数 (Hyperbolic Tangent, Tanh) 激活函数
+    Softcap, // 软截断 (Soft Capping)：y = cap * tanh(x / cap)，把取值平滑限制在 (-cap, cap)
     Softmax, // 独立归一化指数函数 (Standalone Softmax)
 
     // --- 神经网络层与结构运算 (Neural Network Layers & Structural Ops) ---
@@ -61,6 +62,7 @@ pub const OpType = enum {
     GroupNorm, // 分组归一化 (Group Normalization, GroupNorm)
     Dropout, // 随机丢弃正则化
     RoPE, // 旋转位置编码 (Rotary Position Embedding, RoPE)
+    Attention, // 缩放点积注意力 (Scaled Dot-Product Attention, SDPA)：支持因果 / 滑动窗口掩码与分组查询注意力 (Grouped-Query Attention, GQA)
     Embedding, // 嵌入查找 (Embedding Lookup)
     TopK, // 无分支前 K 大元素与下标选择 (Branchless Top-K Selection, TopK)
     GatherMatMul, // 索引收集专家矩阵乘法 (Indexed Gather Matrix Multiplication, GatherMatMul)
@@ -110,6 +112,7 @@ pub const OpType = enum {
             .Silu => "y = x \\cdot \\sigma(x)",
             .Sigmoid => "y = \\frac{1}{1 + e^{-x}}",
             .Tanh => "y = \\tanh(x) = \\frac{e^x - e^{-x}}{e^x + e^{-x}}",
+            .Softcap => "y = c \\tanh\\left(\\frac{x}{c}\\right)",
             .Softmax => "P_i = \\frac{e^{z_i - \\max(z)}}{\\sum_j e^{z_j - \\max(z)}}",
             .Conv1D, .Conv2D => "y = x \\ast W + b",
             .ConvTranspose1D, .ConvTranspose2D => "y = x \\ast_{\\text{deconv}} W + b",
@@ -125,6 +128,7 @@ pub const OpType = enum {
             .GroupNorm => "y = \\frac{x - \\mu_g}{\\sqrt{\\sigma_g^2 + \\epsilon}} \\odot \\gamma + \\beta",
             .Dropout => "y = \\frac{m \\odot x}{1 - p}",
             .RoPE => "y_t = R_{\\Theta, t} x_t",
+            .Attention => "O = \\text{softmax}\\left(s \\cdot Q K^T + M\\right) V",
             .Embedding => "y = W_e[\\text{indices}]",
             .TopK => "(v, \\text{idx}) = \\text{TopK}(x, k)",
             .GatherMatMul => "y_{n, k} = x_{n, k} W_{\\text{idx}[n, k]} + b_{\\text{idx}[n, k]}",
@@ -234,6 +238,9 @@ pub const OpContext = union(enum) {
     Silu: void,
     Sigmoid: void,
     Tanh: void,
+    Softcap: struct {
+        cap: f32,
+    },
     Softmax: void,
 
     // --- 神经网络层与结构运算 ---
@@ -280,10 +287,13 @@ pub const OpContext = union(enum) {
         output_size: [2]usize,
     },
     RmsNorm: struct {
-        eps: f32,
+        options: tensor_mod.RmsNormOptions,
+        inv_rms: []f32, // 前向保存的每行均方根倒数 1 / sqrt(mean(x^2) + eps)，供反向传播使用 (输出不需要梯度时为空)
     },
     LayerNorm: struct {
         eps: f32,
+        save_mean: []f32, // 前向保存的每行均值，供反向传播使用 (输出不需要梯度时为空)
+        save_inv_std: []f32, // 前向保存的每行标准差倒数
     },
     BatchNorm1d: struct {
         eps: f32,
@@ -315,6 +325,10 @@ pub const OpContext = union(enum) {
     RoPE: struct {
         start_pos: usize,
         options: tensor_mod.RopeOptions = .{},
+    },
+    Attention: struct {
+        options: tensor_mod.AttentionOptions,
+        probs: []f32, // 前向保存的注意力概率 [B, q_heads, tq, tk]，供反向传播使用 (输出不需要梯度时为空)
     },
     Embedding: void,
     TopK: struct {
