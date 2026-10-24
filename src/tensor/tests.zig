@@ -2494,3 +2494,60 @@ test "tensor gelu exact and tanh-approximate forms match double-precision refere
     try std.testing.expect(max_form_diff < 5e-4);
     try std.testing.expect(max_form_diff > 1e-4);
 }
+
+test "losses: ceRow, accumulateCeGradRow, dpoTerm and grpoTerm" {
+    const losses = tensor.losses;
+
+    // 1. ceRow & accumulateCeGradRow
+    const logits = [_]f32{ 2.0, 1.0, 0.1 };
+    var probs: [3]f32 = undefined;
+    var grad: [3]f32 = @splat(0.0);
+    const loss = try losses.ceRow(&logits, 0, &probs, &grad, 1.0);
+    try std.testing.expect(loss > 0.0);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), probs[0] + probs[1] + probs[2], 1e-5);
+    // grad should be probs - [1, 0, 0]
+    try std.testing.expectApproxEqAbs(probs[0] - 1.0, grad[0], 1e-5);
+    try std.testing.expectApproxEqAbs(probs[1], grad[1], 1e-5);
+    try std.testing.expectApproxEqAbs(probs[2], grad[2], 1e-5);
+
+    // accumulateCeGradRow with scale 2.0
+    var grad2: [3]f32 = @splat(0.0);
+    losses.accumulateCeGradRow(&probs, 0, &grad2, 2.0);
+    try std.testing.expectApproxEqAbs(2.0 * (probs[0] - 1.0), grad2[0], 1e-5);
+
+    // 2. dpoTerm
+    var dz: f32 = 0.0;
+    const dpo_val = losses.dpoTerm(1.0, 0.5, 0.2, 0.1, 0.5, &dz);
+    try std.testing.expect(dpo_val > 0.0);
+    try std.testing.expect(dz < 0.0); // dz should be -beta * sigmoid(-z)
+
+    // When chosen and rejected match reference, z = 0, loss = log(2)
+    const sym_loss = losses.dpoTerm(0.5, 0.5, 0.5, 0.5, 0.1, null);
+    try std.testing.expectApproxEqAbs(@as(f32, @log(2.0)), sym_loss, 1e-5);
+
+    // 3. grpoTerm
+    var d_obj: f32 = 0.0;
+    const obj = losses.grpoTerm(0.1, 0.0, 1.5, 0.0, 0.05, 0.2, &d_obj);
+    try std.testing.expect(obj > 0.0);
+    try std.testing.expect(d_obj > 0.0);
+
+    // 4. Tensor.softmaxCrossEntropy with usize, u32, and u8 slices
+    const allocator = std.testing.allocator;
+    const logits_t = try array(allocator, &.{ 2, 3 }, &[_]f32{ 1.0, 2.0, 0.5, 0.2, -1.0, 3.0 });
+    defer free(allocator, logits_t);
+
+    const target_u8: [2]u8 = .{ 1, 2 };
+    const loss_u8 = try logits_t.softmaxCrossEntropy(&target_u8, allocator);
+    defer free(allocator, loss_u8);
+
+    const target_u32: [2]u32 = .{ 1, 2 };
+    const loss_u32 = try logits_t.softmaxCrossEntropy(&target_u32, allocator);
+    defer free(allocator, loss_u32);
+
+    const target_usize: [2]usize = .{ 1, 2 };
+    const loss_usize = try logits_t.softmaxCrossEntropy(&target_usize, allocator);
+    defer free(allocator, loss_usize);
+
+    try std.testing.expectEqual(loss_u8.data[0], loss_u32.data[0]);
+    try std.testing.expectEqual(loss_u8.data[0], loss_usize.data[0]);
+}

@@ -14,6 +14,7 @@ pub const weight_init = @import("tensor/weight_init.zig");
 pub const quant = @import("tensor/quant.zig");
 pub const rope = @import("tensor/rope.zig");
 pub const attention_kernels = @import("tensor/attention_kernels.zig");
+pub const losses = @import("tensor/losses.zig");
 pub const Q4Block = quant.Q4Block;
 
 // --- Re-export Linear Algebra Results ---
@@ -56,6 +57,10 @@ pub const StaticTensor = static.StaticTensor;
 
 // --- Re-export kernels shared by eager, graph and decode paths ---
 pub const embeddingLookupInto = nn_kernels.embeddingLookupInto;
+pub const ceRow = losses.ceRow;
+pub const accumulateCeGradRow = losses.accumulateCeGradRow;
+pub const dpoTerm = losses.dpoTerm;
+pub const grpoTerm = losses.grpoTerm;
 
 // --- Re-export core Tensor ---
 pub const Tensor = core.Tensor;

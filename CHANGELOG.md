@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **共享损失核与泛型循环层收敛 (`src/tensor/losses.zig`, `src/autodiff/`, `src/nn/recurrent.zig`, `src/nn/llm.zig`)**:
+  - **共享损失计算核 (`src/tensor/losses.zig`)**：新增 `ceRow`（按对数求和指数 LSE 精确计算单行交叉熵，支持概率写入与原地梯度累加）、`accumulateCeGradRow`、`dpoTerm`（直接偏好优化单样本损失与导数）与 `grpoTerm`（组相对策略优化裁剪代理目标与 KL 散度项及对数概率梯度）；消除 `autodiff/op.zig`、`autodiff/backward_core.zig` 与 `nn/llm.zig` 间三处前向与反向公式重复实现。
+  - **整型标签多态支持 (`Tensor.softmaxCrossEntropy`)**：扩展 `Tensor.softmaxCrossEntropy` 支持任意整型切片与元组（`u8`、`u32`、`usize`），复用 `tensor.losses.ceRow` 并实现统一的越界与形状校验。
+  - **LLM 对齐损失与组优势计算收敛 (`src/nn/llm.zig`)**：重构 `maskedCrossEntropyLoss`、`dpoLoss`、`computeGRPOLoss` 与 `grpoLoss` 直接调用 `tensor.losses` 共享核；在 `computeGroupAdvantages` 中复用 `backend.vec_math.sum` 与 `sumSquaredDeviations`，提升组内均值与标准差计算效率并消除手写循环。
+  - **泛型时间步展开器 (`nn.Recurrent(Cell)`, `nn.RecurrentResult`)**：提取泛型时间步展开容器 `Recurrent(comptime Cell: type)` 与返回结构体 `RecurrentResult`，使经典 `RNN`（`Recurrent(RNNCell)`）与单层门控循环单元 `GRU`（`Recurrent(GRUCell)`）完全复用通用的序列时序展开、隐状态缓冲分配与零状态兜底逻辑。
+
 - **统一 Gemma 4 CPU 泛型模块、配置驱动架构与模型统一生成前端 (`src/models/`, `src/backend/`, `src/nn/`, `examples/`)**:
   - **泛型注意力与解码层原语 (`Gemma4AttentionT`, `Gemma4DecoderLayerT`)**：以 `Gemma4AttentionT(comptime Proj: type)` 与 `Gemma4DecoderLayerT(comptime Attn: type, comptime Mlp: type)` 统一全精度 F32 与 4-bit 量化 Q4 CPU 模型的前向、预填充、增量解码与残差尾部实现；消除 `src/models/gemma4_q4.zig` 中原本 450 行重复手写的注意力机制与解码层样板代码。
   - **配置驱动架构扩展 (`Gemma4Config`, `SamplingOptions`)**：在 `Gemma4Config` 中增加显式 `layer_types`、`sliding_rope`、`full_rope`、`attention_k_eq_v`，并将 `kvSourceLayer` 与 `isKvSharedSource` 深度内聚进配置层；在 `backend.sampling.SamplingOptions` 中增加统一的 `repetition_window: ?usize = null`。

@@ -282,9 +282,9 @@
     - [x] 将 `Gemma4Config` 改为配置驱动（显式携带 `layer_types`、按注意力类型的 `rope_parameters`、`attention_k_eq_v`，并将 `kvSourceLayer`/`isKvSharedSource` 迁入配置）；在 `SamplingOptions` 中增加统一的 `repetition_window: ?usize = null`。
     - [x] 为 12B `Gemma4Q4ForCausalLM` 提供与 E4B 一致的单一生成入口 `generate(allocator, prompt, GenerateOptions) -> Generation`（`next()`），将 `examples/gemma4.zig` 中的投机解码循环内聚至生成会话中。
     - [x] 将 `GPT` / `GPTConfig` / `TransformerDecoder` / `DefaultGPT` 从 `src/nn/transformer.zig` 迁至 `src/models/`，将 `SpeculativeDraftEngine` / `promptLookup` 下沉至 `src/nn/llm.zig`。
-  - [ ] **阶段 P6 — 共享损失核与循环层收敛 (`src/tensor/losses.zig`, `src/nn/recurrent.zig`)**：
-    - [ ] 新增 `src/tensor/losses.zig`（`ceRow`、`dpoTerm`、`grpoTerm`），供 `autodiff/op.zig` 前向与 `backward_core.zig` 反向共用；扩展 `Tensor.softmaxCrossEntropy` 支持任意整型标签；删除 `src/nn/llm.zig` 中手写梯度的即时模式重复实现（`maskedCrossEntropyLoss` 手写梯度分支、即时 `dpoLoss`、`computeGRPOLoss`、`grpoLoss`），并在 `computeGroupAdvantages` 中复用 `backend.vec_math`。
-    - [ ] 在 [`src/nn/recurrent.zig`](../src/nn/recurrent.zig) 中提取泛型时间步展开器 `Recurrent(comptime Cell)`，供 `RNN` 与 `GRU` 共用。
+  - [x] **阶段 P6 — 共享损失核与循环层收敛 (`src/tensor/losses.zig`, `src/nn/recurrent.zig`)**：
+    - [x] 新增 `src/tensor/losses.zig`（`ceRow`、`dpoTerm`、`grpoTerm`），供 `autodiff/op.zig` 前向与 `backward_core.zig` 反向共用；扩展 `Tensor.softmaxCrossEntropy` 支持任意整型标签；删除 `src/nn/llm.zig` 中手写梯度的即时模式重复实现（`maskedCrossEntropyLoss` 手写梯度分支、即时 `dpoLoss`、`computeGRPOLoss`、`grpoLoss`），并在 `computeGroupAdvantages` 中复用 `backend.vec_math`。
+    - [x] 在 [`src/nn/recurrent.zig`](../src/nn/recurrent.zig) 中提取泛型时间步展开器 `Recurrent(comptime Cell)`，供 `RNN` 与 `GRU` 共用。
   - [x] 实现通用 **RoPE** 旋转位置编码的前向与反向 Autograd 算子（[`OpType.RoPE`](../src/autodiff/types.zig)、[`Graph.rope`](../src/autodiff/graph_nn.zig)、[`Tensor.rope`](../src/tensor/nn_kernels.zig) 统一接收 [`RopeOptions`](../src/backend/rope.zig)）并接入 [`MLALayer.forward`](../src/nn/attention.zig)。
   - [x] **共享旋转表 [`RopeTable`](../src/tensor/rope.zig)**：CPU 前向内核、RoPE 反向传播 (逆旋转，不再逐元素重算幂函数与三角函数)、`MLALayer` 增量解码 (频率基数随 `MLALayer.rope` 配置，不再写死 10000) 共用一份旋转实现；频率公式与比例旋转位置编码 (Proportional RoPE) 预设 `RopeOptions.proportional` 位于 [`backend/rope.zig`](../src/backend/rope.zig)，Gemma 4 GPU `GpuRope` 的周期表也由它生成。
   - [x] **补全 Split-Half 与 Partial Rotary RoPE 的静态图重演与反向传播支持 (`graph_nn.zig`, `op.zig`, `backward_nn.zig`, `models/gemma4.zig`)**：
