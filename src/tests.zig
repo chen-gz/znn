@@ -13,6 +13,7 @@ const manifold = root.manifold;
 const cv = root.cv;
 const engine = root.engine;
 const bench = root.bench;
+const models = root.models;
 const TSNE = root.TSNE;
 const TSNEOptions = root.TSNEOptions;
 const tsne = root.tsne;
@@ -55,7 +56,7 @@ test "basic imports and struct definitions" {
     try std.testing.expect(@TypeOf(nn.Linear) == type);
     try std.testing.expect(@TypeOf(nn.SwiGLU) == type);
     try std.testing.expect(@TypeOf(nn.LoRALinear) == type);
-    try std.testing.expect(@TypeOf(nn.TransformerDecoder) == fn (comptime usize) type);
+    try std.testing.expect(@TypeOf(models.TransformerDecoder) == fn (comptime usize) type);
     try std.testing.expect(@TypeOf(autodiff.Graph) == type);
     try std.testing.expect(@TypeOf(tensor.Tensor) == type);
     try std.testing.expect(@TypeOf(optim.SGDOptimizer) == type);

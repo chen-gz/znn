@@ -174,6 +174,8 @@ pub const SamplingOptions = struct {
     top_p: f32 = 1.0,
     /// 重复惩罚 (Repetition Penalty) 系数：大于 1 时对最近出现过的词元施加惩罚，小于等于 1 表示不惩罚
     repetition_penalty: f32 = 1.0,
+    /// 重复惩罚窗口长度 (Repetition Penalty Window)：仅对最近窗口内的词元施加重复惩罚；null 时使用调用方/模型默认窗口
+    repetition_window: ?usize = null,
     /// 伪随机数生成器 (Pseudo-Random Number Generator, PRNG) 种子：相同种子与相同对数几率得到相同的生成序列
     seed: u64 = 0,
 
@@ -203,6 +205,12 @@ pub const SamplingOptions = struct {
     /// 终结分布是否需要完整词表的对数配分函数：只启用核采样 (未启用 Top-K) 时，累积概率必须按完整词表归一化
     pub fn needsLogNormalizer(self: SamplingOptions) bool {
         return !self.isGreedy() and self.top_k == 0 and self.top_p < 1.0;
+    }
+
+    /// 获取给定词元序列在当前重复惩罚配置下的有效词元窗口切片
+    pub fn recentTokens(self: SamplingOptions, tokens: []const usize, default_window: usize) []const usize {
+        const win = self.repetition_window orelse default_window;
+        return if (tokens.len > win) tokens[tokens.len - win ..] else tokens;
     }
 };
 

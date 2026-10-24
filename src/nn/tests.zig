@@ -77,9 +77,6 @@ const CausalSelfAttention = nn.CausalSelfAttention;
 const MLACache = nn.MLACache;
 const MLALayer = nn.MLALayer;
 const TransformerBlock = nn.TransformerBlock;
-const TransformerDecoder = nn.TransformerDecoder;
-const GPTConfig = nn.GPTConfig;
-const GPT = nn.GPT;
 const LoRALinear = nn.LoRALinear;
 const maskedCrossEntropyLoss = nn.maskedCrossEntropyLoss;
 const maskedCrossEntropyLossGraph = nn.maskedCrossEntropyLossGraph;
@@ -99,7 +96,6 @@ const loadModel = nn.loadModel;
 test {
     _ = @import("tests_init.zig");
     _ = @import("tests_module.zig");
-    _ = @import("tests_vis.zig");
 }
 
 test "Embedding Module" {
@@ -312,99 +308,6 @@ test "CausalSelfAttention Module" {
     var q_grad_sum: f32 = 0.0;
     for (attn.q_attn.weight.grad) |g| q_grad_sum += @abs(g);
     try std.testing.expect(q_grad_sum > 0.0);
-}
-
-test "GPT Module" {
-    const arena = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(42);
-    const random = prng.random();
-
-    const config = GPTConfig{
-        .vocab_size = 10,
-        .block_size = 5,
-        .n_embd = 8,
-        .n_head = 2,
-        .n_layer = 2,
-    };
-
-    var gpt = try GPT(config).init(arena);
-    try testing_init.initFromOnes(&gpt, arena, random, &.{ 1, 2 });
-    defer deinitModel(&gpt, arena);
-
-    const x = try arena.create(Tensor);
-    const shape = Shape.init(&.{ 2, 3 });
-    x.* = Tensor{
-        .data = try arena.alloc(f32, 6),
-        .grad = &.{},
-        .shape = shape,
-        .strides = tensor.computeContiguousStrides(shape),
-        .requires_grad = false,
-        .creator = null,
-    };
-    defer {
-        arena.free(x.data);
-        arena.destroy(x);
-    }
-    x.data[0] = 0;
-    x.data[1] = 1;
-    x.data[2] = 2;
-    x.data[3] = 3;
-    x.data[4] = 4;
-    x.data[5] = 5;
-
-    var y_eager_graph = autodiff.Graph.init(arena, .{ .enable_grad = false });
-    defer y_eager_graph.deinit();
-    const y_eager = try gpt.forward(&y_eager_graph, x);
-    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 10 }, y_eager.shape.dims[0..y_eager.shape.len]);
-
-    var graph = autodiff.Graph.initDefault(arena);
-    defer graph.deinit();
-
-    const x_node = try graph.tensorND(&.{ 2, 3 }, false);
-    @memcpy(x_node.data, x.data);
-
-    const y = try gpt.forward(&graph, x_node);
-    try std.testing.expectEqualSlices(usize, &.{ 2, 3, 10 }, y.shape.dims[0..y.shape.len]);
-
-    @memset(y.grad, 1.0);
-    try graph.backward(y);
-
-    var token_embedding_grad_sum: f32 = 0.0;
-    for (gpt.token_embedding.weight.grad) |g| token_embedding_grad_sum += @abs(g);
-    try std.testing.expect(token_embedding_grad_sum > 0.0);
-}
-
-test "GPT Module Save and Load" {
-    const arena = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(42);
-    const random = prng.random();
-
-    const config = GPTConfig{
-        .vocab_size = 10,
-        .block_size = 5,
-        .n_embd = 8,
-        .n_head = 2,
-        .n_layer = 2,
-    };
-
-    var gpt = try GPT(config).init(arena);
-    try testing_init.initFromOnes(&gpt, arena, random, &.{ 1, 2 });
-    defer deinitModel(&gpt, arena);
-
-    try saveModel(&gpt, std.testing.io, "test_gpt_model.safetensors", arena);
-    defer {
-        std.Io.Dir.cwd().deleteFile(std.testing.io, "test_gpt_model.safetensors") catch {};
-    }
-
-    var gpt2 = try GPT(config).init(arena);
-    try testing_init.initFromOnes(&gpt2, arena, random, &.{ 1, 2 });
-    defer deinitModel(&gpt2, arena);
-
-    try loadModel(&gpt2, std.testing.io, "test_gpt_model.safetensors", arena);
-
-    for (gpt.token_embedding.weight.data, gpt2.token_embedding.weight.data) |w1, w2| {
-        try std.testing.expectEqual(w1, w2);
-    }
 }
 
 test "Sequential container chaining" {

@@ -276,12 +276,12 @@
     - [x] 统一 `GpuKvCache`（支持 `dtype` 参数、块式扩容、可选环形滑动窗口、投机解码 `truncate` 回滚与 CPU 窗口同步 `exportWindow`/`importWindow`），替换 12B `Gemma4GpuContext` 每步动态 `concatenate` 的 KV 数组。
     - [x] 将设备端对数几率处理（`softcapLogits`、`penalizeDevice`、`deviceCandidates`、`selectToken`、`selectTokenFromHidden`）下沉至 `src/backend/` 并以 `LogitsProcessor` 参数化，解除对 `Gemma4Config` 的依赖。
     - [x] 在 [`src/backend/mlx.zig`](../src/backend/mlx.zig) 新增类型安全的 `compileFn(comptime n_in, comptime n_out, Ctx, fn, shapeless)` 封装，统一 5 处手写 `mlx_vector_array_*` 编译闭包样板，并使 E4B 编译闭包直接调用单一前向函数。
-  - [ ] **阶段 P5 — 模型层组装与统一生成前端 (`src/models/`)**：
-    - [ ] 以 `Gemma4AttentionT(Proj)` 与 `Gemma4DecoderLayerT(Attn, Mlp)` 统一 Gemma 4 F32 与 Q4 CPU 模型的前向、预填充、单步解码与残差尾部实现。
-    - [ ] 基于阶段 P4 的 GPU 组合块统一组装 12B `Gemma4GpuLayer` 与 E4B `GpuLayerE4B`。
-    - [ ] 将 `Gemma4Config` 改为配置驱动（显式携带 `layer_types`、按注意力类型的 `rope_parameters`、`attention_k_eq_v`，并将 `kvSourceLayer`/`isKvSharedSource` 迁入配置）；在 `SamplingOptions` 中增加统一的 `repetition_window: ?usize = null`。
-    - [ ] 为 12B `Gemma4Q4ForCausalLM` 提供与 E4B 一致的单一生成入口 `generate(allocator, prompt, GenerateOptions) -> Generation`（`next()`），将 `examples/gemma4.zig` 中的投机解码循环内聚至生成会话中。
-    - [ ] 将 `GPT` / `GPTConfig` / `TransformerDecoder` / `DefaultGPT` 从 `src/nn/transformer.zig` 迁至 `src/models/`，将 `SpeculativeDraftEngine` / `promptLookup` 下沉至 `src/nn/llm.zig`。
+  - [x] **阶段 P5 — 模型层组装与统一生成前端 (`src/models/`)**：
+    - [x] 以 `Gemma4AttentionT(Proj)` 与 `Gemma4DecoderLayerT(Attn, Mlp)` 统一 Gemma 4 F32 与 Q4 CPU 模型的前向、预填充、单步解码与残差尾部实现。
+    - [x] 基于阶段 P4 的 GPU 组合块统一组装 12B `Gemma4GpuLayer` 与 E4B `GpuLayerE4B`。
+    - [x] 将 `Gemma4Config` 改为配置驱动（显式携带 `layer_types`、按注意力类型的 `rope_parameters`、`attention_k_eq_v`，并将 `kvSourceLayer`/`isKvSharedSource` 迁入配置）；在 `SamplingOptions` 中增加统一的 `repetition_window: ?usize = null`。
+    - [x] 为 12B `Gemma4Q4ForCausalLM` 提供与 E4B 一致的单一生成入口 `generate(allocator, prompt, GenerateOptions) -> Generation`（`next()`），将 `examples/gemma4.zig` 中的投机解码循环内聚至生成会话中。
+    - [x] 将 `GPT` / `GPTConfig` / `TransformerDecoder` / `DefaultGPT` 从 `src/nn/transformer.zig` 迁至 `src/models/`，将 `SpeculativeDraftEngine` / `promptLookup` 下沉至 `src/nn/llm.zig`。
   - [ ] **阶段 P6 — 共享损失核与循环层收敛 (`src/tensor/losses.zig`, `src/nn/recurrent.zig`)**：
     - [ ] 新增 `src/tensor/losses.zig`（`ceRow`、`dpoTerm`、`grpoTerm`），供 `autodiff/op.zig` 前向与 `backward_core.zig` 反向共用；扩展 `Tensor.softmaxCrossEntropy` 支持任意整型标签；删除 `src/nn/llm.zig` 中手写梯度的即时模式重复实现（`maskedCrossEntropyLoss` 手写梯度分支、即时 `dpoLoss`、`computeGRPOLoss`、`grpoLoss`），并在 `computeGroupAdvantages` 中复用 `backend.vec_math`。
     - [ ] 在 [`src/nn/recurrent.zig`](../src/nn/recurrent.zig) 中提取泛型时间步展开器 `Recurrent(comptime Cell)`，供 `RNN` 与 `GRU` 共用。

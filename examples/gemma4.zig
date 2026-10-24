@@ -168,10 +168,6 @@ pub fn main(init: std.process.Init) !void {
         .q4 => "Q4 仿射量化 (530 MB，显存节省 75%，极速)",
     }});
 
-    // 初始化 Gemma 4 专用混合键值缓存 (Key-Value Cache, KVCache)
-    var cache = try gemma4.Gemma4KVCache.init(allocator, gemma4_q4.DefaultGemma4Q4.config, .{ .max_seq_len = 1024 });
-    defer cache.deinit(allocator);
-    std.debug.print("   - 键值缓存已初始化: 48 层异构连续 KVCache (最大序列长度: 1024)\n", .{});
     printSamplingOptions(sampling_options);
     const use_gpu = zig_ml.backend.offload.isAvailable();
     if (use_gpu) {
@@ -183,12 +179,6 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("   User  : {s}\n", .{user_prompt_str});
     std.debug.print("   Model : ", .{});
 
-    var current_tokens: std.ArrayList(usize) = .empty;
-    defer current_tokens.deinit(allocator);
-    for (prompt_tokens) |tok| {
-        try current_tokens.append(allocator, tok);
-    }
-
     // 运行真实自回归生成循环（最多生成 40 个 token，或遇到 <turn|> / <eos> 结束）
     const max_new_tokens: usize = 40;
     var gen_count: usize = 0;
@@ -199,118 +189,28 @@ pub fn main(init: std.process.Init) !void {
     var first_token_ns: u64 = 0;
     var decode_start_ns: u64 = 0;
 
-    // 1. 预填充阶段 (Prefill)：一次性处理全部 Prompt 词元并写入 KVCache，获取首个词元
-    {
-        var prefill_graph = autodiff.Graph.init(allocator, .{
-            .enable_grad = false,
-            .io = io,
-            .device = if (use_gpu) .gpu else .cpu,
-        });
-        defer prefill_graph.deinit();
-
-        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
-        const p_start = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
-
-        const first_tok = try model.prefill(&prefill_graph, prompt_tokens[0..], &cache, mmap_ptr, &sampler);
-
-        _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
-        const p_end = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
-        first_token_ns = p_end - p_start;
-        decode_start_ns = p_end;
-
-        gen_count += 1;
-        try current_tokens.append(allocator, first_tok);
-        const piece1 = vocab.decode(first_tok);
-        if (piece1.len > 0) {
-            std.debug.print("{s}", .{piece1});
-        } else {
-            std.debug.print("[#{}]", .{first_tok});
-        }
-    }
-
-    // 2. 增量解码阶段 (Decode Loop)：结合 Prompt N-gram 与马尔可夫转移投机采样与 KVCache
-    var current_tok = current_tokens.items[current_tokens.items.len - 1];
-    var speculative_hits: usize = 0;
-
-    var step_graph = autodiff.Graph.init(allocator, .{
-        .enable_grad = false,
-        .io = io,
-        .device = if (use_gpu) .gpu else .cpu,
+    var gen = try model.generate(allocator, prompt_tokens, .{
+        .sampling = sampling_options,
+        .max_new_tokens = max_new_tokens,
+        .enable_speculative = enable_speculative,
+        .max_seq_len = 1024,
+        .mmap_bytes = mmap_ptr,
     });
-    defer step_graph.deinit();
+    defer gen.deinit();
 
-    var draft_engine = gemma4.SpeculativeDraftEngine.init(allocator);
-    defer draft_engine.deinit();
-    try draft_engine.seedFromTokens(prompt_tokens);
-    try draft_engine.seedCommonCollocations(&vocab);
-
-    while (gen_count < max_new_tokens) {
-        if (current_tok == gemma4.Gemma4Vocabulary.EOS or current_tok == gemma4.Gemma4Vocabulary.EOT) {
-            break;
+    while (try gen.next()) |tok| {
+        gen_count += 1;
+        if (gen_count == 1) {
+            _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_ts);
+            const p_end = @as(u64, @intCast(timer_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(timer_ts.nsec));
+            first_token_ns = p_end - start_ns;
+            decode_start_ns = p_end;
         }
-
-        step_graph.reset();
-
-        var cand_buf: [8]usize = undefined;
-        const draft = if (enable_speculative and use_gpu)
-            draft_engine.proposeDraft(current_tokens.items, cand_buf[0..3])
-        else
-            null;
-
-        if (draft) |cands| {
-            var input_spec: [16]usize = undefined;
-            input_spec[0] = current_tok;
-            const spec_k: usize = if (cands.len > 3) @as(usize, 3) else cands.len;
-            for (0..spec_k) |idx| {
-                input_spec[idx + 1] = cands[idx];
-            }
-            const spec_total: usize = 1 + spec_k;
-            var accepted_buf: [16]usize = undefined;
-            const num_acc = try model.decodeSpeculative(
-                &step_graph,
-                input_spec[0..spec_total],
-                &cache,
-                mmap_ptr,
-                current_tokens.items,
-                &sampler,
-                accepted_buf[0..spec_total],
-            );
-
-            if (num_acc > 1) {
-                speculative_hits += (num_acc - 1);
-            }
-
-            var prev_tok = current_tok;
-            for (0..num_acc) |acc_i| {
-                const tok = accepted_buf[acc_i];
-                try current_tokens.append(allocator, tok);
-                draft_engine.recordTransition(prev_tok, tok) catch {};
-                prev_tok = tok;
-                gen_count += 1;
-                const piece = vocab.decode(tok);
-                if (piece.len > 0) {
-                    std.debug.print("{s}", .{piece});
-                } else {
-                    std.debug.print("[#{}]", .{tok});
-                }
-                if (tok == gemma4.Gemma4Vocabulary.EOS or tok == gemma4.Gemma4Vocabulary.EOT or gen_count >= max_new_tokens) {
-                    break;
-                }
-            }
-            current_tok = current_tokens.items[current_tokens.items.len - 1];
+        const piece = vocab.decode(tok);
+        if (piece.len > 0) {
+            std.debug.print("{s}", .{piece});
         } else {
-            const next_tok = try model.decodeStep(&step_graph, current_tok, &cache, mmap_ptr, current_tokens.items, &sampler);
-            draft_engine.recordTransition(current_tok, next_tok) catch {};
-            current_tok = next_tok;
-            gen_count += 1;
-            try current_tokens.append(allocator, next_tok);
-
-            const piece = vocab.decode(next_tok);
-            if (piece.len > 0) {
-                std.debug.print("{s}", .{piece});
-            } else {
-                std.debug.print("[#{}]", .{next_tok});
-            }
+            std.debug.print("[#{}]", .{tok});
         }
     }
 
@@ -333,7 +233,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("   - 增量解码速度 (Decode Speed): {d:.2} tokens/s (基于 KVCache 的 O(1) 增量运算)\n", .{decode_tokens_per_sec});
     if (enable_speculative) {
         const rule = if (sampler.isGreedy()) "贪婪精确匹配校验" else "按目标概率接受的无偏投机采样校验";
-        std.debug.print("   - 投机采样加速: Prompt N-gram 投机采样已启用 ({s}，投机命中加速: {} 个词元)\n", .{ rule, speculative_hits });
+        std.debug.print("   - 投机采样加速: Prompt N-gram 投机采样已启用 ({s}，投机命中加速: {} 个词元)\n", .{ rule, gen.speculative_hits });
     }
     std.debug.print("   - 全局平均吞吐 (含 Prefill): {d:.2} tokens/s\n", .{global_tokens_per_sec});
     std.debug.print("   - 4-bit 量化结合键值缓存使 12B 大模型在本地设备上具备了实用的实时交互生成能力。\n\n", .{});

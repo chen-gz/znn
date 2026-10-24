@@ -26,28 +26,8 @@ pub const SafetensorsArchive = nn.SafetensorsArchive;
 /// 持有独立键值缓存的解码层数 (其余 num_kv_shared_layers 层复用前层缓存)
 pub const num_kv_layers: usize = Gemma4Config.e4b.num_hidden_layers - Gemma4Config.e4b.num_kv_shared_layers;
 
-/// 键值共享层 (KV-Shared Layers) 复用的源层索引：前 num_hidden_layers - num_kv_shared_layers 层各自持有键值缓存，
-/// 其后各层复用最后一个同类型 (滑动窗口 / 全局) 非共享层的键值缓存
-pub fn kvSourceLayer(cfg: Gemma4Config, layer_idx: usize) usize {
-    const first_shared = cfg.num_hidden_layers - cfg.num_kv_shared_layers;
-    if (layer_idx < first_shared) return layer_idx;
-    const attn_type = cfg.layerSpec(layer_idx).attn_type;
-    var j = first_shared;
-    while (j > 0) {
-        j -= 1;
-        if (cfg.layerSpec(j).attn_type == attn_type) return j;
-    }
-    unreachable;
-}
-
-/// 判断某个持有键值缓存的层是否被后续键值共享层复用
-pub fn isKvSharedSource(cfg: Gemma4Config, layer_idx: usize) bool {
-    const first_shared = cfg.num_hidden_layers - cfg.num_kv_shared_layers;
-    for (first_shared..cfg.num_hidden_layers) |shared_idx| {
-        if (kvSourceLayer(cfg, shared_idx) == layer_idx) return true;
-    }
-    return false;
-}
+pub const kvSourceLayer = Gemma4Config.kvSourceLayer;
+pub const isKvSharedSource = Gemma4Config.isKvSharedSource;
 
 /// 逐层嵌入输入结构 (Per-Layer Inputs, PLE)
 pub const PleWeights = struct {
