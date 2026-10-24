@@ -115,26 +115,8 @@ pub fn main(init: std.process.Init) !void {
     // <bos><|turn>user\n[prompt]<turn|>\n<|turn>model\n
     std.debug.print("4. [Gemma 4 Instruct 对话模板 (Chat Template)]:\n", .{});
     const user_prompt_str = custom_prompt orelse "who are you";
-
-    var prompt_list: std.ArrayList(usize) = .empty;
-    defer prompt_list.deinit(allocator);
-
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.BOS);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.SOT);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.USER);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.NL);
-
-    const user_tokens = try vocab.encode(allocator, user_prompt_str);
-    defer allocator.free(user_tokens);
-    try prompt_list.appendSlice(allocator, user_tokens);
-
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.EOT);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.NL);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.SOT);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.MODEL);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.NL);
-
-    const prompt_tokens = prompt_list.items;
+    const prompt_tokens = try vocab.formatInstructPrompt(allocator, user_prompt_str);
+    defer allocator.free(prompt_tokens);
 
     std.debug.print("   - 输入 Prompt 文本: \"<bos><|turn>user\\n{s}<turn|>\\n<|turn>model\\n\"\n", .{user_prompt_str});
     std.debug.print("   - Prompt Tokens ({} 个词元): [", .{prompt_tokens.len});

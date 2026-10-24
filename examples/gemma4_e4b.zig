@@ -99,25 +99,8 @@ pub fn main(init: std.process.Init) !void {
 
     // 3. 构建对话上下文
     const user_prompt_str = custom_prompt orelse "who are you";
-    var prompt_list: std.ArrayList(usize) = .empty;
-    defer prompt_list.deinit(allocator);
-
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.BOS);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.SOT);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.USER);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.NL);
-
-    const user_tokens = try vocab.encode(allocator, user_prompt_str);
-    defer allocator.free(user_tokens);
-    try prompt_list.appendSlice(allocator, user_tokens);
-
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.EOT);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.NL);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.SOT);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.MODEL);
-    try prompt_list.append(allocator, gemma4.Gemma4Vocabulary.NL);
-
-    const prompt_tokens = prompt_list.items;
+    const prompt_tokens = try vocab.formatInstructPrompt(allocator, user_prompt_str);
+    defer allocator.free(prompt_tokens);
     std.debug.print("3. [Gemma 4 Instruct 对话上下文与 Prompt]:\n", .{});
     std.debug.print("   - Prompt 词元 ({} 个): [", .{prompt_tokens.len});
     for (prompt_tokens, 0..) |tid, i| {

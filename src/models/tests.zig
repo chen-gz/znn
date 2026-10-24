@@ -919,6 +919,68 @@ test "Gemma4Vocabulary encode falls back to <0xNN> byte tokens instead of droppi
     try std.testing.expectEqual(@as(usize, 3), try vocab.byteToken('c'));
 }
 
+test "Gemma4Vocabulary formatChatPrompt and formatInstructPrompt" {
+    const allocator = std.testing.allocator;
+    const count = 10000;
+    const pieces = try allocator.alloc([]const u8, count);
+    defer allocator.free(pieces);
+    for (pieces) |*p| p.* = "";
+    pieces[gemma4.Gemma4Vocabulary.BOS] = "<bos>";
+    pieces[gemma4.Gemma4Vocabulary.SOT] = "<|turn>";
+    pieces[gemma4.Gemma4Vocabulary.EOT] = "<turn|>";
+    pieces[gemma4.Gemma4Vocabulary.NL] = "\n";
+    pieces[gemma4.Gemma4Vocabulary.USER] = "user";
+    pieces[gemma4.Gemma4Vocabulary.MODEL] = "model";
+    pieces[gemma4.Gemma4Vocabulary.SYSTEM] = "system";
+    pieces[10] = "hi";
+
+    const bytes = try buildVocabBytes(allocator, pieces);
+    defer allocator.free(bytes);
+    const vocab = try gemma4.Gemma4Vocabulary.loadFromMmap(bytes);
+
+    const tokens = try vocab.formatInstructPrompt(allocator, "hi");
+    defer allocator.free(tokens);
+
+    try std.testing.expectEqualSlices(usize, &.{
+        gemma4.Gemma4Vocabulary.BOS,
+        gemma4.Gemma4Vocabulary.SOT,
+        gemma4.Gemma4Vocabulary.USER,
+        gemma4.Gemma4Vocabulary.NL,
+        10,
+        gemma4.Gemma4Vocabulary.EOT,
+        gemma4.Gemma4Vocabulary.NL,
+        gemma4.Gemma4Vocabulary.SOT,
+        gemma4.Gemma4Vocabulary.MODEL,
+        gemma4.Gemma4Vocabulary.NL,
+    }, tokens);
+
+    const messages = [_]gemma4.Gemma4Vocabulary.Message{
+        .{ .role = .system, .content = "hi" },
+        .{ .role = .user, .content = "hi" },
+    };
+    const multi_tokens = try vocab.formatChatPrompt(allocator, &messages, true);
+    defer allocator.free(multi_tokens);
+
+    try std.testing.expectEqualSlices(usize, &.{
+        gemma4.Gemma4Vocabulary.BOS,
+        gemma4.Gemma4Vocabulary.SOT,
+        gemma4.Gemma4Vocabulary.SYSTEM,
+        gemma4.Gemma4Vocabulary.NL,
+        10,
+        gemma4.Gemma4Vocabulary.EOT,
+        gemma4.Gemma4Vocabulary.NL,
+        gemma4.Gemma4Vocabulary.SOT,
+        gemma4.Gemma4Vocabulary.USER,
+        gemma4.Gemma4Vocabulary.NL,
+        10,
+        gemma4.Gemma4Vocabulary.EOT,
+        gemma4.Gemma4Vocabulary.NL,
+        gemma4.Gemma4Vocabulary.SOT,
+        gemma4.Gemma4Vocabulary.MODEL,
+        gemma4.Gemma4Vocabulary.NL,
+    }, multi_tokens);
+}
+
 // ============================================================================
 // 随机采样 (Stochastic Sampling)：官方生成配置、CPU LM Head 采样顺序、种子可复现性与 GPU 候选选择
 // ============================================================================
