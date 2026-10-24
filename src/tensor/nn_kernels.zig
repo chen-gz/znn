@@ -6,6 +6,7 @@ const conv_pool = @import("conv_pool.zig");
 const Tensor = core.Tensor;
 const ConvOptions = types.ConvOptions;
 const PoolOptions = types.PoolOptions;
+const RmsNormOptions = types.RmsNormOptions;
 const rope_mod = @import("../backend/rope.zig");
 const RopeOptions = rope_mod.RopeOptions;
 const RopeTable = @import("rope.zig").RopeTable;
@@ -43,37 +44,55 @@ pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
     return C;
 }
 
-/// 均方根层归一化前向核函数 (Root Mean Square Layer Normalization, RMSNorm)
-pub fn rmsNorm(self: *Tensor, G: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
+/// 均方根层归一化行内核 (Root Mean Square Layer Normalization, RMSNorm)：x / out 为 [rows, dim] 行主序，
+/// out = x * inv_rms * (weight + weight_offset)，weight 为 null 时不缩放；inv_rms 非 null 时写入每行的
+/// 1 / sqrt(mean(x^2) + eps) 供反向传播复用 (与前向使用同一求和顺序)
+pub fn rmsNormRows(x: []const f32, weight: ?[]const f32, out: []f32, inv_rms: ?[]f32, dim: usize, options: RmsNormOptions) void {
+    std.debug.assert(dim > 0 and x.len % dim == 0 and out.len == x.len);
+    const rows = x.len / dim;
+    for (0..rows) |i| {
+        const row_in = x[i * dim .. (i + 1) * dim];
+        const row_out = out[i * dim .. (i + 1) * dim];
+        const r = 1.0 / @sqrt(vec_math.sumSquares(row_in) / @as(f32, @floatFromInt(dim)) + options.eps);
+        if (inv_rms) |s| s[i] = r;
+        if (weight) |w| {
+            for (row_in, row_out, w[0..dim]) |x_val, *y_val, w_val| y_val.* = x_val * r * (w_val + options.weight_offset);
+        } else {
+            for (row_in, row_out) |x_val, *y_val| y_val.* = x_val * r;
+        }
+    }
+}
+
+/// 均方根层归一化前向核函数 (Root Mean Square Layer Normalization, RMSNorm)：沿最后一维归一化，
+/// weight 为 [dim] 缩放权重 (为 null 时不缩放)；inv_rms 非 null 时须为每行一个元素，保存每行的均方根倒数
+pub fn rmsNorm(self: *Tensor, weight: ?*Tensor, options: RmsNormOptions, inv_rms: ?[]f32, allocator: std.mem.Allocator) !*Tensor {
     if (self.shape.len == 0) return error.IncompatibleDimensions;
     const x = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (x != self) x.deinit(allocator);
 
-    const g_c = if (G.isContiguous()) G else try G.contiguous(allocator);
-    defer if (g_c != G) g_c.deinit(allocator);
-
     const D = x.shape.dims[x.shape.len - 1];
     if (D == 0) return error.DivisionByZero;
-    if (g_c.shape.numel() != D) return error.ShapeMismatch;
-    const M = x.shape.numel() / D;
+    const w_c: ?*Tensor = if (weight) |w| (if (w.isContiguous()) w else try w.contiguous(allocator)) else null;
+    defer if (w_c) |w| if (w != weight.?) w.deinit(allocator);
+    if (w_c) |w| if (w.shape.numel() != D) return error.ShapeMismatch;
+    if (inv_rms) |s| if (s.len != x.shape.numel() / D) return error.ShapeMismatch;
+
     const Y = try zeros(allocator, x.shape.dims[0..x.shape.len]);
-
-    for (0..M) |i| {
-        const row_in = x.data[i * D .. (i + 1) * D];
-        const row_out = Y.data[i * D .. (i + 1) * D];
-
-        const sum_x2 = vec_math.sumSquares(row_in);
-        const inv_rms = 1.0 / @sqrt(sum_x2 / @as(f32, @floatFromInt(D)) + eps);
-
-        for (row_in, row_out, g_c.data[0..D]) |x_val, *y_val, g_val| {
-            y_val.* = x_val * inv_rms * g_val;
-        }
-    }
+    rmsNormRows(x.data, if (w_c) |w| w.data else null, Y.data, inv_rms, D, options);
     return Y;
 }
 
-/// 标准层归一化前向核函数 (Layer Normalization, LayerNorm)
-pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std.mem.Allocator) !*Tensor {
+/// 标准层归一化前向核函数 (Layer Normalization, LayerNorm)：沿最后一维归一化；
+/// save_mean / save_inv_std 非 null 时须为每行一个元素，保存每行的均值与标准差倒数供反向传播复用
+pub fn layerNorm(
+    self: *Tensor,
+    G: *Tensor,
+    B: *Tensor,
+    eps: f32,
+    save_mean: ?[]f32,
+    save_inv_std: ?[]f32,
+    allocator: std.mem.Allocator,
+) !*Tensor {
     if (self.shape.len == 0) return error.IncompatibleDimensions;
     const x = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (x != self) x.deinit(allocator);
@@ -88,6 +107,8 @@ pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std
     if (D == 0) return error.DivisionByZero;
     if (g_c.shape.numel() != D or b_c.shape.numel() != D) return error.ShapeMismatch;
     const M = x.shape.numel() / D;
+    if (save_mean) |s| if (s.len != M) return error.ShapeMismatch;
+    if (save_inv_std) |s| if (s.len != M) return error.ShapeMismatch;
     const Y = try zeros(allocator, x.shape.dims[0..x.shape.len]);
     const d_f = @as(f32, @floatFromInt(D));
 
@@ -98,6 +119,8 @@ pub fn layerNorm(self: *Tensor, G: *Tensor, B: *Tensor, eps: f32, allocator: std
         const mean_val = vec_math.sum(row_in) / d_f;
         const var_sum = vec_math.sumSquaredDeviations(row_in, mean_val);
         const inv_std = 1.0 / @sqrt(var_sum / d_f + eps);
+        if (save_mean) |s| s[i] = mean_val;
+        if (save_inv_std) |s| s[i] = inv_std;
 
         for (row_in, row_out, g_c.data[0..D], b_c.data[0..D]) |x_val, *y_val, g_val, b_val| {
             y_val.* = (x_val - mean_val) * inv_std * g_val + b_val;

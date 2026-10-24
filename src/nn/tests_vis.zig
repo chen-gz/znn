@@ -383,15 +383,15 @@ test "Explicit module scopes attribute ops and tensors to the executing module" 
     try std.testing.expectEqualStrings("", input_tokens.scope);
 
     var gelu_scope: ?[]const u8 = null;
-    var core_transpose_found = false;
+    var core_attn_found = false;
     var attn_reshape_found = false;
     for (graph.ops.items) |o| {
         switch (o.op_type) {
             .Gelu => if (gelu_scope == null) {
                 gelu_scope = o.scope;
             },
-            .Transpose => if (std.mem.eql(u8, o.scope, "gpt.decoder.h.0.attn.core")) {
-                core_transpose_found = true;
+            .Attention => if (std.mem.eql(u8, o.scope, "gpt.decoder.h.0.attn.core")) {
+                core_attn_found = true;
             },
             .Reshape => if (std.mem.eql(u8, o.scope, "gpt.decoder.h.0.attn")) {
                 attn_reshape_found = true;
@@ -402,7 +402,7 @@ test "Explicit module scopes attribute ops and tensors to the executing module" 
         if (o.op_type == .Reshape) try std.testing.expect(!std.mem.eql(u8, o.scope, "gpt.decoder.h.0.ln_1"));
     }
     try std.testing.expectEqualStrings("gpt.decoder.h.0.mlp", gelu_scope.?);
-    try std.testing.expect(core_transpose_found);
+    try std.testing.expect(core_attn_found);
     try std.testing.expect(attn_reshape_found);
 
     // 输出 logits 的最终 Reshape 由 GPT 自身执行，归属 "gpt"
@@ -460,8 +460,8 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     try std.testing.expect(top.get("edges") == null);
     const summary = top.get("summary").?.object;
     try std.testing.expectEqual(@as(i64, 1), summary.get("input_nodes").?.integer);
-    // pos_indices + 每层一个 causal_mask
-    try std.testing.expectEqual(@as(i64, 3), summary.get("buffer_nodes").?.integer);
+    // pos_indices 静态位置索引缓冲区
+    try std.testing.expectEqual(@as(i64, 1), summary.get("buffer_nodes").?.integer);
 
     const root = top.get("root").?.object;
 
@@ -520,19 +520,13 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
         "c_proj->@out0",
     });
 
-    // core：无参数多算子叶子导出算子级局部图，causal_mask 以缓冲区边接入
+    // core：无参数叶子导出算子级局部图，包含一等 Attention 算子节点
     const core_mod = VisTestUtil.findModule(root, "gpt.decoder.h.0.attn.core").?;
     try std.testing.expectEqualStrings("ScaledDotProductAttention", core_mod.get("module_type").?.string);
     try std.testing.expectEqual(@as(usize, 3), core_mod.get("ports").?.object.get("inputs").?.array.items.len);
-    var mask_edges: usize = 0;
-    for (core_mod.get("edges").?.array.items) |e_val| {
-        const edge = e_val.object;
-        if (std.mem.eql(u8, edge.get("from").?.string, "causal_mask")) {
-            try std.testing.expectEqualStrings("buffer", edge.get("kind").?.string);
-            mask_edges += 1;
-        }
-    }
-    try std.testing.expectEqual(@as(usize, 1), mask_edges);
+    try std.testing.expectEqual(@as(usize, 1), core_mod.get("ops").?.array.items.len);
+    try std.testing.expectEqualStrings("Attention", core_mod.get("ops").?.array.items[0].object.get("op_type").?.string);
+    try std.testing.expectEqual(@as(usize, 4), core_mod.get("edges").?.array.items.len);
 
     // MLP：激活函数作为命名算子节点出现
     try VisTestUtil.expectEdgeSet(allocator, root, "gpt.decoder.h.0.mlp", &.{ "@in0->c_fc", "c_fc->gelu", "gelu->c_proj", "c_proj->@out0" });

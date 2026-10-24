@@ -268,6 +268,71 @@ fn convIm2colBackward(A: *Tensor, Wt: *Tensor, C: *Tensor, g: ConvGeometry, col_
     return true;
 }
 
+/// 缩放点积注意力 (Scaled Dot-Product Attention, SDPA) 反向传播：复用前向保存的注意力概率 P。
+/// 与前向一样按键值头分组 (组内 groups * tq 个查询行连续)，记 dO 为输出梯度、s 为打分缩放系数：
+///   dV   += P^T dO
+///   dP    = dO V^T，dS = s * P ⊙ (dP - rowsum(P ⊙ dP))   (掩码位置 P = 0，梯度自然为 0)
+///   dQ   += dS K，dK += dS^T Q
+/// 全部矩阵乘法交给单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM)，分组查询注意力
+/// (Grouped-Query Attention, GQA) 的键值梯度在组内累加。
+fn attentionBackward(self: *Op) !void {
+    const Q = self.inputs[0];
+    const K = self.inputs[1];
+    const V = self.inputs[2];
+    const O = self.outputs[0];
+    const ctx = self.context.Attention;
+    const shape = try tensor_mod.attention_kernels.Shape.init(Q, K, V, ctx.options);
+    std.debug.assert(ctx.probs.len == shape.probsLen());
+    const rows = shape.groups() * shape.tq;
+    const d = shape.head_dim;
+    const dv = shape.v_dim;
+    const tk = shape.tk;
+    if (rows == 0 or tk == 0 or dv == 0) return;
+    const scale = ctx.options.resolveScale(d);
+    const need_scores = Q.requires_grad or K.requires_grad;
+
+    const allocator = std.heap.c_allocator;
+    const ds: []f32 = if (need_scores) try allocator.alloc(f32, rows * tk) else &.{};
+    defer if (need_scores) allocator.free(ds);
+    const ld_d: c_int = @intCast(@max(d, 1));
+
+    for (0..shape.batch) |b| {
+        for (0..shape.kv_heads) |kv_h| {
+            const q_row = shape.groupRow(b, kv_h);
+            const k_row = shape.kvRow(b, kv_h);
+            const p_blk = ctx.probs[q_row * tk ..][0 .. rows * tk];
+            const do_blk = O.grad[q_row * dv ..][0 .. rows * dv];
+
+            if (V.requires_grad) {
+                const dv_blk = V.grad[k_row * dv ..][0 .. tk * dv];
+                c.cblas_sgemm(c.CblasRowMajor, c.CblasTrans, c.CblasNoTrans, @intCast(tk), @intCast(dv), @intCast(rows), 1.0, p_blk.ptr, @intCast(tk), do_blk.ptr, @intCast(dv), 1.0, dv_blk.ptr, @intCast(dv));
+            }
+            if (!need_scores) continue;
+
+            const v_blk = V.data[k_row * dv ..][0 .. tk * dv];
+            c.cblas_sgemm(c.CblasRowMajor, c.CblasNoTrans, c.CblasTrans, @intCast(rows), @intCast(tk), @intCast(dv), 1.0, do_blk.ptr, @intCast(dv), v_blk.ptr, @intCast(dv), 0.0, ds.ptr, @intCast(tk));
+            for (0..rows) |r| {
+                const p_row = p_blk[r * tk .. (r + 1) * tk];
+                const ds_row = ds[r * tk .. (r + 1) * tk];
+                var delta: f32 = 0.0;
+                for (p_row, ds_row) |p, dp| delta += p * dp;
+                for (p_row, ds_row) |p, *g| g.* = scale * p * (g.* - delta);
+            }
+
+            if (Q.requires_grad) {
+                const k_blk = K.data[k_row * d ..][0 .. tk * d];
+                const dq_blk = Q.grad[q_row * d ..][0 .. rows * d];
+                c.cblas_sgemm(c.CblasRowMajor, c.CblasNoTrans, c.CblasNoTrans, @intCast(rows), @intCast(d), @intCast(tk), 1.0, ds.ptr, @intCast(tk), k_blk.ptr, ld_d, 1.0, dq_blk.ptr, ld_d);
+            }
+            if (K.requires_grad) {
+                const q_blk = Q.data[q_row * d ..][0 .. rows * d];
+                const dk_blk = K.grad[k_row * d ..][0 .. tk * d];
+                c.cblas_sgemm(c.CblasRowMajor, c.CblasTrans, c.CblasNoTrans, @intCast(tk), @intCast(d), @intCast(rows), 1.0, ds.ptr, @intCast(tk), q_blk.ptr, ld_d, 1.0, dk_blk.ptr, ld_d);
+            }
+        }
+    }
+}
+
 pub fn backwardNN(self: *Op) !void {
     switch (self.op_type) {
         .Conv1D => {
@@ -778,69 +843,59 @@ pub fn backwardNN(self: *Op) !void {
             }
         },
         .RmsNorm => {
+            // y = x * r * g，r = 1 / sqrt(mean(x^2) + eps) 取自前向保存的 inv_rms，g = w + weight_offset (无权重时 g = 1)：
+            // dg_j += dy_j * x_j * r；dx_j += r * (g_j * dy_j - x_j * r^2 * Σ_k(dy_k * g_k * x_k) / D)
             const X = self.inputs[0];
-            const G = self.inputs[1];
+            const W: ?*Tensor = if (self.inputs.len > 1) self.inputs[1] else null;
             const Y = self.outputs[0];
-            const eps = self.context.RmsNorm.eps;
+            const ctx = self.context.RmsNorm;
+            const offset = ctx.options.weight_offset;
             const D = X.shape.dims[X.shape.len - 1];
             const M = X.shape.numel() / D;
+            const d_f = @as(f32, @floatFromInt(D));
+            std.debug.assert(ctx.inv_rms.len == M);
 
             for (0..M) |i| {
                 const row_in = X.data[i * D .. (i + 1) * D];
                 const row_grad_out = Y.grad[i * D .. (i + 1) * D];
+                const r = ctx.inv_rms[i];
 
-                var sum_x2: f32 = 0.0;
-                for (row_in) |val| {
-                    sum_x2 += val * val;
-                }
-                const scale = 1.0 / @sqrt(sum_x2 / @as(f32, @floatFromInt(D)) + eps);
-
-                if (G.requires_grad) {
-                    for (0..D) |j| {
-                        G.grad[j] += row_grad_out[j] * row_in[j] * scale;
-                    }
-                }
+                if (W) |w| if (w.requires_grad) {
+                    for (w.grad[0..D], row_grad_out, row_in) |*wg, dy, x| wg.* += dy * x * r;
+                };
 
                 if (X.requires_grad) {
                     const row_grad_in = X.grad[i * D .. (i + 1) * D];
-
                     var sum_dy_g_x: f32 = 0.0;
-                    for (0..D) |j| {
-                        sum_dy_g_x += row_grad_out[j] * G.data[j] * row_in[j];
+                    for (row_grad_out, row_in, 0..) |dy, x, j| {
+                        const g = if (W) |w| w.data[j] + offset else 1.0;
+                        sum_dy_g_x += dy * g * x;
                     }
-
-                    for (0..D) |j| {
-                        const term1 = G.data[j] * row_grad_out[j];
-                        const term2 = row_in[j] * scale * scale * sum_dy_g_x / @as(f32, @floatFromInt(D));
-                        row_grad_in[j] += scale * (term1 - term2);
+                    const coef = r * r * sum_dy_g_x / d_f;
+                    for (row_grad_in, row_grad_out, row_in, 0..) |*dx, dy, x, j| {
+                        const g = if (W) |w| w.data[j] + offset else 1.0;
+                        dx.* += r * (g * dy - x * coef);
                     }
                 }
             }
         },
         .LayerNorm => {
+            // 均值与标准差倒数取自前向保存的统计量，与前向使用同一求和顺序
             const X = self.inputs[0];
             const G = self.inputs[1];
             const B = self.inputs[2];
             const Y = self.outputs[0];
-            const eps = self.context.LayerNorm.eps;
+            const ctx = self.context.LayerNorm;
             const D = X.shape.dims[X.shape.len - 1];
             const M = X.shape.numel() / D;
             const d_f = @as(f32, @floatFromInt(D));
+            std.debug.assert(ctx.save_mean.len == M and ctx.save_inv_std.len == M);
 
             for (0..M) |i| {
                 const row_in = X.data[i * D .. (i + 1) * D];
                 const row_grad_out = Y.grad[i * D .. (i + 1) * D];
-
-                var sum_x: f32 = 0.0;
-                for (row_in) |val| sum_x += val;
-                const mean_val = sum_x / d_f;
-
-                var var_sum: f32 = 0.0;
-                for (row_in) |val| {
-                    const diff = val - mean_val;
-                    var_sum += diff * diff;
-                }
-                const inv_std = 1.0 / @sqrt(var_sum / d_f + eps);
+                const mean_val = ctx.save_mean[i];
+                const inv_std = ctx.save_inv_std[i];
 
                 if (B.requires_grad) {
                     for (0..D) |j| {
@@ -1163,6 +1218,7 @@ pub fn backwardNN(self: *Op) !void {
                 }
             }
         },
+        .Attention => try attentionBackward(self),
         .Embedding => {
             const W = self.inputs[0];
             const X = self.inputs[1];

@@ -8,6 +8,8 @@
 const std = @import("std");
 const mlx = @import("mlx.zig");
 const activation = @import("activation.zig");
+const attention_mask = @import("attention_mask.zig");
+const rope_mod = @import("rope.zig");
 const sampling = @import("sampling.zig");
 
 /// 当前硬件环境是否支持统一卸载 (macOS Apple Silicon aarch64 且已集成 MLX)
@@ -77,35 +79,56 @@ pub fn rmsNorm(
     try out_mlx.copyToTensor(out);
 }
 
-/// 快速旋转位置编码硬件卸载 (Rotary Position Embedding Offload, RoPE Offload)
+/// 快速旋转位置编码硬件卸载 (Rotary Position Embedding Offload, RoPE Offload)：对 `[..., T, head_dim]` 张量的每一行
+/// 按共享配置 `RopeOptions` 旋转，第 t 行的绝对位置为 start_pos + t。部分旋转 / 比例旋转经共享周期表 (`fillPeriods`)
+/// 交给 MLX `fast.rope`；旋转子空间带偏移 (rotary_offset != 0)、head_dim 为奇数或超出周期表容量时返回
+/// `error.OffloadNotSupported` (调用方回退 CPU 内核)
 pub fn rope(
     X: anytype,
     out: anytype,
-    dims: usize,
-    traditional: bool,
-    base: ?f32,
-    scale: f32,
-    offset: usize,
+    options: rope_mod.RopeOptions,
+    start_pos: usize,
     stream: ?Stream,
 ) OffloadError!void {
     if (!isAvailable()) return error.OffloadNotSupported;
+    if (!ropeSupported(X.shape.dims[X.shape.len - 1], options)) return error.OffloadNotSupported;
+    const head_dim = X.shape.dims[X.shape.len - 1];
+    const traditional = options.mode == .interleaved;
     var x_mlx = try mlx.Array.fromTensorZeroCopy(X);
     defer x_mlx.deinit();
 
-    var y_mlx = try mlx.Array.fastRoPE(x_mlx, dims, traditional, base, scale, offset, stream);
+    var y_mlx = if (options.numAngles(head_dim) == head_dim / 2)
+        try mlx.Array.fastRoPE(x_mlx, head_dim, traditional, options.base, 1.0, start_pos, stream)
+    else blk: {
+        var periods: [rope_mod.max_angles]f32 = undefined;
+        options.fillPeriods(head_dim, periods[0 .. head_dim / 2]);
+        var freqs = try mlx.Array.fromSlice(periods[0 .. head_dim / 2], &.{head_dim / 2});
+        defer freqs.deinit();
+        break :blk try mlx.Array.fastRoPEWithFreqs(x_mlx, head_dim, traditional, 1.0, start_pos, freqs, stream);
+    };
     defer y_mlx.deinit();
 
     try y_mlx.copyToTensor(out);
 }
 
-/// 快速缩放点积注意力硬件卸载 (Scaled Dot-Product Attention Offload, SDPA Offload / FlashAttention)
-pub fn scaledDotProductAttention(
+/// `rope` 能否在 MLX 上执行：旋转整行 (rotary_offset == 0) 的偶数 head_dim，且周期表不超过 `rope_mod.max_angles`
+pub fn ropeSupported(head_dim: usize, options: rope_mod.RopeOptions) bool {
+    return options.rotary_offset == 0 and head_dim > 0 and head_dim % 2 == 0 and head_dim / 2 <= rope_mod.max_angles;
+}
+
+/// 快速缩放点积注意力硬件卸载 (Scaled Dot-Product Attention Offload, SDPA Offload / FlashAttention)：
+/// q [B, q_heads, tq, d]、k [B, kv_heads, tk, d]、v [B, kv_heads, tk, dv] (分组查询注意力 (Grouped-Query Attention, GQA)
+/// 由融合内核原生处理)，掩码与位置语义见 `maskedAttention`，结果写入 out [B, q_heads, tq, dv]
+pub fn attention(
+    allocator: std.mem.Allocator,
     queries: anytype,
     keys: anytype,
     values: anytype,
     out: anytype,
     scale: f32,
-    is_causal: bool,
+    mask: attention_mask.Mask,
+    q_pos0: usize,
+    k_pos0: usize,
     stream: ?Stream,
 ) OffloadError!void {
     if (!isAvailable()) return error.OffloadNotSupported;
@@ -116,14 +139,7 @@ pub fn scaledDotProductAttention(
     var v_mlx = try mlx.Array.fromTensor(values);
     defer v_mlx.deinit();
 
-    var out_mlx = try mlx.Array.fastScaledDotProductAttention(
-        q_mlx,
-        k_mlx,
-        v_mlx,
-        scale,
-        if (is_causal) .causal else .none,
-        stream,
-    );
+    var out_mlx = try maskedAttention(allocator, q_mlx, k_mlx, v_mlx, scale, mask, q_pos0, k_pos0, stream);
     defer out_mlx.deinit();
 
     try out_mlx.copyToTensor(out);
@@ -777,42 +793,19 @@ pub fn q4MatMul(
     return weights.forward(X, out, stream);
 }
 
-/// 滑动窗口注意力的可见性规则 (与 mlx-lm `create_causal_mask(window_size=...)` 一致)：
-/// 绝对位置为 q_pos 的查询仅可见满足 0 <= q_pos - k_pos < sliding_window 的键 (含自身，共最多 sliding_window 个)
-pub fn isSlidingWindowVisible(q_pos: usize, k_pos: usize, sliding_window: usize) bool {
-    return k_pos <= q_pos and q_pos - k_pos < sliding_window;
-}
-
-/// 在主机端构建 `[tq, tk]` 滑动窗口加性掩码：第 i 个查询的绝对位置为 q_pos0 + i，第 j 个键的绝对位置为 k_pos0 + j，
-/// 可见位置为 0，不可见位置为 -1e9
-pub fn fillSlidingWindowMask(
-    mask: []f32,
-    tq: usize,
-    tk: usize,
-    sliding_window: usize,
-    q_pos0: usize,
-    k_pos0: usize,
-) void {
-    std.debug.assert(mask.len == tq * tk);
-    for (0..tq) |i| {
-        const row = mask[i * tk .. (i + 1) * tk];
-        for (row, 0..) |*m, j| {
-            m.* = if (isSlidingWindowVisible(q_pos0 + i, k_pos0 + j, sliding_window)) 0.0 else -1e9;
-        }
-    }
-}
-
-/// 带滑动窗口掩码的分组查询缩放点积注意力 (Sliding Window Grouped-Query Scaled Dot-Product Attention)
-/// q: [1, num_heads, tq, head_dim]，k / v: [1, num_kv_heads, tk, head_dim]（num_heads 为 num_kv_heads 的整数倍，dtype 任意且一致）；
-/// 第 i 个查询的绝对位置为 q_pos0 + i，第 j 个键的绝对位置为 k_pos0 + j，可见性见 `isSlidingWindowVisible`。
-/// 掩码按查询的 dtype 构建并交给融合缩放点积注意力内核 (`mask_mode = "array"`)，打分在 Softmax 前乘以 scale。
-pub fn slidingWindowAttention(
+/// 带掩码的分组查询缩放点积注意力 (Masked Grouped-Query Scaled Dot-Product Attention)
+/// q: [B, num_heads, tq, head_dim]，k / v: [B, num_kv_heads, tk, head_dim]（num_heads 为 num_kv_heads 的整数倍，dtype 任意且一致）；
+/// 第 i 个查询的绝对位置为 q_pos0 + i，第 j 个键的绝对位置为 k_pos0 + j，可见性见 `attention_mask.Mask`。
+/// 掩码先在 `[tq, tk]` 网格上化简 (`Mask.simplify`)：无掩码与右下对齐的因果掩码直接使用融合内核的内置模式，
+/// 其余情况在主机端构建加性掩码 (`fillAdditiveMask`)，按查询的 dtype 交给融合内核 (`mask_mode = "array"`)。
+/// 打分在 Softmax 前乘以 scale。
+pub fn maskedAttention(
     allocator: std.mem.Allocator,
     q: mlx.Array,
     k: mlx.Array,
     v: mlx.Array,
     scale: f32,
-    sliding_window: usize,
+    mask: attention_mask.Mask,
     q_pos0: usize,
     k_pos0: usize,
     stream: ?Stream,
@@ -822,9 +815,16 @@ pub fn slidingWindowAttention(
     const tq = q.dimSize(2);
     const tk = k.dimSize(2);
 
+    switch (mask.simplify(tq, tk, q_pos0, k_pos0)) {
+        .none => return mlx.Array.fastScaledDotProductAttention(q, k, v, scale, .none, stream),
+        // 融合内核的因果模式按右下角对齐：第 i 个查询可见前 i + tk - tq + 1 个键
+        .causal => if (q_pos0 + tq == k_pos0 + tk) return mlx.Array.fastScaledDotProductAttention(q, k, v, scale, .causal, stream),
+        .sliding => {},
+    }
+
     const mask_buf = try allocator.alloc(f32, tq * tk);
     defer allocator.free(mask_buf);
-    fillSlidingWindowMask(mask_buf, tq, tk, sliding_window, q_pos0, k_pos0);
+    attention_mask.fillAdditiveMask(mask_buf, tq, tk, q_pos0, k_pos0, mask);
     var mask_f32 = try mlx.Array.fromSlice(mask_buf, &.{ 1, 1, tq, tk });
     defer mask_f32.deinit();
     // 加性掩码的 dtype 须可提升至查询的 dtype (如 bfloat16)，-1e9 在 bfloat16 中仍为有限的极大负值
@@ -835,9 +835,10 @@ pub fn slidingWindowAttention(
     return mlx.Array.fastScaledDotProductAttention(q, k, v, scale, .{ .additive = mask_cast orelse mask_f32 }, stream);
 }
 
-/// 键值缓存一步前向的注意力：键值视图须为 `GpuKvCache.writeStep` 返回的视图 (或与其覆盖相同绝对位置的视图)。
-/// - 可见键范围随查询变化 (`KeyRange.needs_window_mask`)：滑动窗口加性掩码 (`slidingWindowAttention`)
-/// - 多词元步：右下对齐因果掩码；单词元解码步：无掩码 (视图恰为该查询的可见键，含环形覆写的完整缓存)
+/// 键值缓存一步前向的注意力：键值视图须为 `GpuKvCache.writeStep` 返回的视图 (或与其覆盖相同绝对位置的视图)，
+/// 视图第 0 个键的绝对位置为 `visibleKeyRange` 的起点；查询位于 [pos, pos + seq_len)。
+/// 掩码化简后：可见键范围随查询变化时施加滑动窗口加性掩码，多词元步使用右下对齐因果掩码，
+/// 单词元解码步不需要掩码 (视图恰为该查询的可见键，含环形覆写的完整缓存)
 pub fn cachedAttention(
     allocator: std.mem.Allocator,
     q: mlx.Array,
@@ -851,10 +852,10 @@ pub fn cachedAttention(
     stream: ?Stream,
 ) OffloadError!mlx.Array {
     const range = GpuKvCache.visibleKeyRange(is_sliding, sliding_window, pos, seq_len);
-    if (range.needs_window_mask) {
-        return slidingWindowAttention(allocator, q, k, v, scale, sliding_window, pos, range.start, stream);
-    }
-    return mlx.Array.fastScaledDotProductAttention(q, k, v, scale, if (seq_len > 1) .causal else .none, stream);
+    const mask: attention_mask.Mask = if (is_sliding) .{ .sliding = sliding_window } else .causal;
+    // 环形覆写的完整缓存不按绝对位置排列，但它恰为单查询的可见键 [pos + 1 - sliding_window, pos]，
+    // 按这一绝对位置区间描述时掩码化简为无掩码，与槽位顺序无关
+    return maskedAttention(allocator, q, k, v, scale, mask, pos, range.start, stream);
 }
 
 /// 块式预分配显存键值缓存 (Pre-allocated Chunked GPU Key-Value Cache, GPU KVCache)

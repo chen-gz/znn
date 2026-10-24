@@ -13,6 +13,7 @@ pub const linalg = @import("tensor/linalg.zig");
 pub const weight_init = @import("tensor/weight_init.zig");
 pub const quant = @import("tensor/quant.zig");
 pub const rope = @import("tensor/rope.zig");
+pub const attention_kernels = @import("tensor/attention_kernels.zig");
 pub const Q4Block = quant.Q4Block;
 
 // --- Re-export Linear Algebra Results ---
@@ -35,8 +36,11 @@ pub const bf16 = types.bf16;
 pub const SliceRange = types.SliceRange;
 pub const ConvOptions = types.ConvOptions;
 pub const PoolOptions = types.PoolOptions;
+pub const RmsNormOptions = types.RmsNormOptions;
 pub const RopeOptions = backend.rope.RopeOptions;
 pub const RopeTable = rope.RopeTable;
+pub const AttentionMask = attention_kernels.Mask;
+pub const AttentionOptions = attention_kernels.Options;
 pub const convertScalar = types.convertScalar;
 pub const checkIndices = types.checkIndices;
 pub const isTruthyScalar = types.isTruthyScalar;

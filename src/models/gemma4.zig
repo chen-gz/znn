@@ -48,42 +48,9 @@ pub fn writePrefillKVCache(
     cache.curr_len = seq_len;
 }
 
-/// 预填充阶段因果 / 滑动窗口注意力 (官方实现中 scaling = 1.0)
-/// q_rot、k、v 形状均为 [B, nh, T, hd] (键值已完成分组查询注意力 (Grouped-Query Attention, GQA) 广播)。
-/// 全局注意力层或 T 不超过滑动窗口时等价于标准因果注意力，直接分发至融合缩放点积注意力
-/// (Scaled Dot-Product Attention, SDPA)；否则使用附加滑动窗口掩码的分解计算图。
-pub fn prefillAttention(
-    graph: *autodiff.Graph,
-    attn_type: Gemma4AttentionType,
-    sliding_window: usize,
-    q_rot: *Tensor,
-    k: *Tensor,
-    v: *Tensor,
-) !*Tensor {
-    const T = q_rot.shape.dims[2];
-    const is_pure_causal = (attn_type == .full_attention or T <= sliding_window);
-    if (is_pure_causal) return graph.scaledDotProductAttention(q_rot, k, v, 1.0, true);
-
-    const k_trans = try graph.transposeND(k, 2, 3);
-    const scores = try graph.batchMatMul(q_rot, k_trans);
-
-    const mask_node = try graph.tensorND(&.{ 1, 1, T, T }, false);
-    mask_node.is_buffer = true;
-    for (0..T) |i| {
-        const row = mask_node.data[i * T .. (i + 1) * T];
-        for (row, 0..) |*m, j| {
-            // 未来位置因果遮蔽，以及超出局部滑动窗口的历史位置遮蔽 (与 GPU 路径共用同一可见性规则)
-            const visible = backend.offload.isSlidingWindowVisible(i, j, sliding_window);
-            m.* = if (visible) 0.0 else -1e9;
-        }
-    }
-    const masked = try graph.add(scores, mask_node);
-    const att_sm = try graph.softmax(masked);
-    return graph.batchMatMul(att_sm, v);
-}
-
 /// 单查询增量解码注意力：将当前时间步旋转后的键 (k_rot: [n_kv, hd]) 与值 (v: [n_kv, hd]) 追加写入层键值缓存，
-/// 随后对缓存中可见窗口 (滑动窗口层仅最近 sliding_window 个位置) 执行数值稳定 (减最大值) 的 Softmax 加权聚合。
+/// 随后每个查询头对缓存中的可见键 (`Gemma4AttentionType.mask` 给出的区间，滑动窗口层仅最近 sliding_window 个位置)
+/// 执行共享的单查询注意力内核 (`attendOneQuery`，scale = 1.0)。
 /// 返回输出投影前的注意力特征 [1, nh * hd]。缓存已满时返回 `error.ContextWindowExceeded`，不修改缓存。
 pub fn decodeAttention(
     graph: *autodiff.Graph,
@@ -109,28 +76,22 @@ pub fn decodeAttention(
         @memcpy(cache.v[dest .. dest + hd], v[kv_h * hd .. (kv_h + 1) * hd]);
     }
     cache.curr_len = pos + 1;
-    const curr_len = cache.curr_len;
 
     const y_2d = try graph.zeros(&.{ 1, num_heads * hd }, false);
-    const start_idx: usize = if (attn_type == .sliding_attention and curr_len > sliding_window)
-        curr_len - sliding_window
-    else
-        0;
-    const scores = try graph.arenaAllocator().alloc(f32, curr_len - start_idx);
+    const range = tensor.attention_kernels.visibleRange(pos, 0, cache.curr_len, attn_type.mask(sliding_window));
+    const scores = try graph.arenaAllocator().alloc(f32, range.len());
 
     for (0..num_heads) |h| {
-        const kv_base = (h / groups) * max_len;
-        const q_head = q_rot[h * hd .. (h + 1) * hd];
-
-        for (scores, start_idx..) |*s, j| {
-            s.* = vec_math.dot(q_head, cache.k[(kv_base + j) * hd .. (kv_base + j + 1) * hd]);
-        }
-        vec_math.softmaxRowInPlace(scores);
-
-        const y_head = y_2d.data[h * hd .. (h + 1) * hd];
-        for (scores, start_idx..) |weight, j| {
-            vec_math.axpy(y_head, weight, cache.v[(kv_base + j) * hd .. (kv_base + j + 1) * hd]);
-        }
+        const kv_base = (h / groups) * max_len * hd;
+        tensor.attention_kernels.attendOneQuery(
+            q_rot[h * hd .. (h + 1) * hd],
+            cache.k[kv_base..][0 .. cache.curr_len * hd],
+            cache.v[kv_base..][0 .. cache.curr_len * hd],
+            range,
+            1.0,
+            scores,
+            y_2d.data[h * hd .. (h + 1) * hd],
+        );
     }
     return y_2d;
 }
@@ -322,6 +283,15 @@ pub const Gemma4AttentionType = enum {
         return switch (self) {
             .sliding_attention => .proportional(10000.0, 1.0),
             .full_attention => .proportional(1000000.0, 0.25),
+        };
+    }
+
+    /// 注意力掩码：滑动窗口层为窗口 sliding_window 的滑动窗口掩码，全局注意力层为因果掩码。
+    /// CPU 预填充 (`Graph.attention`)、CPU 增量解码 (`decodeAttention`) 与 GPU 路径共用这一份掩码。
+    pub fn mask(self: Gemma4AttentionType, sliding_window: usize) tensor.AttentionMask {
+        return switch (self) {
+            .sliding_attention => .{ .sliding = sliding_window },
+            .full_attention => .causal,
         };
     }
 };
@@ -619,36 +589,20 @@ pub const GemmaRMSNorm = struct {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        return try graph.rmsNorm(x, self.weight, self.eps);
+        return try graph.rmsNorm(x, self.weight, .{ .eps = self.eps });
     }
 };
 
 /// Gemma 无权重缩放均方根层归一化 (GemmaUnscaledRMSNorm)
 /// 数学公式：y = RMSNorm(x, eps) = x / sqrt(mean(x^2) + eps)
-/// 专用于 Gemma 4 的 Value states 预注意力归一化 (v_norm, with_scale=False)
+/// 专用于 Gemma 4 的 Value states 预注意力归一化 (v_norm, with_scale=False)，不持有任何权重
 pub const GemmaUnscaledRMSNorm = struct {
-    weight: *Tensor,
     eps: f32,
     name: ?[]const u8 = null,
     module_type: []const u8 = "GemmaUnscaledRMSNorm",
 
-    pub fn init(allocator: std.mem.Allocator, dim: usize, eps: f32) !GemmaUnscaledRMSNorm {
-        const weight = try createPersistentTensor(allocator, 1, dim, false);
-        errdefer freePersistentTensor(allocator, weight);
-        @memset(weight.data, 1.0);
-        weight.shape = Shape.init(&.{dim});
-        weight.strides = tensor.computeContiguousStrides(weight.shape);
-        // 恒为 1 的常量权重注册为缓冲区，解冻参数时不会被误转为可训练参数
-        weight.is_buffer = true;
-
-        return GemmaUnscaledRMSNorm{
-            .weight = weight,
-            .eps = eps,
-        };
-    }
-
-    pub fn deinit(self: *GemmaUnscaledRMSNorm, allocator: std.mem.Allocator) void {
-        freePersistentTensor(allocator, self.weight);
+    pub fn init(eps: f32) GemmaUnscaledRMSNorm {
+        return .{ .eps = eps };
     }
 
     pub const formula = "y = \\frac{x}{\\sqrt{\\frac{1}{d}\\sum x_i^2 + \\epsilon}}";
@@ -657,7 +611,7 @@ pub const GemmaUnscaledRMSNorm = struct {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        return try graph.rmsNorm(x, self.weight, self.eps);
+        return try graph.rmsNorm(x, null, .{ .eps = self.eps });
     }
 };
 
@@ -771,8 +725,7 @@ pub const Gemma4Attention = struct {
         errdefer deinitModel(&q_norm, allocator);
         const k_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
         errdefer deinitModel(&k_norm, allocator);
-        const v_norm = try GemmaUnscaledRMSNorm.init(allocator, head_dim, rms_norm_eps);
-        errdefer deinitModel(&v_norm, allocator);
+        const v_norm = GemmaUnscaledRMSNorm.init(rms_norm_eps);
 
         return Gemma4Attention{
             .q_proj = q_proj,
@@ -855,18 +808,15 @@ pub const Gemma4Attention = struct {
         // 5. 写入键值缓存 (Key-Value Cache, KVCache)
         if (layer_cache) |cache| try writePrefillKVCache(cache, k_rot.data, v.data, B, T);
 
-        // 6. GQA 广播扩展至 nh 个头
-        var k = k_rot;
-        var v_final = v;
-        if (groups > 1) {
-            k = try graph.repeatKV(k_rot, groups);
-            v_final = try graph.repeatKV(v, groups);
-        }
+        // 6. 因果 / 滑动窗口掩码注意力 (官方实现中 scaling = 1.0)；分组查询注意力 (Grouped-Query Attention, GQA)
+        // 由每个键值头服务 groups 个查询头，不复制键值
+        const y_4d = try graph.attention(q_rot, k_rot, v, .{
+            .scale = 1.0,
+            .mask = self.attn_type.mask(self.sliding_window),
+            .kv_groups = groups,
+        });
 
-        // 7. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0)
-        const y_4d = try prefillAttention(graph, self.attn_type, self.sliding_window, q_rot, k, v_final);
-
-        // 8. 转置并融合输出
+        // 7. 转置并融合输出
         const y_trans = try graph.transposeND(y_4d, 1, 2);
         const y_2d = try graph.reshape(y_trans, &.{ B * T, nh * hd });
         const out_2d = try self.o_proj.forward(graph, y_2d);
@@ -1155,11 +1105,8 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             const embed_t = try graph.transposeND(self.embed_tokens.weight, 0, 1);
             const logits_raw_2d = try graph.matmul(h_2d, embed_t);
 
-            // 5. Logit Softcapping: 30 * tanh(logits / 30)
-            const cap = config.final_logit_softcapping;
-            const scaled_logits = try graph.mulScalar(logits_raw_2d, 1.0 / cap);
-            const tanh_logits = try graph.tanh(scaled_logits);
-            const capped_logits_2d = try graph.mulScalar(tanh_logits, cap);
+            // 5. 最终对数几率软截断 (Final Logit Softcapping): cap * tanh(logits / cap)
+            const capped_logits_2d = try graph.softcap(logits_raw_2d, config.final_logit_softcapping);
 
             return try graph.reshape(capped_logits_2d, &.{ B, T, config.vocab_size });
         }

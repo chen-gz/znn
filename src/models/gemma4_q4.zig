@@ -292,7 +292,7 @@ pub const Gemma4Q4Attention = struct {
         errdefer deinitModel(&q_norm, allocator);
         const k_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
         errdefer deinitModel(&k_norm, allocator);
-        const v_norm = try GemmaUnscaledRMSNorm.init(allocator, head_dim, rms_norm_eps);
+        const v_norm = GemmaUnscaledRMSNorm.init(rms_norm_eps);
 
         return Gemma4Q4Attention{
             .q_proj = q_proj,
@@ -335,7 +335,7 @@ pub const Gemma4Q4Attention = struct {
         errdefer deinitModel(&q_norm, allocator);
         const k_norm = try GemmaRMSNorm.init(allocator, head_dim, rms_norm_eps);
         errdefer deinitModel(&k_norm, allocator);
-        const v_norm = try GemmaUnscaledRMSNorm.init(allocator, head_dim, rms_norm_eps);
+        const v_norm = GemmaUnscaledRMSNorm.init(rms_norm_eps);
 
         return Gemma4Q4Attention{
             .q_proj = q_proj,
@@ -362,7 +362,6 @@ pub const Gemma4Q4Attention = struct {
         self.o_proj.deinit(allocator);
         deinitModel(&self.q_norm, allocator);
         deinitModel(&self.k_norm, allocator);
-        self.v_norm.deinit(allocator);
     }
 
     pub fn forward(self: *const Gemma4Q4Attention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
@@ -483,18 +482,14 @@ pub const Gemma4Q4Attention = struct {
         // 5. 写入键值缓存 (Key-Value Cache, KVCache)
         if (layer_cache) |cache| try gemma4.writePrefillKVCache(cache, k_rot.data, v.data, B, T);
 
-        // 6. GQA 广播
-        var k = k_rot;
-        var v_final = v;
-        if (groups > 1) {
-            k = try graph.repeatKV(k_rot, groups);
-            v_final = try graph.repeatKV(v, groups);
-        }
+        // 6. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0，分组查询注意力直接按 kv_groups 索引)
+        const y_4d = try graph.attention(q_rot, k_rot, v, .{
+            .scale = 1.0,
+            .mask = self.attn_type.mask(self.sliding_window),
+            .kv_groups = groups,
+        });
 
-        // 7. 注意力得分与因果 / 滑动窗口掩码计算 (官方实现中 scaling = 1.0)
-        const y_4d = try gemma4.prefillAttention(graph, self.attn_type, self.sliding_window, q_rot, k, v_final);
-
-        // 8. 转置并输出投影
+        // 7. 转置并输出投影
         const y_trans = try graph.transposeND(y_4d, 1, 2);
         const y_2d = try graph.reshape(y_trans, &.{ B * T, nh * hd });
         const out_2d = try self.o_proj.forward(graph, y_2d);
@@ -859,11 +854,8 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
                 break :blk try graph.matmul(h_2d, embed_t);
             };
 
-            // 5. 对数几率截断 (Logit Softcapping, Gemma 官方标尺 30.0)
-            const cap = config.final_logit_softcapping;
-            const scaled = try graph.mulScalar(logits_raw_2d, 1.0 / cap);
-            const capped = try graph.tanh(scaled);
-            const capped_logits_2d = try graph.mulScalar(capped, cap);
+            // 5. 对数几率软截断 (Logit Softcapping, Gemma 官方标尺 30.0)
+            const capped_logits_2d = try graph.softcap(logits_raw_2d, config.final_logit_softcapping);
 
             return try graph.reshape(capped_logits_2d, &.{ B, T, config.vocab_size });
         }

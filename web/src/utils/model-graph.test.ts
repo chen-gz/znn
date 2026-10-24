@@ -51,7 +51,7 @@ describe("model-graph schema 2.0", () => {
     expect(graph.version).toBe("2.0");
     expect(graph.default_scope).toBe("gpt");
     expect((graph as unknown as Record<string, unknown>).edges).toBeUndefined();
-    expect(graph.summary?.buffer_nodes).toBe(3);
+    expect(graph.summary?.buffer_nodes).toBe(1);
   });
 
   it("finds modules by path, treating root and '' alike", () => {
@@ -117,12 +117,8 @@ describe("model-graph schema 2.0", () => {
   it("places sources directly above their first consumer", () => {
     const rows = layoutPipeline(buildLocalGraph(mod(`${BLOCK}.attn.core`)));
     expect(rowIds(rows)).toEqual([
-      ["@in0", "@in1"],
-      ["act_BatchMatMul_18"],
-      ["act_MulScalar_19", "causal_mask"],
-      ["act_Add_20"],
-      ["act_Softmax_21", "@in2"],
-      ["act_BatchMatMul_22"],
+      ["@in0", "@in1", "@in2"],
+      ["act_Attention_17"],
       ["@out0"],
     ]);
   });
@@ -158,9 +154,12 @@ describe("model-graph schema 2.0", () => {
     expect(code).toContain(`call onMermaidNodeClick("${BLOCK}.attn")`);
     expect(code).not.toContain(`${BLOCK}.output`);
 
+    const gptGraph = buildMermaidLocalGraph(mod("gpt")).code;
+    expect(gptGraph).toContain('[("🧱 pos_indices")]');
+    expect(gptGraph).toContain("stroke-dasharray:2 3");
+
     const core = buildMermaidLocalGraph(mod(`${BLOCK}.attn.core`)).code;
-    expect(core).toContain('[("🧱 causal_mask")]');
-    expect(core).toContain("stroke-dasharray:2 3");
+    expect(core).toContain('("⚡ act_Attention_17 : Attention")');
   });
 
   it("collects subtree nodes by module rather than by name prefix", () => {

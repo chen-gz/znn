@@ -77,6 +77,18 @@ pub const ConvOptions = struct {
     }
 };
 
+/// 均方根层归一化可选参数配置 (Root Mean Square Layer Normalization Options, RmsNormOptions)：
+/// y = x / sqrt(mean(x^2) + eps) * (weight + weight_offset)；不带权重时 y = x / sqrt(mean(x^2) + eps)
+pub const RmsNormOptions = struct {
+    eps: f32 = 1e-6, // 方差项的数值稳定常数 (加在平方均值上，位于平方根内)
+    weight_offset: f32 = 0.0, // 权重偏移量：实际缩放系数为 weight + weight_offset (如 Gemma 1~3 的 1 + w 形式)
+
+    pub const default: RmsNormOptions = .{};
+    pub fn defaultOptions() RmsNormOptions {
+        return .{};
+    }
+};
+
 /// 池化算子可选参数配置 (Pooling Operator Options, PoolOptions)
 pub const PoolOptions = struct {
     stride: ?usize = null, // 池化滑动步幅，为 null 时默认等于池化窗口大小 (pool_size / kernel_size)

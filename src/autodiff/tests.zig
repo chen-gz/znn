@@ -681,7 +681,7 @@ test "RMSNorm forward and backward" {
     }, true);
     const G = try graph.array(&.{3}, &[_]f32{ 1.0, 2.0, 3.0 }, true);
 
-    const Y = try graph.rmsNorm(X, G, 1e-5);
+    const Y = try graph.rmsNorm(X, G, .{ .eps = 1e-5 });
 
     try graph.forward();
 
@@ -1448,8 +1448,8 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
     @memset(w_cpu.data, 1.0);
     @memset(w_gpu.data, 1.0);
 
-    const norm_cpu = try g_cpu.rmsNorm(x_cpu, w_cpu, 1e-5);
-    const norm_gpu = try g_gpu.rmsNorm(x_gpu, w_gpu, 1e-5);
+    const norm_cpu = try g_cpu.rmsNorm(x_cpu, w_cpu, .{ .eps = 1e-5 });
+    const norm_gpu = try g_gpu.rmsNorm(x_gpu, w_gpu, .{ .eps = 1e-5 });
     for (norm_cpu.data, norm_gpu.data) |c_val, g_val| {
         try std.testing.expectApproxEqAbs(c_val, g_val, 1e-4);
     }
@@ -1478,8 +1478,8 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
         v_gpu.data[i] = val * 1.2;
     }
 
-    const sdpa_cpu = try g_cpu.scaledDotProductAttention(q_cpu, k_cpu, v_cpu, scale, true);
-    const sdpa_gpu = try g_gpu.scaledDotProductAttention(q_gpu, k_gpu, v_gpu, scale, true);
+    const sdpa_cpu = try g_cpu.attention(q_cpu, k_cpu, v_cpu, .{ .scale = scale, .mask = .causal });
+    const sdpa_gpu = try g_gpu.attention(q_gpu, k_gpu, v_gpu, .{ .scale = scale, .mask = .causal });
 
     for (sdpa_cpu.data, sdpa_gpu.data) |c_val, g_val| {
         try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
@@ -1548,7 +1548,7 @@ test "Graph.backward skips frozen subgraphs that do not require gradients" {
     // 冻结的均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)：输入与缩放参数都不需要梯度
     const x = try graph.array(&.{ 2, 4 }, &.{ 1, 2, 3, 4, 5, 6, 7, 8 }, false);
     const gamma = try graph.array(&.{4}, &.{ 1, 1, 1, 1 }, false);
-    const y = try graph.rmsNorm(x, gamma, 1e-6);
+    const y = try graph.rmsNorm(x, gamma, .{ .eps = 1e-6 });
     try std.testing.expect(!y.requires_grad);
 
     const w = try graph.zeros(&.{ 4, 3 }, true);

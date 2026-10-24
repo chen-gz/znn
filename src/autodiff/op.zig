@@ -43,6 +43,9 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         .Tanh => {
             copyFromEager(self.outputs[0], try self.inputs[0].tanh(allocator), allocator);
         },
+        .Softcap => {
+            copyFromEager(self.outputs[0], try self.inputs[0].softcap(self.context.Softcap.cap, allocator), allocator);
+        },
         .LeakyRelu => {
             copyFromEager(self.outputs[0], try self.inputs[0].leakyRelu(self.context.LeakyRelu.alpha, allocator), allocator);
         },
@@ -232,10 +235,16 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             copyFromEager(self.outputs[0], try self.inputs[0].softmax(allocator), allocator);
         },
         .RmsNorm => {
-            copyFromEager(self.outputs[0], try self.inputs[0].rmsNorm(self.inputs[1], self.context.RmsNorm.eps, allocator), allocator);
+            const ctx = self.context.RmsNorm;
+            const weight: ?*Tensor = if (self.inputs.len > 1) self.inputs[1] else null;
+            const inv_rms: ?[]f32 = if (ctx.inv_rms.len > 0) ctx.inv_rms else null;
+            copyFromEager(self.outputs[0], try self.inputs[0].rmsNorm(weight, ctx.options, inv_rms, allocator), allocator);
         },
         .LayerNorm => {
-            copyFromEager(self.outputs[0], try self.inputs[0].layerNorm(self.inputs[1], self.inputs[2], self.context.LayerNorm.eps, allocator), allocator);
+            const ctx = self.context.LayerNorm;
+            const save_mean: ?[]f32 = if (ctx.save_mean.len > 0) ctx.save_mean else null;
+            const save_inv_std: ?[]f32 = if (ctx.save_inv_std.len > 0) ctx.save_inv_std else null;
+            copyFromEager(self.outputs[0], try self.inputs[0].layerNorm(self.inputs[1], self.inputs[2], ctx.eps, save_mean, save_inv_std, allocator), allocator);
         },
         .BatchNorm1d => {
             // 训练模式重演必须重新计算当前批次的统计量 (并更新运行统计量)，否则反向传播会使用过期的批统计量
@@ -302,6 +311,11 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         },
         .BatchMatMul => {
             copyFromEager(self.outputs[0], try self.inputs[0].batchMatMul(self.inputs[1], allocator), allocator);
+        },
+        .Attention => {
+            const ctx = self.context.Attention;
+            const probs: ?[]f32 = if (ctx.probs.len > 0) ctx.probs else null;
+            try tensor_mod.attention_kernels.attentionInto(self.inputs[0], self.inputs[1], self.inputs[2], self.outputs[0], probs, ctx.options, allocator);
         },
         .Embedding => {
             copyFromEager(self.outputs[0], try self.inputs[0].embedding(self.inputs[1], allocator), allocator);
@@ -403,6 +417,7 @@ pub fn backward(self: *Op) !void {
         .GeluTanh,
         .Sigmoid,
         .Tanh,
+        .Softcap,
         .LeakyRelu,
         .Silu,
         .SoftmaxCrossEntropy,
@@ -445,6 +460,7 @@ pub fn backward(self: *Op) !void {
         .Dropout,
         .RoPE,
         .BatchMatMul,
+        .Attention,
         .Embedding,
         .TopK,
         .GatherMatMul,

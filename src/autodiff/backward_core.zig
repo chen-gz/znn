@@ -235,6 +235,18 @@ pub fn backwardCore(self: *Op) !void {
                 }
             }
         },
+        .Softcap => {
+            // y = cap * tanh(x / cap)，dy/dx = 1 - tanh^2(x / cap)
+            const A = self.inputs[0];
+            const C = self.outputs[0];
+            const cap = self.context.Softcap.cap;
+            if (A.requires_grad) {
+                for (A.grad, C.grad, A.data) |*a_g, c_g, a_val| {
+                    const t = std.math.tanh(a_val / cap);
+                    a_g.* += c_g * (1.0 - t * t);
+                }
+            }
+        },
         .LeakyRelu => {
             const A = self.inputs[0];
             const C = self.outputs[0];
