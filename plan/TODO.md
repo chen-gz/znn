@@ -258,7 +258,8 @@
 
 - [ ] **3.1 注意力机制升级 (Memory-Efficient & FlashAttention)**
   - [ ] 实现基于 Tiling 分块与在线 Softmax 统计更新的 **FlashAttention** 前向与反向算子（避免显式存储 $O(T^2)$ 注意力分数矩阵），以显式 `Attention` 算子实现，并统一 `ScaledDotProductAttention`、`Gemma4Attention` 与 `Gemma4Q4Attention`（设计 Phase 3）。
-  - [x] 实现通用 **RoPE** 旋转位置编码的前向与反向 Autograd 算子（[`OpType.RoPE`](../src/autodiff/types.zig)、[`Graph.rope`](../src/autodiff/graph_nn.zig)、[`Tensor.rope`](../src/tensor/nn_kernels.zig) 统一接收 [`RopeOptions`](../src/tensor/types.zig)）并接入 [`MLALayer.forward`](../src/nn/attention.zig)。
+  - [x] 实现通用 **RoPE** 旋转位置编码的前向与反向 Autograd 算子（[`OpType.RoPE`](../src/autodiff/types.zig)、[`Graph.rope`](../src/autodiff/graph_nn.zig)、[`Tensor.rope`](../src/tensor/nn_kernels.zig) 统一接收 [`RopeOptions`](../src/backend/rope.zig)）并接入 [`MLALayer.forward`](../src/nn/attention.zig)。
+  - [x] **共享旋转表 [`RopeTable`](../src/tensor/rope.zig)**：CPU 前向内核、RoPE 反向传播 (逆旋转，不再逐元素重算幂函数与三角函数)、`MLALayer` 增量解码 (频率基数随 `MLALayer.rope` 配置，不再写死 10000) 共用一份旋转实现；频率公式与比例旋转位置编码 (Proportional RoPE) 预设 `RopeOptions.proportional` 位于 [`backend/rope.zig`](../src/backend/rope.zig)，Gemma 4 GPU `GpuRope` 的周期表也由它生成。
   - [x] **补全 Split-Half 与 Partial Rotary RoPE 的静态图重演与反向传播支持 (`graph_nn.zig`, `op.zig`, `backward_nn.zig`, `models/gemma4.zig`)**：
     - [x] **修复 `requires_grad` 硬编码为 `false` 导致的训练梯度断流**：在 [`src/autodiff/graph_nn.zig`](../src/autodiff/graph_nn.zig) 中，统一 RoPE 继承 `self.enable_grad and X.requires_grad`，彻底修复反向传播梯度断流问题。
     - [x] **修复 `op.zig` 中 `.RoPE` 静态图重演（`graph.forward()`）结果错误**：在 [`OpContext.RoPE`](../src/autodiff/types.zig) 中保存 `mode` 与 `partial_rotary_factor`，并在 [`Op.forward(.RoPE)`](../src/autodiff/op.zig) 重演时传入完整配置，实现 100% 数值一致的图重演。
