@@ -383,7 +383,7 @@ pub fn compileFn(
         }
     };
     const c_fn = if (comptime Ctx == void) Helper.computeVoid else Helper.computeCtx;
-    const payload: ?*anyopaque = if (comptime Ctx == void) null else @constCast(@ptrCast(ctx));
+    const payload: ?*anyopaque = if (comptime Ctx == void) null else @ptrCast(@constCast(ctx));
     return compile(c_fn, payload, shapeless);
 }
 
