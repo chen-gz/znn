@@ -13,19 +13,22 @@ pub const KERNELS_PTX =
     \\.target sm_50
     \\.address_size 64
     \\
-    \\// GEMM Kernel: C = A * B
-    \\// A: [M, K], B: [K, N], C: [M, N]
+    \\// GEMM / BMM Kernel: C = A * B
+    \\// A: [batch, M, K], B: [batch or 1, K, N], C: [batch, M, N]
     \\.visible .entry sgemm_kernel(
     \\    .param .u64 param_A,
     \\    .param .u64 param_B,
     \\    .param .u64 param_C,
     \\    .param .u32 param_M,
     \\    .param .u32 param_N,
-    \\    .param .u32 param_K
+    \\    .param .u32 param_K,
+    \\    .param .u32 param_stride_A,
+    \\    .param .u32 param_stride_B,
+    \\    .param .u32 param_stride_C
     \\) {
     \\    .reg .pred %p<4>;
-    \\    .reg .b32 %r<12>;
-    \\    .reg .b64 %rd<15>;
+    \\    .reg .b32 %r<16>;
+    \\    .reg .b64 %rd<16>;
     \\    .reg .f32 %f<5>;
     \\
     \\    mov.u32 %r0, %ctaid.y;
@@ -50,6 +53,22 @@ pub const KERNELS_PTX =
     \\    ld.param.u64 %rd0, [param_A];
     \\    ld.param.u64 %rd1, [param_B];
     \\    ld.param.u64 %rd2, [param_C];
+    \\    ld.param.u32 %r12, [param_stride_A];
+    \\    ld.param.u32 %r13, [param_stride_B];
+    \\    ld.param.u32 %r14, [param_stride_C];
+    \\
+    \\    mov.u32 %r15, %ctaid.z;
+    \\    mad.lo.s32 %r0, %r15, %r12, 0;
+    \\    mul.wide.u32 %rd9, %r0, 4;
+    \\    add.s64 %rd0, %rd0, %rd9;
+    \\
+    \\    mad.lo.s32 %r1, %r15, %r13, 0;
+    \\    mul.wide.u32 %rd10, %r1, 4;
+    \\    add.s64 %rd1, %rd1, %rd10;
+    \\
+    \\    mad.lo.s32 %r2, %r15, %r14, 0;
+    \\    mul.wide.u32 %rd11, %r2, 4;
+    \\    add.s64 %rd2, %rd2, %rd11;
     \\
     \\    mov.f32 %f0, 0f00000000;
     \\    mov.u32 %r11, 0;
@@ -731,6 +750,116 @@ pub const KERNELS_PTX =
     \\    bra STORE_OUT_LOOP;
     \\
     \\EXIT_ATTN:
+    \\    ret;
+    \\}
+    \\
+    \\// Embedding Kernel: output[i, j] = weight[indices[i], j]
+    \\// indices: [N] (f32), weight: [V, D], output: [N, D]
+    \\.visible .entry embedding_kernel(
+    \\    .param .u64 param_indices,
+    \\    .param .u64 param_weight,
+    \\    .param .u64 param_output,
+    \\    .param .u32 param_N,
+    \\    .param .u32 param_D,
+    \\    .param .u32 param_V
+    \\) {
+    \\    .reg .pred %p<3>;
+    \\    .reg .b32 %r<12>;
+    \\    .reg .b64 %rd<10>;
+    \\    .reg .f32 %f<3>;
+    \\
+    \\    mov.u32 %r0, %ctaid.y;
+    \\    mov.u32 %r1, %ntid.y;
+    \\    mov.u32 %r2, %tid.y;
+    \\    mad.lo.s32 %r3, %r0, %r1, %r2;
+    \\
+    \\    mov.u32 %r4, %ctaid.x;
+    \\    mov.u32 %r5, %ntid.x;
+    \\    mov.u32 %r6, %tid.x;
+    \\    mad.lo.s32 %r7, %r4, %r5, %r6;
+    \\
+    \\    ld.param.u32 %r8, [param_N];
+    \\    ld.param.u32 %r9, [param_D];
+    \\    ld.param.u32 %r10, [param_V];
+    \\
+    \\    setp.ge.u32 %p0, %r3, %r8;
+    \\    @%p0 bra EXIT_EMB;
+    \\    setp.ge.u32 %p1, %r7, %r9;
+    \\    @%p1 bra EXIT_EMB;
+    \\
+    \\    ld.param.u64 %rd0, [param_indices];
+    \\    ld.param.u64 %rd1, [param_weight];
+    \\    ld.param.u64 %rd2, [param_output];
+    \\
+    \\    mul.wide.u32 %rd3, %r3, 4;
+    \\    add.s64 %rd4, %rd0, %rd3;
+    \\    ld.global.f32 %f0, [%rd4];
+    \\    cvt.rzi.u32.f32 %r11, %f0;
+    \\
+    \\    setp.ge.u32 %p2, %r11, %r10;
+    \\    @%p2 bra ZERO_EMB;
+    \\
+    \\    mad.lo.s32 %r0, %r11, %r9, %r7;
+    \\    mul.wide.u32 %rd5, %r0, 4;
+    \\    add.s64 %rd6, %rd1, %rd5;
+    \\    ld.global.f32 %f1, [%rd6];
+    \\    bra STORE_EMB;
+    \\
+    \\ZERO_EMB:
+    \\    mov.f32 %f1, 0f00000000;
+    \\
+    \\STORE_EMB:
+    \\    mad.lo.s32 %r1, %r3, %r9, %r7;
+    \\    mul.wide.u32 %rd7, %r1, 4;
+    \\    add.s64 %rd8, %rd2, %rd7;
+    \\    st.global.f32 [%rd8], %f1;
+    \\
+    \\EXIT_EMB:
+    \\    ret;
+    \\}
+    \\
+    \\// Softcap Kernel: out = cap * tanh(x / cap)
+    \\.visible .entry softcap_kernel(
+    \\    .param .u64 param_a,
+    \\    .param .u64 param_out,
+    \\    .param .u32 param_n,
+    \\    .param .f32 param_cap
+    \\) {
+    \\    .reg .pred %p;
+    \\    .reg .b32 %r<5>;
+    \\    .reg .b64 %rd<6>;
+    \\    .reg .f32 %f<15>;
+    \\
+    \\    mov.u32 %r0, %ctaid.x;
+    \\    mov.u32 %r1, %ntid.x;
+    \\    mov.u32 %r2, %tid.x;
+    \\    mad.lo.s32 %r3, %r0, %r1, %r2;
+    \\    ld.param.u32 %r4, [param_n];
+    \\    setp.ge.u32 %p, %r3, %r4;
+    \\    @%p bra EXIT_SOFTCAP;
+    \\
+    \\    ld.param.u64 %rd0, [param_a];
+    \\    ld.param.u64 %rd1, [param_out];
+    \\    ld.param.f32 %f0, [param_cap];
+    \\    mul.wide.u32 %rd2, %r3, 4;
+    \\    add.s64 %rd3, %rd0, %rd2;
+    \\    add.s64 %rd4, %rd1, %rd2;
+    \\    ld.global.f32 %f1, [%rd3];
+    \\
+    \\    div.approx.f32 %f2, %f1, %f0;
+    \\    add.f32 %f3, %f2, %f2;
+    \\    max.f32 %f4, %f3, 0fc1700000;
+    \\    min.f32 %f5, %f4, 0f41700000;
+    \\    mov.f32 %f6, 0f3fb8aa3b;
+    \\    mul.f32 %f7, %f5, %f6;
+    \\    ex2.approx.f32 %f8, %f7;
+    \\    add.f32 %f9, %f8, 0f3f800000;
+    \\    sub.f32 %f10, %f8, 0f3f800000;
+    \\    div.approx.f32 %f11, %f10, %f9;
+    \\    mul.f32 %f12, %f11, %f0;
+    \\    st.global.f32 [%rd4], %f12;
+    \\
+    \\EXIT_SOFTCAP:
     \\    ret;
     \\}
     \\

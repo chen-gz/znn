@@ -110,6 +110,8 @@ var fn_softmax: ?CUfunction = null;
 var fn_rope: ?CUfunction = null;
 var fn_kv_write_step: ?CUfunction = null;
 var fn_cached_attention: ?CUfunction = null;
+var fn_embedding: ?CUfunction = null;
+var fn_softcap: ?CUfunction = null;
 
 const lib_search_paths = [_][]const u8{
     "libcuda.so.1",
@@ -256,6 +258,8 @@ pub fn ensureContext() CudaError!void {
         _ = api.cuModuleGetFunction(&fn_rope, mod, "rope_kernel");
         _ = api.cuModuleGetFunction(&fn_kv_write_step, mod, "kv_write_step_kernel");
         _ = api.cuModuleGetFunction(&fn_cached_attention, mod, "cached_attention_kernel");
+        _ = api.cuModuleGetFunction(&fn_embedding, mod, "embedding_kernel");
+        _ = api.cuModuleGetFunction(&fn_softcap, mod, "softcap_kernel");
     }
 }
 
@@ -482,7 +486,7 @@ pub const Array = struct {
         }
     }
 
-    /// 通用矩阵乘法 (General Matrix Multiply, GEMM): C = A * B
+    /// 通用矩阵乘法 (General Matrix Multiply, GEMM / Batched GEMM, BMM): C = A * B
     pub fn matmul(a: Array, b: Array, stream: ?Stream) CudaError!Array {
         try ensureContext();
         const api = try getApi();
@@ -495,13 +499,20 @@ pub const Array = struct {
         const N = b.shape[b.ndim - 1];
         if (K1 != K2) return error.ShapeMismatch;
 
-        const out_len = a.len / K1 * N;
+        const batch_a = a.len / (M * K1);
+        const batch_b = b.len / (K2 * N);
+        if (batch_b != 1 and batch_b != batch_a) return error.ShapeMismatch;
+
+        const out_len = batch_a * M * N;
         const c_ptr = try alloc(out_len * @sizeOf(f32));
         errdefer free(c_ptr);
 
         var m_u32: u32 = @intCast(M);
         var n_u32: u32 = @intCast(N);
         var k_u32: u32 = @intCast(K1);
+        var str_a: u32 = @intCast(M * K1);
+        var str_b: u32 = if (batch_b == 1) 0 else @intCast(K2 * N);
+        var str_c: u32 = @intCast(M * N);
         var d_a = a.ptr;
         var d_b = b.ptr;
         var d_c = c_ptr;
@@ -513,16 +524,20 @@ pub const Array = struct {
             &m_u32,
             &n_u32,
             &k_u32,
+            &str_a,
+            &str_b,
+            &str_c,
         };
 
         const block_dim: c_uint = 16;
         const grid_x: c_uint = @intCast((N + block_dim - 1) / block_dim);
         const grid_y: c_uint = @intCast((M + block_dim - 1) / block_dim);
+        const grid_z: c_uint = @intCast(batch_a);
         const h_stream = if (stream) |s| s.handle else null;
 
         if (api.cuLaunchKernel(
             func,
-            grid_x, grid_y, 1,
+            grid_x, grid_y, grid_z,
             block_dim, block_dim, 1,
             0, h_stream, &params, null,
         ) != .success) {
@@ -990,6 +1005,108 @@ pub const Array = struct {
             .shape = res_shape,
             .ndim = q.ndim,
             .len = out_len,
+            .dtype = .float32,
+        };
+    }
+
+    /// 词元嵌入查表 (Embedding Lookup): output[i, j] = weight[indices[i], j]
+    pub fn embedding(w: Array, indices: Array, stream: ?Stream) CudaError!Array {
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_embedding orelse return error.KernelNotFound;
+
+        if (w.ndim != 2) return error.InvalidShape;
+        const V = w.shape[0];
+        const D = w.shape[1];
+        const N = indices.len;
+
+        const out_len = N * D;
+        const c_ptr = try alloc(out_len * @sizeOf(f32));
+        errdefer free(c_ptr);
+
+        var n_u32: u32 = @intCast(N);
+        var d_u32: u32 = @intCast(D);
+        var v_u32: u32 = @intCast(V);
+        var d_idx = indices.ptr;
+        var d_w = w.ptr;
+        var d_out = c_ptr;
+
+        var params = [_]?*anyopaque{
+            &d_idx,
+            &d_w,
+            &d_out,
+            &n_u32,
+            &d_u32,
+            &v_u32,
+        };
+
+        const block_x: c_uint = 16;
+        const block_y: c_uint = 16;
+        const grid_x: c_uint = @intCast((D + block_x - 1) / block_x);
+        const grid_y: c_uint = @intCast((N + block_y - 1) / block_y);
+        const h_stream = if (stream) |s| s.handle else null;
+
+        if (api.cuLaunchKernel(
+            func,
+            grid_x, grid_y, 1,
+            block_x, block_y, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        var res_shape: [8]usize = undefined;
+        for (0..indices.ndim) |i| res_shape[i] = indices.shape[i];
+        res_shape[indices.ndim] = D;
+
+        return .{
+            .ptr = c_ptr,
+            .shape = res_shape,
+            .ndim = indices.ndim + 1,
+            .len = out_len,
+            .dtype = .float32,
+        };
+    }
+
+    /// 软截断算子 (Soft Capping): y = cap * tanh(x / cap)
+    pub fn softcap(x: Array, cap: f32, stream: ?Stream) CudaError!Array {
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_softcap orelse return error.KernelNotFound;
+
+        const out_ptr = try alloc(x.len * @sizeOf(f32));
+        errdefer free(out_ptr);
+
+        var d_in = x.ptr;
+        var d_out = out_ptr;
+        var n_u32: u32 = @intCast(x.len);
+        var cap_f32 = cap;
+
+        var params = [_]?*anyopaque{
+            &d_in,
+            &d_out,
+            &n_u32,
+            &cap_f32,
+        };
+
+        const block_dim: c_uint = 256;
+        const grid_dim: c_uint = @intCast((x.len + block_dim - 1) / block_dim);
+        const h_stream = if (stream) |s| s.handle else null;
+
+        if (api.cuLaunchKernel(
+            func,
+            grid_dim, 1, 1,
+            block_dim, 1, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        return .{
+            .ptr = out_ptr,
+            .shape = x.shape,
+            .ndim = x.ndim,
+            .len = x.len,
             .dtype = .float32,
         };
     }

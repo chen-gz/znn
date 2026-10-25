@@ -1463,3 +1463,77 @@ test "Gemma 4 PLE modules and Gemma4E4BForCausalLM forward" {
         try std.testing.expectEqual(@as(?usize, null), t3);
     }
 }
+
+test "GPT forwardWithCache incremental decoding parity and generate() loop" {
+    const allocator = std.testing.allocator;
+    const gpt_mod = @import("gpt.zig");
+
+    const TinyGPT = gpt_mod.GPT(.{
+        .vocab_size = 32,
+        .block_size = 16,
+        .n_embd = 16,
+        .n_head = 2,
+        .n_layer = 2,
+    });
+
+    var model = try TinyGPT.init(allocator);
+    defer nn.deinitModel(&model, allocator);
+
+    // 1. 全序列前向传播作为黄金基线 (T = 3)
+    var g_full = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g_full.deinit();
+
+    const prompt_tokens = [_]usize{ 3, 7, 12 };
+    const prompt_tensor = try g_full.tensorND(&.{ 1, 3 }, false);
+    for (prompt_tokens, 0..) |tok, i| prompt_tensor.data[i] = @floatFromInt(tok);
+
+    const logits_full = try model.forward(&g_full, prompt_tensor);
+    try std.testing.expectEqualSlices(usize, &.{ 1, 3, 32 }, logits_full.shape.dims[0..3]);
+
+    // 2. 使用 KVCache 的逐步增量前向：Prefill 2 词元 + Decode 1 词元
+    var caches: [2]nn.KVCache = undefined;
+    for (0..2) |i| {
+        caches[i] = try nn.KVCache.init(allocator, 1, 2, 16, 8);
+    }
+    defer {
+        for (0..2) |i| caches[i].deinit(allocator);
+    }
+
+    var g_prefill = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g_prefill.deinit();
+    const prefill_t = try g_prefill.tensorND(&.{ 1, 2 }, false);
+    prefill_t.data[0] = @floatFromInt(prompt_tokens[0]);
+    prefill_t.data[1] = @floatFromInt(prompt_tokens[1]);
+
+    const logits_prefill = try model.forwardWithCache(&g_prefill, prefill_t, &caches, 0);
+    // 验证 prefill 步输出与全序列前两步一致
+    for (0..2) |t| {
+        for (0..32) |v| {
+            try std.testing.expectApproxEqAbs(logits_full.data[t * 32 + v], logits_prefill.data[t * 32 + v], 1e-4);
+        }
+    }
+
+    // Decode 第 3 个词元 (T = 1)
+    var g_decode = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    defer g_decode.deinit();
+    const decode_t = try g_decode.tensorND(&.{ 1, 1 }, false);
+    decode_t.data[0] = @floatFromInt(prompt_tokens[2]);
+
+    const logits_decode = try model.forwardWithCache(&g_decode, decode_t, &caches, 2);
+    // 验证 decode 步输出与全序列第 3 步完全一致
+    for (0..32) |v| {
+        try std.testing.expectApproxEqAbs(logits_full.data[2 * 32 + v], logits_decode.data[v], 1e-4);
+    }
+
+    // 3. 端到端流式生成 generate()
+    const gen_tokens = try model.generate(allocator, &prompt_tokens, .{
+        .max_new_tokens = 3,
+    });
+    defer allocator.free(gen_tokens);
+
+    try std.testing.expectEqual(@as(usize, 6), gen_tokens.len); // 3 prompt + 3 generated
+    try std.testing.expectEqualSlices(usize, &prompt_tokens, gen_tokens[0..3]);
+    for (gen_tokens[3..]) |tok| {
+        try std.testing.expect(tok < 32);
+    }
+}

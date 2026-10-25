@@ -413,6 +413,8 @@
   - [x] 将全部核心计算图前向算子（`matmul`、`softmax`、`rmsNorm`、`mulScalar`、`add`、`mul`、`gelu`、`rope`、`batchMatMul`）改由 `backend.ops.*` 多后端门面分派；
   - [x] 在 `Graph.runBackward` 启动前自动同步反向拓扑内中间激活张量 (`syncHost()`)，并在优化器更新参数后自动重置过期显存句柄，实现端到端训练数值完全一致。
 
-- [ ] **5.6 模型层 (Gemma 4 & GPT) 在 NVIDIA 显卡上的端到端自回归流式生成验证**
-  - [ ] 在 `Gemma4E4BForCausalLM` 与 `GPT` 的 `generate()` / `Generation.next()` 中接入 CUDA 路径；
-  - [ ] 在 Linux / WSL2 / Windows 带有 NVIDIA GPU 的机器上运行基准测试，验证首字延迟 (TTFT) 与自回归流式生成速率 (token/s)，达成跨硬件平台的端到端生成对齐。
+- [x] **5.6 规范化 nn.Module KVCache 机制与模型层 (GPT & Gemma 4) 自回归流式生成**
+  - [x] 在 `CausalSelfAttention`、`TransformerBlock`、`TransformerDecoder` 与 `GPT` 中全面统一接入 `forwardWithCache`，将 KV 缓存机制作为一等公民完整融入 `nn.Module`，消除以往必须脱离 Module 编写私有推理实现的架构缺陷；
+  - [x] 为 `models.GPT` 实现全生命周期自回归流式生成循环 `generate(allocator, prompt_tokens, options)`，支持 Prefill 与单步 Decode 自适应切换，并通过单元测试确认逐步增量解码与全序列前向输出 100% 位一致；
+  - [x] 扩展纯 PTX 批处理矩阵乘法 (BMM)、`embedding_kernel` 与 `softcap_kernel`，彻底清除 `autodiff` 内部对 `backend.offload` 的最后单点绑定；
+  - [ ] 在 Linux / WSL2 / Windows 带有 NVIDIA GPU 的物理机上运行 CUDA 端到端基准测试，验证首字延迟 (TTFT) 与自回归流式生成速率 (token/s)。

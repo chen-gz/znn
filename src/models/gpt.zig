@@ -3,6 +3,7 @@
 //! 包含标准 GPT 模型配置 (`GPTConfig`)、堆叠变换器解码器 (`TransformerDecoder`) 与通用模型生成器 (`GPT`)。
 
 const std = @import("std");
+const backend = @import("../backend.zig");
 const autodiff = @import("../autodiff.zig");
 const tensor = @import("../tensor.zig");
 const nn = @import("../nn.zig");
@@ -54,12 +55,18 @@ pub fn TransformerDecoder(comptime n_layer: usize) type {
 
         /// 解码器主干网络的前向传播流程
         pub fn forward(self: *const Self, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+            return self.forwardWithCache(graph, x, null);
+        }
+
+        /// 支持键值缓存 (Key-Value Cache, KVCache) 的前向传播流程
+        pub fn forwardWithCache(self: *const Self, graph: *autodiff.Graph, x: *Tensor, caches: ?[]nn.KVCache) !*Tensor {
             const module_scope = try enterModuleScope(graph, self);
             defer module_scope.exit();
             var current_x = x;
             // 依次贯穿每一层变换器块 (Transformer Block)
-            for (self.h) |layer| {
-                current_x = try layer.forward(graph, current_x);
+            for (self.h, 0..) |layer, i| {
+                const layer_cache = if (caches) |c| &c[i] else null;
+                current_x = try layer.forwardWithCache(graph, current_x, layer_cache);
             }
 
             // 执行最后一层均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) 映射输出
@@ -124,6 +131,17 @@ pub fn GPT(comptime config: GPTConfig) type {
             };
         }
 
+        /// 生成选项配置
+        pub const GenerateOptions = struct {
+            max_new_tokens: usize = 32,
+            stop_tokens: []const usize = &.{},
+            device: backend.DeviceType = .cpu,
+
+            pub fn defaultOptions() GenerateOptions {
+                return .{};
+            }
+        };
+
         /// 模块标准数学变换公式
         pub const formula = "\\text{logits} = \\text{GPT}(\\text{TokenIDs}; \\theta) \\rightarrow [B, T, V]";
 
@@ -131,6 +149,11 @@ pub fn GPT(comptime config: GPTConfig) type {
         /// 输入 x 为包含词元标识符 (Token Identifier, Token ID) 的二维张量 (2-Dimensional Tensor, 2D，支持 `*Tensor` 或 `*GenericTensor(IntT)`)，形状为 [B, T]
         /// 输出为未归一化的预测对数几率 (Logits)，形状为三维 (3-Dimensional, 3D): [B, T, vocab_size]
         pub fn forward(self: *const Self, graph: *autodiff.Graph, x: anytype) !*Tensor {
+            return self.forwardWithCache(graph, x, null, 0);
+        }
+
+        /// 支持键值缓存 (Key-Value Cache, KVCache) 与时间偏移量的前向推理传播流程
+        pub fn forwardWithCache(self: *const Self, graph: *autodiff.Graph, x: anytype, caches: ?[]nn.KVCache, start_pos: usize) !*Tensor {
             const module_scope = try enterModuleScope(graph, self);
             defer module_scope.exit();
             const B = x.shape.dims[0];
@@ -139,11 +162,11 @@ pub fn GPT(comptime config: GPTConfig) type {
             // 1. 获取词元 (Token) 嵌入向量: [B, T] -> [B, T, n_embd]
             const tok_emb = try self.token_embedding.forward(graph, x);
 
-            // 2. 生成对应的时间/位置索引 [0, 1, 2, ... T-1]，并将其转换为二维 (2-Dimensional, 2D) 位置张量 (Tensor) [B, T]
+            // 2. 生成对应的时间/位置索引 [start_pos, start_pos + 1, ... start_pos + T - 1]，并将其转换为二维 (2-Dimensional, 2D) 位置张量 (Tensor) [B, T]
             const pos_node = try graph.tensorND(&.{ B, T }, false);
             for (0..B) |b| {
                 for (0..T) |t| {
-                    pos_node.data[b * T + t] = @as(f32, @floatFromInt(t));
+                    pos_node.data[b * T + t] = @as(f32, @floatFromInt(start_pos + t));
                 }
             }
             // 位置索引由输入形状在模型内部生成，属于生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 自身的常量缓冲区，而非模型输入
@@ -163,7 +186,7 @@ pub fn GPT(comptime config: GPTConfig) type {
 
             // 5. 将混合后的输入送进层叠的变换器解码器 (Transformer Decoder) 主干网络中依次计算
             // 输出形状保持为: [B, T, n_embd]
-            const decoder_out = try self.decoder.forward(graph, h_x);
+            const decoder_out = try self.decoder.forwardWithCache(graph, h_x, caches);
 
             // 6. 将输出展平为二维 (2-Dimensional, 2D)，以便进行最终分类头的全连接投影计算: [B, T, n_embd] -> [B*T, n_embd]
             const ln_x_2d = try graph.reshape(decoder_out, &.{ B * T, config.n_embd });
@@ -173,6 +196,94 @@ pub fn GPT(comptime config: GPTConfig) type {
 
             // 8. 将形状重塑还原成三维 (3-Dimensional, 3D) 形式返回: [B, T, vocab_size]
             return try graph.reshape(logits_2d, &.{ B, T, config.vocab_size });
+        }
+
+        /// 自回归流式生成循环 (基于 KVCache 与无梯度计算图)
+        pub fn generate(
+            self: *const Self,
+            allocator: std.mem.Allocator,
+            prompt_tokens: []const usize,
+            options: GenerateOptions,
+        ) ![]usize {
+            if (prompt_tokens.len == 0) return error.EmptyPrompt;
+            var output = try std.ArrayList(usize).initCapacity(allocator, prompt_tokens.len + options.max_new_tokens);
+            errdefer output.deinit(allocator);
+            try output.appendSlice(allocator, prompt_tokens);
+
+            var caches: [config.n_layer]nn.KVCache = undefined;
+            for (0..config.n_layer) |i| {
+                caches[i] = try nn.KVCache.init(allocator, 1, config.n_head, config.block_size, config.n_embd / config.n_head);
+            }
+            defer {
+                for (0..config.n_layer) |i| {
+                    caches[i].deinit(allocator);
+                }
+            }
+
+            // 1. Prefill 阶段
+            var g_prefill = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = options.device });
+            defer g_prefill.deinit();
+
+            const prompt_tensor = try g_prefill.tensorND(&.{ 1, prompt_tokens.len }, false);
+            for (prompt_tokens, 0..) |tok, i| {
+                prompt_tensor.data[i] = @floatFromInt(tok);
+            }
+
+            const prefill_logits = try self.forwardWithCache(&g_prefill, prompt_tensor, &caches, 0);
+            if (prefill_logits.device_array != null) {
+                try prefill_logits.syncHost(allocator);
+            }
+
+            const vocab_size = config.vocab_size;
+            const last_pos = prompt_tokens.len - 1;
+            var best_tok: usize = 0;
+            var max_logit: f32 = -std.math.inf(f32);
+            for (0..vocab_size) |v| {
+                const val = prefill_logits.data[last_pos * vocab_size + v];
+                if (val > max_logit) {
+                    max_logit = val;
+                    best_tok = v;
+                }
+            }
+            try output.append(allocator, best_tok);
+
+            // 2. Decode 阶段 (单步自回归)
+            var current_tok = best_tok;
+            var step: usize = 1;
+            while (step < options.max_new_tokens) : (step += 1) {
+                for (options.stop_tokens) |st| {
+                    if (current_tok == st) return output.toOwnedSlice(allocator);
+                }
+
+                const curr_pos = prompt_tokens.len + step - 1;
+                if (curr_pos >= config.block_size) break;
+
+                var g_step = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = options.device });
+                defer g_step.deinit();
+
+                const step_tensor = try g_step.tensorND(&.{ 1, 1 }, false);
+                step_tensor.data[0] = @floatFromInt(current_tok);
+
+                const step_logits = try self.forwardWithCache(&g_step, step_tensor, &caches, curr_pos);
+                if (step_logits.device_array != null) {
+                    try step_logits.syncHost(allocator);
+                }
+
+                var next_tok: usize = 0;
+                var next_max: f32 = -std.math.inf(f32);
+                for (0..vocab_size) |v| {
+                    const val = step_logits.data[v];
+                    if (val > next_max) {
+                        next_max = val;
+                        next_tok = v;
+                    }
+                }
+
+                try output.append(allocator, next_tok);
+                current_tok = next_tok;
+            }
+
+            return output.toOwnedSlice(allocator);
         }
     };
 }

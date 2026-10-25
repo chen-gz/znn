@@ -558,6 +558,14 @@ pub const CausalSelfAttention = struct {
     /// 输入 x 的形状必须为三维张量 (3-Dimensional Tensor, 3D): [B, T, C]
     /// 其中 B 为批次大小 (Batch Size, B)，T 为时间步序列长度 (Sequence Length, T)，C 为通道特征维数 (Embedding Dimension, C / n_embd)
     pub fn forward(self: *const CausalSelfAttention, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        return self.forwardWithCache(graph, x, null);
+    }
+
+    /// 支持键值缓存 (Key-Value Cache, KVCache) 的统一前向注意力传播流程：
+    /// - 若 cache == null：执行标准全序列自注意力；
+    /// - 若 cache.curr_len == 0 (Prefill 阶段)：全量计算并将 [B, n_kv, T, hs] 填入缓存；
+    /// - 若 cache.curr_len > 0 (Decode 增量生成阶段，T = 1)：单步写入缓存并对历史全量键值做注意力。
+    pub fn forwardWithCache(self: *const CausalSelfAttention, graph: *autodiff.Graph, x: *Tensor, cache: ?*KVCache) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
@@ -578,9 +586,60 @@ pub const CausalSelfAttention = struct {
         const k = try splitHeads(graph, k_raw, B, T, n_kv, hs);
         const v = try splitHeads(graph, v_raw, B, T, n_kv, hs);
 
-        // 3. 委托给缩放点积注意力核心子模块 (ScaledDotProductAttention) 执行 softmax(Q K^T / sqrt(hs) + M) V；
-        // n_kv < nh 时按分组查询注意力 (Grouped-Query Attention, GQA) 由每个键值头服务 nh / n_kv 个查询头，不复制键值
-        const y_4d = try self.core.forward(graph, q, k, v);
+        // 3. 计算注意力并支持键值缓存 (KVCache) 增量更新
+        var y_4d: *Tensor = undefined;
+        if (cache) |c| {
+            if (c.curr_len == 0) {
+                // Prefill 阶段
+                if (c.curr_len + T > c.max_len) return error.ContextWindowExceeded;
+                for (0..B) |b| {
+                    for (0..n_kv) |kv_h| {
+                        for (0..T) |t| {
+                            const src_idx = (b * n_kv + kv_h) * T * hs + t * hs;
+                            const dst_idx = ((b * n_kv + kv_h) * c.max_len + t) * hs;
+                            @memcpy(c.k.data[dst_idx .. dst_idx + hs], k.data[src_idx .. src_idx + hs]);
+                            @memcpy(c.v.data[dst_idx .. dst_idx + hs], v.data[src_idx .. src_idx + hs]);
+                        }
+                    }
+                }
+                c.curr_len = T;
+                y_4d = try self.core.forward(graph, q, k, v);
+            } else {
+                // Decode 阶段 (T = 1)
+                if (c.curr_len >= c.max_len) return error.ContextWindowExceeded;
+                const t0 = c.curr_len;
+                for (0..B) |b| {
+                    for (0..n_kv) |kv_h| {
+                        const src_idx = (b * n_kv + kv_h) * hs;
+                        const dst_idx = ((b * n_kv + kv_h) * c.max_len + t0) * hs;
+                        @memcpy(c.k.data[dst_idx .. dst_idx + hs], k.data[src_idx .. src_idx + hs]);
+                        @memcpy(c.v.data[dst_idx .. dst_idx + hs], v.data[src_idx .. src_idx + hs]);
+                    }
+                }
+                c.curr_len += 1;
+                const curr_len = c.curr_len;
+
+                const k_view = try graph.tensorND(&.{ B, n_kv, curr_len, hs }, false);
+                const v_view = try graph.tensorND(&.{ B, n_kv, curr_len, hs }, false);
+                for (0..B) |b| {
+                    for (0..n_kv) |kv_h| {
+                        const src_base = (b * n_kv + kv_h) * c.max_len * hs;
+                        const dst_base = (b * n_kv + kv_h) * curr_len * hs;
+                        @memcpy(k_view.data[dst_base .. dst_base + curr_len * hs], c.k.data[src_base .. src_base + curr_len * hs]);
+                        @memcpy(v_view.data[dst_base .. dst_base + curr_len * hs], c.v.data[src_base .. src_base + curr_len * hs]);
+                    }
+                }
+
+                y_4d = try graph.attention(q, k_view, v_view, .{
+                    .mask = self.core.mask,
+                    .kv_groups = nh / n_kv,
+                    .q_pos0 = curr_len - 1,
+                    .k_pos0 = 0,
+                });
+            }
+        } else {
+            y_4d = try self.core.forward(graph, q, k, v);
+        }
 
         // 4. 将多头的输出转置回去并整合: [B, nh, T, hs] -> [B, T, C]
         const y_3d = try mergeHeads(graph, y_4d, B, T, nh, hs);

@@ -723,7 +723,7 @@ pub fn rope(self: *Graph, X_in: *Tensor, start_pos: usize, options: tensor_mod.R
     if (X.shape.len == 0) return error.IncompatibleDimensions;
     const req_grad = self.enable_grad and X.requires_grad;
     const D = X.shape.dims[X.shape.len - 1];
-    const Y = if (self.useDevice() and backend.offload.ropeSupported(D, options)) blk: {
+    const Y = if (self.useDevice() and backend.ops.ropeSupported(D, options)) blk: {
         const out = try self.tensorND(X.shape.dims[0..X.shape.len], req_grad);
         try backend.ops.rope(X, out, options, start_pos, self.options.device, self.options.mlx_stream);
         break :blk out;
@@ -769,9 +769,13 @@ pub fn attention(self: *Graph, q_in: *Tensor, k_in: *Tensor, v_in: *Tensor, opti
 
     const out = try self.tensorND(&.{ shape.batch, shape.q_heads, shape.tq, shape.v_dim }, req_grad);
     const probs: []f32 = if (req_grad) try allocator.alloc(f32, shape.probsLen()) else &.{};
+    var dispatched_device = false;
     if (self.useDevice() and !req_grad) {
-        try backend.offload.attention(self.backing_allocator, q, k, v, out, options.resolveScale(shape.head_dim), options.mask, options.q_pos0, options.k_pos0, self.options.mlx_stream);
-    } else {
+        if (backend.ops.attention(self.backing_allocator, q, k, v, out, options.resolveScale(shape.head_dim), options.mask, options.q_pos0, options.k_pos0, self.options.device, self.options.mlx_stream)) |_| {
+            dispatched_device = true;
+        } else |_| {}
+    }
+    if (!dispatched_device) {
         try tensor_mod.attention_kernels.attentionInto(q, k, v, out, if (req_grad) probs else null, options, self.backing_allocator);
     }
     return self.registerSingleOutputOp(
@@ -822,36 +826,16 @@ pub fn embedding(self: *Graph, W_in: *Tensor, X: anytype) !*Tensor {
     };
 
     const req_grad = self.enable_grad and W.requires_grad;
+    var out_shape_dims: [8]usize = undefined;
+    for (0..x_tensor.shape.len) |d| {
+        out_shape_dims[d] = x_tensor.shape.dims[d];
+    }
+    out_shape_dims[x_tensor.shape.len] = W.shape.dims[1];
+    const shape_slice = out_shape_dims[0 .. x_tensor.shape.len + 1];
+
     if (self.useDevice() and (W.device.isGpu() or W.device_array != null)) {
-        var w_b = try backend.offload.borrowArray(W);
-        defer w_b.deinit();
-        var x_b = try backend.offload.borrowArray(x_tensor);
-        defer x_b.deinit();
-        var x_i32 = try x_b.arr.astype(.int32, self.options.mlx_stream);
-        defer x_i32.deinit();
-        const res = try w_b.arr.takeAxis(x_i32, 0, self.options.mlx_stream);
-        var out_shape_dims: [8]usize = undefined;
-        for (0..x_tensor.shape.len) |d| {
-            out_shape_dims[d] = x_tensor.shape.dims[d];
-        }
-        out_shape_dims[x_tensor.shape.len] = W.shape.dims[1];
-        const shape = tensor_mod.Shape.init(out_shape_dims[0 .. x_tensor.shape.len + 1]);
-        const numel = shape.numel();
-        const Y = try allocator.create(Tensor);
-        Y.* = Tensor{
-            .data = if (req_grad) try allocator.alloc(f32, numel) else &.{},
-            .grad = if (req_grad) try allocator.alloc(f32, numel) else &.{},
-            .shape = shape,
-            .strides = tensor_mod.computeContiguousStrides(shape),
-            .requires_grad = req_grad,
-            .creator = null,
-            .device = self.options.device,
-            .device_array = .{ .mlx = res },
-            .is_graph_owned = true,
-            .scope = self.currentScope(),
-        };
-        if (req_grad) @memset(Y.grad, 0.0);
-        try self.tensors.append(self.backing_allocator, Y);
+        const Y = try self.tensorND(shape_slice, req_grad);
+        try backend.ops.embedding(W, x_tensor, Y, self.options.device, self.options.mlx_stream);
         return self.registerSingleOutputOp(
             Y,
             &.{ W, x_tensor },

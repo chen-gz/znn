@@ -12,6 +12,7 @@ const cblas = @import("cblas.zig");
 const vec_math = @import("vec_math.zig");
 const activation = @import("activation.zig");
 const rope_mod = @import("rope.zig");
+const attention_mask = @import("attention_mask.zig");
 
 pub const OpError = offload.OffloadError || cuda.CudaError || error{
     DeviceNotSupported,
@@ -380,6 +381,110 @@ pub fn cachedAttention(
     }
 }
 
+/// 检查旋转位置编码配置在当前硬件上是否支持
+pub fn ropeSupported(head_dim: usize, options: rope_mod.RopeOptions) bool {
+    return offload.ropeSupported(head_dim, options);
+}
+
+/// 词元嵌入查表多后端分派 (Token Embedding Lookup Dispatcher)
+pub fn embedding(
+    W: anytype,
+    X: anytype,
+    out: anytype,
+    dev: DeviceType,
+    stream: anytype,
+) OpError!void {
+    if (dev.isGpu() and device_mod.isAvailable(dev)) {
+        const backend_type = device_mod.activeBackend(dev);
+        if (backend_type == .cuda) {
+            var w_b = try borrowCudaArray(W);
+            defer w_b.deinit();
+            var x_b = try borrowCudaArray(X);
+            defer x_b.deinit();
+            const res = try cuda.Array.embedding(w_b.arr, x_b.arr, null);
+            try storeCudaOutput(out, res);
+            return;
+        } else if (backend_type == .mlx) {
+            var w_b = try offload.borrowArray(W);
+            defer w_b.deinit();
+            var x_b = try offload.borrowArray(X);
+            defer x_b.deinit();
+            var x_i32 = try x_b.arr.astype(.int32, stream);
+            defer x_i32.deinit();
+            const res = try w_b.arr.takeAxis(x_i32, 0, stream);
+            try offload.storeOutput(out, res);
+            return;
+        }
+    }
+
+    // CPU 查表回退路径
+    const D = W.shape.dims[1];
+    const V = W.shape.dims[0];
+    for (0..X.data.len) |i| {
+        const idx: usize = @intFromFloat(X.data[i]);
+        if (idx < V) {
+            @memcpy(out.data[i * D .. (i + 1) * D], W.data[idx * D .. (idx + 1) * D]);
+        } else {
+            @memset(out.data[i * D .. (i + 1) * D], 0.0);
+        }
+    }
+}
+
+/// 软截断算子多后端分派 (Soft Capping Dispatcher): y = cap * tanh(x / cap)
+pub fn softcap(
+    A: anytype,
+    out: anytype,
+    cap: f32,
+    dev: DeviceType,
+    stream: anytype,
+) OpError!void {
+    if (cap <= 0.0) return;
+    if (dev.isGpu() and device_mod.isAvailable(dev)) {
+        const backend_type = device_mod.activeBackend(dev);
+        if (backend_type == .cuda) {
+            var a_b = try borrowCudaArray(A);
+            defer a_b.deinit();
+            const res = try cuda.Array.softcap(a_b.arr, cap, null);
+            try storeCudaOutput(out, res);
+            return;
+        } else if (backend_type == .mlx) {
+            var a_b = try offload.borrowArray(A);
+            defer a_b.deinit();
+            const res = try offload.logits_processor.softcapLogits(a_b.arr, cap, stream);
+            try offload.storeOutput(out, res);
+            return;
+        }
+    }
+
+    // CPU 软截断回退路径
+    for (0..A.data.len) |i| {
+        out.data[i] = cap * std.math.tanh(A.data[i] / cap);
+    }
+}
+
+/// 缩放点积注意力多后端分派 (Scaled Dot-Product Attention Dispatcher, SDPA Dispatcher)
+pub fn attention(
+    allocator: std.mem.Allocator,
+    queries: anytype,
+    keys: anytype,
+    values: anytype,
+    out: anytype,
+    scale: f32,
+    mask: attention_mask.Mask,
+    q_pos0: usize,
+    k_pos0: usize,
+    dev: DeviceType,
+    stream: anytype,
+) OpError!void {
+    if (dev.isGpu() and device_mod.isAvailable(dev)) {
+        const backend_type = device_mod.activeBackend(dev);
+        if (backend_type == .mlx) {
+            return offload.attention(allocator, queries, keys, values, out, scale, mask, q_pos0, k_pos0, stream);
+        }
+    }
+    return error.DeviceNotSupported;
+}
+
 test "ops: multi-backend dispatcher tests" {
     // 构造测试张量模拟结构体
     const MockTensor = struct {
@@ -439,5 +544,23 @@ test "ops: multi-backend dispatcher tests" {
         // 验证 Softmax 分派
         try softmax(&A, &C, -1, .gpu, null);
         try std.testing.expectApproxEqAbs(@as(f32, 1.0), C.data[0] + C.data[1], 0.001);
+
+        // 验证 Softcap 分派
+        try softcap(&A, &C, 5.0, .gpu, null);
+        try std.testing.expect(C.data[0] > 0.0 and C.data[0] < 5.0);
+
+        // 验证 Embedding 分派
+        var w_data = [_]f32{ 10.0, 20.0, 30.0, 40.0, 50.0, 60.0 };
+        var idx_data = [_]f32{ 0.0, 2.0 };
+        var emb_out_data = [_]f32{ 0.0, 0.0, 0.0, 0.0 };
+        var W_emb = MockTensor{ .data = &w_data, .shape = .{ .dims = .{ 3, 2, 0, 0 }, .len = 2 } };
+        var Idx = MockTensor{ .data = &idx_data, .shape = .{ .dims = .{ 2, 0, 0, 0 }, .len = 1 } };
+        var Out_emb = MockTensor{ .data = &emb_out_data, .shape = .{ .dims = .{ 2, 2, 0, 0 }, .len = 2 } };
+
+        try embedding(&W_emb, &Idx, &Out_emb, .gpu, null);
+        try std.testing.expectEqual(@as(f32, 10.0), Out_emb.data[0]);
+        try std.testing.expectEqual(@as(f32, 20.0), Out_emb.data[1]);
+        try std.testing.expectEqual(@as(f32, 50.0), Out_emb.data[2]);
+        try std.testing.expectEqual(@as(f32, 60.0), Out_emb.data[3]);
     }
 }

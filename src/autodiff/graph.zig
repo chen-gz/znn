@@ -698,13 +698,9 @@ pub const Graph = struct {
         if (cap <= 0.0) return A_in;
         const allocator = self.arena.allocator();
         const req_grad = self.enable_grad and A_in.requires_grad;
-        if (self.useDevice() and self.options.device == .gpu) {
-            var a_b = try backend.offload.borrowArray(A_in);
-            defer a_b.deinit();
-            const res = try backend.logits_processor.softcapLogits(a_b.arr, cap, self.options.mlx_stream);
+        if (self.useDevice()) {
             const out = try self.tensorND(A_in.shape.slice(), req_grad);
-            out.device_array = .{ .mlx = res };
-            out.device = .gpu;
+            try backend.ops.softcap(A_in, out, cap, self.options.device, self.options.mlx_stream);
             return self.registerSingleOutputOp(
                 out,
                 &.{A_in},

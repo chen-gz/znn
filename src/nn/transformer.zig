@@ -574,12 +574,17 @@ pub const TransformerBlock = struct {
 
     /// 前向传播流程：x -> Block(x) -> out
     pub fn forward(self: *const TransformerBlock, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        return self.forwardWithCache(graph, x, null);
+    }
+
+    /// 支持键值缓存 (Key-Value Cache, KVCache) 的前向传播流程
+    pub fn forwardWithCache(self: *const TransformerBlock, graph: *autodiff.Graph, x: *Tensor, cache: ?*KVCache) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
         // 1. 第一条支路: 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm) -> 注意力 (Attention)
         const x_norm1 = try self.ln_1.forward(graph, x);
 
-        const x_attn = try self.attn.forward(graph, x_norm1);
+        const x_attn = try self.attn.forwardWithCache(graph, x_norm1, cache);
 
         // 2. 第一条残差混合: x1 = x_l + Attention(RMSNorm(x_l))
         const x1 = try graph.add(x, x_attn);
