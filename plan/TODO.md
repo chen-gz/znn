@@ -375,9 +375,42 @@
   - [ ] 提供 Python 脚本工具将 PyTorch `.pt` / `.safetensors` 权重无缝转换为 `znn` 二进制结构。
   - [ ] 导出 ONNX 计算图与权重。
 
-- [ ] **4.3 非 Apple GPU 计算后端探索 (Other GPU Backends，Apple Silicon Metal 见 2.5)**
-  - [ ] 评估 CUDA 后端（`std.DynLib` 动态加载 `libcuda` / `libcublas`，自定义内核经 NVRTC 运行期编译）。
+- [x] **4.3 非 Apple GPU 计算后端探索 (Other GPU Backends，Apple Silicon Metal 见 2.5)**
+  - [x] 评估并落地 CUDA 驱动级后端（基于 `std.DynLib` 动态加载 `libcuda.so.1` / `nvcuda.dll`，8 个核心深度学习算子内核经纯 PTX 虚拟指令集运行时驱动 JIT 编译，零外部 CUDA Toolkit 工具链依赖）。
   - [ ] 探索通过 WebGPU / Vulkan Compute Shaders 实现跨平台纯图形 API 训练与推理后端。
 
 - [ ] **4.4 训练可观测性 (Training Telemetry)**
   - [ ] 终端训练面板：实时显示 tokens/s、吞吐、估算 TFLOPS、当前学习率与剩余时间。
+
+---
+
+### 🚀 Phase 5 (当前进行中): 异构多后端硬件抽象层 (HAL) 彻底解耦与 CUDA 全链路贯通
+
+> 📌 **核心目标**：彻底消除 `offload.zig` 与 `Tensor` 中对 Apple MLX 的历史单点硬编码，构建真正中立、平等的硬件抽象层（Hardware Abstraction Layer, HAL），使计算图调度、显存常驻与自回归生成（含 KV Cache）在 Apple Metal (MLX) 与 NVIDIA GPU (CUDA) 之间实现 100% 透明复用与零拷贝流式执行。
+
+- [ ] **5.1 统一显存常驻句柄 (`DeviceArray`) 消除 `Tensor` 胖字段耦合**
+  - [ ] 在 `src/backend/device.zig` 定义跨硬件通用显存句柄联合体：
+    `pub const DeviceArray = union(enum) { mlx: mlx.Array, cuda: cuda.Array };`
+  - [ ] 重构 `src/tensor/core.zig` 中的 `Tensor` 结构体：消除独立的 `device_array` (MLX) 与 `cuda_array` (CUDA) 字段，统一为 `device_array: ?backend.DeviceArray = null`。
+  - [ ] 统一重构 `Tensor.toDevice(dev)`、`Tensor.toDeviceArray()`、`Tensor.copyFromDeviceArray()` 与 `Tensor.syncHost(?allocator)`。
+
+- [ ] **5.2 消除 CUDA 逐算子主机传输开销，实现图内零拷贝显存流转 (Zero-Copy CUDA Pipeline)**
+  - [ ] 在 `src/backend/ops.zig` 中引入通用的 `borrowDeviceArray(t)` 与 `storeDeviceOutput(out, res)` 原语；
+  - [ ] 若输入 `Tensor` 已经在 CUDA 显存中常驻，算子直接借用 `CUdeviceptr` 显存地址，无需每次在 CPU 主机缓冲区与显存间重复执行 `fromTensor` (HtoD) 与 `copyToTensor` (DtoH)；
+  - [ ] 确保计算图在 `device = .cuda` 模式下前向执行时，中间激活数据 100% 留在 GPU 显存内，仅在必要时（如取损失标量或最终采样）才拉回 CPU。
+
+- [ ] **5.3 厘清 `offload.zig` 架构职责，剥离 MLX 硬编码**
+  - [ ] 现状审计：当前 `src/backend/offload.zig` 名义为“通用卸载”，实则写满了 `mlx.Array`、`mlx.Stream` 及 MLX 静态图编译特化逻辑；
+  - [ ] 重构方案：
+    - 将 MLX 专有执行流与静态图融合闭包剥离收敛至 `src/backend/mlx_offload.zig`；
+    - 让 `src/backend/ops.zig`（或重构后的中立 `offload.zig`）作为真正的多后端统一 HAL 调度门面，仅持有平台无关的算子签名与统一数据结构。
+
+- [ ] **5.4 CUDA 键值缓存与注意力内核 (`CudaKvCache` / `cachedAttention`)**
+  - [ ] 目前 `ops.cachedAttention` 直接硬下发至 MLX，CUDA 尚缺 KV Cache 支持；
+  - [ ] 在 `src/backend/cuda.zig` 中实现基于 `cuda.Array` 的显存块键值缓存 `CudaKvCache`（支持预分配容量、定点切片覆写、滑动窗口与 `truncate` 截断）；
+  - [ ] 在 `src/backend/cuda_kernels.zig` 中新增支持因果掩码与滑动窗口掩码的 Cache-Aware 注意力 PTX 内核；
+  - [ ] 使 `ops.cachedAttention` 能够无缝根据 `device` 分派至 CUDA 执行。
+
+- [ ] **5.5 模型层 (Gemma 4 & GPT) 在 NVIDIA 显卡上的端到端自回归流式生成验证**
+  - [ ] 在 `Gemma4E4BForCausalLM` 与 `GPT` 的 `generate()` / `Generation.next()` 中接入 CUDA 路径；
+  - [ ] 在 Linux / WSL2 / Windows 带有 NVIDIA GPU 的机器上运行基准测试，验证首字延迟 (TTFT) 与自回归流式生成速率 (token/s)，达成跨硬件平台的端到端生成对齐。
