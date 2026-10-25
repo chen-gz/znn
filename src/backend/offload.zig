@@ -138,7 +138,7 @@ pub fn rmsNorm(
         if (weight) |w| {
             w_b = try borrowArray(w);
         }
-    } else {
+    } else if (@typeInfo(WT) != .null) {
         w_b = try borrowArray(weight);
     }
     const D = X.shape.dims[X.shape.len - 1];
