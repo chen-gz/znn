@@ -19,6 +19,25 @@ pub fn isAvailable() bool {
 
 pub const Stream = mlx.Stream;
 pub const DeviceType = mlx.DeviceType;
+pub const Array = mlx.Array;
+pub const DeviceArray = mlx.Array;
+pub const VectorArray = mlx.VectorArray;
+pub const Closure = mlx.Closure;
+
+/// 硬件内存优化与编译控制
+pub const configureOptimalMemory = mlx.configureOptimalWiredMemory;
+pub const enableCompile = mlx.enableCompile;
+pub const setCompileMode = mlx.setCompileMode;
+
+/// 硬件加速算子与内核接口
+pub const compileFn = mlx.compileFn;
+pub const compileGeluMul = mlx.Array.compileGeluMul;
+pub const compileAddMul = mlx.Array.compileAddMul;
+pub const fastRmsNorm = mlx.Array.fastRmsNorm;
+pub const fastScaledDotProductAttention = mlx.Array.fastScaledDotProductAttention;
+pub const fusedGeluMul = mlx.Array.fusedGeluMul;
+pub const fusedAddMul = mlx.Array.fusedAddMul;
+pub const evalMultiple = mlx.Array.evalMultiple;
 
 pub const OffloadError = mlx.MlxError || error{
     OffloadNotSupported,
@@ -1187,6 +1206,7 @@ pub const GpuKvCache = struct {
 // ============================================================================
 
 pub const mlx_blocks = @import("mlx_blocks.zig");
+pub const blocks = mlx_blocks;
 pub const Rope = mlx_blocks.Rope;
 pub const projectHeads = mlx_blocks.projectHeads;
 pub const gatedMlp = mlx_blocks.gatedMlp;

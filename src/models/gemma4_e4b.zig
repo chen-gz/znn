@@ -14,9 +14,7 @@ const autodiff = @import("../autodiff.zig");
 const gemma4 = @import("gemma4.zig");
 const gemma4_q4 = @import("gemma4_q4.zig");
 
-const mlx = backend.mlx;
 const offload = backend.offload;
-const mlx_blocks = offload.mlx_blocks;
 const logits_processor = offload.logits_processor;
 const sampling = backend.sampling;
 const safetensors = backend.safetensors;
@@ -46,7 +44,7 @@ pub const SamplingOptions = sampling.SamplingOptions;
 pub const SafetensorsArchive = safetensors.SafetensorsArchive;
 pub const TensorMeta = safetensors.TensorMeta;
 pub const GeluApproximation = activation.GeluApproximation;
-pub const GpuRope = mlx_blocks.Rope;
+pub const GpuRope = offload.Rope;
 
 pub const default_generation = gemma4.default_generation;
 pub const num_kv_layers: usize = 42 - 18;
@@ -140,9 +138,9 @@ pub const E4BDirectCacheReader = struct {
         );
     }
 
-    pub fn readNorm(self: *E4BDirectCacheReader, dim: usize) !mlx.Array {
+    pub fn readNorm(self: *E4BDirectCacheReader, dim: usize) !offload.Array {
         const bytes = try self.readBytes(dim * @sizeOf(u16));
-        return mlx.Array.fromRawData(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
+        return offload.Array.fromRawData(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
     }
 };
 pub const DirectCacheReader = E4BDirectCacheReader;
@@ -171,15 +169,15 @@ pub const GenerateOptions = E4BGenerateOptions;
 pub const PleWeights = struct {
     embed_tokens_per_layer: Q4Weights,
     model_proj: Q4Weights,
-    proj_norm_w: mlx.Array,
+    proj_norm_w: offload.Array,
     num_layers: usize,
     ple_dim: usize,
     embed_scale: f32,
     proj_scale: f32,
     input_scale: f32,
-    embed_scale_arr: mlx.Array,
-    proj_scale_arr: mlx.Array,
-    input_scale_arr: mlx.Array,
+    embed_scale_arr: offload.Array,
+    proj_scale_arr: offload.Array,
+    input_scale_arr: offload.Array,
 
     pub fn deinit(self: *PleWeights) void {
         self.embed_tokens_per_layer.deinit();
@@ -194,12 +192,12 @@ pub const PleWeights = struct {
 /// 步首词元嵌入与逐层输入预计算静态编译上下文
 pub const PlePrepContext = struct {
     embed_tokens: Q4Weights,
-    sqrt_hidden_arr: mlx.Array,
+    sqrt_hidden_arr: offload.Array,
     ple: PleWeights,
     hidden_size: usize,
     rms_norm_eps: f32,
 
-    pub fn run(ctx: *const PlePrepContext, in_arrs: [1]mlx.Array) ![2]mlx.Array {
+    pub fn run(ctx: *const PlePrepContext, in_arrs: [1]offload.Array) ![2]offload.Array {
         const indices_arr = in_arrs[0];
         const T = indices_arr.dimSize(0);
         if (T == 0) return error.ShapeMismatch;
@@ -216,16 +214,16 @@ pub const PlePrepContext = struct {
 
         var ple_proj_raw = try ctx.ple.model_proj.forwardArray(x_cur, null);
         defer ple_proj_raw.deinit();
-        var ple_proj_scaled = try mlx.Array.multiply(ple_proj_raw, ctx.ple.proj_scale_arr, null);
+        var ple_proj_scaled = try offload.Array.multiply(ple_proj_raw, ctx.ple.proj_scale_arr, null);
         defer ple_proj_scaled.deinit();
         var ple_proj_4d = try ple_proj_scaled.reshape(&.{ 1, T, ctx.ple.num_layers, ctx.ple.ple_dim }, null);
         defer ple_proj_4d.deinit();
-        var ple_proj_normed = try mlx.Array.fastRmsNorm(ple_proj_4d, ctx.ple.proj_norm_w, ctx.rms_norm_eps, null);
+        var ple_proj_normed = try offload.fastRmsNorm(ple_proj_4d, ctx.ple.proj_norm_w, ctx.rms_norm_eps, null);
         defer ple_proj_normed.deinit();
 
-        var ple_sum = try mlx.Array.add(ple_proj_normed, ple_tokens_arr, null);
+        var ple_sum = try offload.Array.add(ple_proj_normed, ple_tokens_arr, null);
         defer ple_sum.deinit();
-        var ple_inputs = try mlx.Array.multiply(ple_sum, ctx.ple.input_scale_arr, null);
+        var ple_inputs = try offload.Array.multiply(ple_sum, ctx.ple.input_scale_arr, null);
         errdefer ple_inputs.deinit();
 
         return .{ x_cur, ple_inputs };
@@ -237,25 +235,25 @@ pub const GpuLayerE4B = struct {
     qkv_proj: Q4Weights,
     o_proj: Q4Weights,
 
-    input_norm_w: mlx.Array,
-    q_norm_w: mlx.Array,
-    k_norm_w: ?mlx.Array = null,
-    post_attn_w: mlx.Array,
-    pre_mlp_w: mlx.Array,
-    post_mlp_w: mlx.Array,
+    input_norm_w: offload.Array,
+    q_norm_w: offload.Array,
+    k_norm_w: ?offload.Array = null,
+    post_attn_w: offload.Array,
+    pre_mlp_w: offload.Array,
+    post_mlp_w: offload.Array,
 
     fused_gate_up: Q4Weights,
     down_proj: Q4Weights,
 
     ple_gate: Q4Weights,
     ple_proj: Q4Weights,
-    ple_norm_w: mlx.Array,
+    ple_norm_w: offload.Array,
 
     has_kv: bool,
     prev_kv_idx: usize,
     is_kv_shared_source: bool,
     layer_scalar: f32,
-    layer_scalar_w: ?mlx.Array = null,
+    layer_scalar_w: ?offload.Array = null,
     is_sliding: bool,
     sliding_window: usize,
     num_heads: usize,
@@ -264,21 +262,21 @@ pub const GpuLayerE4B = struct {
     rope: GpuRope,
     rms_norm_eps: f32,
     hidden_activation: GeluApproximation,
-    compiled_tail: ?mlx.Closure = null,
+    compiled_tail: ?offload.Closure = null,
 
     pub fn forwardTail(
         self: *const GpuLayerE4B,
-        x_in: mlx.Array,
-        o_out: mlx.Array,
-        ple_slice: mlx.Array,
+        x_in: offload.Array,
+        o_out: offload.Array,
+        ple_slice: offload.Array,
         s: ?Stream,
-    ) !mlx.Array {
-        var post_attn = try mlx.Array.fastRmsNorm(o_out, self.post_attn_w, self.rms_norm_eps, s);
+    ) !offload.Array {
+        var post_attn = try offload.fastRmsNorm(o_out, self.post_attn_w, self.rms_norm_eps, s);
         defer post_attn.deinit();
-        var x1 = try mlx_blocks.residualScale(x_in, post_attn, null, s);
+        var x1 = try offload.residualScale(x_in, post_attn, null, s);
         defer x1.deinit();
 
-        var post_mlp = try mlx_blocks.gatedMlp(
+        var post_mlp = try offload.gatedMlp(
             x1,
             &self.fused_gate_up,
             null,
@@ -290,31 +288,31 @@ pub const GpuLayerE4B = struct {
             s,
         );
         defer post_mlp.deinit();
-        var x2 = try mlx_blocks.residualScale(x1, post_mlp, null, s);
+        var x2 = try offload.residualScale(x1, post_mlp, null, s);
         defer x2.deinit();
 
         var ple_gate_raw = try self.ple_gate.forwardArray(x2, s);
         defer ple_gate_raw.deinit();
         var act_ple = try ple_gate_raw.gelu(self.hidden_activation, s);
         defer act_ple.deinit();
-        var ple_modulated = try mlx.Array.multiply(act_ple, ple_slice, s);
+        var ple_modulated = try offload.Array.multiply(act_ple, ple_slice, s);
         defer ple_modulated.deinit();
 
         var ple_projected = try self.ple_proj.forwardArray(ple_modulated, s);
         defer ple_projected.deinit();
-        var ple_normed = try mlx.Array.fastRmsNorm(ple_projected, self.ple_norm_w, self.rms_norm_eps, s);
+        var ple_normed = try offload.fastRmsNorm(ple_projected, self.ple_norm_w, self.rms_norm_eps, s);
         defer ple_normed.deinit();
 
-        return mlx_blocks.residualScale(x2, ple_normed, self.layer_scalar_w, s);
+        return offload.residualScale(x2, ple_normed, self.layer_scalar_w, s);
     }
 
-    pub fn tailRun(self: *const GpuLayerE4B, in_arrs: [3]mlx.Array) !mlx.Array {
+    pub fn tailRun(self: *const GpuLayerE4B, in_arrs: [3]offload.Array) !offload.Array {
         return self.forwardTail(in_arrs[0], in_arrs[1], in_arrs[2], null);
     }
 
     pub fn initCompiledTail(self: *GpuLayerE4B) void {
-        if (!mlx.has_mlx) return;
-        self.compiled_tail = mlx.compileFn(3, 1, GpuLayerE4B, tailRun, false, self) catch null;
+        if (!offload.isAvailable()) return;
+        self.compiled_tail = offload.compileFn(3, 1, GpuLayerE4B, tailRun, false, self) catch null;
     }
 
     pub fn deinit(self: *GpuLayerE4B) void {
@@ -351,7 +349,7 @@ const WeightSource = struct {
 
     const LayerScalar = struct {
         value: f32,
-        arr: ?mlx.Array,
+        arr: ?offload.Array,
     };
 
     fn writeCache(self: *WeightSource, bytes: []const u8) void {
@@ -378,14 +376,14 @@ const WeightSource = struct {
         return Q4Weights.initFromDirectBuffersCustom(w_bytes, s_bytes, b_bytes, in_f, out_f, group_size, bits, .bfloat16, self.stream);
     }
 
-    fn norm(self: *WeightSource, name: []const u8, dim: usize) !mlx.Array {
+    fn norm(self: *WeightSource, name: []const u8, dim: usize) !offload.Array {
         const bytes = if (self.direct) |r| try r.readBytes(dim * @sizeOf(u16)) else blk: {
             const raw = try self.tensorBytes("{s}", .{name});
             if (raw.len < dim * @sizeOf(u16)) return error.InvalidTensorShape;
             self.writeCache(raw[0 .. dim * @sizeOf(u16)]);
             break :blk raw;
         };
-        return mlx.Array.fromRawData(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
+        return offload.Array.fromRawData(@ptrCast(bytes.ptr), &.{dim}, .bfloat16);
     }
 
     fn layerQ4(self: *WeightSource, l_idx: usize, sub: []const u8, in_f: usize, out_f: usize, group_size: i32, bits: i32) !Q4Weights {
@@ -394,7 +392,7 @@ const WeightSource = struct {
         return self.q4(prefix, in_f, out_f, group_size, bits);
     }
 
-    fn layerNorm(self: *WeightSource, l_idx: usize, sub: []const u8, dim: usize) !mlx.Array {
+    fn layerNorm(self: *WeightSource, l_idx: usize, sub: []const u8, dim: usize) !offload.Array {
         var name_buf: [128]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "language_model.model.layers.{}.{s}", .{ l_idx, sub });
         return self.norm(name, dim);
@@ -449,7 +447,7 @@ const WeightSource = struct {
             self.writeCache(&bits);
         }
         const value = vec_math.bf16ToF32(std.mem.readInt(u16, &bits, .little));
-        const arr: ?mlx.Array = if (value != 1.0) try mlx.Array.fromRawData(@ptrCast(&bits), &.{1}, .bfloat16) else null;
+        const arr: ?offload.Array = if (value != 1.0) try offload.Array.fromRawData(@ptrCast(&bits), &.{1}, .bfloat16) else null;
         return .{ .value = value, .arr = arr };
     }
 };
@@ -478,17 +476,17 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
         gpu_layers: ?[]GpuLayerE4B = null,
         ple: ?PleWeights = null,
         embed_tokens_w: ?Q4Weights = null,
-        norm_w: ?mlx.Array = null,
+        norm_w: ?offload.Array = null,
         lm_head: ?Q4Weights = null,
         stream: Stream = undefined,
         exclusion_mask: ?TokenExclusionMask = null,
         gpu_kv: [num_kv_layers]?GpuKvCache = @splat(null),
         curr_len: usize = 0,
-        sqrt_hidden_arr: ?mlx.Array = null,
-        compiled_gelu_mul: ?mlx.Closure = null,
-        compiled_add_mul: ?mlx.Closure = null,
+        sqrt_hidden_arr: ?offload.Array = null,
+        compiled_gelu_mul: ?offload.Closure = null,
+        compiled_add_mul: ?offload.Closure = null,
         ple_prep_ctx: ?*PlePrepContext = null,
-        compiled_ple_prep: ?mlx.Closure = null,
+        compiled_ple_prep: ?offload.Closure = null,
 
         name: ?[]const u8 = null,
         module_type: []const u8 = "Gemma4E4BForCausalLM",
@@ -700,9 +698,9 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             var stream = try Stream.defaultGpu();
             errdefer stream.deinit();
 
-            _ = mlx.configureOptimalWiredMemory();
-            mlx.enableCompile();
-            mlx.setCompileMode(.enabled);
+            _ = offload.configureOptimalMemory();
+            offload.enableCompile();
+            offload.setCompileMode(.enabled);
 
             var direct_reader: E4BDirectCacheReader = if (direct_mmap_opt) |mapped|
                 try E4BDirectCacheReader.init(mapped, expected_cache_bytes)
@@ -739,11 +737,11 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             const proj_scale_val: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
             const input_scale_val: f32 = 1.0 / @sqrt(2.0);
 
-            var embed_scale_arr = try mlx.Array.fromScalarBf16(embed_scale_val);
+            var embed_scale_arr = try offload.Array.fromScalarBf16(embed_scale_val);
             errdefer embed_scale_arr.deinit();
-            var proj_scale_arr = try mlx.Array.fromScalarBf16(proj_scale_val);
+            var proj_scale_arr = try offload.Array.fromScalarBf16(proj_scale_val);
             errdefer proj_scale_arr.deinit();
-            var input_scale_arr = try mlx.Array.fromScalarBf16(input_scale_val);
+            var input_scale_arr = try offload.Array.fromScalarBf16(input_scale_val);
             errdefer input_scale_arr.deinit();
 
             const ple = PleWeights{
@@ -761,7 +759,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             };
 
             const sqrt_hidden_val: f32 = @sqrt(@as(f32, @floatFromInt(config.hidden_size)));
-            var sqrt_hidden_arr = try mlx.Array.fromScalarBf16(sqrt_hidden_val);
+            var sqrt_hidden_arr = try offload.Array.fromScalarBf16(sqrt_hidden_val);
             errdefer sqrt_hidden_arr.deinit();
 
             const gpu_layers = try allocator.alloc(GpuLayerE4B, config.num_hidden_layers);
@@ -788,14 +786,14 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                 }
             }
 
-            var compiled_gelu_mul: ?mlx.Closure = mlx.Array.compileGeluMul(config.hidden_activation) catch null;
+            var compiled_gelu_mul: ?offload.Closure = offload.compileGeluMul(config.hidden_activation) catch null;
             errdefer if (compiled_gelu_mul) |*cls| cls.deinit();
-            var compiled_add_mul: ?mlx.Closure = mlx.Array.compileAddMul() catch null;
+            var compiled_add_mul: ?offload.Closure = offload.compileAddMul() catch null;
             errdefer if (compiled_add_mul) |*cls| cls.deinit();
 
             var ple_prep_ctx: ?*PlePrepContext = null;
-            var compiled_ple_prep: ?mlx.Closure = null;
-            if (mlx.has_mlx) {
+            var compiled_ple_prep: ?offload.Closure = null;
+            if (offload.isAvailable()) {
                 if (allocator.create(PlePrepContext)) |ctx_ptr| {
                     ctx_ptr.* = .{
                         .embed_tokens = embed_tokens,
@@ -805,7 +803,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                         .rms_norm_eps = config.rms_norm_eps,
                     };
                     ple_prep_ctx = ctx_ptr;
-                    compiled_ple_prep = mlx.compileFn(1, 2, PlePrepContext, PlePrepContext.run, false, ctx_ptr) catch null;
+                    compiled_ple_prep = offload.compileFn(1, 2, PlePrepContext, PlePrepContext.run, false, ctx_ptr) catch null;
                 } else |_| {}
             }
             errdefer {
@@ -854,7 +852,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             const out_kv = config.num_key_value_heads * hd;
             const has_kv = idx < num_kv_layers;
 
-            var kn_w: ?mlx.Array = if (has_kv) try src.layerNorm(idx, "self_attn.k_norm.weight", hd) else null;
+            var kn_w: ?offload.Array = if (has_kv) try src.layerNorm(idx, "self_attn.k_norm.weight", hd) else null;
             errdefer if (kn_w) |*kn| kn.deinit();
 
             var qkv_proj = if (has_kv)
@@ -923,38 +921,38 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             };
         }
 
-        fn createTokenIndicesArray(self: *const Self, tokens: []const usize) !mlx.Array {
+        fn createTokenIndicesArray(self: *const Self, tokens: []const usize) !offload.Array {
             for (tokens) |tok| {
                 if (tok >= config.vocab_size) return error.IndexOutOfBounds;
             }
             const T = tokens.len;
             const single_tok = [_]i32{if (T > 0) @intCast(tokens[0]) else 0};
             if (T == 1) {
-                return mlx.Array.fromSliceI32(&single_tok, &.{1});
+                return offload.Array.fromSliceI32(&single_tok, &.{1});
             }
             const tokens_i32 = try self.allocator.alloc(i32, T);
             defer self.allocator.free(tokens_i32);
             for (tokens, 0..) |tok, i| {
                 tokens_i32[i] = @intCast(tok);
             }
-            return mlx.Array.fromSliceI32(tokens_i32, &.{T});
+            return offload.Array.fromSliceI32(tokens_i32, &.{T});
         }
 
-        pub fn getEmbeddingsFromArray(self: *const Self, indices_arr: mlx.Array, T: usize, s: Stream) !mlx.Array {
+        pub fn getEmbeddingsFromArray(self: *const Self, indices_arr: offload.Array, T: usize, s: Stream) !offload.Array {
             var emb = try self.embed_tokens_w.?.gatherRows(indices_arr, self.sqrt_hidden_arr.?, s);
             defer emb.deinit();
             return emb.reshape(&.{ 1, T, config.hidden_size }, s);
         }
 
-        pub fn getPleTokensFromArray(self: *const Self, indices_arr: mlx.Array, T: usize, s: Stream) !mlx.Array {
+        pub fn getPleTokensFromArray(self: *const Self, indices_arr: offload.Array, T: usize, s: Stream) !offload.Array {
             var pdeq = try self.ple.?.embed_tokens_per_layer.gatherRows(indices_arr, self.ple.?.embed_scale_arr, s);
             defer pdeq.deinit();
             return pdeq.reshape(&.{ 1, T, config.num_hidden_layers, config.hidden_size_per_layer_input }, s);
         }
 
-        fn forwardTokenArrayToLogits(self: *Self, indices_arr: mlx.Array, pos: usize, T: usize, s: Stream) !mlx.Array {
-            var x_cur: mlx.Array = undefined;
-            var ple_inputs: mlx.Array = undefined;
+        fn forwardTokenArrayToLogits(self: *Self, indices_arr: offload.Array, pos: usize, T: usize, s: Stream) !offload.Array {
+            var x_cur: offload.Array = undefined;
+            var ple_inputs: offload.Array = undefined;
             if (T == 1 and self.compiled_ple_prep != null) {
                 const prep_out = try self.compiled_ple_prep.?.apply1To2(indices_arr);
                 x_cur = prep_out[0];
@@ -968,14 +966,14 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
 
                 var ple_proj_raw = try self.ple.?.model_proj.forwardArray(x_cur, s);
                 defer ple_proj_raw.deinit();
-                var ple_proj_scaled = try mlx.Array.multiply(ple_proj_raw, self.ple.?.proj_scale_arr, s);
+                var ple_proj_scaled = try offload.Array.multiply(ple_proj_raw, self.ple.?.proj_scale_arr, s);
                 defer ple_proj_scaled.deinit();
                 var ple_proj_4d = try ple_proj_scaled.reshape(&.{ 1, T, config.num_hidden_layers, config.hidden_size_per_layer_input }, s);
                 defer ple_proj_4d.deinit();
-                var ple_proj_normed = try mlx.Array.fastRmsNorm(ple_proj_4d, self.ple.?.proj_norm_w, config.rms_norm_eps, s);
+                var ple_proj_normed = try offload.fastRmsNorm(ple_proj_4d, self.ple.?.proj_norm_w, config.rms_norm_eps, s);
                 defer ple_proj_normed.deinit();
 
-                ple_inputs = try mlx.Array.fusedAddMul(ple_proj_normed, ple_tokens_arr, self.ple.?.input_scale_arr, self.compiled_add_mul, s);
+                ple_inputs = try offload.fusedAddMul(ple_proj_normed, ple_tokens_arr, self.ple.?.input_scale_arr, self.compiled_add_mul, s);
             }
             defer x_cur.deinit();
             defer ple_inputs.deinit();
@@ -1009,7 +1007,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                 }
             }
 
-            var h_norm = try mlx.Array.fastRmsNorm(x_cur, self.norm_w.?, config.rms_norm_eps, s);
+            var h_norm = try offload.fastRmsNorm(x_cur, self.norm_w.?, config.rms_norm_eps, s);
             defer h_norm.deinit();
 
             if (T == 1) {
@@ -1027,26 +1025,26 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
 
         fn forwardLayer(
             self: *Self,
-            x_in: mlx.Array,
+            x_in: offload.Array,
             l: *GpuLayerE4B,
             l_idx: usize,
-            ple_slice: mlx.Array,
+            ple_slice: offload.Array,
             pos: usize,
             seq_len: usize,
             s: Stream,
-        ) !mlx.Array {
-            var in_norm = try mlx.Array.fastRmsNorm(x_in, l.input_norm_w, l.rms_norm_eps, s);
+        ) !offload.Array {
+            var in_norm = try offload.fastRmsNorm(x_in, l.input_norm_w, l.rms_norm_eps, s);
             defer in_norm.deinit();
 
             var qkv_raw = try l.qkv_proj.forwardArray(in_norm, s);
             defer qkv_raw.deinit();
 
-            var q_rot_opt: ?mlx.Array = null;
+            var q_rot_opt: ?offload.Array = null;
             defer if (q_rot_opt) |*q| q.deinit();
-            var eff_k: mlx.Array = undefined;
-            var eff_v: mlx.Array = undefined;
-            var eff_k_free: ?mlx.Array = null;
-            var eff_v_free: ?mlx.Array = null;
+            var eff_k: offload.Array = undefined;
+            var eff_v: offload.Array = undefined;
+            var eff_k_free: ?offload.Array = null;
+            var eff_v_free: ?offload.Array = null;
             defer if (eff_k_free) |*ek| ek.deinit();
             defer if (eff_v_free) |*ev| ev.deinit();
 
@@ -1069,10 +1067,10 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                 var v_raw_slice = try qkv_4d.sliceAxis(axis, l.num_heads + l.num_kv_heads, total_heads, s);
                 defer v_raw_slice.deinit();
 
-                q_rot_opt = try mlx_blocks.projectHeads(q_raw_slice, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
-                var k_rot = try mlx_blocks.projectHeads(k_raw_slice, l.k_norm_w.?, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
+                q_rot_opt = try offload.projectHeads(q_raw_slice, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
+                var k_rot = try offload.projectHeads(k_raw_slice, l.k_norm_w.?, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
                 defer k_rot.deinit();
-                var v_4d = try mlx_blocks.projectHeads(v_raw_slice, null, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, null, pos, s);
+                var v_4d = try offload.projectHeads(v_raw_slice, null, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, null, pos, s);
                 defer v_4d.deinit();
 
                 if (self.gpu_kv[l_idx] == null) {
@@ -1095,7 +1093,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                     eff_v_free = view.v;
                 }
             } else {
-                q_rot_opt = try mlx_blocks.projectHeads(qkv_raw, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
+                q_rot_opt = try offload.projectHeads(qkv_raw, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
                 const cache = &self.gpu_kv[l.prev_kv_idx].?;
                 eff_k = cache.step_eff_k orelse cache.k;
                 eff_v = cache.step_eff_v orelse cache.v;
@@ -1124,12 +1122,12 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                 return l.forwardTail(x_in, o_out, ple_slice, s);
             }
 
-            var post_attn = try mlx.Array.fastRmsNorm(o_out, l.post_attn_w, l.rms_norm_eps, s);
+            var post_attn = try offload.fastRmsNorm(o_out, l.post_attn_w, l.rms_norm_eps, s);
             defer post_attn.deinit();
-            var x1 = try mlx.Array.add(x_in, post_attn, s);
+            var x1 = try offload.Array.add(x_in, post_attn, s);
             defer x1.deinit();
 
-            var pre_mlp = try mlx.Array.fastRmsNorm(x1, l.pre_mlp_w, l.rms_norm_eps, s);
+            var pre_mlp = try offload.fastRmsNorm(x1, l.pre_mlp_w, l.rms_norm_eps, s);
             defer pre_mlp.deinit();
 
             var gate_up = try l.fused_gate_up.forwardArray(pre_mlp, s);
@@ -1141,27 +1139,27 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             var up_out = gu_vec.get(1).?;
             defer up_out.deinit();
 
-            var hidden = try mlx.Array.fusedGeluMul(gate_out, up_out, config.hidden_activation, self.compiled_gelu_mul, s);
+            var hidden = try offload.fusedGeluMul(gate_out, up_out, config.hidden_activation, self.compiled_gelu_mul, s);
             defer hidden.deinit();
 
             var down_out = try l.down_proj.forwardArray(hidden, s);
             defer down_out.deinit();
 
-            var post_mlp = try mlx.Array.fastRmsNorm(down_out, l.post_mlp_w, l.rms_norm_eps, s);
+            var post_mlp = try offload.fastRmsNorm(down_out, l.post_mlp_w, l.rms_norm_eps, s);
             defer post_mlp.deinit();
-            var x2 = try mlx.Array.add(x1, post_mlp, s);
+            var x2 = try offload.Array.add(x1, post_mlp, s);
             defer x2.deinit();
 
             var ple_gate_raw = try l.ple_gate.forwardArray(x2, s);
             defer ple_gate_raw.deinit();
 
             var ple_modulated = if (seq_len == 1)
-                try mlx.Array.fusedGeluMul(ple_gate_raw, ple_slice, config.hidden_activation, self.compiled_gelu_mul, s)
+                try offload.fusedGeluMul(ple_gate_raw, ple_slice, config.hidden_activation, self.compiled_gelu_mul, s)
             else blk: {
                 const ple_dim = config.hidden_size_per_layer_input;
                 var ple_gate_4d = try ple_gate_raw.reshape(&.{ 1, seq_len, 1, ple_dim }, s);
                 defer ple_gate_4d.deinit();
-                var ple_mod_4d = try mlx.Array.fusedGeluMul(ple_gate_4d, ple_slice, config.hidden_activation, self.compiled_gelu_mul, s);
+                var ple_mod_4d = try offload.fusedGeluMul(ple_gate_4d, ple_slice, config.hidden_activation, self.compiled_gelu_mul, s);
                 defer ple_mod_4d.deinit();
                 break :blk try ple_mod_4d.reshape(&.{ 1, seq_len, ple_dim }, s);
             };
@@ -1169,16 +1167,16 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             var ple_projected = try l.ple_proj.forwardArray(ple_modulated, s);
             defer ple_projected.deinit();
 
-            var ple_normed = try mlx.Array.fastRmsNorm(ple_projected, l.ple_norm_w, l.rms_norm_eps, s);
+            var ple_normed = try offload.fastRmsNorm(ple_projected, l.ple_norm_w, l.rms_norm_eps, s);
             defer ple_normed.deinit();
 
             if (l.layer_scalar_w) |sw| {
-                return mlx.Array.fusedAddMul(x2, ple_normed, sw, self.compiled_add_mul, s);
+                return offload.fusedAddMul(x2, ple_normed, sw, self.compiled_add_mul, s);
             }
-            return mlx.Array.add(x2, ple_normed, s);
+            return offload.Array.add(x2, ple_normed, s);
         }
 
-        fn prefillOnDevice(self: *Self, prompt_tokens: []const usize) !mlx.Array {
+        fn prefillOnDevice(self: *Self, prompt_tokens: []const usize) !offload.Array {
             const T = prompt_tokens.len;
             if (T == 0) return error.EmptyPrompt;
             self.resetCache();
@@ -1196,7 +1194,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             return best_tok_arr;
         }
 
-        fn decodeOnDevice(self: *Self, tok_arr: mlx.Array) !mlx.Array {
+        fn decodeOnDevice(self: *Self, tok_arr: offload.Array) !offload.Array {
             const s = self.stream;
             const pos = self.curr_len;
 
@@ -1293,7 +1291,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             sampler: Sampler,
             history: std.ArrayList(usize),
             prompt_len: usize,
-            pending: ?mlx.Array = null,
+            pending: ?offload.Array = null,
             started: bool = false,
             finished: bool = false,
 

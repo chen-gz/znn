@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **模型层 (Layer 4) 彻底解耦硬件驱动、下沉 MLX 原语至 Backend (Layer 0) (`src/models/`, `src/backend/offload.zig`)**:
+  - **消除 `src/models/` 对 `backend.mlx` 的直接硬依赖**：
+    - `src/models/gemma4_e4b.zig` 与 `src/models/gemma4_q4.zig` 彻底移除 `const mlx = backend.mlx;` 及所有 `mlx.*` 算子调用；
+    - 所有硬件设备抽象（`offload.Array`、`offload.VectorArray`、`offload.Closure`、`offload.Stream`）、JIT 编译接口（`offload.compileFn`、`offload.compileGeluMul`、`offload.compileAddMul`）、优化指令（`offload.configureOptimalMemory`、`offload.enableCompile`、`offload.setCompileMode`）以及硬件算子（`offload.fastRmsNorm`、`offload.fastScaledDotProductAttention`、`offload.fusedGeluMul`、`offload.fusedAddMul`、`offload.evalMultiple`）统一由 `backend.offload` 对外导出并向下封装；
+  - **模型分层更纯净**：
+    - 模型层仅依赖通用后端抽象 `backend.offload` 与标准 `Tensor`，消除了针对特定硬件厂商 API 的侵入；
+    - 保持 100% 单向包分层规范（`check-layers: 79 files passed`），全量 389+ 单元测试通过，端到端自回归流式生成保持 ~20.5+ token/s 性能与完全相同的输出质量。
+
 - **彻底废除专用 Offload 旁路引擎、实现模型原生完全内聚 (`src/models/gemma4_e4b.zig`, `src/models/gemma4_q4.zig`)**:
   - **彻底删除 `src/models/gemma4_e4b_offload.zig` 与 `src/models/gemma4_offload.zig`**：全网物理删除两份共计 2465 行的历史遗留旁路引擎，彻底消灭“上层定义纯 Module、底层偷偷走影子引擎”的双轨制，消除超过 460 行重复配置与函数样板代码。
   - **Gemma 4 E4B 原生模型自闭环 (`src/models/gemma4_e4b.zig`)**：

@@ -10,14 +10,12 @@ const autodiff = @import("../autodiff.zig");
 const nn = @import("../nn.zig");
 const gemma4 = @import("gemma4.zig");
 
-const mlx = backend.mlx;
 const offload = backend.offload;
-const mlx_blocks = offload.mlx_blocks;
 const logits_processor = offload.logits_processor;
-const Stream = mlx.Stream;
+const Stream = offload.Stream;
 const Q4Weights = offload.Q4Weights;
 const TokenExclusionMask = offload.TokenExclusionMask;
-const GpuRope = mlx_blocks.Rope;
+const GpuRope = offload.Rope;
 const softcapLogits = logits_processor.softcapLogits;
 const penalizeDevice = logits_processor.penalizeDevice;
 const DeviceCandidates = logits_processor.DeviceCandidates;
@@ -1114,7 +1112,7 @@ fn processorOpts(cfg: anytype) logits_processor.LogitsProcessorOptions {
 
 pub fn deviceCandidates(
     allocator: std.mem.Allocator,
-    logits: mlx.Array,
+    logits: offload.Array,
     cfg: anytype,
     mask: *const TokenExclusionMask,
     recent_tokens: []const usize,
@@ -1126,7 +1124,7 @@ pub fn deviceCandidates(
 
 pub fn selectToken(
     allocator: std.mem.Allocator,
-    logits: mlx.Array,
+    logits: offload.Array,
     cfg: anytype,
     mask: *const TokenExclusionMask,
     recent_tokens: []const usize,
@@ -1186,12 +1184,12 @@ pub const Gemma4GpuLayer = struct {
     intermediate_size: usize,
     attn_dim: usize,
 
-    input_norm_w: mlx.Array,
-    q_norm_w: mlx.Array,
-    k_norm_w: mlx.Array,
-    post_attn_w: mlx.Array,
-    pre_mlp_w: mlx.Array,
-    post_mlp_w: mlx.Array,
+    input_norm_w: offload.Array,
+    q_norm_w: offload.Array,
+    k_norm_w: offload.Array,
+    post_attn_w: offload.Array,
+    pre_mlp_w: offload.Array,
+    post_mlp_w: offload.Array,
 
     layer_scalar: f32,
     attn_type: Gemma4AttentionType,
@@ -1202,7 +1200,7 @@ pub const Gemma4GpuLayer = struct {
     rope: GpuRope,
     rms_norm_eps: f32,
     hidden_activation: backend.activation.GeluApproximation,
-    compiled_mlp: ?mlx.Closure = null,
+    compiled_mlp: ?offload.Closure = null,
 
     pub const Projections = struct {
         fused_qkv: Q4Weights,
@@ -1303,17 +1301,17 @@ pub const Gemma4GpuLayer = struct {
             return error.ShapeMismatch;
         }
 
-        var in_w = try mlx.Array.fromSlice(norms.input, &.{norms.input.len});
+        var in_w = try offload.Array.fromSlice(norms.input, &.{norms.input.len});
         errdefer in_w.deinit();
-        var qn_w = try mlx.Array.fromSlice(norms.q, &.{norms.q.len});
+        var qn_w = try offload.Array.fromSlice(norms.q, &.{norms.q.len});
         errdefer qn_w.deinit();
-        var kn_w = try mlx.Array.fromSlice(norms.k, &.{norms.k.len});
+        var kn_w = try offload.Array.fromSlice(norms.k, &.{norms.k.len});
         errdefer kn_w.deinit();
-        var pa_w = try mlx.Array.fromSlice(norms.post_attn, &.{norms.post_attn.len});
+        var pa_w = try offload.Array.fromSlice(norms.post_attn, &.{norms.post_attn.len});
         errdefer pa_w.deinit();
-        var pm_w = try mlx.Array.fromSlice(norms.pre_mlp, &.{norms.pre_mlp.len});
+        var pm_w = try offload.Array.fromSlice(norms.pre_mlp, &.{norms.pre_mlp.len});
         errdefer pm_w.deinit();
-        var pom_w = try mlx.Array.fromSlice(norms.post_mlp, &.{norms.post_mlp.len});
+        var pom_w = try offload.Array.fromSlice(norms.post_mlp, &.{norms.post_mlp.len});
         errdefer pom_w.deinit();
         const is_full = @backingInt(spec.attn_type) == @backingInt(Gemma4AttentionType.full_attention);
         const attn_type: Gemma4AttentionType = if (is_full) .full_attention else .sliding_attention;
@@ -1348,8 +1346,8 @@ pub const Gemma4GpuLayer = struct {
         };
     }
 
-    pub fn mlpResidual(self: *const Gemma4GpuLayer, x1: mlx.Array, stream: ?Stream) !mlx.Array {
-        var post_mlp = try mlx_blocks.gatedMlp(
+    pub fn mlpResidual(self: *const Gemma4GpuLayer, x1: offload.Array, stream: ?Stream) !offload.Array {
+        var post_mlp = try offload.gatedMlp(
             x1,
             &self.fused_gate_up,
             null,
@@ -1361,15 +1359,15 @@ pub const Gemma4GpuLayer = struct {
             stream,
         );
         defer post_mlp.deinit();
-        var x2 = try mlx_blocks.residualScale(x1, post_mlp, null, stream);
+        var x2 = try offload.residualScale(x1, post_mlp, null, stream);
         if (self.layer_scalar == 1.0) return x2;
         defer x2.deinit();
         return x2.mulScalar(self.layer_scalar, stream);
     }
 
-    fn runMlp(self: *const Gemma4GpuLayer, x1: mlx.Array, stream: ?Stream) !mlx.Array {
+    fn runMlp(self: *const Gemma4GpuLayer, x1: offload.Array, stream: ?Stream) !offload.Array {
         if (self.compiled_mlp) |c_mlp| {
-            var in_vec = mlx.VectorArray.fromArrays(&.{x1});
+            var in_vec = offload.VectorArray.fromArrays(&.{x1});
             defer in_vec.deinit();
             var out_vec = try c_mlp.apply(in_vec);
             defer out_vec.deinit();
@@ -1379,16 +1377,16 @@ pub const Gemma4GpuLayer = struct {
     }
 
     pub fn initCompiledMlp(self: *Gemma4GpuLayer) !void {
-        if (!mlx.has_mlx) return;
+        if (!offload.isAvailable()) return;
         if (self.compiled_mlp != null) return;
 
         const mlpRun = struct {
-            fn run(lw: *const Gemma4GpuLayer, in: [1]mlx.Array) anyerror!mlx.Array {
+            fn run(lw: *const Gemma4GpuLayer, in: [1]offload.Array) anyerror!offload.Array {
                 return lw.mlpResidual(in[0], null);
             }
         }.run;
 
-        self.compiled_mlp = try mlx.compileFn(1, 1, Gemma4GpuLayer, mlpRun, false, self);
+        self.compiled_mlp = try offload.compileFn(1, 1, Gemma4GpuLayer, mlpRun, false, self);
     }
 
     pub fn deinit(self: *Gemma4GpuLayer) void {
@@ -1413,7 +1411,7 @@ pub const Gemma4GpuLayer = struct {
 pub const Gemma4GpuContext = struct {
     allocator: std.mem.Allocator,
     layers: []Gemma4GpuLayer,
-    final_norm_w: mlx.Array,
+    final_norm_w: offload.Array,
     lm_head: LmHeadWeights,
     exclusion_mask: TokenExclusionMask,
     config: Gemma4Config,
@@ -1436,7 +1434,7 @@ pub const Gemma4GpuContext = struct {
         if (layers.len != cfg.num_hidden_layers or final_norm_data.len != cfg.hidden_size) return error.ShapeMismatch;
         if (lm_head.vocab_size != cfg.vocab_size or lm_head.hidden_size != cfg.hidden_size) return error.ShapeMismatch;
 
-        var final_norm_w = try mlx.Array.fromSlice(final_norm_data, &.{cfg.hidden_size});
+        var final_norm_w = try offload.Array.fromSlice(final_norm_data, &.{cfg.hidden_size});
         errdefer final_norm_w.deinit();
         final_norm_w.eval();
 
@@ -1449,8 +1447,8 @@ pub const Gemma4GpuContext = struct {
 
         const stream = try Stream.defaultGpu();
 
-        mlx.enableCompile();
-        mlx.setCompileMode(.enabled);
+        offload.enableCompile();
+        offload.setCompileMode(.enabled);
 
         for (layers) |*lw| {
             lw.initCompiledMlp() catch {};
@@ -1592,9 +1590,9 @@ pub const Gemma4GpuContext = struct {
     }
 
     const QkvHeads = struct {
-        q_rot: mlx.Array,
-        k_rot: mlx.Array,
-        v: mlx.Array,
+        q_rot: offload.Array,
+        k_rot: offload.Array,
+        v: offload.Array,
 
         fn deinit(self: *QkvHeads) void {
             self.q_rot.deinit();
@@ -1603,7 +1601,7 @@ pub const Gemma4GpuContext = struct {
         }
     };
 
-    fn projectQkv(lw: *const Gemma4GpuLayer, in_norm: mlx.Array, t: usize, pos: usize, s: Stream) !QkvHeads {
+    fn projectQkv(lw: *const Gemma4GpuLayer, in_norm: offload.Array, t: usize, pos: usize, s: Stream) !QkvHeads {
         var qkv_raw = try lw.fused_qkv.forwardArray(in_norm, s);
         defer qkv_raw.deinit();
 
@@ -1617,33 +1615,33 @@ pub const Gemma4GpuContext = struct {
             try k_raw.sliceAxis(2, 0, lw.k_dim, s);
         defer v_raw.deinit();
 
-        var q_rot = try mlx_blocks.projectHeads(q_raw, lw.q_norm_w, t, lw.num_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
+        var q_rot = try offload.projectHeads(q_raw, lw.q_norm_w, t, lw.num_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
         errdefer q_rot.deinit();
-        var k_rot = try mlx_blocks.projectHeads(k_raw, lw.k_norm_w, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
+        var k_rot = try offload.projectHeads(k_raw, lw.k_norm_w, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
         errdefer k_rot.deinit();
-        const v_normed = try mlx_blocks.projectHeads(v_raw, null, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, null, pos, s);
+        const v_normed = try offload.projectHeads(v_raw, null, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, null, pos, s);
 
         return .{ .q_rot = q_rot, .k_rot = k_rot, .v = v_normed };
     }
 
-    fn layerTail(lw: *const Gemma4GpuLayer, x_cur: mlx.Array, attn_out: mlx.Array, t: usize, use_compiled: bool, s: Stream) !mlx.Array {
-        var attn_t: ?mlx.Array = if (t == 1) null else try attn_out.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+    fn layerTail(lw: *const Gemma4GpuLayer, x_cur: offload.Array, attn_out: offload.Array, t: usize, use_compiled: bool, s: Stream) !offload.Array {
+        var attn_t: ?offload.Array = if (t == 1) null else try attn_out.transposeAxes(&.{ 0, 2, 1, 3 }, s);
         defer if (attn_t) |*a| a.deinit();
         var attn_2d = try (attn_t orelse attn_out).reshape(&.{ 1, t, lw.attn_dim }, s);
         defer attn_2d.deinit();
         var o_out = try lw.o_proj.forwardArray(attn_2d, s);
         defer o_out.deinit();
 
-        var post_attn = try mlx.Array.fastRmsNorm(o_out, lw.post_attn_w, lw.rms_norm_eps, s);
+        var post_attn = try offload.fastRmsNorm(o_out, lw.post_attn_w, lw.rms_norm_eps, s);
         defer post_attn.deinit();
-        var x1 = try mlx_blocks.residualScale(x_cur, post_attn, null, s);
+        var x1 = try offload.residualScale(x_cur, post_attn, null, s);
         defer x1.deinit();
         return if (use_compiled) lw.runMlp(x1, s) else lw.mlpResidual(x1, s);
     }
 
-    fn finalNorm(self: *const Gemma4GpuContext, x_cur: mlx.Array, t: usize, rows: usize, s: Stream) !mlx.Array {
+    fn finalNorm(self: *const Gemma4GpuContext, x_cur: offload.Array, t: usize, rows: usize, s: Stream) !offload.Array {
         _ = t;
-        return mlx_blocks.finalHidden(x_cur, self.final_norm_w, self.config.rms_norm_eps, rows, self.config.hidden_size, s);
+        return offload.finalHidden(x_cur, self.final_norm_w, self.config.rms_norm_eps, rows, self.config.hidden_size, s);
     }
 
     pub fn prefill(
@@ -1663,11 +1661,11 @@ pub const Gemma4GpuContext = struct {
         const tok_emb_buf = try self.allocator.alloc(f32, T * self.config.hidden_size);
         defer self.allocator.free(tok_emb_buf);
         try self.embedTokens(prompt_tokens, embed_u16, tok_emb_buf);
-        var x_cur = try mlx.Array.fromSlice(tok_emb_buf, &.{ 1, T, self.config.hidden_size });
+        var x_cur = try offload.Array.fromSlice(tok_emb_buf, &.{ 1, T, self.config.hidden_size });
         defer x_cur.deinit();
 
         for (self.layers, 0..) |*lw, l| {
-            var in_norm = try mlx.Array.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
+            var in_norm = try offload.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
             defer in_norm.deinit();
             var qkv = try projectQkv(lw, in_norm, T, 0, s);
             defer qkv.deinit();
@@ -1711,11 +1709,11 @@ pub const Gemma4GpuContext = struct {
         const tok_emb_buf = try self.allocator.alloc(f32, self.config.hidden_size);
         defer self.allocator.free(tok_emb_buf);
         try self.embedTokens(&.{token}, embed_u16, tok_emb_buf);
-        var x_cur = try mlx.Array.fromSlice(tok_emb_buf, &.{ 1, 1, self.config.hidden_size });
+        var x_cur = try offload.Array.fromSlice(tok_emb_buf, &.{ 1, 1, self.config.hidden_size });
         defer x_cur.deinit();
 
         for (self.layers, 0..) |*lw, l| {
-            var in_norm = try mlx.Array.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
+            var in_norm = try offload.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
             defer in_norm.deinit();
             var qkv = try projectQkv(lw, in_norm, 1, pos, s);
             defer qkv.deinit();
@@ -1733,7 +1731,7 @@ pub const Gemma4GpuContext = struct {
                 vv.deinit();
             };
 
-            var attn_out = try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, view.k, view.v, 1.0, .none, s);
+            var attn_out = try offload.fastScaledDotProductAttention(qkv.q_rot, view.k, view.v, 1.0, .none, s);
             defer attn_out.deinit();
 
             const x_next = try layerTail(lw, x_cur, attn_out, 1, true, s);
@@ -1770,11 +1768,11 @@ pub const Gemma4GpuContext = struct {
         const tok_emb_buf = try self.allocator.alloc(f32, M * self.config.hidden_size);
         defer self.allocator.free(tok_emb_buf);
         try self.embedTokens(input_tokens, embed_u16, tok_emb_buf);
-        var x_cur = try mlx.Array.fromSlice(tok_emb_buf, &.{ 1, M, self.config.hidden_size });
+        var x_cur = try offload.Array.fromSlice(tok_emb_buf, &.{ 1, M, self.config.hidden_size });
         defer x_cur.deinit();
 
         for (self.layers, 0..) |*lw, l| {
-            var in_norm = try mlx.Array.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
+            var in_norm = try offload.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
             defer in_norm.deinit();
             var qkv = try projectQkv(lw, in_norm, M, pos, s);
             defer qkv.deinit();
@@ -1827,7 +1825,7 @@ pub const Gemma4GpuContext = struct {
 
     fn verifyGreedy(
         self: *const Gemma4GpuContext,
-        logits_raw: mlx.Array,
+        logits_raw: offload.Array,
         input_tokens: []const usize,
         history: []const usize,
         recent_len: usize,
@@ -1854,7 +1852,7 @@ pub const Gemma4GpuContext = struct {
 
     fn verifySampled(
         self: *const Gemma4GpuContext,
-        logits_raw: mlx.Array,
+        logits_raw: offload.Array,
         input_tokens: []const usize,
         history: []const usize,
         recent_len: usize,
@@ -1875,11 +1873,11 @@ pub const Gemma4GpuContext = struct {
             built += 1;
         }
 
-        const all_arrays = try self.allocator.alloc(mlx.Array, 3 * M);
+        const all_arrays = try self.allocator.alloc(offload.Array, 3 * M);
         defer self.allocator.free(all_arrays);
         var n_arrays: usize = 0;
         for (pending) |*p| n_arrays += p.arrays(all_arrays[n_arrays..]);
-        mlx.Array.evalMultiple(all_arrays[0..n_arrays]);
+        offload.evalMultiple(all_arrays[0..n_arrays]);
 
         const buf = try self.allocator.alloc(sampling.Candidate, pending[0].len());
         defer self.allocator.free(buf);
