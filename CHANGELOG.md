@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **通用自回归 KV Cache 抽象与跨后端生成 (`src/models/gemma4_e4b.zig`, `src/backend/offload.zig`)**:
+  - **跨设备通用键值缓存别名 (`DeviceKvCache`, `KvCache`)**：
+    - 在 `src/backend/offload.zig` 与 `src/backend.zig` 统一导出 `KvCache` 与 `DeviceKvCache`，并由各语言模型统一引用，规范统一键值缓存命名；
+  - **Gemma 4 E4B 跨后端 CPU 自回归流式生成回退 (`stepCpu`)**：
+    - 移除 `Gemma4E4BForCausalLM.generate()` 中 `error.HardwareOffloadRequired` 的硬件强锁门槛；
+    - 在 `Generation.next()` 中，当模型处于纯 CPU 模式（未加载 GPU 权重或无可用 GPU）时，通过 `stepCpu()` 自动回退至纯计算图 `model.forward(&graph, tok_tensor)` 与 `Sampler.sampleLogits`，支持在任意平台（Linux、macOS、Windows）及纯 CPU 环境下无缝执行端到端自回归流式生成；
+  - **全量测试与基准保障**：
+    - 补充 `src/models/tests.zig` 中针对 `Gemma4E4BForCausalLM` 的纯 CPU 端到端自回归生成回退单元测试；
+    - 修复 `src/bench/mlx_suite.zig` 中遗留的 `backend.mlx.DeviceType` 引用，统一为标准 `backend.DeviceType`；
+    - 81 个源文件包级依赖单向性 100% 保持（`zig build check-layers`），390+ 单元测试全量通过，端到端 GPU 生成测试（125.1 token/s 预填充，20.70 token/s 解码）精度与吞吐无损。
+
 - **独立多后端设备抽象与统一算子分派器 (`src/backend/device.zig`, `src/backend/ops.zig`)**:
   - **解耦计算设备类型 (`src/backend/device.zig`)**：
     - 将 `Device` 与 `DeviceType` 从底层 Apple MLX 驱动彻底剥离为顶层通用枚举 (`cpu`, `gpu`)，并提供跨平台硬件可用性探测 (`device.isAvailable`) 与默认设备优选 (`device.defaultDevice`)；

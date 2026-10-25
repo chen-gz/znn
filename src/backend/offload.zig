@@ -1201,6 +1201,10 @@ pub const GpuKvCache = struct {
     }
 };
 
+/// 跨后端通用键值缓存别名 (Generic Hardware Device Key-Value Cache Alias)
+pub const DeviceKvCache = GpuKvCache;
+pub const KvCache = GpuKvCache;
+
 // ============================================================================
 // 共享 MLX 组合块与对数几率处理器转导出
 // ============================================================================

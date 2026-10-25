@@ -199,12 +199,12 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
             alloc: std.mem.Allocator,
             arena: std.heap.ArenaAllocator,
             stream: backend.mlx.Stream,
-            device: backend.mlx.DeviceType,
+            device: backend.DeviceType,
             q_raw: []f32,
             k_raw: []f32,
             v_raw: []f32,
 
-            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.mlx.DeviceType) !@This() {
+            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.DeviceType) !@This() {
                 const q_raw = try alloc.alloc(f32, total);
                 errdefer alloc.free(q_raw);
                 const k_raw = try alloc.alloc(f32, total);
@@ -327,12 +327,12 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
             alloc: std.mem.Allocator,
             arena: std.heap.ArenaAllocator,
             stream: backend.mlx.Stream,
-            device: backend.mlx.DeviceType,
+            device: backend.DeviceType,
             q_raw: []f32,
             k_raw: []f32,
             v_raw: []f32,
 
-            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.mlx.DeviceType) !@This() {
+            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.DeviceType) !@This() {
                 const q_raw = try alloc.alloc(f32, total);
                 errdefer alloc.free(q_raw);
                 const k_raw = try alloc.alloc(f32, total);
@@ -446,11 +446,11 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
             alloc: std.mem.Allocator,
             arena: std.heap.ArenaAllocator,
             stream: backend.mlx.Stream,
-            device: backend.mlx.DeviceType,
+            device: backend.DeviceType,
             x_raw: []f32,
             w_raw: []f32,
 
-            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.mlx.DeviceType) !@This() {
+            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.DeviceType) !@This() {
                 const x_raw = try alloc.alloc(f32, total);
                 errdefer alloc.free(x_raw);
                 const w_raw = try alloc.alloc(f32, D);
@@ -566,10 +566,10 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
             arena: std.heap.ArenaAllocator,
             attn: *const nn.CausalSelfAttention,
             stream: backend.mlx.Stream,
-            device: backend.mlx.DeviceType,
+            device: backend.DeviceType,
             x: *tensor.Tensor,
 
-            pub fn init(alloc: std.mem.Allocator, a: *const nn.CausalSelfAttention, in_x: *tensor.Tensor, s: backend.mlx.Stream, dev: backend.mlx.DeviceType) @This() {
+            pub fn init(alloc: std.mem.Allocator, a: *const nn.CausalSelfAttention, in_x: *tensor.Tensor, s: backend.mlx.Stream, dev: backend.DeviceType) @This() {
                 return .{
                     .arena = std.heap.ArenaAllocator.init(alloc),
                     .attn = a,

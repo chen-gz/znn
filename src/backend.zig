@@ -38,6 +38,9 @@ pub const DeviceCandidates = logits_processor.DeviceCandidates;
 pub const HostCandidates = logits_processor.HostCandidates;
 
 pub const offload = @import("backend/offload.zig");
+pub const GpuKvCache = offload.GpuKvCache;
+pub const DeviceKvCache = offload.DeviceKvCache;
+pub const KvCache = offload.KvCache;
 pub const ops = @import("backend/ops.zig");
 
 pub const rope = @import("backend/rope.zig");

@@ -38,6 +38,8 @@ pub const Q4Weights = offload.Q4Weights;
 pub const QuantLayout = offload.QuantLayout;
 pub const Stream = offload.Stream;
 pub const GpuKvCache = offload.GpuKvCache;
+pub const DeviceKvCache = offload.DeviceKvCache;
+pub const KvCache = offload.KvCache;
 pub const TokenExclusionMask = offload.TokenExclusionMask;
 pub const Sampler = sampling.Sampler;
 pub const SamplingOptions = sampling.SamplingOptions;
@@ -490,6 +492,9 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
 
         name: ?[]const u8 = null,
         module_type: []const u8 = "Gemma4E4BForCausalLM",
+
+        pub const KvCache = GpuKvCache;
+        pub const DeviceKvCache = GpuKvCache;
 
         pub const DIRECT_CACHE_MAGIC = "ZNN4E4B1";
         pub const DIRECT_CACHE_VERSION: u64 = 1;
@@ -1269,7 +1274,6 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             prompt_tokens: []const usize,
             options: E4BGenerateOptions,
         ) !Generation {
-            if (self.gpu_layers == null) return error.HardwareOffloadRequired;
             if (prompt_tokens.len == 0) return error.EmptyPrompt;
             var history: std.ArrayList(usize) = .empty;
             errdefer history.deinit(allocator);
@@ -1321,28 +1325,65 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                 }
                 const model = self.model;
 
-                if (!self.isPipelined()) {
-                    const tok = if (!self.started)
-                        try model.prefillSampled(self.history.items, &self.sampler)
-                    else
-                        try model.decodeSampled(self.history.items[self.history.items.len - 1], self.history.items, &self.sampler);
-                    self.started = true;
+                // GPU 硬件加速路径 (已加载 GPU 权重)
+                if (model.gpu_layers != null) {
+                    if (!self.isPipelined()) {
+                        const tok = if (!self.started)
+                            try model.prefillSampled(self.history.items, &self.sampler)
+                        else
+                            try model.decodeSampled(self.history.items[self.history.items.len - 1], self.history.items, &self.sampler);
+                        self.started = true;
+                        return try self.emit(tok);
+                    }
+
+                    if (!self.started) {
+                        self.pending = try model.prefillOnDevice(self.history.items);
+                        self.started = true;
+                    }
+                    var current = self.pending.?;
+                    self.pending = null;
+                    defer current.deinit();
+
+                    if (self.generated().len + 1 < self.options.max_new_tokens) {
+                        self.pending = try model.decodeOnDevice(current);
+                    }
+                    const tok: usize = @intCast(try current.itemUint32());
                     return try self.emit(tok);
                 }
 
-                if (!self.started) {
-                    self.pending = try model.prefillOnDevice(self.history.items);
-                    self.started = true;
-                }
-                var current = self.pending.?;
-                self.pending = null;
-                defer current.deinit();
-
-                if (self.generated().len + 1 < self.options.max_new_tokens) {
-                    self.pending = try model.decodeOnDevice(current);
-                }
-                const tok: usize = @intCast(try current.itemUint32());
+                // CPU 通用计算图回退路径：无 GPU 离载时的跨平台端到端生成
+                const tok = try self.stepCpu();
+                self.started = true;
                 return try self.emit(tok);
+            }
+
+            fn stepCpu(self: *Generation) !usize {
+                var graph = autodiff.Graph.init(self.allocator, .{ .device = .cpu });
+                defer graph.deinit();
+
+                const hist_tokens = self.history.items;
+                const T = hist_tokens.len;
+                const tok_t = try graph.tensorND(&.{ 1, T }, false);
+                for (hist_tokens, 0..) |tok, i| {
+                    tok_t.data[i] = @floatFromInt(tok);
+                }
+
+                const logits = try self.model.forward(&graph, tok_t);
+                const last_logits = logits.data[(T - 1) * config.vocab_size .. T * config.vocab_size];
+
+                const penalty = self.sampler.options.repetition_penalty;
+                const recent = gemma4.recentWindowFor(hist_tokens, self.sampler.options);
+
+                if (self.sampler.isGreedy()) {
+                    return sampling.argmaxWithPenalty(last_logits, config.vocab_size, config.sampling_excluded_tokens, recent, penalty);
+                }
+
+                const arena = graph.arenaAllocator();
+                const work_logits = try arena.alloc(f32, config.vocab_size);
+                @memcpy(work_logits, last_logits);
+                try sampling.applyRepetitionPenaltyInPlace(arena, work_logits, recent, penalty);
+                sampling.maskExcludedInPlace(work_logits, config.sampling_excluded_tokens);
+                return self.sampler.sampleLogits(graph.executor(), arena, work_logits);
             }
 
             fn emit(self: *Generation, tok: usize) !usize {

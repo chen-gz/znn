@@ -1442,5 +1442,24 @@ test "Gemma 4 PLE modules and Gemma4E4BForCausalLM forward" {
         try std.testing.expectEqual(@as(usize, 1), logits.shape.dims[0]); // B
         try std.testing.expectEqual(@as(usize, 3), logits.shape.dims[1]); // T
         try std.testing.expectEqual(@as(usize, 64), logits.shape.dims[2]); // V
+
+        // 4. Gemma4E4BForCausalLM CPU 端到端自回归生成回退测试 (无 GPU 离载下正常生成词元)
+        var gen = try model.generate(allocator, &.{ 2, 5 }, .{
+            .max_new_tokens = 2,
+            .stop_tokens = &.{},
+            .sampling = .{ .temperature = 0.0 },
+        });
+        defer gen.deinit();
+
+        const t1 = try gen.next();
+        try std.testing.expect(t1 != null);
+        try std.testing.expect(t1.? < tiny_cfg.vocab_size);
+
+        const t2 = try gen.next();
+        try std.testing.expect(t2 != null);
+        try std.testing.expect(t2.? < tiny_cfg.vocab_size);
+
+        const t3 = try gen.next();
+        try std.testing.expectEqual(@as(?usize, null), t3);
     }
 }
