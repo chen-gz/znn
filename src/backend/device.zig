@@ -1,0 +1,68 @@
+//! 计算设备抽象与硬件探测 (Device Abstraction & Hardware Detection)
+//!
+//! 定义多后端统一计算设备（CPU、GPU / 硬件加速器）与可用性探测，
+//! 与底层具体厂商驱动（Apple MLX、NVIDIA CUDA、Vulkan 等）解耦。
+
+const std = @import("std");
+const mlx = @import("mlx.zig");
+
+/// 目标计算设备类型枚举
+pub const DeviceType = enum {
+    cpu,
+    gpu,
+
+    pub fn isGpu(self: DeviceType) bool {
+        return self == .gpu;
+    }
+
+    pub fn isCpu(self: DeviceType) bool {
+        return self == .cpu;
+    }
+
+    /// 转换为底层 MLX 的 DeviceType (用于 Apple Silicon Metal 驱动互操作)
+    pub fn toMlx(self: DeviceType) mlx.DeviceType {
+        return switch (self) {
+            .cpu => .cpu,
+            .gpu => .gpu,
+        };
+    }
+
+    /// 从 MLX DeviceType 转换
+    pub fn fromMlx(dev: mlx.DeviceType) DeviceType {
+        return switch (dev) {
+            .cpu => .cpu,
+            .gpu => .gpu,
+        };
+    }
+};
+
+/// 计算设备别名
+pub const Device = DeviceType;
+
+/// 探测指定计算设备在当前平台是否可用
+pub fn isAvailable(dev: DeviceType) bool {
+    return switch (dev) {
+        .cpu => true,
+        .gpu => mlx.has_mlx,
+    };
+}
+
+/// 获取当前系统的默认首选计算设备 (若 GPU 可用优先使用 GPU，否则回退到 CPU)
+pub fn defaultDevice() DeviceType {
+    if (isAvailable(.gpu)) return .gpu;
+    return .cpu;
+}
+
+test "device: detection and conversions" {
+    const dev = defaultDevice();
+    if (mlx.has_mlx) {
+        try std.testing.expectEqual(Device.gpu, dev);
+        try std.testing.expect(isAvailable(.gpu));
+        try std.testing.expect(dev.isGpu());
+        try std.testing.expectEqual(mlx.DeviceType.gpu, dev.toMlx());
+    } else {
+        try std.testing.expectEqual(Device.cpu, dev);
+        try std.testing.expect(isAvailable(.cpu));
+        try std.testing.expect(dev.isCpu());
+    }
+}

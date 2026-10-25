@@ -13,9 +13,11 @@ pub const Executor = executor.Executor;
 
 pub const cblas = @import("backend/cblas.zig");
 
+pub const device = @import("backend/device.zig");
+pub const Device = device.Device;
+pub const DeviceType = device.DeviceType;
+
 pub const mlx = @import("backend/mlx.zig");
-pub const Device = mlx.DeviceType;
-pub const DeviceType = mlx.DeviceType;
 
 pub const mlx_blocks = @import("backend/mlx_blocks.zig");
 pub const Rope = mlx_blocks.Rope;
@@ -36,6 +38,7 @@ pub const DeviceCandidates = logits_processor.DeviceCandidates;
 pub const HostCandidates = logits_processor.HostCandidates;
 
 pub const offload = @import("backend/offload.zig");
+pub const ops = @import("backend/ops.zig");
 
 pub const rope = @import("backend/rope.zig");
 
@@ -49,12 +52,14 @@ pub const vec_math = @import("backend/vec_math.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("backend/device.zig");
     _ = @import("backend/activation.zig");
     _ = @import("backend/attention_mask.zig");
     _ = @import("backend/executor.zig");
     _ = @import("backend/cblas.zig");
     _ = @import("backend/mlx.zig");
     _ = @import("backend/offload.zig");
+    _ = @import("backend/ops.zig");
     _ = @import("backend/safetensors.zig");
     _ = @import("backend/rope.zig");
     _ = @import("backend/sampling.zig");

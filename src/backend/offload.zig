@@ -18,7 +18,7 @@ pub fn isAvailable() bool {
 }
 
 pub const Stream = mlx.Stream;
-pub const DeviceType = mlx.DeviceType;
+pub const DeviceType = @import("device.zig").DeviceType;
 pub const Array = mlx.Array;
 pub const DeviceArray = mlx.Array;
 pub const VectorArray = mlx.VectorArray;

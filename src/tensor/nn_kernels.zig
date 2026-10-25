@@ -48,19 +48,7 @@ pub fn softmax(self: *Tensor, allocator: std.mem.Allocator) !*Tensor {
 /// out = x * inv_rms * (weight + weight_offset)，weight 为 null 时不缩放；inv_rms 非 null 时写入每行的
 /// 1 / sqrt(mean(x^2) + eps) 供反向传播复用 (与前向使用同一求和顺序)
 pub fn rmsNormRows(x: []const f32, weight: ?[]const f32, out: []f32, inv_rms: ?[]f32, dim: usize, options: RmsNormOptions) void {
-    std.debug.assert(dim > 0 and x.len % dim == 0 and out.len == x.len);
-    const rows = x.len / dim;
-    for (0..rows) |i| {
-        const row_in = x[i * dim .. (i + 1) * dim];
-        const row_out = out[i * dim .. (i + 1) * dim];
-        const r = 1.0 / @sqrt(vec_math.sumSquares(row_in) / @as(f32, @floatFromInt(dim)) + options.eps);
-        if (inv_rms) |s| s[i] = r;
-        if (weight) |w| {
-            for (row_in, row_out, w[0..dim]) |x_val, *y_val, w_val| y_val.* = x_val * r * (w_val + options.weight_offset);
-        } else {
-            for (row_in, row_out) |x_val, *y_val| y_val.* = x_val * r;
-        }
-    }
+    vec_math.rmsNormRows(x, weight, out, inv_rms, dim, options.eps, options.weight_offset);
 }
 
 /// 均方根层归一化前向核函数 (Root Mean Square Layer Normalization, RMSNorm)：沿最后一维归一化，

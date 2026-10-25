@@ -230,6 +230,36 @@ pub fn scaleCopy(dst: []f32, src: []const f32, alpha: f32) void {
 // 归一化指数函数 (Softmax) 与对数求和指数 (Log-Sum-Exp, LSE)
 // ============================================================================
 
+/// 均方根层归一化行内核 (Root Mean Square Layer Normalization, RMSNorm)：
+/// out = x * (1 / sqrt(mean(x^2) + eps)) * (weight + weight_offset)
+pub fn rmsNormRows(
+    x: []const f32,
+    weight: ?[]const f32,
+    out: []f32,
+    inv_rms: ?[]f32,
+    dim: usize,
+    eps: f32,
+    weight_offset: f32,
+) void {
+    std.debug.assert(dim > 0 and x.len % dim == 0 and out.len == x.len);
+    const rows = x.len / dim;
+    for (0..rows) |i| {
+        const row_in = x[i * dim .. (i + 1) * dim];
+        const row_out = out[i * dim .. (i + 1) * dim];
+        const r = 1.0 / @sqrt(sumSquares(row_in) / @as(f32, @floatFromInt(dim)) + eps);
+        if (inv_rms) |s| s[i] = r;
+        if (weight) |w| {
+            for (row_in, row_out, w[0..dim]) |x_val, *y_val, w_val| {
+                y_val.* = x_val * r * (w_val + weight_offset);
+            }
+        } else {
+            for (row_in, row_out) |x_val, *y_val| {
+                y_val.* = x_val * r;
+            }
+        }
+    }
+}
+
 /// 数值稳定的单行归一化指数函数 (Softmax)：先减去行最大值再求指数 (`exp8`)，避免上溢。
 /// `in` 必须非空；`out` 可以与 `in` 是同一切片。
 pub fn softmaxRow(in: []const f32, out: []f32) void {

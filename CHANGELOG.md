@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **独立多后端设备抽象与统一算子分派器 (`src/backend/device.zig`, `src/backend/ops.zig`)**:
+  - **解耦计算设备类型 (`src/backend/device.zig`)**：
+    - 将 `Device` 与 `DeviceType` 从底层 Apple MLX 驱动彻底剥离为顶层通用枚举 (`cpu`, `gpu`)，并提供跨平台硬件可用性探测 (`device.isAvailable`) 与默认设备优选 (`device.defaultDevice`)；
+    - 消除全框架对 `backend.mlx.DeviceType` 的基础类型硬耦合。
+  - **统一多后端算子分派器 (`src/backend/ops.zig`)**：
+    - 新增通用多后端算子调度入口：`matmul`、`rmsNorm`、`softmax`、`add`、`multiply`、`mulScalar`、`gelu` 与 `cachedAttention`；
+    - 统一调度 CPU SIMD / Accelerate 与 GPU Metal / MLX 硬件加速，并在 `vec_math.zig` 补充通用的 CPU `rmsNormRows` 向量化算子；
+    - 为后续接入 Linux / Windows 纯 CPU 全功能自回归流式生成及 NVIDIA CUDA / Vulkan 后端奠定架构基础。
+
 - **模型层 (Layer 4) 彻底解耦硬件驱动、下沉 MLX 原语至 Backend (Layer 0) (`src/models/`, `src/backend/offload.zig`)**:
   - **消除 `src/models/` 对 `backend.mlx` 的直接硬依赖**：
     - `src/models/gemma4_e4b.zig` 与 `src/models/gemma4_q4.zig` 彻底移除 `const mlx = backend.mlx;` 及所有 `mlx.*` 算子调用；
