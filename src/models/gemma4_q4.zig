@@ -1164,7 +1164,7 @@ pub const ProjectionDims = struct {
     pub fn of(cfg: anytype, layer_idx: usize) ProjectionDims {
         const spec = cfg.layerSpec(layer_idx);
         const kv_dim = spec.num_kv_heads * spec.head_dim;
-        const is_full = @intFromEnum(spec.attn_type) == @intFromEnum(Gemma4AttentionType.full_attention);
+        const is_full = @backingInt(spec.attn_type) == @backingInt(Gemma4AttentionType.full_attention);
         return .{
             .q_dim = cfg.num_attention_heads * spec.head_dim,
             .kv_dim = kv_dim,
@@ -1315,7 +1315,7 @@ pub const Gemma4GpuLayer = struct {
         errdefer pm_w.deinit();
         var pom_w = try mlx.Array.fromSlice(norms.post_mlp, &.{norms.post_mlp.len});
         errdefer pom_w.deinit();
-        const is_full = @intFromEnum(spec.attn_type) == @intFromEnum(Gemma4AttentionType.full_attention);
+        const is_full = @backingInt(spec.attn_type) == @backingInt(Gemma4AttentionType.full_attention);
         const attn_type: Gemma4AttentionType = if (is_full) .full_attention else .sliding_attention;
         const rope_inst = try GpuRope.init(spec.head_dim, attn_type.ropeOptions());
 
@@ -1537,7 +1537,7 @@ pub const Gemma4GpuContext = struct {
     fn checkCacheLayout(self: *const Gemma4GpuContext, cache: anytype) !void {
         if (cache.layers.len != self.layers.len) return error.ShapeMismatch;
         for (self.layers, cache.layers) |lw, cl| {
-            if (cl.core.num_kv_heads != lw.num_kv_heads or cl.core.head_dim != lw.head_dim or @intFromEnum(cl.attn_type) != @intFromEnum(lw.attn_type)) {
+            if (cl.core.num_kv_heads != lw.num_kv_heads or cl.core.head_dim != lw.head_dim or @backingInt(cl.attn_type) != @backingInt(lw.attn_type)) {
                 return error.ShapeMismatch;
             }
         }
@@ -1921,5 +1921,3 @@ pub const Gemma4GpuContext = struct {
         (stream orelse self.stream).synchronize();
     }
 };
-
-

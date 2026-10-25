@@ -11,7 +11,7 @@
 ```text
 src/
 ├── root.zig                      # 顶层公共门面 (Facade)，聚合导出所有核心子模块
-├── backend.zig                   # 硬件后端与执行器门面 (导出 activation, attention_mask, logits_processor, mlx_blocks, GeluApproximation, AttentionMask, VisibleRange, Executor, cblas, mlx, offload, rope, sampling, vec_math)
+├── backend.zig                   # 硬件后端与执行器门面 (导出 activation, attention_mask, logits_processor, mlx_blocks, safetensors, Device, GeluApproximation, AttentionMask, VisibleRange, Executor, cblas, mlx, offload, rope, sampling, vec_math)
 ├── backend/
 │   ├── activation.zig            # 逐元素激活的标量公式唯一来源 (GeluApproximation：GELU 精确 erf 形式与 tanh 近似形式的前向与导数)
 │   ├── attention_mask.zig        # 注意力掩码规则唯一来源 (Mask = none | causal | sliding, visibleRange, isSlidingWindowVisible, fillAdditiveMask)
@@ -20,8 +20,9 @@ src/
 │   ├── logits_processor.zig      # 模型无关的设备端对数几率截断 (softcapLogits)、重复惩罚 (penalizeDevice)、候选生成 (deviceCandidates) 与词元选取 (selectToken / LogitsProcessor)
 │   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定、GPU 数组算子与类型安全闭包编译封装 (compileFn)
 │   ├── mlx_blocks.zig            # 模型无关的 MLX GPU 组合块 (Rope, projectHeads, gatedMlp, residualScale, finalHidden)
-│   ├── offload.zig               # 与模型无关的硬件加速卸载原语 (GEMM, RMSNorm, RoPE, SDPA, 滑动窗口注意力, LmHead / LmHeadWeights, TokenExclusionMask, QuantWeights, GpuKvCache)
+│   ├── offload.zig               # 与模型无关的硬件加速卸载原语 (borrowArray, storeOutput, GEMM, RMSNorm, RoPE, SDPA, 滑动窗口注意力, LmHead / LmHeadWeights, TokenExclusionMask, QuantWeights, GpuKvCache)
 │   ├── rope.zig                  # 旋转位置编码配置 RopeOptions (含 proportional 预设) 与旋转角数量 / 频率 / MLX 周期表的唯一公式 (CPU 与 GPU 共用)
+│   ├── safetensors.zig           # 零依赖 Safetensors (F32/BF16/F16) 零拷贝内存映射归档解析 (SafetensorsArchive, TensorMeta)
 │   ├── sampling.zig              # 通用采样基础设施 (TokenRange 排除区间, argmaxWithPenalty, BF16 排除掩码, SamplingOptions / Sampler 温度 + Top-K + Top-P 随机采样, selectTopK 部分选择, 投机采样校验)
 │   ├── vec_math.zig              # SIMD 行原语的唯一来源 (exp8, sum / max / sumSquares, dot / dotBf16, axpy, softmaxRow, logSumExpRow, sigmoid, softcap, BF16 展开)
 │   └── tests.zig                 # 硬件计算后端与 GPU 算子卸载单元测试集
@@ -71,16 +72,14 @@ src/
 │   ├── tests.zig                 # 核心网络层、循环网络、Transformer/LLM 与 Safetensors 测试
 │   ├── tests_init.zig            # 权重自动初始化与增益推导专项测试
 │   └── tests_module.zig          # 编译期反射协议、字段路径命名与权重共享 (Tied Weights) 生命周期测试
-├── models.zig                    # 专用模型门面 (导出 gpt, gemma4, gemma4_q4, gemma4_gpu, gemma4_e4b, GPT, GPTConfig, TransformerDecoder, DefaultGPT, Gemma4E4BModel)
+├── models.zig                    # 专用模型门面 (导出 gpt, gemma4, gemma4_q4, gemma4_e4b, GPT, GPTConfig, TransformerDecoder, DefaultGPT, Gemma4ForCausalLM, DefaultGemma4Q4, Gemma4E4BModel, Gemma4E4BDecoderLayer, Gemma4E4BForCausalLM)
 ├── models/
 │   ├── gpt.zig                   # GPT 架构定义 (GPTConfig, TransformerDecoder, GPT, DefaultGPT)
 │   ├── gemma4.zig                # Gemma 4 配置、泛型注意力与解码层 (Gemma4AttentionT, Gemma4DecoderLayerT)、全精度模型 (Gemma4ForCausalLM, TinyGemma4) 与词表/对话模板 (Gemma4Vocabulary)
-│   ├── gemma4_q4.zig             # Gemma 4 架构 4-bit 量化实现与统一流式生成会话 (Gemma4Q4ForCausalLM.generate / Generation, TinyQ4Gemma4)
-│   ├── gemma4_gpu.zig            # Gemma 4 GPU 推理共享组件与 12B 端到端解码上下文 (Gemma4GpuLayer, Gemma4GpuContext 含无偏投机采样校验)
+│   ├── gemma4_q4.zig             # Gemma 4 架构 4-bit 量化实现、内聚 GPU 解码上下文与统一流式生成会话 (Gemma4Q4ForCausalLM.generate / Generation, Gemma4GpuLayer, Gemma4GpuContext, TinyQ4Gemma4)
 │   ├── gemma4_ple.zig            # Gemma 4 逐层嵌入增强纯模块 (Gemma4PleLayer, Gemma4PleEmbedding)
-│   ├── gemma4_e4b.zig            # Gemma 4 E4B 纯模型架构 (Gemma4E4BDecoderLayer, Gemma4E4BForCausalLM, Gemma4E4BModel)
-│   ├── gemma4_e4b_gpu.zig        # Gemma 4 E4B 苹果统一内存 (UMA) GPU 硬件加速推理引擎 (PleWeights, GpuLayerE4B, Gemma4E4BGpuContext)
-│   ├── tests.zig                 # Gemma 4 全精度、4-bit 量化、E4B 推理引擎与对话模板单元测试
+│   ├── gemma4_e4b.zig            # Gemma 4 E4B 原生内聚模型架构与 UMA GPU 自回归推理 (Gemma4E4BDecoderLayer, Gemma4E4BForCausalLM, Gemma4E4BModel)
+│   ├── tests.zig                 # Gemma 4 全精度、4-bit 量化、PLE、E4B 推理与对话模板单元测试
 │   └── tests_vis.zig             # 可视化作用域归属、Schema 2.0 黄金边集与 18 个经典模型导出测试
 ├── optim.zig                     # SGD, Adam, AdamW 优化器、4 类学习率调度器、梯度裁剪与 ZNNO 检查点
 ├── engine.zig                    # 执行引擎门面 (导出分类训练器、评估器与 causal_lm 因果语言模型训练单步)
