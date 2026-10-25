@@ -1842,3 +1842,82 @@ test "LmHead union with dense LmHeadWeights and GpuKvCache truncate rollback" {
     cache.reset();
     try std.testing.expectEqual(@as(usize, 0), cache.curr_len);
 }
+
+test "CUDA backend: device probe, kernels, and multi-backend ops dispatching" {
+    const cuda_mod = @import("cuda.zig");
+    const ops_mod = @import("ops.zig");
+    const device_mod = @import("device.zig");
+
+    if (cuda_mod.isAvailable()) {
+        try std.testing.expect(cuda_mod.getDeviceCount() > 0);
+
+        var name_buf: [256]u8 = undefined;
+        const dev_name = cuda_mod.getDeviceName(&name_buf);
+        try std.testing.expect(dev_name.len > 0);
+
+        const mem_info = cuda_mod.getDeviceMemory();
+        try std.testing.expect(mem_info.total > 0);
+
+        // 创建与同步统一计算设备架构 (Compute Unified Device Architecture, CUDA) 执行流
+        var stream = try cuda_mod.Stream.create();
+        defer stream.destroy();
+        try stream.synchronize();
+
+        // 验证通用矩阵乘法 (General Matrix Multiply, GEMM)
+        const a_vals = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+        const b_vals = [_]f32{ 2.0, 0.0, 1.0, 2.0 };
+        var a_arr = try cuda_mod.Array.fromSlice(&a_vals, &.{ 2, 2 });
+        defer a_arr.deinit();
+        var b_arr = try cuda_mod.Array.fromSlice(&b_vals, &.{ 2, 2 });
+        defer b_arr.deinit();
+
+        var c_arr = try cuda_mod.Array.matmul(a_arr, b_arr, stream);
+        defer c_arr.deinit();
+
+        var c_host: [4]f32 = undefined;
+        try c_arr.toHostSlice(&c_host);
+        // [1 2; 3 4] * [2 0; 1 2] = [4 4; 10 8]
+        try std.testing.expectEqual(@as(f32, 4.0), c_host[0]);
+        try std.testing.expectEqual(@as(f32, 4.0), c_host[1]);
+        try std.testing.expectEqual(@as(f32, 10.0), c_host[2]);
+        try std.testing.expectEqual(@as(f32, 8.0), c_host[3]);
+
+        // 验证旋转位置编码 (Rotary Position Embedding, RoPE)
+        const rope_in = [_]f32{ 1.0, 0.0, 0.0, 1.0 };
+        var r_arr = try cuda_mod.Array.fromSlice(&rope_in, &.{ 1, 4 });
+        defer r_arr.deinit();
+        var r_out = try cuda_mod.Array.fastRoPE(r_arr, 4, false, 10000.0, 1.0, 0, stream);
+        defer r_out.deinit();
+        var r_host: [4]f32 = undefined;
+        try r_out.toHostSlice(&r_host);
+        // pos=0: cos(0)=1, sin(0)=0 => r_out equals rope_in
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), r_host[0], 1e-4);
+        try std.testing.expectApproxEqAbs(@as(f32, 0.0), r_host[1], 1e-4);
+
+        // 验证统一算子分派器 (Unified Operator Dispatcher) 自动分派至 CUDA
+        const MockTensor = struct {
+            data: []f32,
+            shape: struct {
+                dims: [4]usize,
+                len: usize,
+            },
+        };
+        var t_a_data = [_]f32{ 2.0, 4.0, 6.0, 8.0 };
+        var t_b_data = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
+        var t_c_data = [_]f32{ 0.0, 0.0, 0.0, 0.0 };
+        var TA = MockTensor{ .data = &t_a_data, .shape = .{ .dims = .{ 2, 2, 0, 0 }, .len = 2 } };
+        var TB = MockTensor{ .data = &t_b_data, .shape = .{ .dims = .{ 2, 2, 0, 0 }, .len = 2 } };
+        var TC = MockTensor{ .data = &t_c_data, .shape = .{ .dims = .{ 2, 2, 0, 0 }, .len = 2 } };
+
+        try ops_mod.add(&TA, &TB, &TC, .cuda, null);
+        try std.testing.expectEqual(@as(f32, 3.0), TC.data[0]);
+        try std.testing.expectEqual(@as(f32, 5.0), TC.data[1]);
+        try std.testing.expectEqual(@as(f32, 7.0), TC.data[2]);
+        try std.testing.expectEqual(@as(f32, 9.0), TC.data[3]);
+
+        // 设备抽象验证：首选设备为 GPU
+        try std.testing.expectEqual(device_mod.DeviceType.gpu, device_mod.defaultDevice());
+        try std.testing.expect(device_mod.isAvailable(.gpu));
+        try std.testing.expect(device_mod.isAvailable(.cuda));
+    }
+}

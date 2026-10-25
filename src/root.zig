@@ -15,6 +15,7 @@ pub const models = @import("models.zig");
 pub const backend = @import("backend.zig");
 pub const Executor = backend.Executor;
 pub const mlx = backend.mlx;
+pub const cuda = backend.cuda;
 pub const offload = backend.offload;
 pub const Device = backend.Device;
 

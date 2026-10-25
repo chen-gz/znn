@@ -1,0 +1,906 @@
+//! 统一计算设备架构 (Compute Unified Device Architecture, CUDA) 硬件加速后端
+//!
+//! 基于 NVIDIA 显卡驱动的底层驱动应用程序接口 (Driver Application Programming Interface, Driver API)
+//! 与并行线程执行 (Parallel Thread Execution, PTX) 即时编译器 (Just-In-Time Compiler, JIT)，
+//! 将通用矩阵乘法 (General Matrix Multiply, GEMM)、均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)、
+//! 旋转位置编码 (Rotary Position Embedding, RoPE) 与注意力计算卸载至图形处理器 (Graphics Processing Unit, GPU)。
+//! 零外部 CUDA 编译套件工具链依赖，系统只要安装 NVIDIA 显示驱动即可直接运行。
+
+const std = @import("std");
+const builtin = @import("builtin");
+const activation = @import("activation.zig");
+const GeluApproximation = activation.GeluApproximation;
+const rope_mod = @import("rope.zig");
+const kernels = @import("cuda_kernels.zig");
+
+pub const CUdevice = c_int;
+pub const CUcontext = *anyopaque;
+pub const CUmodule = *anyopaque;
+pub const CUfunction = *anyopaque;
+pub const CUstream = *anyopaque;
+pub const CUdeviceptr = u64;
+
+pub const CuResult = enum(c_int) {
+    success = 0,
+    invalid_value = 1,
+    out_of_memory = 2,
+    not_initialized = 3,
+    deinitialized = 4,
+    no_device = 100,
+    invalid_device = 101,
+    invalid_context = 201,
+    invalid_handle = 400,
+    not_found = 500,
+    not_ready = 600,
+    no_binary_for_gpu = 218,
+    _,
+};
+
+pub const CudaError = error{
+    CudaNotSupported,
+    CudaInitializationFailed,
+    CudaOperationFailed,
+    OutOfMemory,
+    InvalidShape,
+    ShapeMismatch,
+    KernelNotFound,
+    DeviceNotFound,
+};
+
+/// 驱动 API 函数指针表
+const DriverApi = struct {
+    cuInit: *const fn (flags: c_uint) callconv(.c) CuResult,
+    cuDeviceGet: *const fn (device: *CUdevice, ordinal: c_int) callconv(.c) CuResult,
+    cuDeviceGetCount: *const fn (count: *c_int) callconv(.c) CuResult,
+    cuDeviceGetName: *const fn (name: [*]u8, len: c_int, dev: CUdevice) callconv(.c) CuResult,
+    cuDeviceTotalMem: *const fn (bytes: *usize, dev: CUdevice) callconv(.c) CuResult,
+    cuDevicePrimaryCtxRetain: *const fn (pctx: *?CUcontext, dev: CUdevice) callconv(.c) CuResult,
+    cuDevicePrimaryCtxRelease: *const fn (dev: CUdevice) callconv(.c) CuResult,
+    cuCtxCreate: *const fn (pctx: *?CUcontext, flags: c_uint, dev: CUdevice) callconv(.c) CuResult,
+    cuCtxDestroy: *const fn (ctx: ?CUcontext) callconv(.c) CuResult,
+    cuCtxSetCurrent: *const fn (ctx: ?CUcontext) callconv(.c) CuResult,
+    cuCtxSynchronize: *const fn () callconv(.c) CuResult,
+    cuMemAlloc: *const fn (dptr: *CUdeviceptr, bytesize: usize) callconv(.c) CuResult,
+    cuMemFree: *const fn (dptr: CUdeviceptr) callconv(.c) CuResult,
+    cuMemcpyHtoD: *const fn (dstDevice: CUdeviceptr, srcHost: ?*const anyopaque, ByteCount: usize) callconv(.c) CuResult,
+    cuMemcpyDtoH: *const fn (dstHost: ?*anyopaque, srcDevice: CUdeviceptr, ByteCount: usize) callconv(.c) CuResult,
+    cuMemcpyDtoD: *const fn (dstDevice: CUdeviceptr, srcDevice: CUdeviceptr, ByteCount: usize) callconv(.c) CuResult,
+    cuMemsetD8: *const fn (dstDevice: CUdeviceptr, uc: u8, N: usize) callconv(.c) CuResult,
+    cuMemsetD32: *const fn (dstDevice: CUdeviceptr, ui: u32, N: usize) callconv(.c) CuResult,
+    cuStreamCreate: *const fn (phStream: *?CUstream, Flags: c_uint) callconv(.c) CuResult,
+    cuStreamDestroy: *const fn (hStream: ?CUstream) callconv(.c) CuResult,
+    cuStreamSynchronize: *const fn (hStream: ?CUstream) callconv(.c) CuResult,
+    cuModuleLoadData: *const fn (module: *?CUmodule, image: ?*const anyopaque) callconv(.c) CuResult,
+    cuModuleUnload: *const fn (hmod: ?CUmodule) callconv(.c) CuResult,
+    cuModuleGetFunction: *const fn (hfunc: *?CUfunction, hmod: ?CUmodule, name: [*:0]const u8) callconv(.c) CuResult,
+    cuLaunchKernel: *const fn (
+        f: CUfunction,
+        gridDimX: c_uint,
+        gridDimY: c_uint,
+        gridDimZ: c_uint,
+        blockDimX: c_uint,
+        blockDimY: c_uint,
+        blockDimZ: c_uint,
+        sharedMemBytes: c_uint,
+        hStream: ?CUstream,
+        kernelParams: ?[*]const ?*anyopaque,
+        extra: ?[*]const ?*anyopaque,
+    ) callconv(.c) CuResult,
+};
+
+/// 全局驱动状态单例
+var global_driver: ?DriverApi = null;
+var global_lib: ?std.DynLib = null;
+var global_ctx: ?CUcontext = null;
+var global_module: ?CUmodule = null;
+var global_device: CUdevice = 0;
+var probe_attempted: bool = false;
+var is_cuda_available: bool = false;
+
+// 缓存内核函数指针
+var fn_sgemm: ?CUfunction = null;
+var fn_rms_norm: ?CUfunction = null;
+var fn_add: ?CUfunction = null;
+var fn_multiply: ?CUfunction = null;
+var fn_mul_scalar: ?CUfunction = null;
+var fn_gelu: ?CUfunction = null;
+var fn_softmax: ?CUfunction = null;
+var fn_rope: ?CUfunction = null;
+
+const lib_search_paths = [_][]const u8{
+    "libcuda.so.1",
+    "libcuda.so",
+    "/run/opengl-driver/lib/libcuda.so.1",
+    "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+    "/usr/lib/wsl/lib/libcuda.so.1",
+    "nvcuda.dll",
+    "libcuda.dylib",
+};
+
+fn initDriver() bool {
+    if (probe_attempted) return is_cuda_available;
+    probe_attempted = true;
+
+    for (lib_search_paths) |path| {
+        if (std.DynLib.open(path)) |lib| {
+            global_lib = lib;
+            break;
+        } else |_| {}
+    }
+
+    const lib = &(global_lib orelse return false);
+
+    const cuInit = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuInit), "cuInit") orelse return false;
+    const cuDeviceGet = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuDeviceGet), "cuDeviceGet") orelse return false;
+    const cuDeviceGetCount = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuDeviceGetCount), "cuDeviceGetCount") orelse return false;
+    const cuDeviceGetName = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuDeviceGetName), "cuDeviceGetName") orelse return false;
+    const cuDeviceTotalMem = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuDeviceTotalMem), "cuDeviceTotalMem_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuDeviceTotalMem), "cuDeviceTotalMem") orelse return false);
+    const cuDevicePrimaryCtxRetain = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuDevicePrimaryCtxRetain), "cuDevicePrimaryCtxRetain") orelse return false;
+    const cuDevicePrimaryCtxRelease = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuDevicePrimaryCtxRelease), "cuDevicePrimaryCtxRelease") orelse return false;
+    const cuCtxCreate = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuCtxCreate), "cuCtxCreate_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuCtxCreate), "cuCtxCreate") orelse return false);
+    const cuCtxDestroy = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuCtxDestroy), "cuCtxDestroy_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuCtxDestroy), "cuCtxDestroy") orelse return false);
+    const cuCtxSetCurrent = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuCtxSetCurrent), "cuCtxSetCurrent") orelse return false;
+    const cuCtxSynchronize = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuCtxSynchronize), "cuCtxSynchronize") orelse return false;
+    const cuMemAlloc = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemAlloc), "cuMemAlloc_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemAlloc), "cuMemAlloc") orelse return false);
+    const cuMemFree = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemFree), "cuMemFree_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemFree), "cuMemFree") orelse return false);
+    const cuMemcpyHtoD = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemcpyHtoD), "cuMemcpyHtoD_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemcpyHtoD), "cuMemcpyHtoD") orelse return false);
+    const cuMemcpyDtoH = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemcpyDtoH), "cuMemcpyDtoH_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemcpyDtoH), "cuMemcpyDtoH") orelse return false);
+    const cuMemcpyDtoD = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemcpyDtoD), "cuMemcpyDtoD_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemcpyDtoD), "cuMemcpyDtoD") orelse return false);
+    const cuMemsetD8 = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemsetD8), "cuMemsetD8_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemsetD8), "cuMemsetD8") orelse return false);
+    const cuMemsetD32 = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemsetD32), "cuMemsetD32_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuMemsetD32), "cuMemsetD32") orelse return false);
+    const cuStreamCreate = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuStreamCreate), "cuStreamCreate") orelse return false;
+    const cuStreamDestroy = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuStreamDestroy), "cuStreamDestroy_v2") orelse
+        (lib.lookup(@TypeOf(@as(DriverApi, undefined).cuStreamDestroy), "cuStreamDestroy") orelse return false);
+    const cuStreamSynchronize = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuStreamSynchronize), "cuStreamSynchronize") orelse return false;
+    const cuModuleLoadData = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuModuleLoadData), "cuModuleLoadData") orelse return false;
+    const cuModuleUnload = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuModuleUnload), "cuModuleUnload") orelse return false;
+    const cuModuleGetFunction = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuModuleGetFunction), "cuModuleGetFunction") orelse return false;
+    const cuLaunchKernel = lib.lookup(@TypeOf(@as(DriverApi, undefined).cuLaunchKernel), "cuLaunchKernel") orelse return false;
+
+    if (cuInit(0) != .success) return false;
+
+    var dev_count: c_int = 0;
+    if (cuDeviceGetCount(&dev_count) != .success or dev_count <= 0) return false;
+
+    var dev: CUdevice = 0;
+    if (cuDeviceGet(&dev, 0) != .success) return false;
+    global_device = dev;
+
+    global_driver = .{
+        .cuInit = cuInit,
+        .cuDeviceGet = cuDeviceGet,
+        .cuDeviceGetCount = cuDeviceGetCount,
+        .cuDeviceGetName = cuDeviceGetName,
+        .cuDeviceTotalMem = cuDeviceTotalMem,
+        .cuDevicePrimaryCtxRetain = cuDevicePrimaryCtxRetain,
+        .cuDevicePrimaryCtxRelease = cuDevicePrimaryCtxRelease,
+        .cuCtxCreate = cuCtxCreate,
+        .cuCtxDestroy = cuCtxDestroy,
+        .cuCtxSetCurrent = cuCtxSetCurrent,
+        .cuCtxSynchronize = cuCtxSynchronize,
+        .cuMemAlloc = cuMemAlloc,
+        .cuMemFree = cuMemFree,
+        .cuMemcpyHtoD = cuMemcpyHtoD,
+        .cuMemcpyDtoH = cuMemcpyDtoH,
+        .cuMemcpyDtoD = cuMemcpyDtoD,
+        .cuMemsetD8 = cuMemsetD8,
+        .cuMemsetD32 = cuMemsetD32,
+        .cuStreamCreate = cuStreamCreate,
+        .cuStreamDestroy = cuStreamDestroy,
+        .cuStreamSynchronize = cuStreamSynchronize,
+        .cuModuleLoadData = cuModuleLoadData,
+        .cuModuleUnload = cuModuleUnload,
+        .cuModuleGetFunction = cuModuleGetFunction,
+        .cuLaunchKernel = cuLaunchKernel,
+    };
+
+    is_cuda_available = true;
+    return true;
+}
+
+/// 检查当前系统是否支持统一计算设备架构 (Compute Unified Device Architecture, CUDA)
+pub fn isAvailable() bool {
+    return initDriver();
+}
+
+/// 获取全局驱动函数表
+fn getApi() CudaError!*const DriverApi {
+    if (!isAvailable()) return error.CudaNotSupported;
+    return &(global_driver.?);
+}
+
+/// 确保统一计算设备架构上下文与算子内核模块已初始化
+pub fn ensureContext() CudaError!void {
+    const api = try getApi();
+    if (global_ctx != null and global_module != null) return;
+
+    if (global_ctx == null) {
+        var ctx: ?CUcontext = null;
+        if (api.cuDevicePrimaryCtxRetain(&ctx, global_device) != .success) {
+            if (api.cuCtxCreate(&ctx, 0, global_device) != .success) {
+                return error.CudaInitializationFailed;
+            }
+        }
+        _ = api.cuCtxSetCurrent(ctx);
+        global_ctx = ctx;
+    }
+
+    if (global_module == null) {
+        var mod: ?CUmodule = null;
+        if (api.cuModuleLoadData(&mod, kernels.KERNELS_PTX.ptr) != .success) {
+            return error.CudaInitializationFailed;
+        }
+        global_module = mod;
+
+        _ = api.cuModuleGetFunction(&fn_sgemm, mod, "sgemm_kernel");
+        _ = api.cuModuleGetFunction(&fn_rms_norm, mod, "rms_norm_kernel");
+        _ = api.cuModuleGetFunction(&fn_add, mod, "add_kernel");
+        _ = api.cuModuleGetFunction(&fn_multiply, mod, "multiply_kernel");
+        _ = api.cuModuleGetFunction(&fn_mul_scalar, mod, "mul_scalar_kernel");
+        _ = api.cuModuleGetFunction(&fn_gelu, mod, "gelu_kernel");
+        _ = api.cuModuleGetFunction(&fn_softmax, mod, "softmax_kernel");
+        _ = api.cuModuleGetFunction(&fn_rope, mod, "rope_kernel");
+    }
+}
+
+/// 查询系统可用图形处理器数量
+pub fn getDeviceCount() u32 {
+    const api = getApi() catch return 0;
+    var count: c_int = 0;
+    if (api.cuDeviceGetCount(&count) != .success or count < 0) return 0;
+    return @intCast(count);
+}
+
+/// 获取首选图形处理器的名称
+pub fn getDeviceName(buf: []u8) []const u8 {
+    const api = getApi() catch return "CPU";
+    if (api.cuDeviceGetName(buf.ptr, @intCast(buf.len), global_device) != .success) {
+        return "Unknown CUDA Device";
+    }
+    return std.mem.sliceTo(buf, 0);
+}
+
+/// 获取首选图形处理器的显存容量 (字节)
+pub fn getDeviceMemory() struct { total: usize } {
+    const api = getApi() catch return .{ .total = 0 };
+    var total: usize = 0;
+    _ = api.cuDeviceTotalMem(&total, global_device);
+    return .{ .total = total };
+}
+
+/// 统一计算设备架构执行流 (Stream)
+pub const Stream = struct {
+    handle: ?CUstream = null,
+
+    pub fn create() CudaError!Stream {
+        const api = try getApi();
+        try ensureContext();
+        var s: ?CUstream = null;
+        if (api.cuStreamCreate(&s, 0) != .success) return error.CudaOperationFailed;
+        return .{ .handle = s };
+    }
+
+    pub fn destroy(self: *Stream) void {
+        const api = getApi() catch return;
+        if (self.handle) |s| {
+            _ = api.cuStreamDestroy(s);
+            self.handle = null;
+        }
+    }
+
+    pub fn synchronize(self: Stream) CudaError!void {
+        const api = try getApi();
+        if (self.handle) |s| {
+            if (api.cuStreamSynchronize(s) != .success) return error.CudaOperationFailed;
+        } else {
+            if (api.cuCtxSynchronize() != .success) return error.CudaOperationFailed;
+        }
+    }
+};
+
+/// 显存分配 (Device Memory Allocation)
+pub fn alloc(bytes: usize) CudaError!CUdeviceptr {
+    const api = try getApi();
+    try ensureContext();
+    var dptr: CUdeviceptr = 0;
+    if (api.cuMemAlloc(&dptr, bytes) != .success) return error.OutOfMemory;
+    return dptr;
+}
+
+/// 显存释放 (Device Memory Free)
+pub fn free(dptr: CUdeviceptr) void {
+    const api = getApi() catch return;
+    if (dptr != 0) {
+        _ = api.cuMemFree(dptr);
+    }
+}
+
+/// 主机内存到显存拷贝 (Host to Device Copy)
+pub fn copyHostToDevice(dst: CUdeviceptr, src: *const anyopaque, bytes: usize) CudaError!void {
+    const api = try getApi();
+    if (api.cuMemcpyHtoD(dst, src, bytes) != .success) return error.CudaOperationFailed;
+}
+
+/// 显存到主机内存拷贝 (Device to Host Copy)
+pub fn copyDeviceToHost(dst: *anyopaque, src: CUdeviceptr, bytes: usize) CudaError!void {
+    const api = try getApi();
+    if (api.cuMemcpyDtoH(dst, src, bytes) != .success) return error.CudaOperationFailed;
+}
+
+/// 显存内部设备间拷贝 (Device to Device Copy)
+pub fn copyDeviceToDevice(dst: CUdeviceptr, src: CUdeviceptr, bytes: usize) CudaError!void {
+    const api = try getApi();
+    if (api.cuMemcpyDtoD(dst, src, bytes) != .success) return error.CudaOperationFailed;
+}
+
+/// 显存清零 (Zero Out Device Memory)
+pub fn setZero(dst: CUdeviceptr, bytes: usize) CudaError!void {
+    const api = try getApi();
+    if (bytes % 4 == 0) {
+        if (api.cuMemsetD32(dst, 0, bytes / 4) != .success) return error.CudaOperationFailed;
+    } else {
+        if (api.cuMemsetD8(dst, 0, bytes) != .success) return error.CudaOperationFailed;
+    }
+}
+
+/// 数据类型枚举
+pub const DType = enum(u8) {
+    float32,
+    bfloat16,
+};
+
+/// 统一计算设备架构设备端张量数组 (CUDA Device Array)
+pub const Array = struct {
+    ptr: CUdeviceptr,
+    shape: [8]usize = @splat(0),
+    ndim: usize = 0,
+    len: usize = 0,
+    dtype: DType = .float32,
+
+    /// 从切片初始化设备数组
+    pub fn fromSlice(slice: []const f32, dims: []const usize) CudaError!Array {
+        if (dims.len > 8) return error.InvalidShape;
+        var total_len: usize = 1;
+        for (dims) |d| total_len *= d;
+        if (total_len != slice.len) return error.ShapeMismatch;
+
+        const bytes = slice.len * @sizeOf(f32);
+        const dptr = try alloc(bytes);
+        errdefer free(dptr);
+
+        try copyHostToDevice(dptr, slice.ptr, bytes);
+
+        var shape_arr: [8]usize = @splat(0);
+        @memcpy(shape_arr[0..dims.len], dims);
+
+        return .{
+            .ptr = dptr,
+            .shape = shape_arr,
+            .ndim = dims.len,
+            .len = slice.len,
+            .dtype = .float32,
+        };
+    }
+
+    /// 从主机张量创建设备数组
+    pub fn fromTensor(t: anytype) CudaError!Array {
+        const slice = t.data;
+        const dims = t.shape.dims[0..t.shape.len];
+        return fromSlice(slice, dims);
+    }
+
+    /// 拷贝设备数组数据回主机张量
+    pub fn copyToTensor(self: Array, t: anytype) CudaError!void {
+        if (self.len != t.data.len) return error.ShapeMismatch;
+        try copyDeviceToHost(t.data.ptr, self.ptr, self.len * @sizeOf(f32));
+    }
+
+    /// 拷贝到主机切片
+    pub fn toHostSlice(self: Array, dest: []f32) CudaError!void {
+        if (self.len != dest.len) return error.ShapeMismatch;
+        try copyDeviceToHost(dest.ptr, self.ptr, self.len * @sizeOf(f32));
+    }
+
+    /// 克隆设备数组
+    pub fn clone(self: Array) CudaError!Array {
+        const bytes = self.len * @sizeOf(f32);
+        const new_ptr = try alloc(bytes);
+        errdefer free(new_ptr);
+        try copyDeviceToDevice(new_ptr, self.ptr, bytes);
+        return .{
+            .ptr = new_ptr,
+            .shape = self.shape,
+            .ndim = self.ndim,
+            .len = self.len,
+            .dtype = self.dtype,
+        };
+    }
+
+    /// 重塑形状 (浅拷贝视图)
+    pub fn reshape(self: Array, new_dims: []const usize) CudaError!Array {
+        if (new_dims.len > 8) return error.InvalidShape;
+        var total: usize = 1;
+        for (new_dims) |d| total *= d;
+        if (total != self.len) return error.ShapeMismatch;
+
+        var shape_arr: [8]usize = @splat(0);
+        @memcpy(shape_arr[0..new_dims.len], new_dims);
+
+        return .{
+            .ptr = self.ptr,
+            .shape = shape_arr,
+            .ndim = new_dims.len,
+            .len = self.len,
+            .dtype = self.dtype,
+        };
+    }
+
+    /// 释放显存句柄
+    pub fn deinit(self: *Array) void {
+        if (self.ptr != 0) {
+            free(self.ptr);
+            self.ptr = 0;
+            self.len = 0;
+        }
+    }
+
+    /// 通用矩阵乘法 (General Matrix Multiply, GEMM): C = A * B
+    pub fn matmul(a: Array, b: Array, stream: ?Stream) CudaError!Array {
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_sgemm orelse return error.KernelNotFound;
+
+        if (a.ndim < 2 or b.ndim < 2) return error.InvalidShape;
+        const M = a.shape[a.ndim - 2];
+        const K1 = a.shape[a.ndim - 1];
+        const K2 = b.shape[b.ndim - 2];
+        const N = b.shape[b.ndim - 1];
+        if (K1 != K2) return error.ShapeMismatch;
+
+        const out_len = a.len / K1 * N;
+        const c_ptr = try alloc(out_len * @sizeOf(f32));
+        errdefer free(c_ptr);
+
+        var m_u32: u32 = @intCast(M);
+        var n_u32: u32 = @intCast(N);
+        var k_u32: u32 = @intCast(K1);
+        var d_a = a.ptr;
+        var d_b = b.ptr;
+        var d_c = c_ptr;
+
+        var params = [_]?*anyopaque{
+            &d_a,
+            &d_b,
+            &d_c,
+            &m_u32,
+            &n_u32,
+            &k_u32,
+        };
+
+        const block_dim: c_uint = 16;
+        const grid_x: c_uint = @intCast((N + block_dim - 1) / block_dim);
+        const grid_y: c_uint = @intCast((M + block_dim - 1) / block_dim);
+        const h_stream = if (stream) |s| s.handle else null;
+
+        if (api.cuLaunchKernel(
+            func,
+            grid_x, grid_y, 1,
+            block_dim, block_dim, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        var res_shape = a.shape;
+        res_shape[a.ndim - 1] = N;
+
+        return .{
+            .ptr = c_ptr,
+            .shape = res_shape,
+            .ndim = a.ndim,
+            .len = out_len,
+            .dtype = .float32,
+        };
+    }
+
+    /// 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)
+    pub fn rmsNorm(x: Array, weight: ?Array, eps: f32, stream: ?Stream) CudaError!Array {
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_rms_norm orelse return error.KernelNotFound;
+
+        const D = x.shape[x.ndim - 1];
+        const rows = x.len / D;
+
+        const out_ptr = try alloc(x.len * @sizeOf(f32));
+        errdefer free(out_ptr);
+
+        var d_x = x.ptr;
+        var d_w: CUdeviceptr = if (weight) |w| w.ptr else 0;
+        var d_out = out_ptr;
+        var eps_val = eps;
+        var rows_u32: u32 = @intCast(rows);
+        var cols_u32: u32 = @intCast(D);
+
+        var params = [_]?*anyopaque{
+            &d_x,
+            &d_w,
+            &d_out,
+            &eps_val,
+            &rows_u32,
+            &cols_u32,
+        };
+
+        const h_stream = if (stream) |s| s.handle else null;
+        if (api.cuLaunchKernel(
+            func,
+            rows_u32, 1, 1,
+            1, 1, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        return .{
+            .ptr = out_ptr,
+            .shape = x.shape,
+            .ndim = x.ndim,
+            .len = x.len,
+            .dtype = .float32,
+        };
+    }
+
+    /// 逐元素加法 (Elementwise Add)
+    pub fn add(a: Array, b: Array, stream: ?Stream) CudaError!Array {
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_add orelse return error.KernelNotFound;
+        if (a.len != b.len) return error.ShapeMismatch;
+
+        const c_ptr = try alloc(a.len * @sizeOf(f32));
+        errdefer free(c_ptr);
+
+        var d_a = a.ptr;
+        var d_b = b.ptr;
+        var d_c = c_ptr;
+        var n_u32: u32 = @intCast(a.len);
+
+        var params = [_]?*anyopaque{
+            &d_a,
+            &d_b,
+            &d_c,
+            &n_u32,
+        };
+
+        const block_dim: c_uint = 256;
+        const grid_dim: c_uint = @intCast((a.len + block_dim - 1) / block_dim);
+        const h_stream = if (stream) |s| s.handle else null;
+
+        if (api.cuLaunchKernel(
+            func,
+            grid_dim, 1, 1,
+            block_dim, 1, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        return .{
+            .ptr = c_ptr,
+            .shape = a.shape,
+            .ndim = a.ndim,
+            .len = a.len,
+            .dtype = .float32,
+        };
+    }
+
+    /// 逐元素乘法 (Elementwise Multiply)
+    pub fn multiply(a: Array, b: Array, stream: ?Stream) CudaError!Array {
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_multiply orelse return error.KernelNotFound;
+        if (a.len != b.len) return error.ShapeMismatch;
+
+        const c_ptr = try alloc(a.len * @sizeOf(f32));
+        errdefer free(c_ptr);
+
+        var d_a = a.ptr;
+        var d_b = b.ptr;
+        var d_c = c_ptr;
+        var n_u32: u32 = @intCast(a.len);
+
+        var params = [_]?*anyopaque{
+            &d_a,
+            &d_b,
+            &d_c,
+            &n_u32,
+        };
+
+        const block_dim: c_uint = 256;
+        const grid_dim: c_uint = @intCast((a.len + block_dim - 1) / block_dim);
+        const h_stream = if (stream) |s| s.handle else null;
+
+        if (api.cuLaunchKernel(
+            func,
+            grid_dim, 1, 1,
+            block_dim, 1, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        return .{
+            .ptr = c_ptr,
+            .shape = a.shape,
+            .ndim = a.ndim,
+            .len = a.len,
+            .dtype = .float32,
+        };
+    }
+
+    /// 标量乘法 (Multiply Scalar)
+    pub fn mulScalar(a: Array, scalar: f32, stream: ?Stream) CudaError!Array {
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_mul_scalar orelse return error.KernelNotFound;
+
+        const c_ptr = try alloc(a.len * @sizeOf(f32));
+        errdefer free(c_ptr);
+
+        var d_a = a.ptr;
+        var s_val = scalar;
+        var d_c = c_ptr;
+        var n_u32: u32 = @intCast(a.len);
+
+        var params = [_]?*anyopaque{
+            &d_a,
+            &s_val,
+            &d_c,
+            &n_u32,
+        };
+
+        const block_dim: c_uint = 256;
+        const grid_dim: c_uint = @intCast((a.len + block_dim - 1) / block_dim);
+        const h_stream = if (stream) |s| s.handle else null;
+
+        if (api.cuLaunchKernel(
+            func,
+            grid_dim, 1, 1,
+            block_dim, 1, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        return .{
+            .ptr = c_ptr,
+            .shape = a.shape,
+            .ndim = a.ndim,
+            .len = a.len,
+            .dtype = .float32,
+        };
+    }
+
+    /// 高斯误差线性单元 (Gaussian Error Linear Unit, GELU)
+    pub fn gelu(a: Array, approx: GeluApproximation, stream: ?Stream) CudaError!Array {
+        _ = approx;
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_gelu orelse return error.KernelNotFound;
+
+        const out_ptr = try alloc(a.len * @sizeOf(f32));
+        errdefer free(out_ptr);
+
+        var d_a = a.ptr;
+        var d_out = out_ptr;
+        var n_u32: u32 = @intCast(a.len);
+
+        var params = [_]?*anyopaque{
+            &d_a,
+            &d_out,
+            &n_u32,
+        };
+
+        const block_dim: c_uint = 256;
+        const grid_dim: c_uint = @intCast((a.len + block_dim - 1) / block_dim);
+        const h_stream = if (stream) |s| s.handle else null;
+
+        if (api.cuLaunchKernel(
+            func,
+            grid_dim, 1, 1,
+            block_dim, 1, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        return .{
+            .ptr = out_ptr,
+            .shape = a.shape,
+            .ndim = a.ndim,
+            .len = a.len,
+            .dtype = .float32,
+        };
+    }
+
+    /// 归一化指数函数 (Softmax)
+    pub fn softmax(a: Array, axis: c_int, stream: ?Stream) CudaError!Array {
+        _ = axis;
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_softmax orelse return error.KernelNotFound;
+
+        const cols = a.shape[a.ndim - 1];
+        const rows = a.len / cols;
+
+        const out_ptr = try alloc(a.len * @sizeOf(f32));
+        errdefer free(out_ptr);
+
+        var d_x = a.ptr;
+        var d_out = out_ptr;
+        var rows_u32: u32 = @intCast(rows);
+        var cols_u32: u32 = @intCast(cols);
+
+        var params = [_]?*anyopaque{
+            &d_x,
+            &d_out,
+            &rows_u32,
+            &cols_u32,
+        };
+
+        const h_stream = if (stream) |s| s.handle else null;
+        if (api.cuLaunchKernel(
+            func,
+            rows_u32, 1, 1,
+            1, 1, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        return .{
+            .ptr = out_ptr,
+            .shape = a.shape,
+            .ndim = a.ndim,
+            .len = a.len,
+            .dtype = .float32,
+        };
+    }
+
+    /// 旋转位置编码 (Rotary Position Embedding, RoPE)
+    pub fn fastRoPE(
+        x: Array,
+        head_dim: usize,
+        traditional: bool,
+        base: f32,
+        scale: f32,
+        start_pos: usize,
+        stream: ?Stream,
+    ) CudaError!Array {
+        _ = scale;
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_rope orelse return error.KernelNotFound;
+
+        const total_tokens = x.len / head_dim;
+        const out_ptr = try alloc(x.len * @sizeOf(f32));
+        errdefer free(out_ptr);
+
+        var d_x = x.ptr;
+        var d_out = out_ptr;
+        var total_tokens_u32: u32 = @intCast(total_tokens);
+        var head_dim_u32: u32 = @intCast(head_dim);
+        var start_pos_u32: u32 = @intCast(start_pos);
+        var base_val = base;
+        var trad_val: u32 = if (traditional) 1 else 0;
+
+        var params = [_]?*anyopaque{
+            &d_x,
+            &d_out,
+            &total_tokens_u32,
+            &head_dim_u32,
+            &start_pos_u32,
+            &base_val,
+            &trad_val,
+        };
+
+        const h_stream = if (stream) |s| s.handle else null;
+        if (api.cuLaunchKernel(
+            func,
+            total_tokens_u32, 1, 1,
+            1, 1, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        return .{
+            .ptr = out_ptr,
+            .shape = x.shape,
+            .ndim = x.ndim,
+            .len = x.len,
+            .dtype = .float32,
+        };
+    }
+};
+
+test "cuda: hardware probe and driver availability" {
+    if (isAvailable()) {
+        try std.testing.expect(getDeviceCount() > 0);
+        var name_buf: [256]u8 = undefined;
+        const name = getDeviceName(&name_buf);
+        try std.testing.expect(name.len > 0);
+        const mem = getDeviceMemory();
+        try std.testing.expect(mem.total > 0);
+
+        try ensureContext();
+
+        // 测试内存分配与拷贝
+        const host_data = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+        var arr = try Array.fromSlice(&host_data, &.{ 2, 2 });
+        defer arr.deinit();
+
+        var read_back: [4]f32 = undefined;
+        try arr.toHostSlice(&read_back);
+        try std.testing.expectEqualSlices(f32, &host_data, &read_back);
+
+        // 测试矩阵乘法 GEMM: [2, 2] * [2, 2]
+        var res = try Array.matmul(arr, arr, null);
+        defer res.deinit();
+        var mat_res: [4]f32 = undefined;
+        try res.toHostSlice(&mat_res);
+        // [1 2; 3 4] * [1 2; 3 4] = [7 10; 15 22]
+        try std.testing.expectEqual(@as(f32, 7.0), mat_res[0]);
+        try std.testing.expectEqual(@as(f32, 10.0), mat_res[1]);
+        try std.testing.expectEqual(@as(f32, 15.0), mat_res[2]);
+        try std.testing.expectEqual(@as(f32, 22.0), mat_res[3]);
+
+        // 测试均方根层归一化 RMSNorm
+        var norm_res = try Array.rmsNorm(arr, null, 1e-5, null);
+        defer norm_res.deinit();
+        var norm_back: [4]f32 = undefined;
+        try norm_res.toHostSlice(&norm_back);
+        try std.testing.expect(norm_back[0] > 0.0);
+
+        // 测试逐元素加法 Add
+        var add_res = try Array.add(arr, arr, null);
+        defer add_res.deinit();
+        var add_back: [4]f32 = undefined;
+        try add_res.toHostSlice(&add_back);
+        try std.testing.expectEqual(@as(f32, 2.0), add_back[0]);
+        try std.testing.expectEqual(@as(f32, 8.0), add_back[3]);
+
+        // 测试标量乘法 MulScalar
+        var scale_res = try Array.mulScalar(arr, 3.0, null);
+        defer scale_res.deinit();
+        var scale_back: [4]f32 = undefined;
+        try scale_res.toHostSlice(&scale_back);
+        try std.testing.expectEqual(@as(f32, 3.0), scale_back[0]);
+        try std.testing.expectEqual(@as(f32, 12.0), scale_back[3]);
+
+        // 测试高斯误差线性单元 GELU
+        var gelu_res = try Array.gelu(arr, .tanh, null);
+        defer gelu_res.deinit();
+        var gelu_back: [4]f32 = undefined;
+        try gelu_res.toHostSlice(&gelu_back);
+        try std.testing.expect(gelu_back[0] > 0.0);
+
+        // 测试归一化指数函数 Softmax
+        var sm_res = try Array.softmax(arr, -1, null);
+        defer sm_res.deinit();
+        var sm_back: [4]f32 = undefined;
+        try sm_res.toHostSlice(&sm_back);
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), sm_back[0] + sm_back[1], 0.001);
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), sm_back[2] + sm_back[3], 0.001);
+    }
+}

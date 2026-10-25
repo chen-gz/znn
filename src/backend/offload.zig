@@ -11,6 +11,7 @@ const activation = @import("activation.zig");
 const attention_mask = @import("attention_mask.zig");
 const rope_mod = @import("rope.zig");
 const sampling = @import("sampling.zig");
+const cuda = @import("cuda.zig");
 
 /// 当前硬件环境是否支持统一卸载 (macOS Apple Silicon aarch64 且已集成 MLX)
 pub fn isAvailable() bool {
@@ -39,7 +40,7 @@ pub const fusedGeluMul = mlx.Array.fusedGeluMul;
 pub const fusedAddMul = mlx.Array.fusedAddMul;
 pub const evalMultiple = mlx.Array.evalMultiple;
 
-pub const OffloadError = mlx.MlxError || error{
+pub const OffloadError = mlx.MlxError || cuda.CudaError || error{
     OffloadNotSupported,
     UnsupportedQuantMode,
     InvalidShape,

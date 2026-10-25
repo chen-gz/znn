@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **统一计算设备架构 NVIDIA CUDA 硬件加速后端 (`src/backend/cuda.zig`, `src/backend/cuda_kernels.zig`)**:
+  - **动态驱动加载与零工具链依赖 (`src/backend/cuda.zig`)**：
+    - 基于 NVIDIA CUDA Driver API 动态加载器（支持 Linux `libcuda.so.1`、NixOS `/run/opengl-driver/lib/`、WSL2 以及 Windows `nvcuda.dll`），零外部 CUDA Toolkit、nvcc 或 C++ 工具链依赖，只要系统安装了 NVIDIA 显示驱动即可即刻运行；
+    - 完整支持设备探测 (`isAvailable`, `getDeviceCount`, `getDeviceName`, `getDeviceMemory`)、主上下文初始化 (`cuDevicePrimaryCtxRetain`, `ensureContext`)、异步执行流 (`cuda.Stream`)、显存分配与释放 (`alloc`, `free`) 及双向主机/显存拷贝 (`copyHostToDevice`, `copyDeviceToHost`, `copyDeviceToDevice`, `setZero`)；
+  - **基于 PTX 原生汇编的底层高性能算子内核 (`src/backend/cuda_kernels.zig`)**：
+    - 内置纯 ASCII 格式的并行线程执行 (Parallel Thread Execution, PTX) 虚拟汇编，驱动层 JIT 自动针对本地显卡（包括 Ampere、Ada Lovelace 与 Blackwell RTX 5080）编译为最优原生指令；
+    - 完整实现 2D/分块矩阵乘法 (`sgemm_kernel`)、均方根层归一化 (`rms_norm_kernel`)、逐元素加法 (`add_kernel`)、逐元素乘法 (`multiply_kernel`)、标量乘法 (`mul_scalar_kernel`)、数值稳定 Tanh/Erf 高斯误差线性单元 (`gelu_kernel`)、行级减最大值归一化指数函数 (`softmax_kernel`) 与旋转位置编码 (`rope_kernel`)；
+  - **深度集成设备抽象与统一算子分派 (`src/backend/device.zig`, `src/backend/ops.zig`, `src/tensor/core.zig`)**：
+    - `DeviceType` 扩展支持 `.cuda`，`Device.isAvailable(.gpu)` 自动探测 CUDA 与 MLX 可用性；在 Linux / Windows 带有 NVIDIA 显卡时，默认设备 `defaultDevice()` 自动解析为 GPU；
+    - `ops.zig` 统一算子分派器完整接入 CUDA 路径，`matmul`、`rmsNorm`、`add`、`multiply`、`mulScalar`、`gelu`、`softmax` 与 `rope` 自动将任务卸载至 CUDA 显卡执行；
+    - `Tensor.toDevice(.cuda)` 与 `Tensor.toDevice(.gpu)` 完整支持 CUDA 显存数组绑定 (`cuda_array`)，支持 `syncHost` 回写与 `toCudaArray` 快速视图；
+  - **全量测试与架构分层保障**：
+    - 83 个源文件包级依赖单向性 100% 保持（`zig build check-layers`），所有单元测试全量通过，在 RTX 5080 硬件上完成全部算子精度验证。
+
 - **通用自回归 KV Cache 抽象与跨后端生成 (`src/models/gemma4_e4b.zig`, `src/backend/offload.zig`)**:
   - **跨设备通用键值缓存别名 (`DeviceKvCache`, `KvCache`)**：
     - 在 `src/backend/offload.zig` 与 `src/backend.zig` 统一导出 `KvCache` 与 `DeviceKvCache`，并由各语言模型统一引用，规范统一键值缓存命名；

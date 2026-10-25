@@ -1,18 +1,24 @@
 //! 计算设备抽象与硬件探测 (Device Abstraction & Hardware Detection)
 //!
-//! 定义多后端统一计算设备（CPU、GPU / 硬件加速器）与可用性探测，
+//! 定义多后端统一计算设备（中央处理器 CPU、图形处理器 GPU / 硬件加速器、统一计算设备架构 CUDA）与可用性探测，
 //! 与底层具体厂商驱动（Apple MLX、NVIDIA CUDA、Vulkan 等）解耦。
 
 const std = @import("std");
 const mlx = @import("mlx.zig");
+const cuda = @import("cuda.zig");
 
-/// 目标计算设备类型枚举
+/// 目标计算设备类型枚举 (中央处理器 CPU 与图形处理器 GPU / CUDA)
 pub const DeviceType = enum {
     cpu,
     gpu,
+    cuda,
 
     pub fn isGpu(self: DeviceType) bool {
-        return self == .gpu;
+        return self == .gpu or self == .cuda;
+    }
+
+    pub fn isCuda(self: DeviceType) bool {
+        return self == .cuda;
     }
 
     pub fn isCpu(self: DeviceType) bool {
@@ -23,7 +29,7 @@ pub const DeviceType = enum {
     pub fn toMlx(self: DeviceType) mlx.DeviceType {
         return switch (self) {
             .cpu => .cpu,
-            .gpu => .gpu,
+            .gpu, .cuda => .gpu,
         };
     }
 
@@ -39,15 +45,32 @@ pub const DeviceType = enum {
 /// 计算设备别名
 pub const Device = DeviceType;
 
+/// 底层实际生效的硬件加速后端枚举
+pub const BackendType = enum {
+    cpu,
+    cuda,
+    mlx,
+};
+
 /// 探测指定计算设备在当前平台是否可用
 pub fn isAvailable(dev: DeviceType) bool {
     return switch (dev) {
         .cpu => true,
-        .gpu => mlx.has_mlx,
+        .cuda => cuda.isAvailable(),
+        .gpu => cuda.isAvailable() or mlx.has_mlx,
     };
 }
 
-/// 获取当前系统的默认首选计算设备 (若 GPU 可用优先使用 GPU，否则回退到 CPU)
+/// 获取指定设备类型实际分派的底层硬件后端类型
+pub fn activeBackend(dev: DeviceType) BackendType {
+    return switch (dev) {
+        .cpu => .cpu,
+        .cuda => if (cuda.isAvailable()) .cuda else .cpu,
+        .gpu => if (cuda.isAvailable()) .cuda else if (mlx.has_mlx) .mlx else .cpu,
+    };
+}
+
+/// 获取当前系统的默认首选计算设备 (若图形处理器 GPU 可用优先使用 GPU，否则回退到中央处理器 CPU)
 pub fn defaultDevice() DeviceType {
     if (isAvailable(.gpu)) return .gpu;
     return .cpu;
@@ -55,14 +78,23 @@ pub fn defaultDevice() DeviceType {
 
 test "device: detection and conversions" {
     const dev = defaultDevice();
-    if (mlx.has_mlx) {
+    if (cuda.isAvailable()) {
+        try std.testing.expectEqual(Device.gpu, dev);
+        try std.testing.expect(isAvailable(.gpu));
+        try std.testing.expect(isAvailable(.cuda));
+        try std.testing.expect(dev.isGpu());
+        try std.testing.expectEqual(BackendType.cuda, activeBackend(.gpu));
+        try std.testing.expectEqual(BackendType.cuda, activeBackend(.cuda));
+    } else if (mlx.has_mlx) {
         try std.testing.expectEqual(Device.gpu, dev);
         try std.testing.expect(isAvailable(.gpu));
         try std.testing.expect(dev.isGpu());
         try std.testing.expectEqual(mlx.DeviceType.gpu, dev.toMlx());
+        try std.testing.expectEqual(BackendType.mlx, activeBackend(.gpu));
     } else {
         try std.testing.expectEqual(Device.cpu, dev);
         try std.testing.expect(isAvailable(.cpu));
         try std.testing.expect(dev.isCpu());
+        try std.testing.expectEqual(BackendType.cpu, activeBackend(.gpu));
     }
 }

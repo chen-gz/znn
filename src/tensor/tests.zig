@@ -1,4 +1,5 @@
 const std = @import("std");
+const backend = @import("../backend.zig");
 const tensor = @import("../tensor.zig");
 const Shape = tensor.Shape;
 const broadcastShapes = tensor.broadcastShapes;
@@ -1252,7 +1253,6 @@ test "Tensor linear algebra: One-Sided Jacobi SVD decomposition" {
 }
 
 test "Tensor to MLX Array bridge zero-copy and conversion" {
-    const backend = @import("../backend.zig");
     if (!backend.mlx.has_mlx) return;
 
     const allocator = std.testing.allocator;
@@ -2550,4 +2550,24 @@ test "losses: ceRow, accumulateCeGradRow, dpoTerm and grpoTerm" {
 
     try std.testing.expectEqual(loss_u8.data[0], loss_u32.data[0]);
     try std.testing.expectEqual(loss_u8.data[0], loss_usize.data[0]);
+}
+
+test "Tensor: toDevice and syncHost with CUDA and CPU" {
+    const allocator = std.testing.allocator;
+    const t = try array(allocator, &.{ 2, 2 }, &[_]f32{ 10.0, 20.0, 30.0, 40.0 });
+    defer free(allocator, t);
+
+    try std.testing.expectEqual(backend.Device.cpu, t.device);
+
+    if (backend.device.isAvailable(.cuda)) {
+        try t.toDevice(.cuda);
+        try std.testing.expectEqual(backend.Device.cuda, t.device);
+        try std.testing.expect(t.cuda_array != null);
+
+        // 同步回中央处理器 (Central Processing Unit, CPU) 主机内存
+        try t.syncHost(allocator);
+        try std.testing.expectEqual(backend.Device.cpu, t.device);
+        try std.testing.expectEqual(@as(f32, 10.0), t.data[0]);
+        try std.testing.expectEqual(@as(f32, 40.0), t.data[3]);
+    }
 }

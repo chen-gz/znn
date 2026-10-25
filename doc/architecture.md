@@ -11,12 +11,14 @@
 ```text
 src/
 ├── root.zig                      # 顶层公共门面 (Facade)，聚合导出所有核心子模块
-├── backend.zig                   # 硬件后端与执行器门面 (导出 device, ops, activation, attention_mask, logits_processor, mlx_blocks, safetensors, Device, DeviceType, GeluApproximation, AttentionMask, VisibleRange, Executor, cblas, mlx, offload, KvCache, DeviceKvCache, rope, sampling, vec_math)
+├── backend.zig                   # 硬件后端与执行器门面 (导出 device, ops, activation, attention_mask, logits_processor, mlx_blocks, safetensors, Device, DeviceType, BackendType, GeluApproximation, AttentionMask, VisibleRange, Executor, cblas, mlx, cuda, cuda_kernels, offload, KvCache, DeviceKvCache, rope, sampling, vec_math)
 ├── backend/
 │   ├── activation.zig            # 逐元素激活的标量公式唯一来源 (GeluApproximation：GELU 精确 erf 形式与 tanh 近似形式的前向与导数)
 │   ├── attention_mask.zig        # 注意力掩码规则唯一来源 (Mask = none | causal | sliding, visibleRange, isSlidingWindowVisible, fillAdditiveMask)
 │   ├── cblas.zig                 # macOS Accelerate (AMX) 构建期链接与跨平台 8 路 SIMD GEMM 后备内核
-│   ├── device.zig                # 硬件计算设备抽象与探测 (DeviceType = enum { cpu, gpu }, Device, isAvailable, defaultDevice)
+│   ├── cuda.zig                  # NVIDIA CUDA 统一计算设备架构驱动 API 动态加载、显存分配与 GPU 数组封装
+│   ├── cuda_kernels.zig          # 基于并行线程执行 (PTX) 虚拟指令集的底层深度学习算子内核 (GEMM, RMSNorm, Add, Mul, GELU, Softmax, RoPE)
+│   ├── device.zig                # 硬件计算设备抽象与探测 (DeviceType = enum { cpu, gpu, cuda }, Device, BackendType, isAvailable, defaultDevice)
 │   ├── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
 │   ├── logits_processor.zig      # 模型无关的设备端对数几率截断 (softcapLogits)、重复惩罚 (penalizeDevice)、候选生成 (deviceCandidates) 与词元选取 (selectToken / LogitsProcessor)
 │   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定、GPU 数组算子与类型安全闭包编译封装 (compileFn)
@@ -425,6 +427,13 @@ flowchart LR
 * 标量 `sigmoid`（数值稳定的两分支形式）、`softcap`（`cap * tanh(x / cap)`，`cap <= 0` 为恒等）与 BF16 展开 `bf16ToF32` / `widenBf16`（可带缩放）/ `widenBf16Bytes`（小端、非对齐字节）。
 
 嵌入查表 `tensor.embeddingLookupInto(Elem, table, ids, dim, scale, out)`（`Elem` 为 f32 或 BF16 原始位 u16，越界 ID 返回 `error.IndexOutOfBounds`）是 `Tensor.embedding` 与 Gemma 4 F32 / Q4 / GPU 主机端嵌入共用的行收集内核；`tensor.checkIndices` 在修改任何状态前提前校验词元 ID。
+
+### 6.4 统一计算设备架构 CUDA 硬件加速后端 (`src/backend/cuda.zig` & `src/backend/cuda_kernels.zig`)
+针对 Linux、Windows 与 WSL2 环境下的 NVIDIA 图形处理器 (Graphics Processing Unit, GPU)，系统支持基于 CUDA 驱动应用程序接口 (Driver API) 的即时硬件加速：
+* **零工具链外部依赖**：通过纯 Zig 动态加载 `libcuda.so.1` / `nvcuda.dll`，只要系统安装了标准 NVIDIA 显示驱动即可直接运行，无需安装臃肿的 CUDA Toolkit 或 nvcc 编译器；
+* **PTX 原生指令即时编译**：内置手写优化的并行线程执行 (Parallel Thread Execution, PTX) 虚拟汇编，由显卡驱动内置的 JIT 编译器自动针对当前 GPU 架构（从 Ampere、Ada Lovelace 到最新的 Blackwell RTX 5080）生成最优机器码；
+* **核心深度学习算子覆盖**：完整支持通用矩阵乘法 (General Matrix Multiply, GEMM)、均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)、逐元素加法/乘法/标量缩放、高斯误差线性单元 (Gaussian Error Linear Unit, GELU)、数值稳定行级 Softmax 以及旋转位置编码 (Rotary Position Embedding, RoPE)；
+* **多后端统一算子分派 (`src/backend/ops.zig`)**：设备抽象 `DeviceType` 统一调度中央处理器 CPU SIMD、Apple 机器学习拓展 MLX 与 NVIDIA 统一计算设备架构 CUDA，上层模型与训练调度器无需修改代码即可在多平台硬件间无缝迁移。
 
 ---
 

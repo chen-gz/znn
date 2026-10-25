@@ -1,5 +1,5 @@
 //! Backend - 计算后端、底层执行器与硬件加速基础设施
-//! 统一管理数据并行执行器 (Executor)、系统级 BLAS (Accelerate / 回退 GEMM) 与未来的 Apple Silicon Metal 加速。
+//! 统一管理数据并行执行器 (Executor)、系统级 BLAS (Accelerate / 回退 GEMM)、Apple Silicon MLX 与 NVIDIA CUDA 硬件加速。
 
 const std = @import("std");
 
@@ -16,8 +16,11 @@ pub const cblas = @import("backend/cblas.zig");
 pub const device = @import("backend/device.zig");
 pub const Device = device.Device;
 pub const DeviceType = device.DeviceType;
+pub const BackendType = device.BackendType;
 
 pub const mlx = @import("backend/mlx.zig");
+pub const cuda = @import("backend/cuda.zig");
+pub const cuda_kernels = @import("backend/cuda_kernels.zig");
 
 pub const mlx_blocks = @import("backend/mlx_blocks.zig");
 pub const Rope = mlx_blocks.Rope;
@@ -61,6 +64,8 @@ test {
     _ = @import("backend/executor.zig");
     _ = @import("backend/cblas.zig");
     _ = @import("backend/mlx.zig");
+    _ = @import("backend/cuda.zig");
+    _ = @import("backend/cuda_kernels.zig");
     _ = @import("backend/offload.zig");
     _ = @import("backend/ops.zig");
     _ = @import("backend/safetensors.zig");
