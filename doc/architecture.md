@@ -11,16 +11,18 @@
 ```text
 src/
 ├── root.zig                      # 顶层公共门面 (Facade)，聚合导出所有核心子模块
-├── backend.zig                   # 硬件后端与执行器门面 (导出 activation, attention_mask, logits_processor, mlx_blocks, safetensors, Device, GeluApproximation, AttentionMask, VisibleRange, Executor, cblas, mlx, offload, rope, sampling, vec_math)
+├── backend.zig                   # 硬件后端与执行器门面 (导出 device, ops, activation, attention_mask, logits_processor, mlx_blocks, safetensors, Device, DeviceType, GeluApproximation, AttentionMask, VisibleRange, Executor, cblas, mlx, offload, KvCache, DeviceKvCache, rope, sampling, vec_math)
 ├── backend/
 │   ├── activation.zig            # 逐元素激活的标量公式唯一来源 (GeluApproximation：GELU 精确 erf 形式与 tanh 近似形式的前向与导数)
 │   ├── attention_mask.zig        # 注意力掩码规则唯一来源 (Mask = none | causal | sliding, visibleRange, isSlidingWindowVisible, fillAdditiveMask)
 │   ├── cblas.zig                 # macOS Accelerate (AMX) 构建期链接与跨平台 8 路 SIMD GEMM 后备内核
+│   ├── device.zig                # 硬件计算设备抽象与探测 (DeviceType = enum { cpu, gpu }, Device, isAvailable, defaultDevice)
 │   ├── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
 │   ├── logits_processor.zig      # 模型无关的设备端对数几率截断 (softcapLogits)、重复惩罚 (penalizeDevice)、候选生成 (deviceCandidates) 与词元选取 (selectToken / LogitsProcessor)
 │   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定、GPU 数组算子与类型安全闭包编译封装 (compileFn)
 │   ├── mlx_blocks.zig            # 模型无关的 MLX GPU 组合块 (Rope, projectHeads, gatedMlp, residualScale, finalHidden)
-│   ├── offload.zig               # 与模型无关的硬件加速卸载原语 (borrowArray, storeOutput, GEMM, RMSNorm, RoPE, SDPA, 滑动窗口注意力, LmHead / LmHeadWeights, TokenExclusionMask, QuantWeights, GpuKvCache)
+│   ├── offload.zig               # 与模型无关的硬件加速卸载原语 (borrowArray, storeOutput, GEMM, RMSNorm, RoPE, SDPA, 滑动窗口注意力, LmHead / LmHeadWeights, TokenExclusionMask, QuantWeights, GpuKvCache, DeviceKvCache, KvCache)
+│   ├── ops.zig                   # 统一多后端算子分派器 (matmul, rmsNorm, softmax, add, multiply, mulScalar, gelu, cachedAttention)
 │   ├── rope.zig                  # 旋转位置编码配置 RopeOptions (含 proportional 预设) 与旋转角数量 / 频率 / MLX 周期表的唯一公式 (CPU 与 GPU 共用)
 │   ├── safetensors.zig           # 零依赖 Safetensors (F32/BF16/F16) 零拷贝内存映射归档解析 (SafetensorsArchive, TensorMeta)
 │   ├── sampling.zig              # 通用采样基础设施 (TokenRange 排除区间, argmaxWithPenalty, BF16 排除掩码, SamplingOptions / Sampler 温度 + Top-K + Top-P 随机采样, selectTopK 部分选择, 投机采样校验)
