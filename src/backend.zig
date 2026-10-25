@@ -16,6 +16,7 @@ pub const cblas = @import("backend/cblas.zig");
 pub const device = @import("backend/device.zig");
 pub const Device = device.Device;
 pub const DeviceType = device.DeviceType;
+pub const DeviceArray = device.DeviceArray;
 pub const BackendType = device.BackendType;
 
 pub const mlx = @import("backend/mlx.zig");

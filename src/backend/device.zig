@@ -45,6 +45,90 @@ pub const DeviceType = enum {
 /// 计算设备别名
 pub const Device = DeviceType;
 
+/// 跨硬件统一设备显存数组联合体 (Unified Device Memory Array Union)
+pub const DeviceArray = union(enum) {
+    mlx: mlx.Array,
+    cuda: cuda.Array,
+
+    pub fn deinit(self: *DeviceArray) void {
+        switch (self.*) {
+            .mlx => |*arr| arr.deinit(),
+            .cuda => |*arr| arr.deinit(),
+        }
+    }
+
+    pub fn clone(self: DeviceArray) !DeviceArray {
+        return switch (self) {
+            .mlx => |arr| .{ .mlx = arr },
+            .cuda => |arr| .{ .cuda = try arr.clone() },
+        };
+    }
+
+    pub fn copyToSlice(self: DeviceArray, dest: []f32) !void {
+        switch (self) {
+            .mlx => |arr| try arr.copyToSlice(dest),
+            .cuda => |arr| try arr.toHostSlice(dest),
+        }
+    }
+
+    pub fn copyToTensor(self: DeviceArray, t: anytype) !void {
+        switch (self) {
+            .mlx => |arr| try arr.copyToTensor(t),
+            .cuda => |arr| try arr.copyToTensor(t),
+        }
+    }
+
+    pub fn eval(self: DeviceArray) void {
+        switch (self) {
+            .mlx => |arr| arr.eval(),
+            .cuda => {},
+        }
+    }
+
+    pub fn reshape(self: DeviceArray, new_dims: []const usize, stream_opt: anytype) !DeviceArray {
+        return switch (self) {
+            .mlx => |arr| .{ .mlx = try arr.reshape(new_dims, stream_opt) },
+            .cuda => |arr| .{ .cuda = try arr.reshape(new_dims) },
+        };
+    }
+
+    pub fn transposeAxes(self: DeviceArray, axes: []const usize, stream_opt: anytype) !DeviceArray {
+        return switch (self) {
+            .mlx => |arr| .{ .mlx = try arr.transposeAxes(axes, stream_opt) },
+            .cuda => error.OperationNotSupported,
+        };
+    }
+
+    pub fn sliceAxis(self: DeviceArray, axis: usize, start: usize, end: usize, stream_opt: anytype) !DeviceArray {
+        return switch (self) {
+            .mlx => |arr| .{ .mlx = try arr.sliceAxis(axis, start, end, stream_opt) },
+            .cuda => error.OperationNotSupported,
+        };
+    }
+
+    pub fn isMlx(self: DeviceArray) bool {
+        return self == .mlx;
+    }
+
+    pub fn isCuda(self: DeviceArray) bool {
+        return self == .cuda;
+    }
+
+    pub fn asMlx(self: DeviceArray) ?mlx.Array {
+        return switch (self) {
+            .mlx => |arr| arr,
+            .cuda => null,
+        };
+    }
+
+    pub fn asCuda(self: DeviceArray) ?cuda.Array {
+        return switch (self) {
+            .cuda => |arr| arr,
+            .mlx => null,
+        };
+    }
+};
+
 /// 底层实际生效的硬件加速后端枚举
 pub const BackendType = enum {
     cpu,

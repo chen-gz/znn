@@ -54,9 +54,8 @@ pub const Tensor = struct {
     init_constant: ?f32 = null, // 结构性常量初始值 (如 LSTM 遗忘门偏置 1.0)，Graph 自动初始化时以该常量填充，不依赖命名
     is_buffer: bool = false, // 是否为静态缓冲区/非学习常量张量 (如因果掩码 causal_mask, 位置索引 pos_indices)
     scope: []const u8 = "", // 张量在计算图中创建时所处的模块作用域完整路径 ("" 表示根作用域或图外创建)
-    device: backend.Device = .cpu, // 存储所在设备：.cpu (默认) 或 .gpu
-    device_array: ?backend.mlx.Array = null, // GPU 驻留数组 (Apple MLX 数组句柄，非空时表示张量物理数据驻留在 GPU)
-    cuda_array: ?backend.cuda.Array = null, // 统一计算设备架构 (Compute Unified Device Architecture, CUDA) 显存数组句柄
+    device: backend.Device = .cpu, // 存储所在设备：.cpu (默认) 或 .gpu / .cuda
+    device_array: ?backend.DeviceArray = null, // GPU 驻留统一显存数组句柄 (支持 Apple MLX 与 NVIDIA CUDA)
     is_graph_owned: bool = false, // 是否由计算图拥有生命周期 (若为 true，计算图 reset/deinit 时自动释放 device_array)
     name: ?[]const u8 = null, // 可选张量调试名称 (如 "fc1.weight", "conv1.bias")
     name_buf: [64]u8 = undefined,
@@ -186,19 +185,19 @@ pub const Tensor = struct {
 
     /// 判断张量物理数据是否驻留在图形处理器 (Graphics Processing Unit, GPU)
     pub fn isDevice(self: *const Tensor) bool {
-        return self.device.isGpu() and (self.device_array != null or self.cuda_array != null);
+        return self.device.isGpu() and self.device_array != null;
     }
 
     /// 触发 GPU 驻留数组的惰性求值
     pub fn eval(self: *const Tensor) void {
-        if (self.device_array) |arr| {
-            arr.eval();
+        if (self.device_array) |da| {
+            da.eval();
         }
     }
 
     /// 将 GPU 驻留张量的数据物化同步回主机中央处理器 (Central Processing Unit, CPU) 缓冲区 (data)
     pub fn syncHost(self: *Tensor, allocator: ?std.mem.Allocator) !void {
-        if (self.device_array) |arr| {
+        if (self.device_array) |da| {
             const n_elements = self.shape.numel();
             if (self.data.len < n_elements) {
                 const alloc = allocator orelse std.heap.smp_allocator;
@@ -207,36 +206,27 @@ pub const Tensor = struct {
                 }
                 self.data = try alloc.alloc(f32, n_elements);
             }
-            try arr.copyToSlice(self.data[0..n_elements]);
-            self.device = .cpu;
-        } else if (self.cuda_array) |arr| {
-            const n_elements = self.shape.numel();
-            if (self.data.len < n_elements) {
-                const alloc = allocator orelse std.heap.smp_allocator;
-                if (!self.is_view and self.data.len > 0) {
-                    alloc.free(self.data);
-                }
-                self.data = try alloc.alloc(f32, n_elements);
-            }
-            try arr.toHostSlice(self.data[0..n_elements]);
+            try da.copyToSlice(self.data[0..n_elements]);
             self.device = .cpu;
         }
     }
 
     /// 迁移张量至指定设备 (.cpu, .gpu 或 .cuda)
     pub fn toDevice(self: *Tensor, target: backend.Device) !void {
-        if (self.device == target) return;
+        if (self.device == target and self.device_array != null) return;
         switch (target) {
             .gpu, .cuda => {
                 if (!backend.device.isAvailable(target)) return error.DeviceNotSupported;
                 const active = backend.device.activeBackend(target);
                 if (active == .cuda) {
-                    if (self.cuda_array == null) {
-                        self.cuda_array = try backend.cuda.Array.fromTensor(self);
+                    if (self.device_array == null or !self.device_array.?.isCuda()) {
+                        if (self.device_array) |*old| old.deinit();
+                        self.device_array = .{ .cuda = try backend.cuda.Array.fromTensor(self) };
                     }
                 } else if (active == .mlx) {
-                    if (self.device_array == null) {
-                        self.device_array = try backend.mlx.Array.fromTensorZeroCopy(self);
+                    if (self.device_array == null or !self.device_array.?.isMlx()) {
+                        if (self.device_array) |*old| old.deinit();
+                        self.device_array = .{ .mlx = try backend.mlx.Array.fromTensorZeroCopy(self) };
                     }
                 }
                 self.device = target;
@@ -250,19 +240,25 @@ pub const Tensor = struct {
 
     /// 将张量转换为统一计算设备架构 (Compute Unified Device Architecture, CUDA) 数组
     pub fn toCudaArray(self: *const Tensor) !backend.cuda.Array {
-        if (self.cuda_array) |arr| return arr;
+        if (self.device_array) |da| {
+            if (da.asCuda()) |arr| return arr;
+        }
         return backend.cuda.Array.fromTensor(self);
     }
 
     /// 将只读张量转换为 MLX 数组 (Apple Machine Learning Explore, MLX)
     pub fn toMlxArray(self: *const Tensor) !backend.mlx.Array {
-        if (self.device_array) |arr| return arr;
+        if (self.device_array) |da| {
+            if (da.asMlx()) |arr| return arr;
+        }
         return backend.mlx.Array.fromTensor(self);
     }
 
     /// 将张量以零拷贝 (Zero-Copy) 方式映射为 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
     pub fn toMlxArrayZeroCopy(self: *Tensor) !backend.mlx.Array {
-        if (self.device_array) |arr| return arr;
+        if (self.device_array) |da| {
+            if (da.asMlx()) |arr| return arr;
+        }
         return backend.mlx.Array.fromTensorZeroCopy(self);
     }
 
@@ -990,10 +986,6 @@ pub const Tensor = struct {
         if (self.device_array) |*arr| {
             arr.deinit();
             self.device_array = null;
-        }
-        if (self.cuda_array) |*arr| {
-            arr.deinit();
-            self.cuda_array = null;
         }
         if (!self.is_view) {
             if (self.data.len > 0) {

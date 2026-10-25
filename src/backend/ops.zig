@@ -19,6 +19,54 @@ pub const OpError = offload.OffloadError || cuda.CudaError || error{
     IncompatibleDimensions,
 };
 
+pub const BorrowedCudaArray = struct {
+    arr: cuda.Array,
+    needs_deinit: bool,
+
+    pub fn deinit(self: *BorrowedCudaArray) void {
+        if (self.needs_deinit) {
+            self.arr.deinit();
+        }
+    }
+};
+
+/// 借用张量的 CUDA 显存数组句柄 (若张量已在 CUDA 显存常驻则直接复用，实现零拷贝借用；若为 CPU 主机张量则分配显存并拷贝)
+pub fn borrowCudaArray(t: anytype) cuda.CudaError!BorrowedCudaArray {
+    const T = @TypeOf(t);
+    const info = @typeInfo(T);
+    if (info == .pointer and @hasField(info.pointer.child, "device_array")) {
+        if (t.device_array) |da| {
+            if (da.asCuda()) |arr| {
+                return .{ .arr = arr, .needs_deinit = false };
+            }
+        }
+        if (t.data.len > 0) {
+            const arr = try cuda.Array.fromTensor(t);
+            return .{ .arr = arr, .needs_deinit = true };
+        }
+        return error.EmptyTensor;
+    }
+    const arr = try cuda.Array.fromTensor(t);
+    return .{ .arr = arr, .needs_deinit = true };
+}
+
+/// 将计算结果安全存入输出张量 (若输出为 GPU 驻留张量则直接接管 CUDA 显存句柄；若为 CPU 主机张量则拷回内存)
+pub fn storeCudaOutput(out: anytype, res_cuda: cuda.Array) cuda.CudaError!void {
+    const T = @TypeOf(out);
+    const info = @typeInfo(T);
+    if (info == .pointer and @hasField(info.pointer.child, "device_array")) {
+        if (out.device.isGpu() or out.data.len == 0) {
+            if (out.device_array) |*old| old.deinit();
+            out.device_array = .{ .cuda = res_cuda };
+            out.device = .cuda;
+            return;
+        }
+    }
+    var to_free = res_cuda;
+    defer to_free.deinit();
+    try res_cuda.copyToTensor(out);
+}
+
 /// 通用矩阵乘法多后端分派 (General Matrix Multiply Dispatcher, GEMM Dispatcher)：C = A * B
 pub fn matmul(
     A: anytype,
@@ -30,13 +78,12 @@ pub fn matmul(
     if (dev.isGpu() and device_mod.isAvailable(dev)) {
         const backend = device_mod.activeBackend(dev);
         if (backend == .cuda) {
-            var a_arr = try cuda.Array.fromTensor(A);
-            defer a_arr.deinit();
-            var b_arr = try cuda.Array.fromTensor(B);
-            defer b_arr.deinit();
-            var c_arr = try cuda.Array.matmul(a_arr, b_arr, null);
-            defer c_arr.deinit();
-            try c_arr.copyToTensor(C);
+            var a_b = try borrowCudaArray(A);
+            defer a_b.deinit();
+            var b_b = try borrowCudaArray(B);
+            defer b_b.deinit();
+            const c_arr = try cuda.Array.matmul(a_b.arr, b_b.arr, null);
+            try storeCudaOutput(C, c_arr);
             return;
         } else if (backend == .mlx) {
             return offload.matmul(A, B, C, stream);
@@ -80,19 +127,19 @@ pub fn rmsNorm(
     if (dev.isGpu() and device_mod.isAvailable(dev)) {
         const backend = device_mod.activeBackend(dev);
         if (backend == .cuda) {
-            var x_arr = try cuda.Array.fromTensor(X);
-            defer x_arr.deinit();
-            var w_arr: ?cuda.Array = null;
-            defer if (w_arr) |*w| w.deinit();
+            var x_b = try borrowCudaArray(X);
+            defer x_b.deinit();
+            var w_b: ?BorrowedCudaArray = null;
+            defer if (w_b) |*w| w.deinit();
             const WT = @TypeOf(weight);
             if (@typeInfo(WT) == .optional) {
-                if (weight) |w| w_arr = try cuda.Array.fromTensor(w);
+                if (weight) |w| w_b = try borrowCudaArray(w);
             } else if (@typeInfo(WT) != .null) {
-                w_arr = try cuda.Array.fromTensor(weight);
+                w_b = try borrowCudaArray(weight);
             }
-            var out_arr = try cuda.Array.rmsNorm(x_arr, w_arr, eps, null);
-            defer out_arr.deinit();
-            try out_arr.copyToTensor(out);
+            const w_arr: ?cuda.Array = if (w_b) |w| w.arr else null;
+            const out_arr = try cuda.Array.rmsNorm(x_b.arr, w_arr, eps, null);
+            try storeCudaOutput(out, out_arr);
             return;
         } else if (backend == .mlx) {
             return offload.rmsNorm(X, weight, out, eps, stream);
@@ -127,13 +174,12 @@ pub fn add(
     if (dev.isGpu() and device_mod.isAvailable(dev)) {
         const backend = device_mod.activeBackend(dev);
         if (backend == .cuda) {
-            var a_arr = try cuda.Array.fromTensor(A);
-            defer a_arr.deinit();
-            var b_arr = try cuda.Array.fromTensor(B);
-            defer b_arr.deinit();
-            var c_arr = try cuda.Array.add(a_arr, b_arr, null);
-            defer c_arr.deinit();
-            try c_arr.copyToTensor(C);
+            var a_b = try borrowCudaArray(A);
+            defer a_b.deinit();
+            var b_b = try borrowCudaArray(B);
+            defer b_b.deinit();
+            const c_arr = try cuda.Array.add(a_b.arr, b_b.arr, null);
+            try storeCudaOutput(C, c_arr);
             return;
         } else if (backend == .mlx) {
             return offload.add(A, B, C, stream);
@@ -158,13 +204,12 @@ pub fn multiply(
     if (dev.isGpu() and device_mod.isAvailable(dev)) {
         const backend = device_mod.activeBackend(dev);
         if (backend == .cuda) {
-            var a_arr = try cuda.Array.fromTensor(A);
-            defer a_arr.deinit();
-            var b_arr = try cuda.Array.fromTensor(B);
-            defer b_arr.deinit();
-            var c_arr = try cuda.Array.multiply(a_arr, b_arr, null);
-            defer c_arr.deinit();
-            try c_arr.copyToTensor(C);
+            var a_b = try borrowCudaArray(A);
+            defer a_b.deinit();
+            var b_b = try borrowCudaArray(B);
+            defer b_b.deinit();
+            const c_arr = try cuda.Array.multiply(a_b.arr, b_b.arr, null);
+            try storeCudaOutput(C, c_arr);
             return;
         } else if (backend == .mlx) {
             return offload.multiply(A, B, C, stream);
@@ -189,11 +234,10 @@ pub fn mulScalar(
     if (dev.isGpu() and device_mod.isAvailable(dev)) {
         const backend = device_mod.activeBackend(dev);
         if (backend == .cuda) {
-            var a_arr = try cuda.Array.fromTensor(A);
-            defer a_arr.deinit();
-            var c_arr = try cuda.Array.mulScalar(a_arr, scalar, null);
-            defer c_arr.deinit();
-            try c_arr.copyToTensor(C);
+            var a_b = try borrowCudaArray(A);
+            defer a_b.deinit();
+            const c_arr = try cuda.Array.mulScalar(a_b.arr, scalar, null);
+            try storeCudaOutput(C, c_arr);
             return;
         } else if (backend == .mlx) {
             return offload.mulScalar(A, scalar, C, stream);
@@ -215,11 +259,10 @@ pub fn gelu(
     if (dev.isGpu() and device_mod.isAvailable(dev)) {
         const backend = device_mod.activeBackend(dev);
         if (backend == .cuda) {
-            var a_arr = try cuda.Array.fromTensor(A);
-            defer a_arr.deinit();
-            var out_arr = try cuda.Array.gelu(a_arr, approximation, null);
-            defer out_arr.deinit();
-            try out_arr.copyToTensor(out);
+            var a_b = try borrowCudaArray(A);
+            defer a_b.deinit();
+            const out_arr = try cuda.Array.gelu(a_b.arr, approximation, null);
+            try storeCudaOutput(out, out_arr);
             return;
         } else if (backend == .mlx) {
             return offload.gelu(A, out, approximation, stream);
@@ -253,11 +296,10 @@ pub fn softmax(
     if (dev.isGpu() and device_mod.isAvailable(dev)) {
         const backend = device_mod.activeBackend(dev);
         if (backend == .cuda) {
-            var a_arr = try cuda.Array.fromTensor(A);
-            defer a_arr.deinit();
-            var out_arr = try cuda.Array.softmax(a_arr, axis, null);
-            defer out_arr.deinit();
-            try out_arr.copyToTensor(out);
+            var a_b = try borrowCudaArray(A);
+            defer a_b.deinit();
+            const out_arr = try cuda.Array.softmax(a_b.arr, axis, null);
+            try storeCudaOutput(out, out_arr);
             return;
         } else if (backend == .mlx) {
             return offload.softmax(A, out, axis, stream);
@@ -287,13 +329,12 @@ pub fn rope(
     if (dev.isGpu() and device_mod.isAvailable(dev)) {
         const backend = device_mod.activeBackend(dev);
         if (backend == .cuda) {
-            var x_arr = try cuda.Array.fromTensor(X);
-            defer x_arr.deinit();
+            var x_b = try borrowCudaArray(X);
+            defer x_b.deinit();
             const head_dim = X.shape.dims[X.shape.len - 1];
             const traditional = options.mode == .interleaved;
-            var out_arr = try cuda.Array.fastRoPE(x_arr, head_dim, traditional, options.base, 1.0, start_pos, null);
-            defer out_arr.deinit();
-            try out_arr.copyToTensor(out);
+            const out_arr = try cuda.Array.fastRoPE(x_b.arr, head_dim, traditional, options.base, 1.0, start_pos, null);
+            try storeCudaOutput(out, out_arr);
             return;
         } else if (backend == .mlx) {
             return offload.rope(X, out, options, start_pos, stream);

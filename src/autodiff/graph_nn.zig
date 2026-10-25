@@ -845,7 +845,7 @@ pub fn embedding(self: *Graph, W_in: *Tensor, X: anytype) !*Tensor {
             .requires_grad = false,
             .creator = null,
             .device = .gpu,
-            .device_array = res,
+            .device_array = .{ .mlx = res },
             .is_graph_owned = true,
             .scope = self.currentScope(),
         };

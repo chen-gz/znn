@@ -69,8 +69,10 @@ pub fn borrowArray(t: anytype) OffloadError!ArrayBorrow {
     }
     const info = @typeInfo(T);
     if (info == .pointer and @hasField(info.pointer.child, "device_array")) {
-        if (t.device_array) |arr| {
-            return .{ .arr = arr, .needs_deinit = false };
+        if (t.device_array) |da| {
+            if (da.asMlx()) |arr| {
+                return .{ .arr = arr, .needs_deinit = false };
+            }
         }
         if (t.data.len > 0) {
             const arr = try mlx.Array.fromTensorZeroCopy(t);
@@ -89,7 +91,7 @@ pub fn storeOutput(out: anytype, res_mlx: mlx.Array) OffloadError!void {
     if (info == .pointer and @hasField(info.pointer.child, "device_array")) {
         if (out.device == .gpu or out.data.len == 0) {
             if (out.device_array) |*old| old.deinit();
-            out.device_array = res_mlx;
+            out.device_array = .{ .mlx = res_mlx };
             out.device = .gpu;
             return;
         }

@@ -2562,7 +2562,7 @@ test "Tensor: toDevice and syncHost with CUDA and CPU" {
     if (backend.device.isAvailable(.cuda)) {
         try t.toDevice(.cuda);
         try std.testing.expectEqual(backend.Device.cuda, t.device);
-        try std.testing.expect(t.cuda_array != null);
+        try std.testing.expect(t.device_array != null and t.device_array.?.isCuda());
 
         // 同步回中央处理器 (Central Processing Unit, CPU) 主机内存
         try t.syncHost(allocator);

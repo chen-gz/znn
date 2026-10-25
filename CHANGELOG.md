@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **统一硬件显存句柄 DeviceArray 与零拷贝 CUDA 算子流转 (`src/backend/device.zig`, `src/tensor/core.zig`, `src/backend/ops.zig`)**:
+  - **消除 Tensor 结构体胖字段耦合 (`DeviceArray`)**：
+    - 在 `src/backend/device.zig` 定义跨硬件通用显存句柄联合体 `pub const DeviceArray = union(enum) { mlx: mlx.Array, cuda: cuda.Array };`；
+    - 消除 `Tensor` 中独立挂载 `device_array` (MLX) 与 `cuda_array` (CUDA) 的冗余双字段，统一为单个可选的 `device_array: ?backend.DeviceArray`；
+    - 统一重构 `Tensor.toDevice()`、`toCudaArray()`、`toMlxArray()` 与 `syncHost()`，大幅精简张量核心结构体元数据；
+  - **消除 CUDA 逐算子主机传输开销 (Zero-Copy CUDA Pipeline)**：
+    - 在 `src/backend/ops.zig` 中实现 `borrowCudaArray` 与 `storeCudaOutput` 原语；
+    - 若输入张量已常驻于 CUDA 显存，算子直接借用显存地址，结果直接留在显存中，彻底消除多算子链式执行过程中的 HtoD / DtoH 往返拷贝开销；
+  - **全量测试与基准无损**：
+    - 83 个源文件包级依赖单向性 100% 保持（`zig build check-layers`），390+ 单元测试全量通过，Gemma 4 E4B 保持 124.2 token/s 预填充与 20.55 token/s 解码速率。
+
 - **统一计算设备架构 NVIDIA CUDA 硬件加速后端 (`src/backend/cuda.zig`, `src/backend/cuda_kernels.zig`)**:
   - **动态驱动加载与零工具链依赖 (`src/backend/cuda.zig`)**：
     - 基于 NVIDIA CUDA Driver API 动态加载器（支持 Linux `libcuda.so.1`、NixOS `/run/opengl-driver/lib/`、WSL2 以及 Windows `nvcuda.dll`），零外部 CUDA Toolkit、nvcc 或 C++ 工具链依赖，只要系统安装了 NVIDIA 显示驱动即可即刻运行；

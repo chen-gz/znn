@@ -388,16 +388,16 @@
 
 > 📌 **核心目标**：彻底消除 `offload.zig` 与 `Tensor` 中对 Apple MLX 的历史单点硬编码，构建真正中立、平等的硬件抽象层（Hardware Abstraction Layer, HAL），使计算图调度、显存常驻与自回归生成（含 KV Cache）在 Apple Metal (MLX) 与 NVIDIA GPU (CUDA) 之间实现 100% 透明复用与零拷贝流式执行。
 
-- [ ] **5.1 统一显存常驻句柄 (`DeviceArray`) 消除 `Tensor` 胖字段耦合**
-  - [ ] 在 `src/backend/device.zig` 定义跨硬件通用显存句柄联合体：
+- [x] **5.1 统一显存常驻句柄 (`DeviceArray`) 消除 `Tensor` 胖字段耦合**
+  - [x] 在 `src/backend/device.zig` 定义跨硬件通用显存句柄联合体：
     `pub const DeviceArray = union(enum) { mlx: mlx.Array, cuda: cuda.Array };`
-  - [ ] 重构 `src/tensor/core.zig` 中的 `Tensor` 结构体：消除独立的 `device_array` (MLX) 与 `cuda_array` (CUDA) 字段，统一为 `device_array: ?backend.DeviceArray = null`。
-  - [ ] 统一重构 `Tensor.toDevice(dev)`、`Tensor.toDeviceArray()`、`Tensor.copyFromDeviceArray()` 与 `Tensor.syncHost(?allocator)`。
+  - [x] 重构 `src/tensor/core.zig` 中的 `Tensor` 结构体：消除独立的 `device_array` (MLX) 与 `cuda_array` (CUDA) 字段，统一为 `device_array: ?backend.DeviceArray = null`。
+  - [x] 统一重构 `Tensor.toDevice(dev)`、`Tensor.toDeviceArray()`、`Tensor.copyFromDeviceArray()` 与 `Tensor.syncHost(?allocator)`。
 
-- [ ] **5.2 消除 CUDA 逐算子主机传输开销，实现图内零拷贝显存流转 (Zero-Copy CUDA Pipeline)**
-  - [ ] 在 `src/backend/ops.zig` 中引入通用的 `borrowDeviceArray(t)` 与 `storeDeviceOutput(out, res)` 原语；
-  - [ ] 若输入 `Tensor` 已经在 CUDA 显存中常驻，算子直接借用 `CUdeviceptr` 显存地址，无需每次在 CPU 主机缓冲区与显存间重复执行 `fromTensor` (HtoD) 与 `copyToTensor` (DtoH)；
-  - [ ] 确保计算图在 `device = .cuda` 模式下前向执行时，中间激活数据 100% 留在 GPU 显存内，仅在必要时（如取损失标量或最终采样）才拉回 CPU。
+- [x] **5.2 消除 CUDA 逐算子主机传输开销，实现图内零拷贝显存流转 (Zero-Copy CUDA Pipeline)**
+  - [x] 在 `src/backend/ops.zig` 中引入通用的 `borrowCudaArray(t)` 与 `storeCudaOutput(out, res)` 原语；
+  - [x] 若输入 `Tensor` 已经在 CUDA 显存中常驻，算子直接借用 `CUdeviceptr` 显存地址，无需每次在 CPU 主机缓冲区与显存间重复执行 `fromTensor` (HtoD) 与 `copyToTensor` (DtoH)；
+  - [x] 确保计算图在 `device = .cuda` 模式下前向执行时，中间激活数据 100% 留在 GPU 显存内，仅在必要时（如取损失标量或最终采样）才拉回 CPU。
 
 - [ ] **5.3 厘清 `offload.zig` 架构职责，剥离 MLX 硬编码**
   - [ ] 现状审计：当前 `src/backend/offload.zig` 名义为“通用卸载”，实则写满了 `mlx.Array`、`mlx.Stream` 及 MLX 静态图编译特化逻辑；

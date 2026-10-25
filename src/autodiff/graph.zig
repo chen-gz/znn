@@ -696,7 +696,7 @@ pub const Graph = struct {
             defer a_b.deinit();
             const res = try backend.logits_processor.softcapLogits(a_b.arr, cap, self.options.mlx_stream);
             const out = try self.tensorND(A_in.shape.slice(), req_grad);
-            out.device_array = res;
+            out.device_array = .{ .mlx = res };
             out.device = .gpu;
             return self.registerSingleOutputOp(
                 out,
