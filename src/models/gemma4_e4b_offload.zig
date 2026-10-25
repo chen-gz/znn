@@ -4,15 +4,16 @@
 //! 供上层纯模型结构 (Gemma4E4BForCausalLM) 按需分发，使模型定义彻底解耦底层硬件细节。
 
 const std = @import("std");
-const mlx = @import("mlx.zig");
-const offload = @import("offload.zig");
-const mlx_blocks = @import("mlx_blocks.zig");
-const logits_processor = @import("logits_processor.zig");
-const sampling = @import("sampling.zig");
-const safetensors = @import("safetensors.zig");
-const activation = @import("activation.zig");
-const vec_math = @import("vec_math.zig");
-const rope_mod = @import("rope.zig");
+const backend = @import("../backend.zig");
+const mlx = backend.mlx;
+const offload = backend.offload;
+const mlx_blocks = offload.mlx_blocks;
+const logits_processor = offload.logits_processor;
+const sampling = backend.sampling;
+const safetensors = backend.safetensors;
+const activation = backend.activation;
+const vec_math = backend.vec_math;
+const rope_mod = backend.rope;
 
 pub const Q4Weights = offload.Q4Weights;
 pub const QuantLayout = offload.QuantLayout;

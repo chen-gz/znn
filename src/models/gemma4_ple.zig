@@ -20,7 +20,6 @@ const enterModuleScope = nn.core.enterModuleScope;
 pub fn Gemma4PleLayer(comptime Proj: type) type {
     return struct {
         const Self = @This();
-
         ple_gate: Proj,
         ple_proj: Proj,
         ple_norm: RMSNorm,

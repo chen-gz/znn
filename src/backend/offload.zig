@@ -26,7 +26,58 @@ pub const OffloadError = mlx.MlxError || error{
     InvalidShape,
     ShapeMismatch,
     NonContiguousTensor,
+    EmptyTensor,
 };
+
+/// 借用或包装数组句柄守卫
+pub const ArrayBorrow = struct {
+    arr: mlx.Array,
+    needs_deinit: bool,
+
+    pub fn deinit(self: *ArrayBorrow) void {
+        if (self.needs_deinit) {
+            self.arr.deinit();
+        }
+    }
+};
+
+/// 从输入张量或数组借用 MLX 数组句柄 (若已在 GPU 驻留则零开销借用；若在主机内存则零拷贝包装)
+pub fn borrowArray(t: anytype) OffloadError!ArrayBorrow {
+    const T = @TypeOf(t);
+    if (T == mlx.Array) {
+        return .{ .arr = t, .needs_deinit = false };
+    }
+    const info = @typeInfo(T);
+    if (info == .pointer and @hasField(info.pointer.child, "device_array")) {
+        if (t.device_array) |arr| {
+            return .{ .arr = arr, .needs_deinit = false };
+        }
+        if (t.data.len > 0) {
+            const arr = try mlx.Array.fromTensorZeroCopy(t);
+            return .{ .arr = arr, .needs_deinit = true };
+        }
+        return error.EmptyTensor;
+    }
+    const arr = try mlx.Array.fromTensorZeroCopy(t);
+    return .{ .arr = arr, .needs_deinit = true };
+}
+
+/// 将计算结果安全存入输出张量 (若输出为 GPU 驻留张量则直接接管句柄；若为 CPU 主机张量则拷回内存)
+pub fn storeOutput(out: anytype, res_mlx: mlx.Array) OffloadError!void {
+    const T = @TypeOf(out);
+    const info = @typeInfo(T);
+    if (info == .pointer and @hasField(info.pointer.child, "device_array")) {
+        if (out.device == .gpu or out.data.len == 0) {
+            if (out.device_array) |*old| old.deinit();
+            out.device_array = res_mlx;
+            out.device = .gpu;
+            return;
+        }
+    }
+    var to_free = res_mlx;
+    defer to_free.deinit();
+    try res_mlx.copyToTensor(out);
+}
 
 /// 通用矩阵乘法硬件卸载 (General Matrix Multiply Offload, GEMM Offload)：C = A * B
 /// 支持二维矩阵乘法以及高维张量批处理矩阵乘法 (Batch MatMul)
@@ -37,15 +88,15 @@ pub fn matmul(
     stream: ?Stream,
 ) OffloadError!void {
     if (!isAvailable()) return error.OffloadNotSupported;
-    var a_mlx = try mlx.Array.fromTensorZeroCopy(A);
-    defer a_mlx.deinit();
-    var b_mlx = try mlx.Array.fromTensorZeroCopy(B);
-    defer b_mlx.deinit();
+    var a_b = try borrowArray(A);
+    defer a_b.deinit();
+    var b_b = try borrowArray(B);
+    defer b_b.deinit();
 
-    var c_mlx = try mlx.Array.matmul(a_mlx, b_mlx, stream);
-    defer c_mlx.deinit();
+    var c_mlx = try mlx.Array.matmul(a_b.arr, b_b.arr, stream);
+    errdefer c_mlx.deinit();
 
-    try c_mlx.copyToTensor(C);
+    try storeOutput(C, c_mlx);
 }
 
 /// 快速均方根层归一化硬件卸载 (Root Mean Square Layer Normalization Offload, RMSNorm Offload)
@@ -57,26 +108,35 @@ pub fn rmsNorm(
     stream: ?Stream,
 ) OffloadError!void {
     if (!isAvailable()) return error.OffloadNotSupported;
-    var x_mlx = try mlx.Array.fromTensorZeroCopy(X);
-    defer x_mlx.deinit();
+    var x_b = try borrowArray(X);
+    defer x_b.deinit();
 
-    var w_mlx: ?mlx.Array = null;
-    defer if (w_mlx) |*w| w.deinit();
+    var w_b: ?ArrayBorrow = null;
+    defer if (w_b) |*w| w.deinit();
     const WT = @TypeOf(weight);
     if (@typeInfo(WT) == .optional) {
         if (weight) |w| {
-            const D = X.shape.dims[X.shape.len - 1];
-            w_mlx = try mlx.Array.fromSliceZeroCopy(w.data[0..D], &.{D});
+            w_b = try borrowArray(w);
         }
     } else {
-        const D = X.shape.dims[X.shape.len - 1];
-        w_mlx = try mlx.Array.fromSliceZeroCopy(weight.data[0..D], &.{D});
+        w_b = try borrowArray(weight);
     }
+    const D = X.shape.dims[X.shape.len - 1];
+    var w_reshaped: ?mlx.Array = null;
+    defer if (w_reshaped) |*wr| wr.deinit();
 
-    var out_mlx = try mlx.Array.fastRmsNorm(x_mlx, w_mlx, eps, stream);
-    defer out_mlx.deinit();
+    const w_arr: ?mlx.Array = if (w_b) |w| blk: {
+        if (w.arr.ndim() != 1) {
+            w_reshaped = try w.arr.reshape(&.{D}, stream);
+            break :blk w_reshaped.?;
+        }
+        break :blk w.arr;
+    } else null;
 
-    try out_mlx.copyToTensor(out);
+    var out_mlx = try mlx.Array.fastRmsNorm(x_b.arr, w_arr, eps, stream);
+    errdefer out_mlx.deinit();
+
+    try storeOutput(out, out_mlx);
 }
 
 /// 快速旋转位置编码硬件卸载 (Rotary Position Embedding Offload, RoPE Offload)：对 `[..., T, head_dim]` 张量的每一行
@@ -94,21 +154,21 @@ pub fn rope(
     if (!ropeSupported(X.shape.dims[X.shape.len - 1], options)) return error.OffloadNotSupported;
     const head_dim = X.shape.dims[X.shape.len - 1];
     const traditional = options.mode == .interleaved;
-    var x_mlx = try mlx.Array.fromTensorZeroCopy(X);
-    defer x_mlx.deinit();
+    var x_b = try borrowArray(X);
+    defer x_b.deinit();
 
     var y_mlx = if (options.numAngles(head_dim) == head_dim / 2)
-        try mlx.Array.fastRoPE(x_mlx, head_dim, traditional, options.base, 1.0, start_pos, stream)
+        try mlx.Array.fastRoPE(x_b.arr, head_dim, traditional, options.base, 1.0, start_pos, stream)
     else blk: {
         var periods: [rope_mod.max_angles]f32 = undefined;
         options.fillPeriods(head_dim, periods[0 .. head_dim / 2]);
         var freqs = try mlx.Array.fromSlice(periods[0 .. head_dim / 2], &.{head_dim / 2});
         defer freqs.deinit();
-        break :blk try mlx.Array.fastRoPEWithFreqs(x_mlx, head_dim, traditional, 1.0, start_pos, freqs, stream);
+        break :blk try mlx.Array.fastRoPEWithFreqs(x_b.arr, head_dim, traditional, 1.0, start_pos, freqs, stream);
     };
-    defer y_mlx.deinit();
+    errdefer y_mlx.deinit();
 
-    try y_mlx.copyToTensor(out);
+    try storeOutput(out, y_mlx);
 }
 
 /// `rope` 能否在 MLX 上执行：旋转整行 (rotary_offset == 0) 的偶数 head_dim，且周期表不超过 `rope_mod.max_angles`
@@ -132,17 +192,17 @@ pub fn attention(
     stream: ?Stream,
 ) OffloadError!void {
     if (!isAvailable()) return error.OffloadNotSupported;
-    var q_mlx = try mlx.Array.fromTensor(queries);
-    defer q_mlx.deinit();
-    var k_mlx = try mlx.Array.fromTensor(keys);
-    defer k_mlx.deinit();
-    var v_mlx = try mlx.Array.fromTensor(values);
-    defer v_mlx.deinit();
+    var q_b = try borrowArray(queries);
+    defer q_b.deinit();
+    var k_b = try borrowArray(keys);
+    defer k_b.deinit();
+    var v_b = try borrowArray(values);
+    defer v_b.deinit();
 
-    var out_mlx = try maskedAttention(allocator, q_mlx, k_mlx, v_mlx, scale, mask, q_pos0, k_pos0, stream);
-    defer out_mlx.deinit();
+    var out_mlx = try maskedAttention(allocator, q_b.arr, k_b.arr, v_b.arr, scale, mask, q_pos0, k_pos0, stream);
+    errdefer out_mlx.deinit();
 
-    try out_mlx.copyToTensor(out);
+    try storeOutput(out, out_mlx);
 }
 
 /// 归一化指数函数硬件卸载 (Softmax Offload)
@@ -153,13 +213,85 @@ pub fn softmax(
     stream: ?Stream,
 ) OffloadError!void {
     if (!isAvailable()) return error.OffloadNotSupported;
-    var a_mlx = try mlx.Array.fromTensorZeroCopy(A);
-    defer a_mlx.deinit();
+    var a_b = try borrowArray(A);
+    defer a_b.deinit();
 
-    var res_mlx = try mlx.Array.softmax(a_mlx, axis, stream);
-    defer res_mlx.deinit();
+    var res_mlx = try mlx.Array.softmax(a_b.arr, axis, stream);
+    errdefer res_mlx.deinit();
 
-    try res_mlx.copyToTensor(out);
+    try storeOutput(out, res_mlx);
+}
+
+/// 逐元素加法硬件卸载
+pub fn add(
+    A: anytype,
+    B: anytype,
+    C: anytype,
+    stream: ?Stream,
+) OffloadError!void {
+    if (!isAvailable()) return error.OffloadNotSupported;
+    var a_b = try borrowArray(A);
+    defer a_b.deinit();
+    var b_b = try borrowArray(B);
+    defer b_b.deinit();
+
+    var c_mlx = try mlx.Array.add(a_b.arr, b_b.arr, stream);
+    errdefer c_mlx.deinit();
+
+    try storeOutput(C, c_mlx);
+}
+
+/// 逐元素乘法硬件卸载
+pub fn multiply(
+    A: anytype,
+    B: anytype,
+    C: anytype,
+    stream: ?Stream,
+) OffloadError!void {
+    if (!isAvailable()) return error.OffloadNotSupported;
+    var a_b = try borrowArray(A);
+    defer a_b.deinit();
+    var b_b = try borrowArray(B);
+    defer b_b.deinit();
+
+    var c_mlx = try mlx.Array.multiply(a_b.arr, b_b.arr, stream);
+    errdefer c_mlx.deinit();
+
+    try storeOutput(C, c_mlx);
+}
+
+/// 标量乘法硬件卸载
+pub fn mulScalar(
+    A: anytype,
+    scalar: f32,
+    C: anytype,
+    stream: ?Stream,
+) OffloadError!void {
+    if (!isAvailable()) return error.OffloadNotSupported;
+    var a_b = try borrowArray(A);
+    defer a_b.deinit();
+
+    var c_mlx = try mlx.Array.mulScalar(a_b.arr, scalar, stream);
+    errdefer c_mlx.deinit();
+
+    try storeOutput(C, c_mlx);
+}
+
+/// 高斯误差线性单元硬件卸载 (GELU Offload)
+pub fn gelu(
+    X: anytype,
+    out: anytype,
+    approx: activation.GeluApproximation,
+    stream: ?Stream,
+) OffloadError!void {
+    if (!isAvailable()) return error.OffloadNotSupported;
+    var x_b = try borrowArray(X);
+    defer x_b.deinit();
+
+    var out_mlx = try x_b.arr.gelu(approx, stream);
+    errdefer out_mlx.deinit();
+
+    try storeOutput(out, out_mlx);
 }
 
 /// 语言模型输出头 (Language Model Head, LM Head) 常驻词表矩阵的量化模式
@@ -691,21 +823,22 @@ pub const QuantWeights = struct {
             total_elements *= X.shape.dims[d];
         }
         const in_f = self.in_features;
-        const out_f = self.out_features;
         if (total_elements % in_f != 0) return error.ShapeMismatch;
         const rows = total_elements / in_f;
-        if (out.data.len < rows * out_f) return error.ShapeMismatch;
 
-        var x_mlx = try mlx.Array.fromSliceZeroCopy(X.data[0..total_elements], &.{ rows, in_f });
-        defer x_mlx.deinit();
+        var x_b = try borrowArray(X);
+        defer x_b.deinit();
 
-        var res_mlx = try self.forwardArray(x_mlx, stream);
-        defer res_mlx.deinit();
-        res_mlx.eval();
+        var x_2d = if (x_b.arr.ndim() == 2)
+            x_b.arr
+        else
+            try x_b.arr.reshape(&.{ rows, in_f }, stream);
+        defer if (x_b.arr.ndim() != 2) x_2d.deinit();
 
-        const res_data = try res_mlx.dataFloat32();
-        if (res_data.len != rows * out_f) return error.ShapeMismatch;
-        @memcpy(out.data[0 .. rows * out_f], res_data);
+        var res_mlx = try self.forwardArray(x_2d, stream);
+        errdefer res_mlx.deinit();
+
+        try storeOutput(out, res_mlx);
     }
 };
 

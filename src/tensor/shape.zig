@@ -48,6 +48,11 @@ pub const Shape = struct {
         return total;
     }
 
+    /// 获取形状有效维度的切片
+    pub fn slice(self: *const Shape) []const usize {
+        return self.dims[0..self.len];
+    }
+
     /// Increments an N-dimensional coordinate array in-place, carrying over to the previous dimension if a dimension reaches its limit.
     pub inline fn incrementCoord(self: Shape, coord: *[8]usize) void {
         var d = self.len;

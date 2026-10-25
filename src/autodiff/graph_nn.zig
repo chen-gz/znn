@@ -500,7 +500,7 @@ pub fn rmsNorm(self: *Graph, X_in: *Tensor, W_in: ?*Tensor, options: tensor_mod.
 
     const Y = if (self.useDevice(req_grad) and (W == null or options.weight_offset == 0.0)) blk: {
         if (W) |w| if (w.shape.numel() != D) return error.ShapeMismatch;
-        const out = try tensor_mod.zeros(allocator, X.shape.dims[0..X.shape.len]);
+        const out = try self.tensorND(X.shape.dims[0..X.shape.len], req_grad);
         try backend.offload.rmsNorm(X, W, out, options.eps, self.options.mlx_stream);
         break :blk out;
     } else try X.rmsNorm(W, options, if (req_grad) inv_rms else null, allocator);
@@ -724,7 +724,7 @@ pub fn rope(self: *Graph, X_in: *Tensor, start_pos: usize, options: tensor_mod.R
     const req_grad = self.enable_grad and X.requires_grad;
     const D = X.shape.dims[X.shape.len - 1];
     const Y = if (self.useDevice(req_grad) and backend.offload.ropeSupported(D, options)) blk: {
-        const out = try tensor_mod.zeros(allocator, X.shape.dims[0..X.shape.len]);
+        const out = try self.tensorND(X.shape.dims[0..X.shape.len], req_grad);
         try backend.offload.rope(X, out, options, start_pos, self.options.mlx_stream);
         break :blk out;
     } else try X.rope(start_pos, options, allocator);
@@ -746,7 +746,7 @@ pub fn batchMatMul(self: *Graph, A_in: *Tensor, B_in: *Tensor) !*Tensor {
     const C = if (self.useDevice(req_grad)) blk: {
         if (A.shape.len != 4 or B.shape.len != 4) return error.IncompatibleDimensions;
         if (A.shape.dims[0] != B.shape.dims[0] or A.shape.dims[1] != B.shape.dims[1] or A.shape.dims[3] != B.shape.dims[2]) return error.ShapeMismatch;
-        const out = try tensor_mod.zeros(allocator, &.{ A.shape.dims[0], A.shape.dims[1], A.shape.dims[2], B.shape.dims[3] });
+        const out = try self.tensorND(&.{ A.shape.dims[0], A.shape.dims[1], A.shape.dims[2], B.shape.dims[3] }, req_grad);
         try backend.offload.matmul(A, B, out, self.options.mlx_stream);
         break :blk out;
     } else try A.batchMatMul(B, allocator);
@@ -767,7 +767,7 @@ pub fn attention(self: *Graph, q_in: *Tensor, k_in: *Tensor, v_in: *Tensor, opti
     const shape = try tensor_mod.attention_kernels.Shape.init(q, k, v, options);
     const req_grad = self.enable_grad and (q.requires_grad or k.requires_grad or v.requires_grad);
 
-    const out = try tensor_mod.zeros(allocator, &.{ shape.batch, shape.q_heads, shape.tq, shape.v_dim });
+    const out = try self.tensorND(&.{ shape.batch, shape.q_heads, shape.tq, shape.v_dim }, req_grad);
     const probs: []f32 = if (req_grad) try allocator.alloc(f32, shape.probsLen()) else &.{};
     if (self.useDevice(req_grad)) {
         try backend.offload.attention(self.backing_allocator, q, k, v, out, options.resolveScale(shape.head_dim), options.mask, options.q_pos0, options.k_pos0, self.options.mlx_stream);
@@ -821,13 +821,51 @@ pub fn embedding(self: *Graph, W_in: *Tensor, X: anytype) !*Tensor {
         }
     };
 
+    const req_grad = self.enable_grad and W.requires_grad;
+    if (self.useDevice(req_grad) and (W.device == .gpu or W.device_array != null)) {
+        var w_b = try backend.offload.borrowArray(W);
+        defer w_b.deinit();
+        var x_b = try backend.offload.borrowArray(x_tensor);
+        defer x_b.deinit();
+        var x_i32 = try x_b.arr.astype(.int32, self.options.mlx_stream);
+        defer x_i32.deinit();
+        const res = try w_b.arr.takeAxis(x_i32, 0, self.options.mlx_stream);
+        var out_shape_dims: [8]usize = undefined;
+        for (0..x_tensor.shape.len) |d| {
+            out_shape_dims[d] = x_tensor.shape.dims[d];
+        }
+        out_shape_dims[x_tensor.shape.len] = W.shape.dims[1];
+        const shape = tensor_mod.Shape.init(out_shape_dims[0 .. x_tensor.shape.len + 1]);
+        const Y = try allocator.create(Tensor);
+        Y.* = Tensor{
+            .data = &.{},
+            .grad = &.{},
+            .shape = shape,
+            .strides = tensor_mod.computeContiguousStrides(shape),
+            .requires_grad = false,
+            .creator = null,
+            .device = .gpu,
+            .device_array = res,
+            .is_graph_owned = true,
+            .scope = self.currentScope(),
+        };
+        try self.tensors.append(self.backing_allocator, Y);
+        return self.registerSingleOutputOp(
+            Y,
+            &.{ W, x_tensor },
+            .Embedding,
+            .{ .Embedding = {} },
+            false,
+        );
+    }
+
     const Y = try W.embedding(x_tensor, allocator);
     return self.registerSingleOutputOp(
         Y,
         &.{ W, x_tensor },
         .Embedding,
         .{ .Embedding = {} },
-        self.enable_grad and W.requires_grad,
+        req_grad,
     );
 }
 

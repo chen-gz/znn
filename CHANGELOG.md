@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **设备常驻张量 (Device-Resident Tensor) 与计算图透明零拷贝加速 (`src/tensor/`, `src/autodiff/`, `src/backend/`, `src/models/`)**:
+  - **原生设备常驻张量 (`Tensor.device`, `Tensor.device_array`)**：在 `Tensor` 核心数据结构中引入 `device: Device = .cpu`、`device_array: ?mlx.Array = null` 与 `is_graph_owned: bool = false`，彻底消除每步算子强制同步拷回主机内存（Host RAM）的瓶颈，实现真正的 PyTorch/JAX 式 GPU 显存常驻与惰性求值（Lazy Evaluation）。
+  - **零拷贝借用与直接显存回写 (`borrowArray`, `storeOutput`, `src/backend/offload.zig`)**：
+    - `borrowArray(t)`：当张量常驻于 GPU 时直接借用底层显存句柄（零开销）；当张量位于 CPU 时执行零拷贝包装；
+    - `storeOutput(out, res)`：当输出张量常驻于 GPU 时直接转移 `device_array` 句柄，不触发任何 CPU 缓冲区拷贝与显存回写；
+    - 重构 `matmul`、`rmsNorm`、`rope`、`attention`、`softmax`、`add`、`multiply`、`mulScalar`、`gelu` 与量化矩阵乘法 `QuantWeights.forward`，全链路贯通设备常驻显存。
+  - **计算图透明 GPU 链式执行 (`autodiff.Graph`, `autodiff.graph_nn.zig`)**：
+    - `Graph` 在 `.gpu` 模式下直接创建设备常驻张量，算子之间直接传递 `device_array`，在多层前向传播过程中零主机端内存分配、零 CPU-GPU 同步阻塞；
+    - 统一内存管理：`Graph.deinit` 与 `reset` 自动批量释放由计算图拥有的显存数组；
+    - 在需要读取数值或单元测试断言时提供 `tensor.syncHost(?allocator)` 与 `tensor.eval()`，按需拉取数据至主机端。
+  - **Layer 0 (`backend`) 纯粹化与特定模型执行流上移 (`src/backend/` -> `src/models/`)**：
+    - 彻底从 Layer 0 移除 `e4b_offload.zig` 与 `gemma4_offload.zig`，消除底层 `backend` 对特定模型架构及权重结构的耦合，确保 `backend` 严格作为纯粹的通用硬件加速内核库；
+    - 将模型专属权重加载与分层执行移入 `src/models/gemma4_e4b_offload.zig` 与 `src/models/gemma4_offload.zig`，层级依赖与包职责更加清晰规范。
+  - **全量测试与端到端性能验证**：81 个包分层单向校验 `zig build check-layers` 与全部 389+ 单元测试 100% 通过；端到端 `gemma4-e4b` 保持 21+ token/s 极速吞吐。
+
 - **通用模块化重构、模型定义与硬件加速彻底解耦 (`src/models/`, `src/backend/`, `src/autodiff/`, `src/nn/`)**:
   - **纯 PyTorch / JAX 风格模型定义**：`src/models/` 彻底剥离全部专有硬件运行模块（彻底删除 `src/models/gemma4_e4b_gpu.zig` 与 `src/models/gemma4_gpu.zig`），模型架构（`Gemma4ForCausalLM`、`Gemma4E4BForCausalLM`、`Gemma4Q4ForCausalLM`、`GPT`）转为 100% 纯粹的 `nn.Module`，零专有硬件结构（如 `gpu_context`）侵入。
   - **统一计算设备枚举 (`Device.cpu`, `Device.gpu`)**：在 `backend` 统一导出 `pub const Device = mlx.DeviceType;`，并穿透暴露至 `tensor`、`autodiff`、`nn`、`models` 与根包 `zig_ml`；计算图通过 `graph.options.device` 实现全局设备分发。

@@ -10,7 +10,6 @@ const Tensor = tensor.Tensor;
 const gemma4 = models.gemma4;
 const gemma4_q4 = models.gemma4_q4;
 const gemma4_e4b = models.gemma4_e4b;
-const gemma4_offload = backend.gemma4_offload;
 const sampling = backend.sampling;
 const Gemma4E4BModel = gemma4_e4b.Gemma4E4BModel;
 
@@ -153,6 +152,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
             try std.testing.expectEqual(@as(usize, 4), logits_gpu.shape.dims[1]);
             try std.testing.expectEqual(@as(usize, 128), logits_gpu.shape.dims[2]);
 
+            try logits_gpu.syncHost(null);
             for (logits.data, logits_gpu.data) |c_val, g_val| {
                 try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
             }
@@ -1244,7 +1244,7 @@ test "Gemma 4 GPU candidate selection matches the CPU sampler for identical logi
         .{ .temperature = 0.9, .top_k = 16, .top_p = 0.95, .repetition_penalty = 1.4, .seed = 5 },
         .{ .temperature = 1.2, .top_p = 0.8, .repetition_penalty = 1.4, .seed = 6 },
     }) |opts| {
-        var pending = try gemma4_offload.deviceCandidates(allocator, logits_arr, cfg, &mask, &recent, opts, stream);
+        var pending = try backend.offload.deviceCandidates(allocator, logits_arr, cfg, &mask, &recent, opts, stream);
         defer pending.deinit();
         var buf: [128]sampling.Candidate = undefined;
         const host = try pending.read(&buf);
@@ -1273,7 +1273,7 @@ test "Gemma 4 GPU candidate selection matches the CPU sampler for identical logi
         }
 
         var sel_sampler = sampling.Sampler.init(opts);
-        const tok = try gemma4_offload.selectToken(allocator, logits_arr, cfg, &mask, &recent, &sel_sampler, stream);
+        const tok = try backend.offload.selectToken(allocator, logits_arr, cfg, &mask, &recent, &sel_sampler, stream);
         try std.testing.expect(!cfg.isSamplingExcluded(tok));
     }
 }

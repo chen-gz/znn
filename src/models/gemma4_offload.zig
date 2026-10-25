@@ -7,15 +7,16 @@
 //! backend 包只提供与模型无关的 MLX / 卸载原语，Gemma 4 专属的层结构、键值缓存管理与采样策略集中在本文件。
 
 const std = @import("std");
-const mlx = @import("mlx.zig");
-const offload = @import("offload.zig");
-const sampling = @import("sampling.zig");
-const mlx_blocks = @import("mlx_blocks.zig");
-const logits_processor = @import("logits_processor.zig");
-const rope = @import("rope.zig");
-const vec_math = @import("vec_math.zig");
-const attention_mask = @import("attention_mask.zig");
-const activation = @import("activation.zig");
+const backend = @import("../backend.zig");
+const mlx = backend.mlx;
+const offload = backend.offload;
+const sampling = backend.sampling;
+const mlx_blocks = offload.mlx_blocks;
+const logits_processor = offload.logits_processor;
+const rope = backend.rope;
+const vec_math = backend.vec_math;
+const attention_mask = backend.attention_mask;
+const activation = backend.activation;
 
 const Sampler = sampling.Sampler;
 const SamplingOptions = sampling.SamplingOptions;

@@ -170,6 +170,14 @@ pub const Graph = struct {
 
     // 释放整个计算图的内存（包括所有张量与算子节点的前向/反向缓冲区）
     pub fn deinit(self: *Graph) void {
+        for (self.tensors.items) |t| {
+            if (t.is_graph_owned) {
+                if (t.device_array) |*arr| {
+                    arr.deinit();
+                    t.device_array = null;
+                }
+            }
+        }
         self.module_formulas.deinit();
         self.module_types.deinit();
         self.scope_stack.deinit(self.backing_allocator);
@@ -180,6 +188,14 @@ pub const Graph = struct {
 
     /// 重置计算图状态与 Arena 内存（保留已分配容量以供高效复用）
     pub fn reset(self: *Graph) void {
+        for (self.tensors.items) |t| {
+            if (t.is_graph_owned) {
+                if (t.device_array) |*arr| {
+                    arr.deinit();
+                    t.device_array = null;
+                }
+            }
+        }
         self.module_formulas.clearRetainingCapacity();
         self.module_types.clearRetainingCapacity();
         self.scope_stack.clearRetainingCapacity();
@@ -246,6 +262,7 @@ pub const Graph = struct {
         }
 
         const effective_req_grad = self.enable_grad and requires_grad;
+        const is_gpu = (self.options.device == .gpu) and !effective_req_grad;
 
         t.* = Tensor{
             .data = try allocator.alloc(f32, total_size),
@@ -255,6 +272,8 @@ pub const Graph = struct {
             .requires_grad = effective_req_grad,
             .creator = null,
             .scope = self.currentScope(),
+            .device = if (is_gpu) .gpu else .cpu,
+            .is_graph_owned = true,
         };
         @memset(t.data, 0.0);
         if (effective_req_grad) {
@@ -276,6 +295,25 @@ pub const Graph = struct {
         if (old_total != new_total) return error.ShapeMismatch;
 
         const req_grad = self.enable_grad and A.requires_grad;
+
+        if (self.useDevice(req_grad) and A.device_array != null) {
+            const arr = try A.device_array.?.reshape(new_shape_slice, self.options.mlx_stream);
+            C.* = Tensor{
+                .data = &.{},
+                .grad = &.{},
+                .shape = shape,
+                .strides = strides,
+                .requires_grad = false,
+                .creator = null,
+                .device = .gpu,
+                .device_array = arr,
+                .is_graph_owned = true,
+                .scope = self.currentScope(),
+            };
+            try self.tensors.append(self.backing_allocator, C);
+            return self.registerSingleOutputOp(C, &.{A}, .Reshape, .{ .Reshape = {} }, false);
+        }
+
         const can_alias = A.isContiguous() and A.data.len >= new_total;
 
         C.* = Tensor{
@@ -397,13 +435,49 @@ pub const Graph = struct {
     // 维度转置算子前向传播：交换 dim0 和 dim1
     pub fn transposeND(self: *Graph, A: *Tensor, dim0: usize, dim1: usize) !*Tensor {
         const allocator = self.arena.allocator();
+        const req_grad = self.enable_grad and A.requires_grad;
+
+        if (self.useDevice(req_grad) and A.device_array != null) {
+            const rank = A.shape.len;
+            if (dim0 >= rank or dim1 >= rank) return error.IndexOutOfBounds;
+            var axes: [8]usize = undefined;
+            for (0..rank) |i| axes[i] = i;
+            axes[dim0] = dim1;
+            axes[dim1] = dim0;
+            const res = try A.device_array.?.transposeAxes(axes[0..rank], self.options.mlx_stream);
+            var out_shape = A.shape;
+            out_shape.dims[dim0] = A.shape.dims[dim1];
+            out_shape.dims[dim1] = A.shape.dims[dim0];
+            const C = try allocator.create(Tensor);
+            C.* = Tensor{
+                .data = &.{},
+                .grad = &.{},
+                .shape = out_shape,
+                .strides = computeContiguousStrides(out_shape),
+                .requires_grad = false,
+                .creator = null,
+                .device = .gpu,
+                .device_array = res,
+                .is_graph_owned = true,
+                .scope = self.currentScope(),
+            };
+            try self.tensors.append(self.backing_allocator, C);
+            return self.registerSingleOutputOp(
+                C,
+                &.{A},
+                .Transpose,
+                .{ .Transpose = .{ .dim0 = dim0, .dim1 = dim1 } },
+                false,
+            );
+        }
+
         const C = try A.transpose(dim0, dim1, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
             .Transpose,
             .{ .Transpose = .{ .dim0 = dim0, .dim1 = dim1 } },
-            self.enable_grad and A.requires_grad,
+            req_grad,
         );
     }
 
@@ -521,7 +595,7 @@ pub const Graph = struct {
         const C = if (self.useDevice(req_grad)) blk: {
             if (A.shape.len != 2 or B.shape.len != 2) return error.IncompatibleDimensions;
             if (A.shape.dims[1] != B.shape.dims[0]) return error.ShapeMismatch;
-            const out = try tensor_mod.zeros(allocator, &.{ A.shape.dims[0], B.shape.dims[1] });
+            const out = try self.tensorND(&.{ A.shape.dims[0], B.shape.dims[1] }, req_grad);
             try backend.offload.matmul(A, B, out, self.options.mlx_stream);
             break :blk out;
         } else try A.matmul(B, allocator);
@@ -558,18 +632,30 @@ pub const Graph = struct {
     /// `.tanh` 记录为双曲正切 (Hyperbolic Tangent, Tanh) 近似形式算子 `GeluTanh`
     pub fn gelu(self: *Graph, A_in: *Tensor, approximation: backend.GeluApproximation) !*Tensor {
         const allocator = self.arena.allocator();
-        const A = try self.contiguous(A_in);
-        const C = try A.gelu(approximation, allocator);
+        const req_grad = self.enable_grad and A_in.requires_grad;
         const context: types.OpContext = switch (approximation) {
             .none => .{ .Gelu = {} },
             .tanh => .{ .GeluTanh = {} },
         };
+        if (self.useDevice(req_grad)) {
+            const out = try self.tensorND(A_in.shape.slice(), req_grad);
+            try backend.offload.gelu(A_in, out, approximation, self.options.mlx_stream);
+            return self.registerSingleOutputOp(
+                out,
+                &.{A_in},
+                types.OpType.forGelu(approximation),
+                context,
+                req_grad,
+            );
+        }
+        const A = try self.contiguous(A_in);
+        const C = try A.gelu(approximation, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{A},
             types.OpType.forGelu(approximation),
             context,
-            self.enable_grad and A.requires_grad,
+            req_grad,
         );
     }
 
@@ -604,6 +690,22 @@ pub const Graph = struct {
     pub fn softcap(self: *Graph, A_in: *Tensor, cap: f32) !*Tensor {
         if (cap <= 0.0) return A_in;
         const allocator = self.arena.allocator();
+        const req_grad = self.enable_grad and A_in.requires_grad;
+        if (self.useDevice(req_grad)) {
+            var a_b = try backend.offload.borrowArray(A_in);
+            defer a_b.deinit();
+            const res = try backend.logits_processor.softcapLogits(a_b.arr, cap, self.options.mlx_stream);
+            const out = try self.tensorND(A_in.shape.slice(), req_grad);
+            out.device_array = res;
+            out.device = .gpu;
+            return self.registerSingleOutputOp(
+                out,
+                &.{A_in},
+                .Softcap,
+                .{ .Softcap = .{ .cap = cap } },
+                req_grad,
+            );
+        }
         const A = try self.contiguous(A_in);
         const C = try A.softcap(cap, allocator);
         return self.registerSingleOutputOp(
@@ -611,7 +713,7 @@ pub const Graph = struct {
             &.{A},
             .Softcap,
             .{ .Softcap = .{ .cap = cap } },
-            self.enable_grad and A.requires_grad,
+            req_grad,
         );
     }
 
@@ -662,6 +764,18 @@ pub const Graph = struct {
     // 标量乘法（缩放）：C = val * A
     pub fn mulScalar(self: *Graph, A_in: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
+        const req_grad = self.enable_grad and A_in.requires_grad;
+        if (self.useDevice(req_grad)) {
+            const out = try self.tensorND(A_in.shape.slice(), req_grad);
+            try backend.offload.mulScalar(A_in, val, out, self.options.mlx_stream);
+            return self.registerSingleOutputOp(
+                out,
+                &.{A_in},
+                .MulScalar,
+                .{ .MulScalar = .{ .val = val } },
+                req_grad,
+            );
+        }
         const A = try self.contiguous(A_in);
         const C = try A.mulScalar(val, allocator);
         return self.registerSingleOutputOp(
@@ -669,7 +783,7 @@ pub const Graph = struct {
             &.{A},
             .MulScalar,
             .{ .MulScalar = .{ .val = val } },
-            self.enable_grad and A.requires_grad,
+            req_grad,
         );
     }
 
@@ -718,13 +832,19 @@ pub const Graph = struct {
     // 逐元素张量加法：C = A + B (支持多维广播)
     pub fn add(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.add(B, allocator);
+        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
+        const C = if (self.useDevice(req_grad)) blk: {
+            const out_shape = try tensor_mod.broadcastShapes(A.shape, B.shape);
+            const out = try self.tensorND(out_shape.slice(), req_grad);
+            try backend.offload.add(A, B, out, self.options.mlx_stream);
+            break :blk out;
+        } else try A.add(B, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{ A, B },
             .Add,
             .{ .Add = {} },
-            self.enable_grad and (A.requires_grad or B.requires_grad),
+            req_grad,
         );
     }
 
@@ -744,13 +864,19 @@ pub const Graph = struct {
     // 逐元素张量乘法 (Hadamard 积)：C = A * B (支持多维广播)
     pub fn mul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
-        const C = try A.mul(B, allocator);
+        const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
+        const C = if (self.useDevice(req_grad)) blk: {
+            const out_shape = try tensor_mod.broadcastShapes(A.shape, B.shape);
+            const out = try self.tensorND(out_shape.slice(), req_grad);
+            try backend.offload.multiply(A, B, out, self.options.mlx_stream);
+            break :blk out;
+        } else try A.mul(B, allocator);
         return self.registerSingleOutputOp(
             C,
             &.{ A, B },
             .Mul,
             .{ .Mul = {} },
-            self.enable_grad and (A.requires_grad or B.requires_grad),
+            req_grad,
         );
     }
 
@@ -969,6 +1095,53 @@ pub const Graph = struct {
         }
 
         const req_grad = self.enable_grad and A.requires_grad;
+
+        if (self.useDevice(req_grad) and A.device_array != null) {
+            var curr_arr = A.device_array.?;
+            var had_slice = false;
+            for (0..A.shape.len) |d| {
+                const dim_size = A.shape.dims[d];
+                const range = if (d < ranges.len) ranges[d] else tensor_mod.SliceRange{};
+                const start = range.start orelse 0;
+                const end = range.end orelse dim_size;
+                if (start != 0 or end != dim_size) {
+                    curr_arr = try curr_arr.sliceAxis(d, start, end, self.options.mlx_stream);
+                    had_slice = true;
+                }
+            }
+            if (!had_slice) {
+                curr_arr = try curr_arr.sliceAxis(0, 0, A.shape.dims[0], self.options.mlx_stream);
+            }
+            const C = try self.arena.allocator().create(Tensor);
+            const shape = try Shape.fromSlice(new_dims[0..A.shape.len]);
+            C.* = Tensor{
+                .data = &.{},
+                .grad = &.{},
+                .shape = shape,
+                .strides = computeContiguousStrides(shape),
+                .requires_grad = false,
+                .creator = null,
+                .device = .gpu,
+                .device_array = curr_arr,
+                .is_graph_owned = true,
+                .scope = self.currentScope(),
+            };
+            try self.tensors.append(self.backing_allocator, C);
+            return self.registerSingleOutputOp(
+                C,
+                &.{A},
+                .Slice,
+                .{
+                    .Slice = .{
+                        .offset = offset,
+                        .strides = new_strides,
+                        .rank = A.shape.len,
+                    },
+                },
+                false,
+            );
+        }
+
         const C = try self.tensorND(new_dims[0..A.shape.len], req_grad);
         return self.runAndRecordPreallocatedOp(
             C,

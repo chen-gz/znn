@@ -27,10 +27,11 @@ pub const Gemma4Q4MLP = gemma4_q4.Gemma4Q4MLP;
 pub const Gemma4PleLayer = gemma4.Gemma4PleLayer(nn.Q4Linear);
 pub const Gemma4PleEmbedding = gemma4.Gemma4PleEmbedding(nn.Q4Linear);
 
-// 硬件加速引擎导出 (统一委托至底层 backend.e4b_offload 引擎)
-pub const Gemma4E4BGpuContext = backend.e4b_offload.Gemma4E4BOffloadEngine;
-pub const GpuLayerE4B = backend.e4b_offload.GpuLayerE4B;
-pub const PleWeights = backend.e4b_offload.PleWeights;
+// 硬件加速引擎导出 (统一委托至模型专用 Gemma4E4BOffload 引擎)
+pub const e4b_offload = @import("gemma4_e4b_offload.zig");
+pub const Gemma4E4BGpuContext = e4b_offload.Gemma4E4BOffloadEngine;
+pub const GpuLayerE4B = e4b_offload.GpuLayerE4B;
+pub const PleWeights = e4b_offload.PleWeights;
 pub const DirectCacheReader = Gemma4E4BGpuContext.DirectCacheReader;
 pub const computeExpectedDirectCacheSize = Gemma4E4BGpuContext.computeExpectedDirectCacheSize;
 pub const DIRECT_CACHE_MAGIC = Gemma4E4BGpuContext.DIRECT_CACHE_MAGIC;
@@ -39,7 +40,7 @@ pub const DIRECT_CACHE_FILENAME = Gemma4E4BGpuContext.DIRECT_CACHE_FILENAME;
 pub const LoadOptions = Gemma4E4BGpuContext.LoadOptions;
 pub const GenerateOptions = Gemma4E4BGpuContext.GenerateOptions;
 pub const Generation = Gemma4E4BGpuContext.Generation;
-pub const num_kv_layers = backend.e4b_offload.num_kv_layers;
+pub const num_kv_layers = e4b_offload.num_kv_layers;
 pub const kvSourceLayer = Gemma4Config.kvSourceLayer;
 pub const isKvSharedSource = Gemma4Config.isKvSharedSource;
 

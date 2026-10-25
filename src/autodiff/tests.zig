@@ -1431,6 +1431,7 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
 
     const c_cpu = try g_cpu.matmul(a_cpu, b_cpu);
     const c_gpu = try g_gpu.matmul(a_gpu, b_gpu);
+    try c_gpu.syncHost(null);
     for (c_cpu.data, c_gpu.data) |c_val, g_val| {
         try std.testing.expectApproxEqAbs(c_val, g_val, 1e-4);
     }
@@ -1450,6 +1451,7 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
 
     const norm_cpu = try g_cpu.rmsNorm(x_cpu, w_cpu, .{ .eps = 1e-5 });
     const norm_gpu = try g_gpu.rmsNorm(x_gpu, w_gpu, .{ .eps = 1e-5 });
+    try norm_gpu.syncHost(null);
     for (norm_cpu.data, norm_gpu.data) |c_val, g_val| {
         try std.testing.expectApproxEqAbs(c_val, g_val, 1e-4);
     }
@@ -1480,6 +1482,7 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
 
     const sdpa_cpu = try g_cpu.attention(q_cpu, k_cpu, v_cpu, .{ .scale = scale, .mask = .causal });
     const sdpa_gpu = try g_gpu.attention(q_gpu, k_gpu, v_gpu, .{ .scale = scale, .mask = .causal });
+    try sdpa_gpu.syncHost(null);
 
     for (sdpa_cpu.data, sdpa_gpu.data) |c_val, g_val| {
         try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
@@ -1496,18 +1499,21 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
 
     const r_out_cpu = try g_cpu.rope(rope_cpu, 0, .{ .mode = .split_half, .partial_rotary_factor = 1.0, .base = 10000.0 });
     const r_out_gpu = try g_gpu.rope(rope_gpu, 0, .{ .mode = .split_half, .partial_rotary_factor = 1.0, .base = 10000.0 });
+    try r_out_gpu.syncHost(null);
     for (r_out_cpu.data, r_out_gpu.data) |c_val, g_val| {
         try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
     }
 
     const r_part_cpu = try g_cpu.rope(rope_cpu, 0, .{ .mode = .split_half, .partial_rotary_factor = 0.5, .base = 10000.0 });
     const r_part_gpu = try g_gpu.rope(rope_gpu, 0, .{ .mode = .split_half, .partial_rotary_factor = 0.5, .base = 10000.0 });
+    try r_part_gpu.syncHost(null);
     for (r_part_cpu.data, r_part_gpu.data) |c_val, g_val| {
         try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
     }
 
     const r_intl_cpu = try g_cpu.rope(rope_cpu, 0, .{ .mode = .interleaved, .partial_rotary_factor = 1.0, .base = 10000.0 });
     const r_intl_gpu = try g_gpu.rope(rope_gpu, 0, .{ .mode = .interleaved, .partial_rotary_factor = 1.0, .base = 10000.0 });
+    try r_intl_gpu.syncHost(null);
     for (r_intl_cpu.data, r_intl_gpu.data) |c_val, g_val| {
         try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
     }

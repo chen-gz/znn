@@ -30,6 +30,15 @@ pub const LogitsProcessorOptions = struct {
             .sampling_excluded_tokens = &.{},
         };
     }
+
+    pub fn of(cfg: anytype) LogitsProcessorOptions {
+        if (@TypeOf(cfg) == LogitsProcessorOptions) return cfg;
+        return .{
+            .vocab_size = cfg.vocab_size,
+            .final_logit_softcapping = if (@hasField(@TypeOf(cfg), "final_logit_softcapping")) cfg.final_logit_softcapping else 0.0,
+            .sampling_excluded_tokens = if (@hasField(@TypeOf(cfg), "sampling_excluded_tokens")) cfg.sampling_excluded_tokens else &.{},
+        };
+    }
 };
 
 /// 将 GPU 对数几率转换为单精度并施加最终对数几率截断 (Final Logit Softcapping)：cap * tanh(x / cap)；cap <= 0 时只做类型转换
@@ -141,22 +150,23 @@ pub const HostCandidates = struct {
 pub fn deviceCandidates(
     allocator: std.mem.Allocator,
     logits: mlx.Array,
-    opts: LogitsProcessorOptions,
+    opts: anytype,
     mask: *const TokenExclusionMask,
     recent_tokens: []const usize,
     sampling_opts: SamplingOptions,
     s: ?Stream,
 ) !DeviceCandidates {
-    if (logits.ndim() != 2 or logits.dimSize(0) != 1 or logits.dimSize(1) != opts.vocab_size) return error.ShapeMismatch;
+    const opt_proc = LogitsProcessorOptions.of(opts);
+    if (logits.ndim() != 2 or logits.dimSize(0) != 1 or logits.dimSize(1) != opt_proc.vocab_size) return error.ShapeMismatch;
     const recent = if (sampling_opts.repetition_window) |win| sampling_opts.recentTokens(recent_tokens, win) else recent_tokens;
-    var capped = try softcapLogits(logits, opts.final_logit_softcapping, s);
+    var capped = try softcapLogits(logits, opt_proc.final_logit_softcapping, s);
     defer capped.deinit();
-    var penalized_opt = try penalizeDevice(allocator, capped, opts.vocab_size, recent, sampling_opts.repetition_penalty, s);
+    var penalized_opt = try penalizeDevice(allocator, capped, opt_proc.vocab_size, recent, sampling_opts.repetition_penalty, s);
     defer if (penalized_opt) |*a| a.deinit();
     var masked = try mask.apply(penalized_opt orelse capped, s);
     defer masked.deinit();
 
-    const k = sampling_opts.candidateCount(opts.vocab_size);
+    const k = sampling_opts.candidateCount(opt_proc.vocab_size);
     var neg = try masked.negative(s);
     defer neg.deinit();
     var order = try neg.argpartitionAxis(k - 1, -1, s);
@@ -184,12 +194,13 @@ pub fn deviceCandidates(
 pub fn selectToken(
     allocator: std.mem.Allocator,
     logits: mlx.Array,
-    opts: LogitsProcessorOptions,
+    opts: anytype,
     mask: *const TokenExclusionMask,
     recent_tokens: []const usize,
     sampler: *Sampler,
     s: ?Stream,
 ) !usize {
+    const opt_proc = LogitsProcessorOptions.of(opts);
     const s_opts = sampler.options;
     const recent = if (s_opts.repetition_window) |win| s_opts.recentTokens(recent_tokens, win) else recent_tokens;
     if (s_opts.isPlainGreedy()) {
@@ -198,14 +209,14 @@ pub fn selectToken(
         return @intCast(try best.itemUint32());
     }
     if (s_opts.isGreedy()) {
-        var capped = try softcapLogits(logits, opts.final_logit_softcapping, s);
+        var capped = try softcapLogits(logits, opt_proc.final_logit_softcapping, s);
         defer capped.deinit();
         const data = try capped.dataFloat32();
-        if (data.len != opts.vocab_size) return error.ShapeMismatch;
-        return sampling.argmaxWithPenalty(data, opts.vocab_size, opts.sampling_excluded_tokens, recent, s_opts.repetition_penalty);
+        if (data.len != opt_proc.vocab_size) return error.ShapeMismatch;
+        return sampling.argmaxWithPenalty(data, opt_proc.vocab_size, opt_proc.sampling_excluded_tokens, recent, s_opts.repetition_penalty);
     }
 
-    var pending = try deviceCandidates(allocator, logits, opts, mask, recent, s_opts, s);
+    var pending = try deviceCandidates(allocator, logits, opt_proc, mask, recent, s_opts, s);
     defer pending.deinit();
     const buf = try allocator.alloc(sampling.Candidate, pending.len());
     defer allocator.free(buf);

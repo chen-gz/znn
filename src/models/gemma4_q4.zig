@@ -9,7 +9,7 @@ const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const nn = @import("../nn.zig");
 const gemma4 = @import("gemma4.zig");
-pub const gemma4_offload = backend.gemma4_offload;
+pub const gemma4_offload = @import("gemma4_offload.zig");
 
 const Tensor = tensor.Tensor;
 const Q4Block = tensor.quant.Q4Block;

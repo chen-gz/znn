@@ -701,15 +701,27 @@ pub const Array = struct {
     /// 从任意张量对象零拷贝创建 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
     pub fn fromTensorZeroCopy(t: anytype) !Array {
         if (!has_mlx) return error.MlxNotSupported;
-        if (!t.isContiguous()) return error.NonContiguousTensor;
-        return fromSliceZeroCopy(t.data[0..t.shape.numel()], t.shape.dims[0..t.shape.len]);
+        const T = @TypeOf(t);
+        const info = @typeInfo(T);
+        const Child = if (info == .pointer) info.pointer.child else T;
+        if (@hasDecl(Child, "isContiguous")) {
+            if (!t.isContiguous()) return error.NonContiguousTensor;
+        }
+        const numel_val = if (@hasDecl(Child, "numel")) t.numel() else if (@hasField(Child, "shape") and @hasDecl(@TypeOf(t.shape), "numel")) t.shape.numel() else t.data.len;
+        return fromSliceZeroCopy(t.data[0..numel_val], t.shape.dims[0..t.shape.len]);
     }
 
     /// 将 MLX 数组中的计算结果写回任意张量对象
     pub fn copyToTensor(self: Array, t: anytype) !void {
         if (!has_mlx) return error.MlxNotSupported;
-        if (!t.isContiguous()) return error.NonContiguousTensor;
-        return self.copyToSlice(t.data[0..t.shape.numel()]);
+        const T = @TypeOf(t);
+        const info = @typeInfo(T);
+        const Child = if (info == .pointer) info.pointer.child else T;
+        if (@hasDecl(Child, "isContiguous")) {
+            if (!t.isContiguous()) return error.NonContiguousTensor;
+        }
+        const numel_val = if (@hasDecl(Child, "numel")) t.numel() else if (@hasField(Child, "shape") and @hasDecl(@TypeOf(t.shape), "numel")) t.shape.numel() else t.data.len;
+        return self.copyToSlice(t.data[0..numel_val]);
     }
 
     /// 释放数组显存与内部引用
