@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **彻底废除专用 Offload 旁路引擎、实现模型原生完全内聚 (`src/models/gemma4_e4b.zig`, `src/models/gemma4_q4.zig`)**:
+  - **彻底删除 `src/models/gemma4_e4b_offload.zig` 与 `src/models/gemma4_offload.zig`**：全网物理删除两份共计 2465 行的历史遗留旁路引擎，彻底消灭“上层定义纯 Module、底层偷偷走影子引擎”的双轨制，消除超过 460 行重复配置与函数样板代码。
+  - **Gemma 4 E4B 原生模型自闭环 (`src/models/gemma4_e4b.zig`)**：
+    - `Gemma4E4BForCausalLM` 原生内聚自回归解码缓存与权重结构，消除外挂 `gpu_context`；
+    - `loadFromDirectoryWithOptions` 直接构建模型并就地加载权重（直通二进制缓存与 Safetensors）；
+    - `model.generate()` 与 `Generation` 原生隶属于模型本身，保持纯粹的模块接口与生命周期控制。
+  - **Gemma 4 12B Q4 结构完全内聚 (`src/models/gemma4_q4.zig`)**：
+    - 将 `ProjectionDims`、`selectTokenFromHidden`、`Gemma4GpuLayer` 与 `Gemma4GpuContext` 直接并入 `src/models/gemma4_q4.zig`，模型定义与 GPU 加速解码一体化。
+  - **架构分层瘦身与极致性能无损**：依赖校验从 81 个文件进一步精简至 79 个文件（`zig build check-layers` 100% 通过），全量 389+ 单元测试 100% 通过，端到端 `gemma4-e4b` 生成速度保持 21.14 token/s。
+
 - **设备常驻张量 (Device-Resident Tensor) 与计算图透明零拷贝加速 (`src/tensor/`, `src/autodiff/`, `src/backend/`, `src/models/`)**:
   - **原生设备常驻张量 (`Tensor.device`, `Tensor.device_array`)**：在 `Tensor` 核心数据结构中引入 `device: Device = .cpu`、`device_array: ?mlx.Array = null` 与 `is_graph_owned: bool = false`，彻底消除每步算子强制同步拷回主机内存（Host RAM）的瓶颈，实现真正的 PyTorch/JAX 式 GPU 显存常驻与惰性求值（Lazy Evaluation）。
   - **零拷贝借用与直接显存回写 (`borrowArray`, `storeOutput`, `src/backend/offload.zig`)**：

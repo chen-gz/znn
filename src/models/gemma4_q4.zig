@@ -9,7 +9,21 @@ const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
 const nn = @import("../nn.zig");
 const gemma4 = @import("gemma4.zig");
-pub const gemma4_offload = @import("gemma4_offload.zig");
+
+const mlx = backend.mlx;
+const offload = backend.offload;
+const mlx_blocks = offload.mlx_blocks;
+const logits_processor = offload.logits_processor;
+const Stream = mlx.Stream;
+const Q4Weights = offload.Q4Weights;
+const TokenExclusionMask = offload.TokenExclusionMask;
+const GpuRope = mlx_blocks.Rope;
+const softcapLogits = logits_processor.softcapLogits;
+const penalizeDevice = logits_processor.penalizeDevice;
+const DeviceCandidates = logits_processor.DeviceCandidates;
+const HostCandidates = logits_processor.HostCandidates;
+const sampling = backend.sampling;
+const SamplingOptions = backend.sampling.SamplingOptions;
 
 const Tensor = tensor.Tensor;
 const Q4Block = tensor.quant.Q4Block;
@@ -21,8 +35,6 @@ const Gemma4KVCache = gemma4.Gemma4KVCache;
 const vec_math = backend.vec_math;
 const LmHeadWeights = backend.offload.LmHeadWeights;
 const Sampler = backend.sampling.Sampler;
-pub const Gemma4GpuLayer = gemma4_offload.Gemma4GpuLayer;
-pub const Gemma4GpuContext = gemma4_offload.Gemma4GpuContext;
 
 const freePersistentTensor = nn.core.freePersistentTensor;
 const deinitModel = nn.core.deinitModel;
@@ -317,7 +329,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             out_gpu: *Gemma4GpuLayer,
         ) !Gemma4Q4DecoderLayer {
             const spec = config.layerSpec(i);
-            const d = gemma4_offload.ProjectionDims.of(config, i);
+            const d = ProjectionDims.of(config, i);
             const H = config.hidden_size;
 
             var layer = try Gemma4Q4DecoderLayer.initEmpty(
@@ -687,12 +699,12 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             var mask = try backend.offload.TokenExclusionMask.init(arena, config.vocab_size, config.sampling_excluded_tokens);
             defer mask.deinit();
             if (self.lm_head_weights) |*w| {
-                return gemma4_offload.selectTokenFromHidden(arena, w, &mask, config, h_last, recent_tokens, sampler, stream);
+                return selectTokenFromHidden(arena, w, &mask, config, h_last, recent_tokens, sampler, stream);
             }
             // 未构建常驻 LM Head 时临时构建一次 BF16 词表矩阵
             var tmp = try LmHeadWeights.init(embed_u16, config.vocab_size, config.hidden_size, stream);
             defer tmp.deinit();
-            return gemma4_offload.selectTokenFromHidden(arena, &tmp, &mask, config, h_last, recent_tokens, sampler, stream);
+            return selectTokenFromHidden(arena, &tmp, &mask, config, h_last, recent_tokens, sampler, stream);
         }
 
         /// 从模型映射字节中切出 BF16 词表嵌入矩阵 [vocab_size, hidden_size]
@@ -1081,4 +1093,833 @@ pub const DefaultGemma4Q4 = Gemma4Q4ForCausalLM(Gemma4Config.default);
 
 /// 测试配置的微型 Q4 量化 Gemma 4 模型类型
 pub const TinyQ4Gemma4 = Gemma4Q4ForCausalLM(Gemma4Config.tiny_test);
+
+// ============================================================================
+// Gemma 4 12B GPU 硬件加速层与整网自回归解码上下文
+// ============================================================================
+
+pub fn recentWindowFor(tokens: []const usize, opts: SamplingOptions) []const usize {
+    const window = opts.repetition_window orelse return tokens;
+    if (window == 0 or tokens.len <= window) return tokens;
+    return tokens[tokens.len - window ..];
+}
+
+fn processorOpts(cfg: anytype) logits_processor.LogitsProcessorOptions {
+    return .{
+        .vocab_size = cfg.vocab_size,
+        .final_logit_softcapping = cfg.final_logit_softcapping,
+        .sampling_excluded_tokens = cfg.sampling_excluded_tokens,
+    };
+}
+
+pub fn deviceCandidates(
+    allocator: std.mem.Allocator,
+    logits: mlx.Array,
+    cfg: anytype,
+    mask: *const TokenExclusionMask,
+    recent_tokens: []const usize,
+    options: SamplingOptions,
+    s: ?Stream,
+) !DeviceCandidates {
+    return logits_processor.deviceCandidates(allocator, logits, processorOpts(cfg), mask, recent_tokens, options, s);
+}
+
+pub fn selectToken(
+    allocator: std.mem.Allocator,
+    logits: mlx.Array,
+    cfg: anytype,
+    mask: *const TokenExclusionMask,
+    recent_tokens: []const usize,
+    sampler: *Sampler,
+    s: ?Stream,
+) !usize {
+    return logits_processor.selectToken(allocator, logits, processorOpts(cfg), mask, recent_tokens, sampler, s);
+}
+
+pub fn selectTokenFromHidden(
+    allocator: std.mem.Allocator,
+    lm_head: anytype,
+    mask: *const TokenExclusionMask,
+    cfg: anytype,
+    h_last: []const f32,
+    recent_tokens: []const usize,
+    sampler: *Sampler,
+    s: ?Stream,
+) !usize {
+    const head: offload.LmHead = switch (@TypeOf(lm_head.*)) {
+        offload.LmHead => lm_head.*,
+        offload.LmHeadWeights => .{ .dense = lm_head.* },
+        offload.QuantWeights => .{ .quant = lm_head.* },
+        else => @compileError("Unsupported lm_head type"),
+    };
+    return logits_processor.selectTokenFromHidden(allocator, &head, processorOpts(cfg), mask, h_last, recent_tokens, sampler, s);
+}
+
+/// 第 layer_idx 层注意力投影的输出维度：全局注意力层 attention_k_eq_v 为 true，不存储独立的 V 投影 (v_dim = 0)
+pub const ProjectionDims = struct {
+    q_dim: usize,
+    kv_dim: usize,
+    v_dim: usize,
+
+    pub fn of(cfg: anytype, layer_idx: usize) ProjectionDims {
+        const spec = cfg.layerSpec(layer_idx);
+        const kv_dim = spec.num_kv_heads * spec.head_dim;
+        const is_full = @intFromEnum(spec.attn_type) == @intFromEnum(Gemma4AttentionType.full_attention);
+        return .{
+            .q_dim = cfg.num_attention_heads * spec.head_dim,
+            .kv_dim = kv_dim,
+            .v_dim = if (is_full) 0 else kv_dim,
+        };
+    }
+};
+
+/// 图形处理器 (Graphics Processing Unit, GPU) 加速解码单个 Gemma 4 Transformer 层的常驻权重与超参数
+pub const Gemma4GpuLayer = struct {
+    fused_qkv: Q4Weights,
+    o_proj: Q4Weights,
+    fused_gate_up: Q4Weights,
+    down_proj: Q4Weights,
+
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+    intermediate_size: usize,
+    attn_dim: usize,
+
+    input_norm_w: mlx.Array,
+    q_norm_w: mlx.Array,
+    k_norm_w: mlx.Array,
+    post_attn_w: mlx.Array,
+    pre_mlp_w: mlx.Array,
+    post_mlp_w: mlx.Array,
+
+    layer_scalar: f32,
+    attn_type: Gemma4AttentionType,
+    sliding_window: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rope: GpuRope,
+    rms_norm_eps: f32,
+    hidden_activation: backend.activation.GeluApproximation,
+    compiled_mlp: ?mlx.Closure = null,
+
+    pub const Projections = struct {
+        fused_qkv: Q4Weights,
+        o_proj: Q4Weights,
+        fused_gate_up: Q4Weights,
+        down_proj: Q4Weights,
+
+        pub fn deinit(self: *Projections) void {
+            self.fused_qkv.deinit();
+            self.o_proj.deinit();
+            self.fused_gate_up.deinit();
+            self.down_proj.deinit();
+        }
+
+        pub fn fromBlocks(allocator: std.mem.Allocator, cfg: anytype, layer_idx: usize, blocks: BlockSlices) !Projections {
+            const d = ProjectionDims.of(cfg, layer_idx);
+            const H = cfg.hidden_size;
+            if ((blocks.v != null) != (d.v_dim != 0)) return error.ShapeMismatch;
+
+            var fused_qkv = if (blocks.v) |vb|
+                try Q4Weights.initFromBlockSlices(allocator, &.{ blocks.q, blocks.k, vb }, H, &.{ d.q_dim, d.kv_dim, d.v_dim }, null)
+            else
+                try Q4Weights.initFromBlockSlices(allocator, &.{ blocks.q, blocks.k }, H, &.{ d.q_dim, d.kv_dim }, null);
+            errdefer fused_qkv.deinit();
+            var o_proj = try Q4Weights.initFromBlocks(allocator, blocks.o, d.q_dim, H, null);
+            errdefer o_proj.deinit();
+            var fused_gate_up = try Q4Weights.initFromBlockSlices(
+                allocator,
+                &.{ blocks.gate, blocks.up },
+                H,
+                &.{ cfg.intermediate_size, cfg.intermediate_size },
+                null,
+            );
+            errdefer fused_gate_up.deinit();
+            const down_proj = try Q4Weights.initFromBlocks(allocator, blocks.down, cfg.intermediate_size, H, null);
+            return .{ .fused_qkv = fused_qkv, .o_proj = o_proj, .fused_gate_up = fused_gate_up, .down_proj = down_proj };
+        }
+
+        pub fn fromDirect(cfg: anytype, layer_idx: usize, direct: DirectSlices) !Projections {
+            const d = ProjectionDims.of(cfg, layer_idx);
+            const H = cfg.hidden_size;
+            var fused_qkv = try Q4Weights.initFromDirectBuffers(direct.qkv.wq, direct.qkv.sc, direct.qkv.bi, H, d.q_dim + d.kv_dim + d.v_dim, null);
+            errdefer fused_qkv.deinit();
+            var o_proj = try Q4Weights.initFromDirectBuffers(direct.o.wq, direct.o.sc, direct.o.bi, d.q_dim, H, null);
+            errdefer o_proj.deinit();
+            var fused_gate_up = try Q4Weights.initFromDirectBuffers(direct.gate_up.wq, direct.gate_up.sc, direct.gate_up.bi, H, cfg.intermediate_size * 2, null);
+            errdefer fused_gate_up.deinit();
+            const down_proj = try Q4Weights.initFromDirectBuffers(direct.down.wq, direct.down.sc, direct.down.bi, cfg.intermediate_size, H, null);
+            return .{ .fused_qkv = fused_qkv, .o_proj = o_proj, .fused_gate_up = fused_gate_up, .down_proj = down_proj };
+        }
+    };
+
+    pub const BlockSlices = struct {
+        q: []const u8,
+        k: []const u8,
+        v: ?[]const u8,
+        o: []const u8,
+        gate: []const u8,
+        up: []const u8,
+        down: []const u8,
+    };
+
+    pub const DirectMatrix = struct {
+        wq: []const u8,
+        sc: []const u8,
+        bi: []const u8,
+    };
+
+    pub const DirectSlices = struct {
+        qkv: DirectMatrix,
+        o: DirectMatrix,
+        gate_up: DirectMatrix,
+        down: DirectMatrix,
+    };
+
+    pub const NormWeights = struct {
+        input: []const f32,
+        q: []const f32,
+        k: []const f32,
+        post_attn: []const f32,
+        pre_mlp: []const f32,
+        post_mlp: []const f32,
+    };
+
+    pub fn init(
+        cfg: anytype,
+        layer_idx: usize,
+        projections: Projections,
+        norms: NormWeights,
+        layer_scalar: f32,
+    ) !Gemma4GpuLayer {
+        const spec = cfg.layerSpec(layer_idx);
+        const d = ProjectionDims.of(cfg, layer_idx);
+        if (norms.input.len != cfg.hidden_size or norms.post_attn.len != cfg.hidden_size or
+            norms.pre_mlp.len != cfg.hidden_size or norms.post_mlp.len != cfg.hidden_size or
+            norms.q.len != spec.head_dim or norms.k.len != spec.head_dim)
+        {
+            return error.ShapeMismatch;
+        }
+
+        var in_w = try mlx.Array.fromSlice(norms.input, &.{norms.input.len});
+        errdefer in_w.deinit();
+        var qn_w = try mlx.Array.fromSlice(norms.q, &.{norms.q.len});
+        errdefer qn_w.deinit();
+        var kn_w = try mlx.Array.fromSlice(norms.k, &.{norms.k.len});
+        errdefer kn_w.deinit();
+        var pa_w = try mlx.Array.fromSlice(norms.post_attn, &.{norms.post_attn.len});
+        errdefer pa_w.deinit();
+        var pm_w = try mlx.Array.fromSlice(norms.pre_mlp, &.{norms.pre_mlp.len});
+        errdefer pm_w.deinit();
+        var pom_w = try mlx.Array.fromSlice(norms.post_mlp, &.{norms.post_mlp.len});
+        errdefer pom_w.deinit();
+        const is_full = @intFromEnum(spec.attn_type) == @intFromEnum(Gemma4AttentionType.full_attention);
+        const attn_type: Gemma4AttentionType = if (is_full) .full_attention else .sliding_attention;
+        const rope_inst = try GpuRope.init(spec.head_dim, attn_type.ropeOptions());
+
+        return .{
+            .fused_qkv = projections.fused_qkv,
+            .o_proj = projections.o_proj,
+            .fused_gate_up = projections.fused_gate_up,
+            .down_proj = projections.down_proj,
+            .q_dim = d.q_dim,
+            .k_dim = d.kv_dim,
+            .v_dim = d.v_dim,
+            .intermediate_size = cfg.intermediate_size,
+            .attn_dim = d.q_dim,
+            .input_norm_w = in_w,
+            .q_norm_w = qn_w,
+            .k_norm_w = kn_w,
+            .post_attn_w = pa_w,
+            .pre_mlp_w = pm_w,
+            .post_mlp_w = pom_w,
+            .layer_scalar = layer_scalar,
+            .attn_type = attn_type,
+            .sliding_window = cfg.sliding_window,
+            .num_heads = cfg.num_attention_heads,
+            .num_kv_heads = spec.num_kv_heads,
+            .head_dim = spec.head_dim,
+            .rope = rope_inst,
+            .rms_norm_eps = cfg.rms_norm_eps,
+            .hidden_activation = cfg.hidden_activation,
+            .compiled_mlp = null,
+        };
+    }
+
+    pub fn mlpResidual(self: *const Gemma4GpuLayer, x1: mlx.Array, stream: ?Stream) !mlx.Array {
+        var post_mlp = try mlx_blocks.gatedMlp(
+            x1,
+            &self.fused_gate_up,
+            null,
+            &self.down_proj,
+            self.hidden_activation,
+            self.pre_mlp_w,
+            self.post_mlp_w,
+            self.rms_norm_eps,
+            stream,
+        );
+        defer post_mlp.deinit();
+        var x2 = try mlx_blocks.residualScale(x1, post_mlp, null, stream);
+        if (self.layer_scalar == 1.0) return x2;
+        defer x2.deinit();
+        return x2.mulScalar(self.layer_scalar, stream);
+    }
+
+    fn runMlp(self: *const Gemma4GpuLayer, x1: mlx.Array, stream: ?Stream) !mlx.Array {
+        if (self.compiled_mlp) |c_mlp| {
+            var in_vec = mlx.VectorArray.fromArrays(&.{x1});
+            defer in_vec.deinit();
+            var out_vec = try c_mlp.apply(in_vec);
+            defer out_vec.deinit();
+            return out_vec.get(0) orelse error.MlxOperationFailed;
+        }
+        return self.mlpResidual(x1, stream);
+    }
+
+    pub fn initCompiledMlp(self: *Gemma4GpuLayer) !void {
+        if (!mlx.has_mlx) return;
+        if (self.compiled_mlp != null) return;
+
+        const mlpRun = struct {
+            fn run(lw: *const Gemma4GpuLayer, in: [1]mlx.Array) anyerror!mlx.Array {
+                return lw.mlpResidual(in[0], null);
+            }
+        }.run;
+
+        self.compiled_mlp = try mlx.compileFn(1, 1, Gemma4GpuLayer, mlpRun, false, self);
+    }
+
+    pub fn deinit(self: *Gemma4GpuLayer) void {
+        if (self.compiled_mlp) |*c_cls| {
+            c_cls.deinit();
+            self.compiled_mlp = null;
+        }
+        self.fused_qkv.deinit();
+        self.o_proj.deinit();
+        self.fused_gate_up.deinit();
+        self.down_proj.deinit();
+        self.input_norm_w.deinit();
+        self.q_norm_w.deinit();
+        self.k_norm_w.deinit();
+        self.post_attn_w.deinit();
+        self.pre_mlp_w.deinit();
+        self.post_mlp_w.deinit();
+        self.rope.deinit();
+    }
+};
+
+pub const Gemma4GpuContext = struct {
+    allocator: std.mem.Allocator,
+    layers: []Gemma4GpuLayer,
+    final_norm_w: mlx.Array,
+    lm_head: LmHeadWeights,
+    exclusion_mask: TokenExclusionMask,
+    config: Gemma4Config,
+    max_seq_len: usize,
+    stream: Stream,
+
+    gpu_kv: []?offload.GpuKvCache,
+    curr_len: usize = 0,
+    sqrt_d: f32 = 0.0,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        cfg: anytype,
+        layers: []Gemma4GpuLayer,
+        final_norm_data: []const f32,
+        lm_head: LmHeadWeights,
+        max_seq_len: usize,
+    ) !Gemma4GpuContext {
+        if (!offload.isAvailable()) return error.OffloadNotSupported;
+        if (layers.len != cfg.num_hidden_layers or final_norm_data.len != cfg.hidden_size) return error.ShapeMismatch;
+        if (lm_head.vocab_size != cfg.vocab_size or lm_head.hidden_size != cfg.hidden_size) return error.ShapeMismatch;
+
+        var final_norm_w = try mlx.Array.fromSlice(final_norm_data, &.{cfg.hidden_size});
+        errdefer final_norm_w.deinit();
+        final_norm_w.eval();
+
+        var exclusion_mask = try TokenExclusionMask.init(allocator, cfg.vocab_size, cfg.sampling_excluded_tokens);
+        errdefer exclusion_mask.deinit();
+
+        const gpu_kv = try allocator.alloc(?offload.GpuKvCache, layers.len);
+        errdefer allocator.free(gpu_kv);
+        @memset(gpu_kv, null);
+
+        const stream = try Stream.defaultGpu();
+
+        mlx.enableCompile();
+        mlx.setCompileMode(.enabled);
+
+        for (layers) |*lw| {
+            lw.initCompiledMlp() catch {};
+        }
+
+        const gemma_cfg: Gemma4Config = .{
+            .vocab_size = cfg.vocab_size,
+            .hidden_size = cfg.hidden_size,
+            .intermediate_size = cfg.intermediate_size,
+            .num_hidden_layers = cfg.num_hidden_layers,
+            .num_attention_heads = cfg.num_attention_heads,
+            .num_key_value_heads = cfg.num_key_value_heads,
+            .num_global_key_value_heads = cfg.num_global_key_value_heads,
+            .head_dim = cfg.head_dim,
+            .global_head_dim = cfg.global_head_dim,
+            .sliding_window = cfg.sliding_window,
+            .rms_norm_eps = cfg.rms_norm_eps,
+            .final_logit_softcapping = cfg.final_logit_softcapping,
+            .max_position_embeddings = cfg.max_position_embeddings,
+            .hidden_activation = cfg.hidden_activation,
+            .sampling_excluded_tokens = cfg.sampling_excluded_tokens,
+        };
+
+        return .{
+            .allocator = allocator,
+            .layers = layers,
+            .final_norm_w = final_norm_w,
+            .lm_head = lm_head,
+            .exclusion_mask = exclusion_mask,
+            .config = gemma_cfg,
+            .max_seq_len = max_seq_len,
+            .stream = stream,
+            .gpu_kv = gpu_kv,
+            .curr_len = 0,
+            .sqrt_d = @sqrt(@as(f32, @floatFromInt(cfg.hidden_size))),
+        };
+    }
+
+    pub fn deinit(self: *Gemma4GpuContext) void {
+        self.stream.synchronize();
+        self.resetCache();
+        for (self.layers) |*l| {
+            l.deinit();
+        }
+        self.allocator.free(self.layers);
+        self.final_norm_w.deinit();
+        self.lm_head.deinit();
+        self.exclusion_mask.deinit();
+        self.stream.deinit();
+        self.allocator.free(self.gpu_kv);
+    }
+
+    pub fn resetCache(self: *Gemma4GpuContext) void {
+        for (self.gpu_kv) |*c_opt| {
+            if (c_opt.*) |*c| c.deinit();
+            c_opt.* = null;
+        }
+        self.curr_len = 0;
+    }
+
+    pub fn sampleHidden(
+        self: *const Gemma4GpuContext,
+        h_last: []const f32,
+        recent_tokens: []const usize,
+        sampler: *Sampler,
+        stream: ?Stream,
+    ) !usize {
+        return selectTokenFromHidden(self.allocator, &self.lm_head, &self.exclusion_mask, self.config, h_last, recent_tokens, sampler, stream orelse self.stream);
+    }
+
+    fn embedTokens(self: *const Gemma4GpuContext, tokens: []const usize, embed_u16: []const u16, out: []f32) !void {
+        const h = self.config.hidden_size;
+        const table = embed_u16[0..@min(embed_u16.len, self.config.vocab_size * h)];
+        for (tokens, 0..) |tok, i| {
+            if (tok >= self.config.vocab_size) return error.IndexOutOfBounds;
+            const row = table[tok * h .. (tok + 1) * h];
+            const dest = out[i * h .. (i + 1) * h];
+            for (row, dest) |val, *d| {
+                d.* = vec_math.bf16ToF32(val) * self.sqrt_d;
+            }
+        }
+    }
+
+    fn checkCacheLayout(self: *const Gemma4GpuContext, cache: anytype) !void {
+        if (cache.layers.len != self.layers.len) return error.ShapeMismatch;
+        for (self.layers, cache.layers) |lw, cl| {
+            if (cl.core.num_kv_heads != lw.num_kv_heads or cl.core.head_dim != lw.head_dim or @intFromEnum(cl.attn_type) != @intFromEnum(lw.attn_type)) {
+                return error.ShapeMismatch;
+            }
+        }
+    }
+
+    pub fn syncCacheFromCpu(self: *Gemma4GpuContext, cache: anytype) !void {
+        try self.checkCacheLayout(cache);
+        self.resetCache();
+        const cached_len = if (cache.layers.len > 0) cache.layers[0].core.curr_len else 0;
+        if (cached_len == 0) return;
+        if (cached_len >= self.max_seq_len) return error.ContextWindowExceeded;
+
+        for (self.layers, cache.layers, 0..) |lw, *cl, l_idx| {
+            if (cl.core.curr_len != cached_len) return error.ShapeMismatch;
+            const win = cl.windowLen();
+            const packed_len = lw.num_kv_heads * win * lw.head_dim;
+
+            const pack_buf_k = try self.allocator.alloc(f32, packed_len);
+            defer self.allocator.free(pack_buf_k);
+            const pack_buf_v = try self.allocator.alloc(f32, packed_len);
+            defer self.allocator.free(pack_buf_v);
+            try cl.packWindow(pack_buf_k, pack_buf_v);
+
+            if (self.gpu_kv[l_idx] == null) {
+                const default_cap = if (lw.attn_type == .sliding_attention) lw.sliding_window else 256;
+                const initial_cap = @max(default_cap, ((win + 255) / 256) * 256);
+                self.gpu_kv[l_idx] = try offload.GpuKvCache.init(initial_cap, lw.num_kv_heads, lw.head_dim, .bfloat16, self.stream);
+            }
+            try self.gpu_kv[l_idx].?.importWindow(pack_buf_k, pack_buf_v, win, self.stream);
+        }
+        self.curr_len = cached_len;
+    }
+
+    pub fn syncCacheToCpu(self: *const Gemma4GpuContext, cache: anytype) !void {
+        try self.checkCacheLayout(cache);
+        for (self.layers, cache.layers, 0..) |lw, *cl, l_idx| {
+            if (self.curr_len == 0) {
+                cl.reset();
+                continue;
+            }
+            const kv_cache = &(self.gpu_kv[l_idx] orelse return error.ShapeMismatch);
+            const win = cl.windowLen();
+            const packed_len = lw.num_kv_heads * win * lw.head_dim;
+
+            const buf_k = try self.allocator.alloc(f32, packed_len);
+            defer self.allocator.free(buf_k);
+            const buf_v = try self.allocator.alloc(f32, packed_len);
+            defer self.allocator.free(buf_v);
+            try kv_cache.exportWindow(buf_k, buf_v, win, self.stream);
+            try cl.writeWindow(buf_k, buf_v, win, self.curr_len);
+        }
+    }
+
+    const QkvHeads = struct {
+        q_rot: mlx.Array,
+        k_rot: mlx.Array,
+        v: mlx.Array,
+
+        fn deinit(self: *QkvHeads) void {
+            self.q_rot.deinit();
+            self.k_rot.deinit();
+            self.v.deinit();
+        }
+    };
+
+    fn projectQkv(lw: *const Gemma4GpuLayer, in_norm: mlx.Array, t: usize, pos: usize, s: Stream) !QkvHeads {
+        var qkv_raw = try lw.fused_qkv.forwardArray(in_norm, s);
+        defer qkv_raw.deinit();
+
+        var q_raw = try qkv_raw.sliceAxis(2, 0, lw.q_dim, s);
+        defer q_raw.deinit();
+        var k_raw = try qkv_raw.sliceAxis(2, lw.q_dim, lw.q_dim + lw.k_dim, s);
+        defer k_raw.deinit();
+        var v_raw = if (lw.v_dim > 0)
+            try qkv_raw.sliceAxis(2, lw.q_dim + lw.k_dim, lw.q_dim + lw.k_dim + lw.v_dim, s)
+        else
+            try k_raw.sliceAxis(2, 0, lw.k_dim, s);
+        defer v_raw.deinit();
+
+        var q_rot = try mlx_blocks.projectHeads(q_raw, lw.q_norm_w, t, lw.num_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
+        errdefer q_rot.deinit();
+        var k_rot = try mlx_blocks.projectHeads(k_raw, lw.k_norm_w, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
+        errdefer k_rot.deinit();
+        const v_normed = try mlx_blocks.projectHeads(v_raw, null, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, null, pos, s);
+
+        return .{ .q_rot = q_rot, .k_rot = k_rot, .v = v_normed };
+    }
+
+    fn layerTail(lw: *const Gemma4GpuLayer, x_cur: mlx.Array, attn_out: mlx.Array, t: usize, use_compiled: bool, s: Stream) !mlx.Array {
+        var attn_t: ?mlx.Array = if (t == 1) null else try attn_out.transposeAxes(&.{ 0, 2, 1, 3 }, s);
+        defer if (attn_t) |*a| a.deinit();
+        var attn_2d = try (attn_t orelse attn_out).reshape(&.{ 1, t, lw.attn_dim }, s);
+        defer attn_2d.deinit();
+        var o_out = try lw.o_proj.forwardArray(attn_2d, s);
+        defer o_out.deinit();
+
+        var post_attn = try mlx.Array.fastRmsNorm(o_out, lw.post_attn_w, lw.rms_norm_eps, s);
+        defer post_attn.deinit();
+        var x1 = try mlx_blocks.residualScale(x_cur, post_attn, null, s);
+        defer x1.deinit();
+        return if (use_compiled) lw.runMlp(x1, s) else lw.mlpResidual(x1, s);
+    }
+
+    fn finalNorm(self: *const Gemma4GpuContext, x_cur: mlx.Array, t: usize, rows: usize, s: Stream) !mlx.Array {
+        _ = t;
+        return mlx_blocks.finalHidden(x_cur, self.final_norm_w, self.config.rms_norm_eps, rows, self.config.hidden_size, s);
+    }
+
+    pub fn prefill(
+        self: *Gemma4GpuContext,
+        prompt_tokens: []const usize,
+        embed_u16: []const u16,
+        sampler: *Sampler,
+        stream: ?Stream,
+    ) !usize {
+        const T = prompt_tokens.len;
+        if (T == 0) return error.EmptyPrompt;
+        if (T >= self.max_seq_len) return error.ContextWindowExceeded;
+
+        const s = stream orelse self.stream;
+        self.resetCache();
+
+        const tok_emb_buf = try self.allocator.alloc(f32, T * self.config.hidden_size);
+        defer self.allocator.free(tok_emb_buf);
+        try self.embedTokens(prompt_tokens, embed_u16, tok_emb_buf);
+        var x_cur = try mlx.Array.fromSlice(tok_emb_buf, &.{ 1, T, self.config.hidden_size });
+        defer x_cur.deinit();
+
+        for (self.layers, 0..) |*lw, l| {
+            var in_norm = try mlx.Array.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
+            defer in_norm.deinit();
+            var qkv = try projectQkv(lw, in_norm, T, 0, s);
+            defer qkv.deinit();
+
+            if (self.gpu_kv[l] == null) {
+                const default_cap = if (lw.attn_type == .sliding_attention) lw.sliding_window else 256;
+                const initial_cap = @max(default_cap, ((T + 255) / 256) * 256);
+                self.gpu_kv[l] = try offload.GpuKvCache.init(initial_cap, lw.num_kv_heads, lw.head_dim, .bfloat16, s);
+            }
+            _ = try self.gpu_kv[l].?.writeStep(qkv.k_rot, qkv.v, lw.attn_type == .sliding_attention, lw.sliding_window, 0, T, s);
+
+            var attn_out = try offload.maskedAttention(self.allocator, qkv.q_rot, qkv.k_rot, qkv.v, 1.0, lw.attn_type.mask(lw.sliding_window), 0, 0, s);
+            defer attn_out.deinit();
+
+            const x_next = try layerTail(lw, x_cur, attn_out, T, false, s);
+            x_cur.deinit();
+            x_cur = x_next;
+        }
+
+        var h_norm = try self.finalNorm(x_cur, T, 1, s);
+        defer h_norm.deinit();
+        var logits = try self.lm_head.forwardArrayBf16(h_norm, s);
+        defer logits.deinit();
+        const next = try selectToken(self.allocator, logits, self.config, &self.exclusion_mask, recentWindowFor(prompt_tokens, sampler.options), sampler, s);
+        self.curr_len = T;
+        return next;
+    }
+
+    pub fn decodeStep(
+        self: *Gemma4GpuContext,
+        token: usize,
+        embed_u16: []const u16,
+        recent_tokens: []const usize,
+        sampler: *Sampler,
+        stream: ?Stream,
+    ) !usize {
+        const pos = self.curr_len;
+        if (pos >= self.max_seq_len) return error.ContextWindowExceeded;
+        const s = stream orelse self.stream;
+
+        const tok_emb_buf = try self.allocator.alloc(f32, self.config.hidden_size);
+        defer self.allocator.free(tok_emb_buf);
+        try self.embedTokens(&.{token}, embed_u16, tok_emb_buf);
+        var x_cur = try mlx.Array.fromSlice(tok_emb_buf, &.{ 1, 1, self.config.hidden_size });
+        defer x_cur.deinit();
+
+        for (self.layers, 0..) |*lw, l| {
+            var in_norm = try mlx.Array.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
+            defer in_norm.deinit();
+            var qkv = try projectQkv(lw, in_norm, 1, pos, s);
+            defer qkv.deinit();
+
+            if (self.gpu_kv[l] == null) {
+                const default_cap = if (lw.attn_type == .sliding_attention) lw.sliding_window else 256;
+                const initial_cap = @max(default_cap, ((pos + 1 + 255) / 256) * 256);
+                self.gpu_kv[l] = try offload.GpuKvCache.init(initial_cap, lw.num_kv_heads, lw.head_dim, .bfloat16, s);
+            }
+            const view = try self.gpu_kv[l].?.writeStep(qkv.k_rot, qkv.v, lw.attn_type == .sliding_attention, lw.sliding_window, pos, 1, s);
+            defer if (view.is_slice) {
+                var vk = view.k;
+                var vv = view.v;
+                vk.deinit();
+                vv.deinit();
+            };
+
+            var attn_out = try mlx.Array.fastScaledDotProductAttention(qkv.q_rot, view.k, view.v, 1.0, .none, s);
+            defer attn_out.deinit();
+
+            const x_next = try layerTail(lw, x_cur, attn_out, 1, true, s);
+            x_cur.deinit();
+            x_cur = x_next;
+        }
+
+        var h_norm = try self.finalNorm(x_cur, 1, 1, s);
+        defer h_norm.deinit();
+        var logits = try self.lm_head.forwardArrayBf16(h_norm, s);
+        defer logits.deinit();
+        const next = try selectToken(self.allocator, logits, self.config, &self.exclusion_mask, recentWindowFor(recent_tokens, sampler.options), sampler, s);
+        self.curr_len = pos + 1;
+        return next;
+    }
+
+    pub fn decodeSpeculative(
+        self: *Gemma4GpuContext,
+        input_tokens: []const usize,
+        embed_u16: []const u16,
+        recent_tokens: []const usize,
+        sampler: *Sampler,
+        stream: ?Stream,
+        accepted_tokens: []usize,
+    ) !usize {
+        const M = input_tokens.len;
+        if (M == 0) return 0;
+        if (accepted_tokens.len < M) return error.ShapeMismatch;
+        const pos = self.curr_len;
+        if (pos + M >= self.max_seq_len) return error.ContextWindowExceeded;
+
+        const s = stream orelse self.stream;
+
+        const tok_emb_buf = try self.allocator.alloc(f32, M * self.config.hidden_size);
+        defer self.allocator.free(tok_emb_buf);
+        try self.embedTokens(input_tokens, embed_u16, tok_emb_buf);
+        var x_cur = try mlx.Array.fromSlice(tok_emb_buf, &.{ 1, M, self.config.hidden_size });
+        defer x_cur.deinit();
+
+        for (self.layers, 0..) |*lw, l| {
+            var in_norm = try mlx.Array.fastRmsNorm(x_cur, lw.input_norm_w, lw.rms_norm_eps, s);
+            defer in_norm.deinit();
+            var qkv = try projectQkv(lw, in_norm, M, pos, s);
+            defer qkv.deinit();
+
+            if (self.gpu_kv[l] == null) {
+                const default_cap = if (lw.attn_type == .sliding_attention) lw.sliding_window else 256;
+                const initial_cap = @max(default_cap, ((pos + M + 255) / 256) * 256);
+                self.gpu_kv[l] = try offload.GpuKvCache.init(initial_cap, lw.num_kv_heads, lw.head_dim, .bfloat16, s);
+            }
+            const view = try self.gpu_kv[l].?.writeStep(qkv.k_rot, qkv.v, lw.attn_type == .sliding_attention, lw.sliding_window, pos, M, s);
+            defer if (view.is_slice) {
+                var vk = view.k;
+                var vv = view.v;
+                vk.deinit();
+                vv.deinit();
+            };
+
+            var attn_out = try offload.cachedAttention(self.allocator, qkv.q_rot, view.k, view.v, 1.0, lw.attn_type == .sliding_attention, lw.sliding_window, pos, M, s);
+            defer attn_out.deinit();
+
+            const x_next = try layerTail(lw, x_cur, attn_out, M, true, s);
+            x_cur.deinit();
+            x_cur = x_next;
+        }
+
+        var h_norm = try self.finalNorm(x_cur, M, M, s);
+        defer h_norm.deinit();
+        var logits_raw = try self.lm_head.forwardArrayBf16(h_norm, s);
+        defer logits_raw.deinit();
+
+        var history = try std.ArrayList(usize).initCapacity(self.allocator, recent_tokens.len + M);
+        defer history.deinit(self.allocator);
+        try history.appendSlice(self.allocator, recent_tokens);
+        try history.appendSlice(self.allocator, input_tokens[1..]);
+
+        const num_accepted = if (sampler.isGreedy())
+            try self.verifyGreedy(logits_raw, input_tokens, history.items, recent_tokens.len, sampler.options, accepted_tokens, s)
+        else
+            try self.verifySampled(logits_raw, input_tokens, history.items, recent_tokens.len, sampler, accepted_tokens, s);
+
+        if (M > num_accepted) {
+            for (self.gpu_kv) |*maybe_kv| {
+                if (maybe_kv.*) |*kv| kv.truncate(pos + num_accepted);
+            }
+        }
+
+        self.curr_len = pos + num_accepted;
+        return num_accepted;
+    }
+
+    fn verifyGreedy(
+        self: *const Gemma4GpuContext,
+        logits_raw: mlx.Array,
+        input_tokens: []const usize,
+        history: []const usize,
+        recent_len: usize,
+        sampling_opts: SamplingOptions,
+        accepted_tokens: []usize,
+        s: Stream,
+    ) !usize {
+        const M = input_tokens.len;
+        const V = self.config.vocab_size;
+        var logits = try softcapLogits(logits_raw, self.config.final_logit_softcapping, s);
+        defer logits.deinit();
+        const logits_slice = try logits.dataFloat32();
+        if (logits_slice.len != M * V) return error.ShapeMismatch;
+
+        for (0..M) |i| {
+            const row = logits_slice[i * V .. (i + 1) * V];
+            const window = recentWindowFor(history[0 .. recent_len + i], sampling_opts);
+            const pred = sampling.argmaxWithPenalty(row, V, self.config.sampling_excluded_tokens, window, sampling_opts.repetition_penalty);
+            accepted_tokens[i] = pred;
+            if (i + 1 < M and pred != input_tokens[i + 1]) return i + 1;
+        }
+        return M;
+    }
+
+    fn verifySampled(
+        self: *const Gemma4GpuContext,
+        logits_raw: mlx.Array,
+        input_tokens: []const usize,
+        history: []const usize,
+        recent_len: usize,
+        sampler: *Sampler,
+        accepted_tokens: []usize,
+        s: Stream,
+    ) !usize {
+        const M = input_tokens.len;
+        const pending = try self.allocator.alloc(DeviceCandidates, M);
+        defer self.allocator.free(pending);
+        var built: usize = 0;
+        defer for (pending[0..built]) |*p| p.deinit();
+        for (0..M) |i| {
+            var row = try logits_raw.sliceAxis(0, i, i + 1, s);
+            defer row.deinit();
+            const window = recentWindowFor(history[0 .. recent_len + i], sampler.options);
+            pending[i] = try deviceCandidates(self.allocator, row, self.config, &self.exclusion_mask, window, sampler.options, s);
+            built += 1;
+        }
+
+        const all_arrays = try self.allocator.alloc(mlx.Array, 3 * M);
+        defer self.allocator.free(all_arrays);
+        var n_arrays: usize = 0;
+        for (pending) |*p| n_arrays += p.arrays(all_arrays[n_arrays..]);
+        mlx.Array.evalMultiple(all_arrays[0..n_arrays]);
+
+        const buf = try self.allocator.alloc(sampling.Candidate, pending[0].len());
+        defer self.allocator.free(buf);
+        for (0..M) |i| {
+            const host = try pending[i].read(buf);
+            const dist = sampler.distribution(host.candidates, host.log_normalizer);
+            if (i + 1 == M) {
+                accepted_tokens[i] = dist.sample(sampler.random());
+                return M;
+            }
+            const draft = input_tokens[i + 1];
+            if (draft < self.config.vocab_size) {
+                switch (sampler.verifyDraft(dist, @intCast(draft))) {
+                    .accepted => {
+                        accepted_tokens[i] = draft;
+                        continue;
+                    },
+                    .rejected => |tok| accepted_tokens[i] = tok,
+                }
+            } else {
+                accepted_tokens[i] = dist.sample(sampler.random());
+            }
+            return i + 1;
+        }
+        unreachable;
+    }
+
+    pub fn warmup(self: *Gemma4GpuContext, embed_u16: []const u16, stream: ?Stream) !void {
+        if (self.config.vocab_size < 3) return;
+        const dummy_prompt = [_]usize{ 1, 2 };
+        var greedy = Sampler.init(.greedy);
+        _ = try self.prefill(&dummy_prompt, embed_u16, &greedy, stream);
+        _ = try self.decodeStep(1, embed_u16, &dummy_prompt, &greedy, stream);
+
+        var accepted_dummy: [2]usize = undefined;
+        _ = self.decodeSpeculative(&dummy_prompt, embed_u16, &dummy_prompt, &greedy, stream, &accepted_dummy) catch {};
+
+        self.resetCache();
+        (stream orelse self.stream).synchronize();
+    }
+};
+
 
