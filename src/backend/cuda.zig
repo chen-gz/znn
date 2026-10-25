@@ -46,6 +46,7 @@ pub const CudaError = error{
     KernelNotFound,
     DeviceNotFound,
     OperationNotSupported,
+    EmptyTensor,
 };
 
 /// 驱动 API 函数指针表

@@ -315,6 +315,10 @@ pub const SGDOptimizer = struct {
                     weight.* -= current_lr * grad;
                 }
             }
+            if (param.device_array) |*da| {
+                da.deinit();
+                param.device_array = null;
+            }
         }
     }
 
@@ -487,6 +491,10 @@ pub const AdamOptimizer = struct {
 
         for (self.params, self.m, self.v) |param, m_t, v_t| {
             update.apply(param.data, param.grad, m_t, v_t);
+            if (param.device_array) |*da| {
+                da.deinit();
+                param.device_array = null;
+            }
         }
     }
 
@@ -595,6 +603,10 @@ pub const AdamWOptimizer = struct {
 
         for (self.params, self.m, self.v) |param, m_t, v_t| {
             update.apply(param.data, param.grad, m_t, v_t);
+            if (param.device_array) |*da| {
+                da.deinit();
+                param.device_array = null;
+            }
         }
     }
 

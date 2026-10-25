@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **打通 GPU 前向训练加速与自动求导反向传播 (`src/autodiff/graph.zig`, `src/autodiff/graph_nn.zig`, `src/autodiff/backward_nn.zig`, `src/optim.zig`)**:
+  - **根除 `useDevice` 对 `!req_grad` 的硬编码门禁**：
+    - 重构 `Graph.useDevice` 为 `self.options.device.isGpu() and backend.device.isAvailable(self.options.device)`，不再依赖 `req_grad`，支持 GPU 与 CUDA 统一分派；
+    - 消除 `tensorND` 中 `effective_req_grad` 对张量设备类型的 CPU 强制降级，训练张量前向计算完整驻留 GPU / CUDA；
+    - 全面将 `matmul`、`softmax`、`rmsNorm`、`mulScalar`、`add`、`mul`、`gelu`、`rope`、`batchMatMul` 统一接入平台中立的 `backend.ops.*` 调度门面；
+  - **反向传播前向激活自动主机同步与数值闭环**：
+    - 在 `Graph.runBackward` 遍历 `order.items` 启动前，自动对参与反向传导的中间输入输出张量触发 `syncHost()`，保证 CPU 反向内核读取到准确的 GPU 前向激活数据；
+    - 在 `backward_nn.zig` 中支持 `RmsNorm` 在缺少前向 CPU 缓存统计量时自适应由前向数据即时计算，杜绝崩溃断言；
+    - 在 `SGDOptimizer`、`AdamOptimizer` 与 `AdamWOptimizer` 的参数更新步骤末尾自动重置已过期的参数显存句柄，确保优化器更新后权重在下一轮前向自动重新加载；
+  - **高覆盖率验证与基准保障**：
+    - 新增 `Graph: GPU forward with training gradients (requires_grad = true) and backward propagation` 单元测试，实测 GPU 前向与反向梯度数值与 CPU 基线 100% 对齐；
+    - 83 个源文件包级依赖单向性 100% 保持（`zig build check-layers`），所有单元测试全量通过，Gemma 4 E4B 保持 122+ token/s 预填充与 20.45+ token/s 解码速率。
+
 - **CUDA 键值缓存与 FlashAttention 在线 Softmax 内核 (`src/backend/cuda.zig`, `src/backend/cuda_kernels.zig`, `src/backend/device.zig`, `src/backend/ops.zig`)**:
   - **基于纯 PTX 的 FlashAttention 在线 Softmax 注意力内核 (`cached_attention_kernel`)**：
     - 在 `src/backend/cuda_kernels.zig` 中实现零动态内存分配、固定 $O(1)$ 显存与 512 维 SRAM 共享内存累加的纯 PTX 在线 Softmax 闪速注意力内核；

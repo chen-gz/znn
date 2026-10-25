@@ -274,12 +274,12 @@ pub fn gelu(
     switch (approximation) {
         .none => {
             for (A.data, out.data) |a, *o| {
-                o.* = activation.gelu(a);
+                o.* = activation.gelu(.none, a);
             }
         },
         .tanh => {
             for (A.data, out.data) |a, *o| {
-                o.* = activation.geluTanh(a);
+                o.* = activation.gelu(.tanh, a);
             }
         },
     }

@@ -853,12 +853,16 @@ pub fn backwardNN(self: *Op) !void {
             const D = X.shape.dims[X.shape.len - 1];
             const M = X.shape.numel() / D;
             const d_f = @as(f32, @floatFromInt(D));
-            std.debug.assert(ctx.inv_rms.len == M);
-
             for (0..M) |i| {
                 const row_in = X.data[i * D .. (i + 1) * D];
                 const row_grad_out = Y.grad[i * D .. (i + 1) * D];
-                const r = ctx.inv_rms[i];
+                const r = if (ctx.inv_rms.len == M and ctx.inv_rms[i] > 0.0)
+                    ctx.inv_rms[i]
+                else blk: {
+                    var sum_sq: f32 = 0.0;
+                    for (row_in) |x| sum_sq += x * x;
+                    break :blk 1.0 / @sqrt(sum_sq / d_f + ctx.options.eps);
+                };
 
                 if (W) |w| if (w.requires_grad) {
                     for (w.grad[0..D], row_grad_out, row_in) |*wg, dy, x| wg.* += dy * x * r;

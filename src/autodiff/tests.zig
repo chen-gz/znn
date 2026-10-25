@@ -1519,6 +1519,50 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
     }
 }
 
+test "Graph: GPU forward with training gradients (requires_grad = true) and backward propagation" {
+    const backend = @import("../backend.zig");
+    if (!backend.device.isAvailable(.gpu)) return;
+
+    const allocator = std.testing.allocator;
+
+    // 1. CPU 基线计算
+    var g_cpu = Graph.init(allocator, .{ .enable_grad = true, .device = .cpu });
+    defer g_cpu.deinit();
+
+    const x_cpu = try g_cpu.array(&.{ 2, 3 }, &.{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 }, true);
+    const w_cpu = try g_cpu.array(&.{ 3, 2 }, &.{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 }, true);
+    const h_cpu = try g_cpu.matmul(x_cpu, w_cpu);
+    const act_cpu = try g_cpu.gelu(h_cpu, .none);
+    const loss_cpu = try g_cpu.sum(act_cpu, null, false);
+    try g_cpu.backward(loss_cpu);
+
+    // 2. GPU 硬件加速前向与反向传播
+    var g_gpu = Graph.init(allocator, .{ .enable_grad = true, .device = .gpu });
+    defer g_gpu.deinit();
+
+    const x_gpu = try g_gpu.array(&.{ 2, 3 }, &.{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 }, true);
+    const w_gpu = try g_gpu.array(&.{ 3, 2 }, &.{ 0.1, 0.2, 0.3, 0.4, 0.5, 0.6 }, true);
+    const h_gpu = try g_gpu.matmul(x_gpu, w_gpu);
+    // 验证 h_gpu 确实驻留在 GPU 上，未退回 CPU！
+    try std.testing.expect(h_gpu.isDevice());
+    try std.testing.expect(h_gpu.requires_grad);
+
+    const act_gpu = try g_gpu.gelu(h_gpu, .none);
+    try std.testing.expect(act_gpu.isDevice());
+    try std.testing.expect(act_gpu.requires_grad);
+
+    const loss_gpu = try g_gpu.sum(act_gpu, null, false);
+    try g_gpu.backward(loss_gpu);
+
+    // 3. 校验梯度数值与 CPU 基线完全一致！
+    for (x_cpu.grad, x_gpu.grad) |c_val, g_val| {
+        try std.testing.expectApproxEqAbs(c_val, g_val, 1e-4);
+    }
+    for (w_cpu.grad, w_gpu.grad) |c_val, g_val| {
+        try std.testing.expectApproxEqAbs(c_val, g_val, 1e-4);
+    }
+}
+
 test "Graph.backward called repeatedly accumulates parameter gradients without re-propagating stale intermediate gradients" {
     const allocator = std.testing.allocator;
     var graph = Graph.initDefault(allocator);

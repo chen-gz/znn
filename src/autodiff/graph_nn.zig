@@ -471,15 +471,15 @@ pub fn adaptiveAvgPool2d(self: *Graph, A: *Tensor, output_size: [2]usize) !*Tens
     );
 }
 
-/// 沿最后一维的数值稳定归一化指数函数 (Softmax)；统一设备分派：GPU 计算图且输出不需要梯度时由 MLX 执行前向
+/// 沿最后一维的数值稳定归一化指数函数 (Softmax)；统一设备分派：当计算图配置为 GPU/CUDA 时由底层硬件执行前向
 pub fn softmax(self: *Graph, A_in: *Tensor) !*Tensor {
     const allocator = self.arena.allocator();
     const A = try self.contiguous(A_in);
     const req_grad = self.enable_grad and A.requires_grad;
-    const C = if (self.useDevice(req_grad)) blk: {
+    const C = if (self.useDevice()) blk: {
         if (A.shape.len == 0) return error.IncompatibleDimensions;
-        const out = try tensor_mod.zeros(allocator, A.shape.dims[0..A.shape.len]);
-        try backend.offload.softmax(A, out, -1, self.options.mlx_stream);
+        const out = try self.tensorND(A.shape.dims[0..A.shape.len], req_grad);
+        try backend.ops.softmax(A, out, -1, self.options.device, self.options.mlx_stream);
         break :blk out;
     } else try A.softmax(allocator);
     return self.registerSingleOutputOp(C, &.{A}, .Softmax, .{ .Softmax = {} }, req_grad);
@@ -487,7 +487,7 @@ pub fn softmax(self: *Graph, A_in: *Tensor) !*Tensor {
 
 /// 均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)：y = x / sqrt(mean(x^2) + eps) * (w + weight_offset)，
 /// 沿最后一维归一化；W 为 null 时不缩放 (无参数 RMSNorm)。需要梯度时在算子上下文中保存每行的均方根倒数，
-/// 反向传播直接复用。统一设备分派：GPU 计算图且输出不需要梯度时由 MLX 快速 RMSNorm 执行 (weight_offset 为 0 时)。
+/// 反向传播直接复用。统一设备分派：当计算图配置为 GPU/CUDA 时由底层硬件快速执行前向 (weight_offset 为 0 时)。
 pub fn rmsNorm(self: *Graph, X_in: *Tensor, W_in: ?*Tensor, options: tensor_mod.RmsNormOptions) !*Tensor {
     const allocator = self.arena.allocator();
     const X = try self.contiguous(X_in);
@@ -498,10 +498,10 @@ pub fn rmsNorm(self: *Graph, X_in: *Tensor, W_in: ?*Tensor, options: tensor_mod.
     const req_grad = self.enable_grad and (X.requires_grad or (W != null and W.?.requires_grad));
     const inv_rms: []f32 = if (req_grad) try allocator.alloc(f32, X.shape.numel() / D) else &.{};
 
-    const Y = if (self.useDevice(req_grad) and (W == null or options.weight_offset == 0.0)) blk: {
+    const Y = if (self.useDevice() and (W == null or options.weight_offset == 0.0)) blk: {
         if (W) |w| if (w.shape.numel() != D) return error.ShapeMismatch;
         const out = try self.tensorND(X.shape.dims[0..X.shape.len], req_grad);
-        try backend.offload.rmsNorm(X, W, out, options.eps, self.options.mlx_stream);
+        try backend.ops.rmsNorm(X, W, out, options.eps, self.options.device, self.options.mlx_stream);
         break :blk out;
     } else try X.rmsNorm(W, options, if (req_grad) inv_rms else null, allocator);
 
@@ -723,9 +723,9 @@ pub fn rope(self: *Graph, X_in: *Tensor, start_pos: usize, options: tensor_mod.R
     if (X.shape.len == 0) return error.IncompatibleDimensions;
     const req_grad = self.enable_grad and X.requires_grad;
     const D = X.shape.dims[X.shape.len - 1];
-    const Y = if (self.useDevice(req_grad) and backend.offload.ropeSupported(D, options)) blk: {
+    const Y = if (self.useDevice() and backend.offload.ropeSupported(D, options)) blk: {
         const out = try self.tensorND(X.shape.dims[0..X.shape.len], req_grad);
-        try backend.offload.rope(X, out, options, start_pos, self.options.mlx_stream);
+        try backend.ops.rope(X, out, options, start_pos, self.options.device, self.options.mlx_stream);
         break :blk out;
     } else try X.rope(start_pos, options, allocator);
     return self.registerSingleOutputOp(
@@ -737,17 +737,17 @@ pub fn rope(self: *Graph, X_in: *Tensor, start_pos: usize, options: tensor_mod.R
     );
 }
 
-/// 批量矩阵乘法 [B, H, M, K] x [B, H, K, N]；统一设备分派：GPU 计算图且输出不需要梯度时由 MLX 执行
+/// 批量矩阵乘法 [B, H, M, K] x [B, H, K, N]；统一设备分派：当计算图配置为 GPU/CUDA 时由底层硬件执行
 pub fn batchMatMul(self: *Graph, A_in: *Tensor, B_in: *Tensor) !*Tensor {
     const allocator = self.arena.allocator();
     const A = try self.contiguous(A_in);
     const B = try self.contiguous(B_in);
     const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
-    const C = if (self.useDevice(req_grad)) blk: {
+    const C = if (self.useDevice()) blk: {
         if (A.shape.len != 4 or B.shape.len != 4) return error.IncompatibleDimensions;
         if (A.shape.dims[0] != B.shape.dims[0] or A.shape.dims[1] != B.shape.dims[1] or A.shape.dims[3] != B.shape.dims[2]) return error.ShapeMismatch;
         const out = try self.tensorND(&.{ A.shape.dims[0], A.shape.dims[1], A.shape.dims[2], B.shape.dims[3] }, req_grad);
-        try backend.offload.matmul(A, B, out, self.options.mlx_stream);
+        try backend.ops.matmul(A, B, out, self.options.device, self.options.mlx_stream);
         break :blk out;
     } else try A.batchMatMul(B, allocator);
     return self.registerSingleOutputOp(C, &.{ A, B }, .BatchMatMul, .{ .BatchMatMul = {} }, req_grad);
@@ -769,7 +769,7 @@ pub fn attention(self: *Graph, q_in: *Tensor, k_in: *Tensor, v_in: *Tensor, opti
 
     const out = try self.tensorND(&.{ shape.batch, shape.q_heads, shape.tq, shape.v_dim }, req_grad);
     const probs: []f32 = if (req_grad) try allocator.alloc(f32, shape.probsLen()) else &.{};
-    if (self.useDevice(req_grad)) {
+    if (self.useDevice() and !req_grad) {
         try backend.offload.attention(self.backing_allocator, q, k, v, out, options.resolveScale(shape.head_dim), options.mask, options.q_pos0, options.k_pos0, self.options.mlx_stream);
     } else {
         try tensor_mod.attention_kernels.attentionInto(q, k, v, out, if (req_grad) probs else null, options, self.backing_allocator);
@@ -822,7 +822,7 @@ pub fn embedding(self: *Graph, W_in: *Tensor, X: anytype) !*Tensor {
     };
 
     const req_grad = self.enable_grad and W.requires_grad;
-    if (self.useDevice(req_grad) and (W.device == .gpu or W.device_array != null)) {
+    if (self.useDevice() and (W.device.isGpu() or W.device_array != null)) {
         var w_b = try backend.offload.borrowArray(W);
         defer w_b.deinit();
         var x_b = try backend.offload.borrowArray(x_tensor);
@@ -836,26 +836,28 @@ pub fn embedding(self: *Graph, W_in: *Tensor, X: anytype) !*Tensor {
         }
         out_shape_dims[x_tensor.shape.len] = W.shape.dims[1];
         const shape = tensor_mod.Shape.init(out_shape_dims[0 .. x_tensor.shape.len + 1]);
+        const numel = shape.numel();
         const Y = try allocator.create(Tensor);
         Y.* = Tensor{
-            .data = &.{},
-            .grad = &.{},
+            .data = if (req_grad) try allocator.alloc(f32, numel) else &.{},
+            .grad = if (req_grad) try allocator.alloc(f32, numel) else &.{},
             .shape = shape,
             .strides = tensor_mod.computeContiguousStrides(shape),
-            .requires_grad = false,
+            .requires_grad = req_grad,
             .creator = null,
-            .device = .gpu,
+            .device = self.options.device,
             .device_array = .{ .mlx = res },
             .is_graph_owned = true,
             .scope = self.currentScope(),
         };
+        if (req_grad) @memset(Y.grad, 0.0);
         try self.tensors.append(self.backing_allocator, Y);
         return self.registerSingleOutputOp(
             Y,
             &.{ W, x_tensor },
             .Embedding,
             .{ .Embedding = {} },
-            false,
+            req_grad,
         );
     }
 

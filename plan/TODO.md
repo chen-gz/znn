@@ -408,6 +408,11 @@
   - [x] 在 `src/backend/cuda_kernels.zig` 中新增支持因果掩码与滑动窗口掩码的 FlashAttention 在线 Softmax PTX 汇编内核 (`cached_attention_kernel`) 与切片写入内核 (`kv_write_step_kernel`)；
   - [x] 在 `src/backend/ops.zig` 中使 `cachedAttention` 能够无缝分派至 CUDA 执行。
 
-- [ ] **5.5 模型层 (Gemma 4 & GPT) 在 NVIDIA 显卡上的端到端自回归流式生成验证**
+- [x] **5.5 打通计算图 GPU 前向训练加速与自动求导反向传播闭环**
+  - [x] 消除 `Graph.useDevice` 中对 `!req_grad` 的硬编码门禁，统一为 `options.device.isGpu() and isAvailable(options.device)`；
+  - [x] 将全部核心计算图前向算子（`matmul`、`softmax`、`rmsNorm`、`mulScalar`、`add`、`mul`、`gelu`、`rope`、`batchMatMul`）改由 `backend.ops.*` 多后端门面分派；
+  - [x] 在 `Graph.runBackward` 启动前自动同步反向拓扑内中间激活张量 (`syncHost()`)，并在优化器更新参数后自动重置过期显存句柄，实现端到端训练数值完全一致。
+
+- [ ] **5.6 模型层 (Gemma 4 & GPT) 在 NVIDIA 显卡上的端到端自回归流式生成验证**
   - [ ] 在 `Gemma4E4BForCausalLM` 与 `GPT` 的 `generate()` / `Generation.next()` 中接入 CUDA 路径；
   - [ ] 在 Linux / WSL2 / Windows 带有 NVIDIA GPU 的机器上运行基准测试，验证首字延迟 (TTFT) 与自回归流式生成速率 (token/s)，达成跨硬件平台的端到端生成对齐。
