@@ -19,9 +19,7 @@ pub fn isAvailable() bool {
 }
 
 pub const Stream = mlx.Stream;
-pub const DeviceType = @import("device.zig").DeviceType;
 pub const Array = mlx.Array;
-pub const DeviceArray = mlx.Array;
 pub const VectorArray = mlx.VectorArray;
 pub const Closure = mlx.Closure;
 
@@ -1203,10 +1201,6 @@ pub const GpuKvCache = struct {
         self.capacity = new_cap;
     }
 };
-
-/// 跨后端通用键值缓存别名 (Generic Hardware Device Key-Value Cache Alias)
-pub const DeviceKvCache = GpuKvCache;
-pub const KvCache = GpuKvCache;
 
 // ============================================================================
 // 共享 MLX 组合块与对数几率处理器转导出

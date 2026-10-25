@@ -17,10 +17,13 @@ pub const device = @import("backend/device.zig");
 pub const Device = device.Device;
 pub const DeviceType = device.DeviceType;
 pub const DeviceArray = device.DeviceArray;
+pub const DeviceKvCache = device.DeviceKvCache;
+pub const KvCache = device.KvCache;
 pub const BackendType = device.BackendType;
 
 pub const mlx = @import("backend/mlx.zig");
 pub const cuda = @import("backend/cuda.zig");
+pub const CudaKvCache = cuda.CudaKvCache;
 pub const cuda_kernels = @import("backend/cuda_kernels.zig");
 
 pub const mlx_blocks = @import("backend/mlx_blocks.zig");
@@ -43,8 +46,6 @@ pub const HostCandidates = logits_processor.HostCandidates;
 
 pub const offload = @import("backend/offload.zig");
 pub const GpuKvCache = offload.GpuKvCache;
-pub const DeviceKvCache = offload.DeviceKvCache;
-pub const KvCache = offload.KvCache;
 pub const ops = @import("backend/ops.zig");
 
 pub const rope = @import("backend/rope.zig");

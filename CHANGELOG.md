@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **CUDA 键值缓存与 FlashAttention 在线 Softmax 内核 (`src/backend/cuda.zig`, `src/backend/cuda_kernels.zig`, `src/backend/device.zig`, `src/backend/ops.zig`)**:
+  - **基于纯 PTX 的 FlashAttention 在线 Softmax 注意力内核 (`cached_attention_kernel`)**：
+    - 在 `src/backend/cuda_kernels.zig` 中实现零动态内存分配、固定 $O(1)$ 显存与 512 维 SRAM 共享内存累加的纯 PTX 在线 Softmax 闪速注意力内核；
+    - 原生支持因果掩码 (Causal Mask)、局部滑动窗口掩码 (Sliding Window Mask) 与分组查询注意力 (GQA / MQA)，彻底消除显式物化注意力权重矩阵的显存与带宽瓶颈；
+  - **定点原位切片写入内核 (`kv_write_step_kernel`) 与 CudaKvCache 结构体**：
+    - 实现高效原位切片写入内核，直接在 GPU 显存内并行将新词元的 $K$ 与 $V$ 写入对应槽位 $[pos, pos + seq\_len)$；
+    - 在 `src/backend/cuda.zig` 中实现 `CudaKvCache`，完整支持容量预分配、256 步长块式按需扩容、切片覆写、重置与截断 (`truncate`) 回滚；
+  - **跨硬件统一键值缓存联合体 DeviceKvCache 与通用 cachedAttention 分派**：
+    - 在 `src/backend/device.zig` 定义跨硬件通用显存键值缓存联合体 `pub const DeviceKvCache = union(enum) { mlx: offload.GpuKvCache, cuda: cuda.CudaKvCache };`；
+    - 剥离 `offload.zig` 中历史遗留的 `DeviceArray = mlx.Array` 与 `DeviceKvCache = GpuKvCache` 等单点绑定；
+    - 在 `src/backend/ops.zig` 中将 `cachedAttention` 泛化为多后端调度门面，支持 `cuda.Array`、`mlx.Array` 与 `DeviceArray` 统一分派；
+  - **全量测试与基准无损**：
+    - 83 个源文件包级依赖单向性 100% 保持（`zig build check-layers`），390+ 单元测试全量通过，Gemma 4 E4B 保持 125.5 token/s 预填充与 20.76 token/s 解码速率。
+
 - **统一硬件显存句柄 DeviceArray 与零拷贝 CUDA 算子流转 (`src/backend/device.zig`, `src/tensor/core.zig`, `src/backend/ops.zig`)**:
   - **消除 Tensor 结构体胖字段耦合 (`DeviceArray`)**：
     - 在 `src/backend/device.zig` 定义跨硬件通用显存句柄联合体 `pub const DeviceArray = union(enum) { mlx: mlx.Array, cuda: cuda.Array };`；

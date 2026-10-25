@@ -357,7 +357,27 @@ pub fn cachedAttention(
     seq_len: usize,
     stream: anytype,
 ) OpError!@TypeOf(q) {
-    return offload.cachedAttention(allocator, q, k, v, scale, is_sliding, sliding_window, pos, seq_len, stream);
+    const QType = @TypeOf(q);
+    if (QType == cuda.Array) {
+        return try cuda.Array.cachedAttention(q, k, v, scale, is_sliding, sliding_window, pos, seq_len, stream);
+    } else if (QType == device_mod.DeviceArray) {
+        switch (q) {
+            .mlx => |mq| {
+                const mk = k.asMlx() orelse return error.ShapeMismatch;
+                const mv = v.asMlx() orelse return error.ShapeMismatch;
+                const res = try offload.cachedAttention(allocator, mq, mk, mv, scale, is_sliding, sliding_window, pos, seq_len, stream);
+                return .{ .mlx = res };
+            },
+            .cuda => |cq| {
+                const ck = k.asCuda() orelse return error.ShapeMismatch;
+                const cv = v.asCuda() orelse return error.ShapeMismatch;
+                const res = try cuda.Array.cachedAttention(cq, ck, cv, scale, is_sliding, sliding_window, pos, seq_len, stream);
+                return .{ .cuda = res };
+            },
+        }
+    } else {
+        return offload.cachedAttention(allocator, q, k, v, scale, is_sliding, sliding_window, pos, seq_len, stream);
+    }
 }
 
 test "ops: multi-backend dispatcher tests" {

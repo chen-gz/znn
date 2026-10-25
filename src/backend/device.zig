@@ -6,6 +6,7 @@
 const std = @import("std");
 const mlx = @import("mlx.zig");
 const cuda = @import("cuda.zig");
+const offload = @import("offload.zig");
 
 /// 目标计算设备类型枚举 (中央处理器 CPU 与图形处理器 GPU / CUDA)
 pub const DeviceType = enum {
@@ -128,6 +129,58 @@ pub const DeviceArray = union(enum) {
         };
     }
 };
+
+/// 跨硬件统一设备键值缓存联合体 (Unified Device Key-Value Cache Union)
+pub const DeviceKvCache = union(enum) {
+    mlx: offload.GpuKvCache,
+    cuda: cuda.CudaKvCache,
+
+    pub fn deinit(self: *DeviceKvCache) void {
+        switch (self.*) {
+            .mlx => |*c| c.deinit(),
+            .cuda => |*c| c.deinit(),
+        }
+    }
+
+    pub fn reset(self: *DeviceKvCache) void {
+        switch (self.*) {
+            .mlx => |*c| c.reset(),
+            .cuda => |*c| c.reset(),
+        }
+    }
+
+    pub fn truncate(self: *DeviceKvCache, new_len: usize) void {
+        switch (self.*) {
+            .mlx => |*c| c.truncate(new_len),
+            .cuda => |*c| c.truncate(new_len),
+        }
+    }
+
+    pub fn isMlx(self: DeviceKvCache) bool {
+        return self == .mlx;
+    }
+
+    pub fn isCuda(self: DeviceKvCache) bool {
+        return self == .cuda;
+    }
+
+    pub fn asMlx(self: *DeviceKvCache) ?*offload.GpuKvCache {
+        return switch (self.*) {
+            .mlx => |*c| c,
+            .cuda => null,
+        };
+    }
+
+    pub fn asCuda(self: *DeviceKvCache) ?*cuda.CudaKvCache {
+        return switch (self.*) {
+            .cuda => |*c| c,
+            .mlx => null,
+        };
+    }
+};
+
+/// 通用键值缓存别名
+pub const KvCache = DeviceKvCache;
 
 /// 底层实际生效的硬件加速后端枚举
 pub const BackendType = enum {

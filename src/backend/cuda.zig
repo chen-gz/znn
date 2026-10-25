@@ -45,6 +45,7 @@ pub const CudaError = error{
     ShapeMismatch,
     KernelNotFound,
     DeviceNotFound,
+    OperationNotSupported,
 };
 
 /// 驱动 API 函数指针表
@@ -106,6 +107,8 @@ var fn_mul_scalar: ?CUfunction = null;
 var fn_gelu: ?CUfunction = null;
 var fn_softmax: ?CUfunction = null;
 var fn_rope: ?CUfunction = null;
+var fn_kv_write_step: ?CUfunction = null;
+var fn_cached_attention: ?CUfunction = null;
 
 const lib_search_paths = [_][]const u8{
     "libcuda.so.1",
@@ -250,6 +253,8 @@ pub fn ensureContext() CudaError!void {
         _ = api.cuModuleGetFunction(&fn_gelu, mod, "gelu_kernel");
         _ = api.cuModuleGetFunction(&fn_softmax, mod, "softmax_kernel");
         _ = api.cuModuleGetFunction(&fn_rope, mod, "rope_kernel");
+        _ = api.cuModuleGetFunction(&fn_kv_write_step, mod, "kv_write_step_kernel");
+        _ = api.cuModuleGetFunction(&fn_cached_attention, mod, "cached_attention_kernel");
     }
 }
 
@@ -366,6 +371,28 @@ pub const Array = struct {
     ndim: usize = 0,
     len: usize = 0,
     dtype: DType = .float32,
+
+    /// 创建全零初始化的显存数组
+    pub fn zeros(dims: []const usize) CudaError!Array {
+        if (dims.len > 8) return error.InvalidShape;
+        var total_len: usize = 1;
+        for (dims) |d| total_len *= d;
+        const bytes = total_len * @sizeOf(f32);
+        const dptr = try alloc(bytes);
+        errdefer free(dptr);
+        try setZero(dptr, bytes);
+
+        var shape_arr: [8]usize = @splat(0);
+        @memcpy(shape_arr[0..dims.len], dims);
+
+        return .{
+            .ptr = dptr,
+            .shape = shape_arr,
+            .ndim = dims.len,
+            .len = total_len,
+            .dtype = .float32,
+        };
+    }
 
     /// 从切片初始化设备数组
     pub fn fromSlice(slice: []const f32, dims: []const usize) CudaError!Array {
@@ -832,6 +859,245 @@ pub const Array = struct {
             .dtype = .float32,
         };
     }
+
+    /// 将新词元的键与值原位写入键值缓存对应槽位 [pos, pos + seq_len)
+    pub fn writeKvStep(
+        dst_k: Array,
+        dst_v: Array,
+        src_k: Array,
+        src_v: Array,
+        capacity: usize,
+        pos: usize,
+        seq_len: usize,
+        num_kv: usize,
+        head_dim: usize,
+        stream: ?Stream,
+    ) CudaError!void {
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_kv_write_step orelse return error.KernelNotFound;
+
+        var d_dst_k = dst_k.ptr;
+        var d_dst_v = dst_v.ptr;
+        var d_src_k = src_k.ptr;
+        var d_src_v = src_v.ptr;
+        var cap_u32: u32 = @intCast(capacity);
+        var pos_u32: u32 = @intCast(pos);
+        var seq_u32: u32 = @intCast(seq_len);
+        var num_kv_u32: u32 = @intCast(num_kv);
+        var head_dim_u32: u32 = @intCast(head_dim);
+
+        var params = [_]?*anyopaque{
+            &d_dst_k,
+            &d_dst_v,
+            &d_src_k,
+            &d_src_v,
+            &cap_u32,
+            &pos_u32,
+            &seq_u32,
+            &num_kv_u32,
+            &head_dim_u32,
+        };
+
+        const h_stream = if (stream) |s| s.handle else null;
+        if (api.cuLaunchKernel(
+            func,
+            seq_u32, num_kv_u32, 1,
+            1, 1, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+    }
+
+    /// 缓存感知注意力计算 (闪速注意力 FlashAttention 在线 Softmax 纯 PTX 实现)
+    /// Q: [1, num_heads, seq_len, head_dim] (或 [num_heads, seq_len, head_dim])
+    /// K: [1, num_kv_heads, capacity, head_dim]
+    /// V: [1, num_kv_heads, capacity, head_dim]
+    /// Out: [1, num_heads, seq_len, head_dim]
+    pub fn cachedAttention(
+        q: Array,
+        k: Array,
+        v: Array,
+        scale: f32,
+        is_sliding: bool,
+        sliding_window: usize,
+        pos: usize,
+        seq_len: usize,
+        stream: ?Stream,
+    ) CudaError!Array {
+        try ensureContext();
+        const api = try getApi();
+        const func = fn_cached_attention orelse return error.KernelNotFound;
+
+        if (q.ndim < 3 or k.ndim < 3 or v.ndim < 3) return error.InvalidShape;
+        const head_dim = q.shape[q.ndim - 1];
+        if (head_dim > 512) return error.OperationNotSupported;
+
+        const num_heads = q.shape[q.ndim - 3];
+        const num_kv_heads = k.shape[k.ndim - 3];
+        const capacity = k.shape[k.ndim - 2];
+
+        const out_len = num_heads * seq_len * head_dim;
+        const out_ptr = try alloc(out_len * @sizeOf(f32));
+        errdefer free(out_ptr);
+
+        var d_q = q.ptr;
+        var d_k = k.ptr;
+        var d_v = v.ptr;
+        var d_out = out_ptr;
+        var scale_val = scale;
+        var pos_u32: u32 = @intCast(pos);
+        var seq_len_u32: u32 = @intCast(seq_len);
+        var num_heads_u32: u32 = @intCast(num_heads);
+        var num_kv_heads_u32: u32 = @intCast(num_kv_heads);
+        var head_dim_u32: u32 = @intCast(head_dim);
+        var capacity_u32: u32 = @intCast(capacity);
+        var is_sliding_u32: u32 = if (is_sliding) 1 else 0;
+        var sliding_window_u32: u32 = @intCast(sliding_window);
+
+        var params = [_]?*anyopaque{
+            &d_q,
+            &d_k,
+            &d_v,
+            &d_out,
+            &scale_val,
+            &pos_u32,
+            &seq_len_u32,
+            &num_heads_u32,
+            &num_kv_heads_u32,
+            &head_dim_u32,
+            &capacity_u32,
+            &is_sliding_u32,
+            &sliding_window_u32,
+        };
+
+        const h_stream = if (stream) |s| s.handle else null;
+        if (api.cuLaunchKernel(
+            func,
+            seq_len_u32, num_heads_u32, 1,
+            1, 1, 1,
+            0, h_stream, &params, null,
+        ) != .success) {
+            return error.CudaOperationFailed;
+        }
+
+        var res_shape = q.shape;
+        res_shape[q.ndim - 2] = seq_len;
+        return .{
+            .ptr = out_ptr,
+            .shape = res_shape,
+            .ndim = q.ndim,
+            .len = out_len,
+            .dtype = .float32,
+        };
+    }
+};
+
+/// 统一计算设备架构键值缓存 (Compute Unified Device Architecture Key-Value Cache, CudaKvCache)
+pub const CudaKvCache = struct {
+    k: Array,
+    v: Array,
+    capacity: usize,
+    num_kv: usize,
+    head_dim: usize,
+    curr_len: usize = 0,
+
+    pub fn init(capacity: usize, num_kv: usize, head_dim: usize, stream: ?Stream) !CudaKvCache {
+        _ = stream;
+        var k = try Array.zeros(&.{ 1, num_kv, capacity, head_dim });
+        errdefer k.deinit();
+        const v = try Array.zeros(&.{ 1, num_kv, capacity, head_dim });
+        return .{
+            .k = k,
+            .v = v,
+            .capacity = capacity,
+            .num_kv = num_kv,
+            .head_dim = head_dim,
+            .curr_len = 0,
+        };
+    }
+
+    pub fn initDefault(capacity: usize, num_kv: usize, head_dim: usize) !CudaKvCache {
+        return init(capacity, num_kv, head_dim, null);
+    }
+
+    pub fn deinit(self: *CudaKvCache) void {
+        self.k.deinit();
+        self.v.deinit();
+    }
+
+    pub fn reset(self: *CudaKvCache) void {
+        self.curr_len = 0;
+    }
+
+    pub fn truncate(self: *CudaKvCache, new_len: usize) void {
+        if (new_len < self.curr_len) {
+            self.curr_len = new_len;
+        }
+    }
+
+    pub fn ensureCapacity(self: *CudaKvCache, required: usize, stream: ?Stream) !void {
+        if (required <= self.capacity) return;
+        const add_cap: usize = ((required - self.capacity + 255) / 256) * 256;
+        const new_cap = self.capacity + add_cap;
+
+        var new_k = try Array.zeros(&.{ 1, self.num_kv, new_cap, self.head_dim });
+        errdefer new_k.deinit();
+        var new_v = try Array.zeros(&.{ 1, self.num_kv, new_cap, self.head_dim });
+        errdefer new_v.deinit();
+
+        if (self.curr_len > 0) {
+            const api = try getApi();
+            _ = stream;
+            var kv: usize = 0;
+            while (kv < self.num_kv) : (kv += 1) {
+                const src_off = kv * self.capacity * self.head_dim * @sizeOf(f32);
+                const dst_off = kv * new_cap * self.head_dim * @sizeOf(f32);
+                const bytes = self.curr_len * self.head_dim * @sizeOf(f32);
+                if (bytes > 0) {
+                    if (api.cuMemcpyDtoD(new_k.ptr + dst_off, self.k.ptr + src_off, bytes) != .success) return error.CudaOperationFailed;
+                    if (api.cuMemcpyDtoD(new_v.ptr + dst_off, self.v.ptr + src_off, bytes) != .success) return error.CudaOperationFailed;
+                }
+            }
+        }
+
+        self.k.deinit();
+        self.v.deinit();
+        self.k = new_k;
+        self.v = new_v;
+        self.capacity = new_cap;
+    }
+
+    pub fn writeStep(
+        self: *CudaKvCache,
+        k_new: Array,
+        v_new: Array,
+        is_sliding: bool,
+        sliding_window: usize,
+        pos: usize,
+        seq_len: usize,
+        stream: ?Stream,
+    ) !void {
+        _ = is_sliding;
+        _ = sliding_window;
+        const total_len = pos + seq_len;
+        try self.ensureCapacity(total_len, stream);
+
+        try Array.writeKvStep(
+            self.k,
+            self.v,
+            k_new,
+            v_new,
+            self.capacity,
+            pos,
+            seq_len,
+            self.num_kv,
+            self.head_dim,
+            stream,
+        );
+        self.curr_len = total_len;
+    }
 };
 
 test "cuda: hardware probe and driver availability" {
@@ -902,5 +1168,33 @@ test "cuda: hardware probe and driver availability" {
         try sm_res.toHostSlice(&sm_back);
         try std.testing.expectApproxEqAbs(@as(f32, 1.0), sm_back[0] + sm_back[1], 0.001);
         try std.testing.expectApproxEqAbs(@as(f32, 1.0), sm_back[2] + sm_back[3], 0.001);
+
+        // 测试全零数组与 CudaKvCache 键值缓存
+        var cache = try CudaKvCache.init(4, 1, 2, null);
+        defer cache.deinit();
+        try std.testing.expectEqual(@as(usize, 4), cache.capacity);
+        try std.testing.expectEqual(@as(usize, 0), cache.curr_len);
+
+        const k_data = [_]f32{ 1.0, 0.0 };
+        const v_data = [_]f32{ 2.0, 3.0 };
+        var k_arr = try Array.fromSlice(&k_data, &.{ 1, 1, 1, 2 });
+        defer k_arr.deinit();
+        var v_arr = try Array.fromSlice(&v_data, &.{ 1, 1, 1, 2 });
+        defer v_arr.deinit();
+
+        try cache.writeStep(k_arr, v_arr, false, 0, 0, 1, null);
+        try std.testing.expectEqual(@as(usize, 1), cache.curr_len);
+
+        // 测试缓存感知注意力计算 cachedAttention
+        const q_data = [_]f32{ 1.0, 0.0 };
+        var q_arr = try Array.fromSlice(&q_data, &.{ 1, 1, 1, 2 });
+        defer q_arr.deinit();
+
+        var attn_out = try Array.cachedAttention(q_arr, cache.k, cache.v, 1.0, false, 0, 0, 1, null);
+        defer attn_out.deinit();
+        var attn_back: [2]f32 = undefined;
+        try attn_out.toHostSlice(&attn_back);
+        try std.testing.expectApproxEqAbs(@as(f32, 2.0), attn_back[0], 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 3.0), attn_back[1], 0.01);
     }
 }

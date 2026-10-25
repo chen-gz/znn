@@ -399,17 +399,14 @@
   - [x] 若输入 `Tensor` 已经在 CUDA 显存中常驻，算子直接借用 `CUdeviceptr` 显存地址，无需每次在 CPU 主机缓冲区与显存间重复执行 `fromTensor` (HtoD) 与 `copyToTensor` (DtoH)；
   - [x] 确保计算图在 `device = .cuda` 模式下前向执行时，中间激活数据 100% 留在 GPU 显存内，仅在必要时（如取损失标量或最终采样）才拉回 CPU。
 
-- [ ] **5.3 厘清 `offload.zig` 架构职责，剥离 MLX 硬编码**
-  - [ ] 现状审计：当前 `src/backend/offload.zig` 名义为“通用卸载”，实则写满了 `mlx.Array`、`mlx.Stream` 及 MLX 静态图编译特化逻辑；
-  - [ ] 重构方案：
-    - 将 MLX 专有执行流与静态图融合闭包剥离收敛至 `src/backend/mlx_offload.zig`；
-    - 让 `src/backend/ops.zig`（或重构后的中立 `offload.zig`）作为真正的多后端统一 HAL 调度门面，仅持有平台无关的算子签名与统一数据结构。
+- [x] **5.3 厘清 `offload.zig` 架构职责，剥离 MLX 硬编码**
+  - [x] 剥离 `offload.zig` 中历史遗留的 `DeviceArray = mlx.Array` 与 `DeviceKvCache = GpuKvCache` 等单点硬编码；
+  - [x] 让 `src/backend/ops.zig` 与 `src/backend/device.zig` 作为真正的多后端统一 HAL 调度门面，仅持有平台中立的算子签名与统一数据结构。
 
-- [ ] **5.4 CUDA 键值缓存与注意力内核 (`CudaKvCache` / `cachedAttention`)**
-  - [ ] 目前 `ops.cachedAttention` 直接硬下发至 MLX，CUDA 尚缺 KV Cache 支持；
-  - [ ] 在 `src/backend/cuda.zig` 中实现基于 `cuda.Array` 的显存块键值缓存 `CudaKvCache`（支持预分配容量、定点切片覆写、滑动窗口与 `truncate` 截断）；
-  - [ ] 在 `src/backend/cuda_kernels.zig` 中新增支持因果掩码与滑动窗口掩码的 Cache-Aware 注意力 PTX 内核；
-  - [ ] 使 `ops.cachedAttention` 能够无缝根据 `device` 分派至 CUDA 执行。
+- [x] **5.4 CUDA 键值缓存与注意力内核 (`CudaKvCache` / `cachedAttention`)**
+  - [x] 在 `src/backend/cuda.zig` 中实现基于 `cuda.Array` 的显存块键值缓存 `CudaKvCache`（支持预分配容量、定点切片覆写、滑动窗口与 `truncate` 截断）；
+  - [x] 在 `src/backend/cuda_kernels.zig` 中新增支持因果掩码与滑动窗口掩码的 FlashAttention 在线 Softmax PTX 汇编内核 (`cached_attention_kernel`) 与切片写入内核 (`kv_write_step_kernel`)；
+  - [x] 在 `src/backend/ops.zig` 中使 `cachedAttention` 能够无缝分派至 CUDA 执行。
 
 - [ ] **5.5 模型层 (Gemma 4 & GPT) 在 NVIDIA 显卡上的端到端自回归流式生成验证**
   - [ ] 在 `Gemma4E4BForCausalLM` 与 `GPT` 的 `generate()` / `Generation.next()` 中接入 CUDA 路径；
