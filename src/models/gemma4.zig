@@ -17,11 +17,214 @@ const freePersistentTensor = core.freePersistentTensor;
 const deinitModel = core.deinitModel;
 const releaseModuleGrads = core.releaseModuleGrads;
 const enterModuleScope = core.enterModuleScope;
-const sampling = backend.sampling;
 const vec_math = backend.vec_math;
-const TokenRange = sampling.TokenRange;
-const Sampler = sampling.Sampler;
-const SamplingOptions = sampling.SamplingOptions;
+pub const TokenRange = tensor.TokenRange;
+pub const SamplingOptions = tensor.SamplingOptions;
+
+const topk_min_chunk: usize = 8192;
+const initial_nucleus_candidates: usize = 256;
+
+const CandidateHeap = struct {
+    items: []tensor.Candidate,
+    len: usize = 0,
+
+    fn push(self: *CandidateHeap, cand: tensor.Candidate) void {
+        if (self.items.len == 0) return;
+        if (self.len < self.items.len) {
+            self.items[self.len] = cand;
+            self.siftUp(self.len);
+            self.len += 1;
+        } else if (cand.before(self.items[0])) {
+            self.items[0] = cand;
+            self.siftDown(0);
+        }
+    }
+
+    fn siftUp(self: *CandidateHeap, start: usize) void {
+        var i = start;
+        while (i > 0) {
+            const parent = (i - 1) / 2;
+            if (!self.items[parent].before(self.items[i])) break;
+            std.mem.swap(tensor.Candidate, &self.items[parent], &self.items[i]);
+            i = parent;
+        }
+    }
+
+    fn siftDown(self: *CandidateHeap, start: usize) void {
+        var i = start;
+        while (true) {
+            var worst = i;
+            inline for (.{ 1, 2 }) |offset| {
+                const child = 2 * i + offset;
+                if (child < self.len and self.items[worst].before(self.items[child])) worst = child;
+            }
+            if (worst == i) break;
+            std.mem.swap(tensor.Candidate, &self.items[worst], &self.items[i]);
+            i = worst;
+        }
+    }
+};
+
+pub fn selectTopK(
+    executor: anytype,
+    allocator: std.mem.Allocator,
+    logits: []const f32,
+    out: []tensor.Candidate,
+) ![]tensor.Candidate {
+    const n = logits.len;
+    const k = @min(out.len, n);
+    if (k == 0) return out[0..0];
+    std.debug.assert(n <= std.math.maxInt(u32));
+
+    const grain = @max(topk_min_chunk, k * 4);
+    const chunks = n / grain + @intFromBool(n % grain != 0);
+    if (chunks <= 1) {
+        var heap = CandidateHeap{ .items = out[0..k] };
+        for (logits, 0..) |logit, v| {
+            if (tensor.usableLogit(logit)) heap.push(.{ .id = @intCast(v), .logit = logit });
+        }
+        return out[0..heap.len];
+    }
+
+    const partials = try allocator.alloc(tensor.Candidate, chunks * k);
+    defer allocator.free(partials);
+    const counts = try allocator.alloc(usize, chunks);
+    defer allocator.free(counts);
+
+    const Context = struct {
+        logits: []const f32,
+        partials: []tensor.Candidate,
+        counts: []usize,
+        k: usize,
+        grain: usize,
+
+        fn run(ctx: @This(), begin: usize, end: usize) void {
+            for (begin..end) |c| {
+                const start = c * ctx.grain;
+                const stop = @min(start + ctx.grain, ctx.logits.len);
+                var heap = CandidateHeap{ .items = ctx.partials[c * ctx.k ..][0..ctx.k] };
+                for (ctx.logits[start..stop], start..) |logit, v| {
+                    if (tensor.usableLogit(logit)) heap.push(.{ .id = @intCast(v), .logit = logit });
+                }
+                ctx.counts[c] = heap.len;
+            }
+        }
+    };
+    try executor.parallelFor(chunks, 1, Context{
+        .logits = logits,
+        .partials = partials,
+        .counts = counts,
+        .k = k,
+        .grain = grain,
+    }, Context.run);
+
+    var heap = CandidateHeap{ .items = out[0..k] };
+    for (counts, 0..) |count, c| {
+        for (partials[c * k ..][0..count]) |cand| heap.push(cand);
+    }
+    return out[0..heap.len];
+}
+
+fn logSumExpParallel(executor: anytype, logits: []const f32, inv_temperature: f32) !vec_math.LogSumExp {
+    const Context = struct {
+        logits: []const f32,
+        inv_temperature: f32,
+
+        fn map(ctx: @This(), begin: usize, end: usize) vec_math.LogSumExp {
+            return vec_math.logSumExpPartial(ctx.logits[begin..end], ctx.inv_temperature, .skip);
+        }
+    };
+    return executor.parallelReduce(
+        vec_math.LogSumExp,
+        logits.len,
+        16384,
+        Context{ .logits = logits, .inv_temperature = inv_temperature },
+        Context.map,
+        vec_math.LogSumExp.merge,
+        .{},
+    );
+}
+
+pub fn logSumExpScaled(executor: anytype, logits: []const f32, inv_temperature: f32) !f32 {
+    return (try logSumExpParallel(executor, logits, inv_temperature)).value();
+}
+
+/// Gemma 4 模型自带采样器 (Model-Native Sampler)
+pub const Sampler = struct {
+    options: tensor.SamplingOptions,
+    prng: std.Random.DefaultPrng,
+
+    pub fn init(options: tensor.SamplingOptions) Sampler {
+        return .{ .options = options, .prng = .init(options.seed) };
+    }
+
+    pub fn initDefault() Sampler {
+        return init(.{});
+    }
+
+    pub fn isGreedy(self: *const Sampler) bool {
+        return self.options.isGreedy();
+    }
+
+    pub fn random(self: *Sampler) std.Random {
+        return self.prng.random();
+    }
+
+    pub fn distribution(self: *const Sampler, candidates: []tensor.Candidate, log_normalizer: ?f32) tensor.Distribution {
+        return tensor.buildDistribution(candidates, self.options, log_normalizer);
+    }
+
+    pub fn sampleCandidates(self: *Sampler, candidates: []tensor.Candidate, log_normalizer: ?f32) u32 {
+        return self.distribution(candidates, log_normalizer).sample(self.random());
+    }
+
+    pub fn verifyDraft(self: *Sampler, dist: tensor.Distribution, draft: u32) tensor.DraftVerdict {
+        return tensor.verifyDraftToken(dist, draft, self.random());
+    }
+
+    pub fn sampleLogits(self: *Sampler, executor: anytype, allocator: std.mem.Allocator, logits: []const f32) !usize {
+        const n = logits.len;
+        if (n == 0) return error.EmptyLogits;
+        const opts = self.options;
+        if (opts.isGreedy()) return tensor.argmaxWithPenalty(logits, n, &.{}, &.{}, 1.0);
+
+        if (opts.top_k > 0) {
+            const buf = try allocator.alloc(tensor.Candidate, @min(opts.top_k, n));
+            defer allocator.free(buf);
+            const cands = try selectTopK(executor, allocator, logits, buf);
+            return self.sampleCandidates(cands, null);
+        }
+
+        const inv_t: f32 = 1.0 / opts.temperature;
+        if (!(opts.top_p < 1.0)) return self.sampleFull(executor, logits, inv_t);
+
+        const log_normalizer = try logSumExpScaled(executor, logits, inv_t);
+        var m: usize = @min(initial_nucleus_candidates, n);
+        while (true) {
+            const buf = try allocator.alloc(tensor.Candidate, m);
+            defer allocator.free(buf);
+            const cands = try selectTopK(executor, allocator, logits, buf);
+            const dist = self.distribution(cands, log_normalizer);
+            if (dist.covers_nucleus or m >= n or cands.len < m) return dist.sample(self.random());
+            m = @min(n, m * 8);
+        }
+    }
+
+    fn sampleFull(self: *Sampler, executor: anytype, logits: []const f32, inv_temperature: f32) !usize {
+        const p = try logSumExpParallel(executor, logits, inv_temperature);
+        if (p.max == -std.math.inf(f32)) return 0;
+        const target = self.random().float(f64) * p.sum;
+        var cum: f64 = 0.0;
+        var last: usize = 0;
+        for (logits, 0..) |logit, v| {
+            if (!tensor.usableLogit(logit)) continue;
+            cum += @exp(@as(f64, logit * inv_temperature - p.max));
+            last = v;
+            if (cum > target) return v;
+        }
+        return last;
+    }
+};
 
 // ============================================================================
 // Gemma 4 混合注意力共享核心 (F32 与 Q4 两条推理路径共用)
@@ -100,7 +303,8 @@ pub fn embedTokensScaled(comptime Elem: type, graph: *autodiff.Graph, table: []c
 /// 与 Hugging Face (logits 处理器作用于截断后的输出) 及 E4B GPU 路径的顺序一致
 pub fn samplingLogit(raw: f32, cap: f32, penalized: bool, repetition_penalty: f32) f32 {
     const capped = vec_math.softcap(raw, cap);
-    return if (penalized) sampling.applyRepetitionPenalty(capped, repetition_penalty) else capped;
+    if (!penalized) return capped;
+    return if (capped > 0.0) capped / repetition_penalty else capped * repetition_penalty;
 }
 
 /// 参与重复惩罚的最近词元窗口长度
@@ -178,7 +382,7 @@ pub fn greedyLmHeadCpu(
 
     const bitset_words = (cfg.vocab_size + 63) / 64;
     var recent_bitset: [bitset_words]u64 = @splat(0);
-    const apply_penalty = sampling.penaltyActive(repetition_penalty);
+    const apply_penalty = (repetition_penalty != 1.0 and !std.math.isNan(repetition_penalty) and repetition_penalty > 0);
     if (apply_penalty) {
         for (recent_tokens) |rec| {
             if (rec < cfg.vocab_size) recent_bitset[rec / 64] |= @as(u64, 1) << @intCast(rec % 64);
@@ -201,7 +405,7 @@ pub fn greedyLmHeadCpu(
         Context.reduceFn,
         BestToken{ .id = std.math.maxInt(usize), .val = -std.math.inf(f32) },
     );
-    // 全部词元均被排除或得分为 NaN 时退回 0 号词元 (与 `sampling.argmaxWithPenalty` 一致)
+    // 全部词元均被排除或得分为 NaN 时退回 0 号词元
     return if (best.id == std.math.maxInt(usize)) 0 else best.id;
 }
 
@@ -237,8 +441,7 @@ pub fn lmHeadLogitsCpu(
 
 /// CPU 词表投影并选取下一个词元：
 /// - 贪婪采样走融合快车道 `greedyLmHeadCpu`，结果与此前的贪婪实现逐位一致；
-/// - 随机采样先物化截断后的完整对数几率，再按 Hugging Face 顺序施加重复惩罚 (recent_tokens 中的词元全部受罚，窗口由调用方决定)、
-///   排除 `cfg.sampling_excluded_tokens`，最后交给 `Sampler.sampleLogits` 完成温度、前 K 截断 (Top-K)、核采样 (Nucleus Sampling, Top-P) 与抽样。
+/// - 随机采样先物化截断后的完整对数几率，再交由 sampler 完成重复惩罚、排除与抽样。
 pub fn sampleLmHeadCpu(
     comptime cfg: Gemma4Config,
     comptime Elem: type,
@@ -246,7 +449,7 @@ pub fn sampleLmHeadCpu(
     embed: []const Elem,
     h_last: []const f32,
     recent_tokens: []const usize,
-    sampler: *Sampler,
+    sampler: anytype,
 ) !usize {
     const penalty = sampler.options.repetition_penalty;
     if (sampler.isGreedy()) return greedyLmHeadCpu(cfg, Elem, graph, embed, h_last, recent_tokens, penalty);
@@ -254,8 +457,8 @@ pub fn sampleLmHeadCpu(
     const arena = graph.arenaAllocator();
     const logits = try arena.alloc(f32, cfg.vocab_size);
     try lmHeadLogitsCpu(cfg, Elem, graph, embed, h_last, logits);
-    try sampling.applyRepetitionPenaltyInPlace(arena, logits, recent_tokens, penalty);
-    sampling.maskExcludedInPlace(logits, cfg.sampling_excluded_tokens);
+    try tensor.applyRepetitionPenaltyInPlace(arena, logits, recent_tokens, penalty);
+    tensor.maskExcludedInPlace(logits, cfg.sampling_excluded_tokens);
     return sampler.sampleLogits(graph.executor(), arena, logits);
 }
 
@@ -347,7 +550,10 @@ pub const Gemma4Config = struct {
 
     /// 词元 v 是否属于采样排除集合
     pub fn isSamplingExcluded(self: Gemma4Config, v: usize) bool {
-        return sampling.isExcluded(self.sampling_excluded_tokens, v);
+        for (self.sampling_excluded_tokens) |r| {
+            if (r.contains(v)) return true;
+        }
+        return false;
     }
 
     /// 单个解码层的注意力几何规格
@@ -493,7 +699,7 @@ pub const Gemma4KVCache = struct {
             return self.core.writePrefill(k_seq, v_seq, seq_len);
         }
 
-        pub inline fn visibleRange(self: *const LayerCache, pos: usize) backend.attention_mask.KeyRange {
+        pub inline fn visibleRange(self: *const LayerCache, pos: usize) tensor.attention.KeyRange {
             return self.core.visibleRange(pos);
         }
     };
@@ -1260,7 +1466,7 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             self: *const Self,
             h_last: []const f32,
             recent_tokens: []const usize,
-            sampler: *Sampler,
+            sampler: anytype,
             graph: *autodiff.Graph,
         ) !usize {
             return sampleLmHeadCpu(config, f32, graph, self.embed_tokens.weight.data, h_last, recentWindowFor(recent_tokens, sampler.options), sampler);
@@ -1272,7 +1478,7 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             graph: *autodiff.Graph,
             prompt_tokens: []const usize,
             cache: *Gemma4KVCache,
-            sampler: *Sampler,
+            sampler: anytype,
         ) !usize {
             const T = prompt_tokens.len;
             if (T == 0) return error.EmptyPrompt;
@@ -1296,7 +1502,7 @@ pub fn Gemma4ForCausalLM(comptime cfg: Gemma4Config) type {
             token: usize,
             cache: *Gemma4KVCache,
             recent_tokens: []const usize,
-            sampler: *Sampler,
+            sampler: anytype,
         ) !usize {
             const tok_emb = try embedTokensScaled(f32, graph, self.embed_tokens.weight.data, config.hidden_size, &.{token});
 

@@ -135,7 +135,7 @@ pub fn GPT(comptime config: GPTConfig) type {
         pub const GenerateOptions = struct {
             max_new_tokens: usize = 32,
             stop_tokens: []const usize = &.{},
-            device: backend.DeviceType = .cpu,
+            device: backend.Device = .cpu,
 
             pub fn defaultOptions() GenerateOptions {
                 return .{};

@@ -1,5 +1,6 @@
 const std = @import("std");
-const c = @import("../backend/cblas.zig");
+const backend = @import("../backend.zig");
+const c = backend.cblas;
 const shape_mod = @import("shape.zig");
 pub const Shape = shape_mod.Shape;
 pub const computeContiguousStrides = shape_mod.computeContiguousStrides;

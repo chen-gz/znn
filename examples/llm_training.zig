@@ -5,6 +5,7 @@ const nn = zig_ml.nn;
 const autodiff = zig_ml.autodiff;
 const dataset = zig_ml.dataset;
 const optim = zig_ml.optim;
+const engine = zig_ml.engine;
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -151,9 +152,9 @@ pub fn main() !void {
     // ---------------------------------------------------------------
     std.debug.print("[Stage 5] Generating next token with Top-P=0.9 and Top-K=3...\n", .{});
     const mock_logits = [_]f32{ 0.1, 0.4, 2.8, 0.2, 0.9 };
-    var sampler_p = backend.sampling.Sampler.init(.{ .temperature = 0.7, .top_p = 0.9, .seed = 2026 });
+    var sampler_p = engine.sampling.Sampler.init(.{ .temperature = 0.7, .top_p = 0.9, .seed = 2026 });
     const sampled_p = try sampler_p.sampleLogits(.{}, allocator, &mock_logits);
-    var sampler_k = backend.sampling.Sampler.init(.{ .temperature = 0.7, .top_k = 3, .seed = 2026 });
+    var sampler_k = engine.sampling.Sampler.init(.{ .temperature = 0.7, .top_k = 3, .seed = 2026 });
     const sampled_k = try sampler_k.sampleLogits(.{}, allocator, &mock_logits);
     std.debug.print("  Sampled Top-P Token ID: {}\n", .{sampled_p});
     std.debug.print("  Sampled Top-K Token ID: {}\n", .{sampled_k});

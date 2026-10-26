@@ -6,13 +6,13 @@ const Tensor = tensor.Tensor;
 const module = @import("module.zig");
 
 // ============================================================================
-// Safetensors 归档解析器重导出 (已下沉至 backend)
+// Safetensors 归档解析器重导出 (位于 tensor)
 // ============================================================================
 
-pub const TensorMeta = backend.TensorMeta;
-pub const SafetensorsArchive = backend.SafetensorsArchive;
-pub const parseDataOffsets = backend.safetensors.parseDataOffsets;
-pub const max_header_len = backend.safetensors.max_header_len;
+pub const TensorMeta = tensor.TensorMeta;
+pub const SafetensorsArchive = tensor.SafetensorsArchive;
+pub const parseDataOffsets = tensor.safetensors.parseDataOffsets;
+pub const max_header_len = tensor.safetensors.max_header_len;
 
 // ============================================================================
 // Safetensors 格式模型权重序列化与反序列化

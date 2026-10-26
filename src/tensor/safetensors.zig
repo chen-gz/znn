@@ -1,9 +1,10 @@
 //! Safetensors 零拷贝内存映射归档解析器 (Zero-Copy Memory-Mapped Safetensors Archive)
 //!
-//! 在 Layer 0 (backend) 提供底层轻量级 Safetensors 二进制文件解析，供硬件离线加载与权重直接绑定。
+//! 在 Layer 1 (tensor) 提供轻量级 Safetensors 二进制文件解析，供模型权重加载与张量反序列化。
 
 const std = @import("std");
-const mlx = @import("mlx.zig");
+const backend = @import("../backend.zig");
+const mlx = backend.mlx;
 
 /// Safetensors 格式中的张量元数据 (Tensor Metadata)
 pub const TensorMeta = struct {

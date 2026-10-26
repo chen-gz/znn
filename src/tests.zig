@@ -726,11 +726,11 @@ test "End-to-End LLM Pipeline integration demo" {
 
     // 4. Sampling test
     const mock_logits = [_]f32{ 0.1, 0.4, 2.5, 0.2, 0.8 };
-    var sampler_p = backend.sampling.Sampler.init(.{ .temperature = 0.7, .top_p = 0.9, .seed = 42 });
+    var sampler_p = engine.sampling.Sampler.init(.{ .temperature = 0.7, .top_p = 0.9, .seed = 42 });
     const sampled_top_p = try sampler_p.sampleLogits(.{}, allocator, &mock_logits);
     try std.testing.expect(sampled_top_p < 5);
 
-    var sampler_k = backend.sampling.Sampler.init(.{ .temperature = 0.7, .top_k = 2, .seed = 42 });
+    var sampler_k = engine.sampling.Sampler.init(.{ .temperature = 0.7, .top_k = 2, .seed = 42 });
     const sampled_top_k = try sampler_k.sampleLogits(.{}, allocator, &mock_logits);
     try std.testing.expect(sampled_top_k < 5);
 }

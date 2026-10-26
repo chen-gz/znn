@@ -231,11 +231,15 @@ pub const Q4Linear = struct {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
 
-        if (graph.options.device == .gpu and backend.offload.isAvailable() and !graph.enable_grad) {
+        if (graph.options.device.isGpu() and backend.offload.isAvailable() and !graph.enable_grad) {
             if (self.q4_weights) |*qw| {
                 const rows = try RowView.init(graph, x, self.in_features);
                 const out_2d = try graph.tensorND(&.{ rows.matrix.shape.dims[0], self.out_features }, false);
-                try qw.forward(rows.matrix, out_2d, graph.options.mlx_stream);
+                var x_arr = try backend.mlx.Array.fromSlice(rows.matrix.data, rows.matrix.shape.dims[0..rows.matrix.shape.len]);
+                defer x_arr.deinit();
+                var res_mlx = try qw.forwardArray(x_arr, graph.options.mlx_stream);
+                defer res_mlx.deinit();
+                try res_mlx.copyToSlice(out_2d.data);
                 return rows.restore(graph, out_2d, self.out_features);
             }
         }

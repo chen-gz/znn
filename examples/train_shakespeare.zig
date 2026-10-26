@@ -6,6 +6,7 @@ const dataset = zig_ml.dataset;
 const optim = zig_ml.optim;
 const backend = zig_ml.backend;
 const models = zig_ml.models;
+const engine = zig_ml.engine;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -176,7 +177,7 @@ pub fn main(init: std.process.Init) !void {
         const logits = try model.forward(&g, x_eval);
         const last_logits = logits.data[(cur_len - 1) * vocab_size .. cur_len * vocab_size];
 
-        var sampler = backend.sampling.Sampler.init(.{ .temperature = 0.65, .top_p = 0.85, .seed = prng.next() });
+        var sampler = engine.sampling.Sampler.init(.{ .temperature = 0.65, .top_p = 0.85, .seed = prng.next() });
         const next_token = @as(u32, @intCast(try sampler.sampleLogits(.{}, allocator, last_logits)));
         try gen_tokens.append(allocator, next_token);
     }

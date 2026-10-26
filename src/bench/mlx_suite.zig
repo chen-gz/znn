@@ -199,12 +199,12 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
             alloc: std.mem.Allocator,
             arena: std.heap.ArenaAllocator,
             stream: backend.mlx.Stream,
-            device: backend.DeviceType,
+            device: backend.Device,
             q_raw: []f32,
             k_raw: []f32,
             v_raw: []f32,
 
-            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.DeviceType) !@This() {
+            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.Device) !@This() {
                 const q_raw = try alloc.alloc(f32, total);
                 errdefer alloc.free(q_raw);
                 const k_raw = try alloc.alloc(f32, total);
@@ -242,7 +242,7 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
                 var g = autodiff.Graph.init(self.arena.allocator(), .{
                     .enable_grad = false,
                     .device = self.device,
-                    .mlx_stream = if (self.device == .gpu) self.stream else null,
+                    .mlx_stream = if (self.device.isGpu()) self.stream else null,
                 });
                 defer g.deinit();
 
@@ -251,14 +251,14 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
                 const v = try g.tensorNDWithData(&.{ B, H, L, D }, self.v_raw, false);
 
                 const out = try g.attention(q, k, v, .{ .scale = scale, .mask = .causal });
-                if (self.device == .gpu) self.stream.synchronize();
+                if (self.device.isGpu()) self.stream.synchronize();
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
         };
 
         var cpu_sdpa = try SdpaCtx.init(allocator, stream, .cpu);
         defer cpu_sdpa.deinit();
-        var gpu_sdpa = try SdpaCtx.init(allocator, stream, .gpu);
+        var gpu_sdpa = try SdpaCtx.init(allocator, stream, .metal);
         defer gpu_sdpa.deinit();
 
         // 预先数值一致性校验
@@ -268,7 +268,7 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
         // 从单次运行提取两者误差
         var g_c = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .cpu });
         defer g_c.deinit();
-        var g_g = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .gpu, .mlx_stream = stream });
+        var g_g = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .metal, .mlx_stream = stream });
         defer g_g.deinit();
         const qc = try g_c.tensorNDWithData(&.{ B, H, L, D }, cpu_sdpa.q_raw, false);
         const kc = try g_c.tensorNDWithData(&.{ B, H, L, D }, cpu_sdpa.k_raw, false);
@@ -327,12 +327,12 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
             alloc: std.mem.Allocator,
             arena: std.heap.ArenaAllocator,
             stream: backend.mlx.Stream,
-            device: backend.DeviceType,
+            device: backend.Device,
             q_raw: []f32,
             k_raw: []f32,
             v_raw: []f32,
 
-            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.DeviceType) !@This() {
+            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.Device) !@This() {
                 const q_raw = try alloc.alloc(f32, total);
                 errdefer alloc.free(q_raw);
                 const k_raw = try alloc.alloc(f32, total);
@@ -370,7 +370,7 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
                 var g = autodiff.Graph.init(self.arena.allocator(), .{
                     .enable_grad = false,
                     .device = self.device,
-                    .mlx_stream = if (self.device == .gpu) self.stream else null,
+                    .mlx_stream = if (self.device.isGpu()) self.stream else null,
                 });
                 defer g.deinit();
 
@@ -379,20 +379,20 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
                 const v = try g.tensorNDWithData(&.{ B, H, L, D }, self.v_raw, false);
 
                 const out = try g.attention(q, k, v, .{ .scale = scale, .mask = .causal });
-                if (self.device == .gpu) self.stream.synchronize();
+                if (self.device.isGpu()) self.stream.synchronize();
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
         };
 
         var cpu_long = try SdpaLongCtx.init(allocator, stream, .cpu);
         defer cpu_long.deinit();
-        var gpu_long = try SdpaLongCtx.init(allocator, stream, .gpu);
+        var gpu_long = try SdpaLongCtx.init(allocator, stream, .metal);
         defer gpu_long.deinit();
 
         // 预先数值一致性校验
         var g_c = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .cpu });
         defer g_c.deinit();
-        var g_g = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .gpu, .mlx_stream = stream });
+        var g_g = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .metal, .mlx_stream = stream });
         defer g_g.deinit();
         const qc = try g_c.tensorNDWithData(&.{ B, H, L, D }, cpu_long.q_raw, false);
         const kc = try g_c.tensorNDWithData(&.{ B, H, L, D }, cpu_long.k_raw, false);
@@ -446,11 +446,11 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
             alloc: std.mem.Allocator,
             arena: std.heap.ArenaAllocator,
             stream: backend.mlx.Stream,
-            device: backend.DeviceType,
+            device: backend.Device,
             x_raw: []f32,
             w_raw: []f32,
 
-            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.DeviceType) !@This() {
+            pub fn init(alloc: std.mem.Allocator, s: backend.mlx.Stream, dev: backend.Device) !@This() {
                 const x_raw = try alloc.alloc(f32, total);
                 errdefer alloc.free(x_raw);
                 const w_raw = try alloc.alloc(f32, D);
@@ -482,27 +482,27 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
                 var g = autodiff.Graph.init(self.arena.allocator(), .{
                     .enable_grad = false,
                     .device = self.device,
-                    .mlx_stream = if (self.device == .gpu) self.stream else null,
+                    .mlx_stream = if (self.device.isGpu()) self.stream else null,
                 });
                 defer g.deinit();
 
                 const x = try g.tensorNDWithData(&.{ M, D }, self.x_raw, false);
                 const w = try g.tensorNDWithData(&.{D}, self.w_raw, false);
                 const out = try g.rmsNorm(x, w, .{ .eps = 1e-5 });
-                if (self.device == .gpu) self.stream.synchronize();
+                if (self.device.isGpu()) self.stream.synchronize();
                 std.mem.doNotOptimizeAway(out.data.ptr);
             }
         };
 
         var cpu_rms = try RmsCtx.init(allocator, stream, .cpu);
         defer cpu_rms.deinit();
-        var gpu_rms = try RmsCtx.init(allocator, stream, .gpu);
+        var gpu_rms = try RmsCtx.init(allocator, stream, .metal);
         defer gpu_rms.deinit();
 
         // 校验数值误差
         var g_c = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .cpu });
         defer g_c.deinit();
-        var g_g = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .gpu, .mlx_stream = stream });
+        var g_g = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .metal, .mlx_stream = stream });
         defer g_g.deinit();
         const xc = try g_c.tensorNDWithData(&.{ M, D }, cpu_rms.x_raw, false);
         const wc = try g_c.tensorNDWithData(&.{D}, cpu_rms.w_raw, false);
@@ -566,10 +566,10 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
             arena: std.heap.ArenaAllocator,
             attn: *const nn.CausalSelfAttention,
             stream: backend.mlx.Stream,
-            device: backend.DeviceType,
+            device: backend.Device,
             x: *tensor.Tensor,
 
-            pub fn init(alloc: std.mem.Allocator, a: *const nn.CausalSelfAttention, in_x: *tensor.Tensor, s: backend.mlx.Stream, dev: backend.DeviceType) @This() {
+            pub fn init(alloc: std.mem.Allocator, a: *const nn.CausalSelfAttention, in_x: *tensor.Tensor, s: backend.mlx.Stream, dev: backend.Device) @This() {
                 return .{
                     .arena = std.heap.ArenaAllocator.init(alloc),
                     .attn = a,
@@ -588,25 +588,25 @@ pub fn runMlxBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) 
                 var g = autodiff.Graph.init(self.arena.allocator(), .{
                     .enable_grad = false,
                     .device = self.device,
-                    .mlx_stream = if (self.device == .gpu) self.stream else null,
+                    .mlx_stream = if (self.device.isGpu()) self.stream else null,
                 });
                 defer g.deinit();
 
                 const y = try self.attn.forward(&g, self.x);
-                if (self.device == .gpu) self.stream.synchronize();
+                if (self.device.isGpu()) self.stream.synchronize();
                 std.mem.doNotOptimizeAway(y.data.ptr);
             }
         };
 
         var cpu_mod = AttnModCtx.init(allocator, &attn, x, stream, .cpu);
         defer cpu_mod.deinit();
-        var gpu_mod = AttnModCtx.init(allocator, &attn, x, stream, .gpu);
+        var gpu_mod = AttnModCtx.init(allocator, &attn, x, stream, .metal);
         defer gpu_mod.deinit();
 
         // 校验整层端到端数值精度
         var g_c = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .cpu });
         defer g_c.deinit();
-        var g_g = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .gpu, .mlx_stream = stream });
+        var g_g = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .metal, .mlx_stream = stream });
         defer g_g.deinit();
         const y_c = try attn.forward(&g_c, x);
         const y_g = try attn.forward(&g_g, x);

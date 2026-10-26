@@ -1,5 +1,6 @@
 const std = @import("std");
-const vec_math = @import("../backend/vec_math.zig");
+const backend = @import("../backend.zig");
+const vec_math = backend.vec_math;
 const core = @import("core.zig");
 const Tensor = core.Tensor;
 const shape_mod = @import("shape.zig");

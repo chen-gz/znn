@@ -11,28 +11,15 @@
 //! 随机性只来自调用方持有的 `Sampler` (内含以 `SamplingOptions.seed` 初始化的伪随机数生成器)，本模块不持有任何全局随机状态。
 
 const std = @import("std");
-const Executor = @import("executor.zig").Executor;
-const vec_math = @import("vec_math.zig");
+const backend = @import("../backend.zig");
+const Executor = backend.Executor;
+const vec_math = backend.vec_math;
+const tensor = @import("../tensor.zig");
 
-/// 词元 ID 闭区间 [first, last]
-pub const TokenRange = struct {
-    first: usize,
-    last: usize,
-
-    /// 只包含单个词元的区间
-    pub fn single(id: usize) TokenRange {
-        return .{ .first = id, .last = id };
-    }
-
-    pub fn contains(self: TokenRange, v: usize) bool {
-        return v >= self.first and v <= self.last;
-    }
-
-    /// 是否与半开区间 [begin, end) 相交
-    pub fn intersects(self: TokenRange, begin: usize, end: usize) bool {
-        return begin <= self.last and end > self.first;
-    }
-};
+pub const TokenRange = tensor.TokenRange;
+pub const Candidate = tensor.Candidate;
+pub const SamplingOptions = tensor.SamplingOptions;
+pub const bounded_candidate_count = tensor.bounded_candidate_count;
 
 /// 词元 v 是否落在任一排除区间内
 pub fn isExcluded(excluded: []const TokenRange, v: usize) bool {
@@ -154,81 +141,8 @@ pub fn argmaxWithPenalty(
 // 随机采样 (Stochastic Sampling)：选项、候选集、终结分布与采样器
 // ============================================================================
 
-/// 设备端 (例如 GPU) 在未启用前 K 截断 (Top-K) 时选出并传回主机的有界候选数。
-/// 只传回概率最高的 1024 个候选：核采样 (Nucleus Sampling, Top-P) 阈值落在其中时结果精确
-/// (设备端同时传回完整词表的对数配分函数 (Log-Partition, logsumexp)，累积概率按完整词表归一化)，
-/// 否则 (例如 top_p = 1 且分布非常平坦) 只在这 1024 个候选内按相对概率抽样，忽略其余长尾概率质量。
-pub const bounded_candidate_count: usize = 1024;
-
 /// CPU 在只启用核采样时首轮部分选择的候选数；累积概率未达到阈值时按 8 倍扩大重新选择
 pub const initial_nucleus_candidates: usize = 256;
-
-/// 采样选项 (Sampling Options)：全部字段带默认值，`.{}` 即按完整 Softmax 分布 (温度 1，无截断，无惩罚) 抽样
-pub const SamplingOptions = struct {
-    /// 温度 (Temperature)：对数几率除以温度后再归一化；小于等于 0 (或 NaN) 时退化为贪婪采样 (Greedy Decoding)
-    temperature: f32 = 1.0,
-    /// 前 K 截断 (Top-K)：只在概率最高的 K 个词元中抽样；0 表示不截断，1 等价于贪婪采样
-    top_k: usize = 0,
-    /// 核采样 (Nucleus Sampling, Top-P)：只保留累积概率刚好达到 top_p 的最小高概率词元集合；大于等于 1 表示不截断，
-    /// 极小值 (例如 1e-6) 只保留概率最高的词元
-    top_p: f32 = 1.0,
-    /// 重复惩罚 (Repetition Penalty) 系数：大于 1 时对最近出现过的词元施加惩罚，小于等于 1 表示不惩罚
-    repetition_penalty: f32 = 1.0,
-    /// 重复惩罚窗口长度 (Repetition Penalty Window)：仅对最近窗口内的词元施加重复惩罚；null 时使用调用方/模型默认窗口
-    repetition_window: ?usize = null,
-    /// 伪随机数生成器 (Pseudo-Random Number Generator, PRNG) 种子：相同种子与相同对数几率得到相同的生成序列
-    seed: u64 = 0,
-
-    /// 贪婪采样 (不施加重复惩罚)
-    pub const greedy: SamplingOptions = .{ .temperature = 0.0 };
-
-    pub fn defaultOptions() SamplingOptions {
-        return .{};
-    }
-
-    /// 是否退化为贪婪采样：温度小于等于 0 (或 NaN) 或 top_k == 1
-    pub fn isGreedy(self: SamplingOptions) bool {
-        return !(self.temperature > 0.0) or self.top_k == 1;
-    }
-
-    /// 是否为不带重复惩罚的纯贪婪采样 (可直接在设备端求 argmax，不需要回传任何对数几率)
-    pub fn isPlainGreedy(self: SamplingOptions) bool {
-        return self.isGreedy() and !penaltyActive(self.repetition_penalty);
-    }
-
-    /// 设备端需要选出并传回主机的候选数：贪婪采样为 1，启用 Top-K 时为 top_k，否则为 `bounded_candidate_count`；不超过词表大小
-    pub fn candidateCount(self: SamplingOptions, vocab_size: usize) usize {
-        const k: usize = if (self.isGreedy()) 1 else if (self.top_k > 0) self.top_k else bounded_candidate_count;
-        return @max(1, @min(k, vocab_size));
-    }
-
-    /// 终结分布是否需要完整词表的对数配分函数：只启用核采样 (未启用 Top-K) 时，累积概率必须按完整词表归一化
-    pub fn needsLogNormalizer(self: SamplingOptions) bool {
-        return !self.isGreedy() and self.top_k == 0 and self.top_p < 1.0;
-    }
-
-    /// 获取给定词元序列在当前重复惩罚配置下的有效词元窗口切片
-    pub fn recentTokens(self: SamplingOptions, tokens: []const usize, default_window: usize) []const usize {
-        const win = self.repetition_window orelse default_window;
-        return if (tokens.len > win) tokens[tokens.len - win ..] else tokens;
-    }
-};
-
-/// 采样候选：词元 ID 与其已完成重复惩罚与排除处理 (尚未除以温度) 的对数几率
-pub const Candidate = struct {
-    id: u32,
-    logit: f32,
-
-    /// 规范全序 (Canonical Order)：对数几率降序，相同时词元 ID 升序。
-    /// 候选集合按该全序排序后与输入顺序、分块方式及线程数无关
-    pub fn before(a: Candidate, b: Candidate) bool {
-        return a.logit > b.logit or (a.logit == b.logit and a.id < b.id);
-    }
-
-    fn lessThan(_: void, a: Candidate, b: Candidate) bool {
-        return a.before(b);
-    }
-};
 
 /// 对数几率是否可参与采样：NaN 与 -inf (排除词元) 的概率为 0
 fn usableLogit(logit: f32) bool {
@@ -256,7 +170,6 @@ const CandidateHeap = struct {
         var i = start;
         while (i > 0) {
             const parent = (i - 1) / 2;
-            // 父节点必须不优于子节点 (堆顶最差)
             if (!self.items[parent].before(self.items[i])) break;
             std.mem.swap(Candidate, &self.items[parent], &self.items[i]);
             i = parent;
@@ -352,7 +265,6 @@ fn logSumExpParallel(executor: Executor, logits: []const f32, inv_temperature: f
         inv_temperature: f32,
 
         fn map(ctx: @This(), begin: usize, end: usize) vec_math.LogSumExp {
-            // NaN 的概率视为 0；排除词元 (-inf) 对和式贡献 0
             return vec_math.logSumExpPartial(ctx.logits[begin..end], ctx.inv_temperature, .skip);
         }
     };
@@ -373,51 +285,21 @@ pub fn logSumExpScaled(executor: Executor, logits: []const f32, inv_temperature:
     return (try logSumExpParallel(executor, logits, inv_temperature)).value();
 }
 
-/// 就地施加重复惩罚：recent_tokens 中出现的每个词元 (越界 ID 被忽略) 恰好惩罚一次，重复出现不会叠加
-pub fn applyRepetitionPenaltyInPlace(
-    allocator: std.mem.Allocator,
-    logits: []f32,
-    recent_tokens: []const usize,
-    repetition_penalty: f32,
-) !void {
-    if (!penaltyActive(repetition_penalty) or recent_tokens.len == 0) return;
-    var seen = try std.DynamicBitSetUnmanaged.initEmpty(allocator, logits.len);
-    defer seen.deinit(allocator);
-    for (recent_tokens) |tok| {
-        if (tok >= logits.len or seen.isSet(tok)) continue;
-        seen.set(tok);
-        logits[tok] = applyRepetitionPenalty(logits[tok], repetition_penalty);
-    }
-}
-
-/// 就地将排除词元的对数几率置为 -inf (概率为 0)
-pub fn maskExcludedInPlace(logits: []f32, excluded: []const TokenRange) void {
-    for (excluded) |r| {
-        if (r.first >= logits.len) continue;
-        const stop = @min(r.last, logits.len - 1);
-        @memset(logits[r.first .. stop + 1], -std.math.inf(f32));
-    }
-}
+pub const applyRepetitionPenaltyInPlace = tensor.applyRepetitionPenaltyInPlace;
+pub const maskExcludedInPlace = tensor.maskExcludedInPlace;
 
 /// 终结分布 (Finished Distribution)：温度、前 K 截断与核采样之后保留的候选及其未归一化权重。
-/// 权重 w_i = exp((logit_i - logit_0) / temperature)，概率 p_i = w_i / mass；CPU 与 GPU 路径共用。
 pub const Distribution = struct {
-    /// 保留的候选 (按规范全序排列)；为空表示没有任何可采样词元
     candidates: []const Candidate,
     inv_temperature: f32,
-    /// 最优候选的缩放对数几率 (权重的数值稳定基准)
     max_scaled: f32,
-    /// 保留候选的权重和
     mass: f64,
-    /// 核采样阈值是否在给定候选集内达到；为 false 表示候选集只是完整分布的前缀，未覆盖 top_p 要求的概率质量
     covers_nucleus: bool,
 
-    /// 候选的未归一化权重
     pub fn weight(self: Distribution, cand: Candidate) f64 {
         return @exp(@as(f64, cand.logit * self.inv_temperature - self.max_scaled));
     }
 
-    /// 词元 id 在终结分布中的概率 (被截断或不在候选集中时为 0)
     pub fn probability(self: Distribution, id: u32) f64 {
         if (self.mass <= 0.0) return 0.0;
         for (self.candidates) |cand| {
@@ -426,13 +308,10 @@ pub const Distribution = struct {
         return 0.0;
     }
 
-    /// 按终结分布抽样一个词元：只有一个候选时不消耗随机数；没有可采样词元时返回 0 (与 `argmaxWithPenalty` 一致)
     pub fn sample(self: Distribution, random: std.Random) u32 {
         return self.sampleExcluding(random, null);
     }
 
-    /// 从去掉词元 excluded 并重新归一化后的终结分布中抽样 (投机采样拒绝后的重采样)。
-    /// 只剩一个候选时直接返回且不消耗随机数；去掉之后没有剩余候选时返回 excluded 本身
     pub fn sampleExcluding(self: Distribution, random: std.Random, excluded: ?u32) u32 {
         if (self.candidates.len == 0) return 0;
         var total = self.mass;
@@ -467,11 +346,6 @@ pub const Distribution = struct {
 };
 
 /// 终结步骤 (CPU / GPU 共用)：把候选集 (对数几率已完成重复惩罚与排除) 依次施加温度、前 K 截断与核采样，得到终结分布。
-/// - candidates 按规范全序就地排序并剔除不可采样项，返回的分布借用其中一段前缀；
-/// - 贪婪采样只保留最优候选；
-/// - log_normalizer 为完整词表的 log Σ exp(logit / temperature) (见 `logSumExpScaled`)，只在未启用 Top-K 时用于核采样阈值：
-///   与 Hugging Face 一致，启用 Top-K 时核采样在 Top-K 截断后的分布上重新归一化计算；为 null 时以候选集自身为完整分布。
-/// 核采样保留规则与 Hugging Face `TopPLogitsWarper` 一致：按概率降序保留排在其前面的累积概率严格小于 top_p 的词元 (至少保留 1 个)。
 pub fn buildDistribution(candidates: []Candidate, options: SamplingOptions, log_normalizer: ?f32) Distribution {
     var n: usize = 0;
     for (candidates) |cand| {
@@ -525,15 +399,10 @@ pub fn buildDistribution(candidates: []Candidate, options: SamplingOptions, log_
 
 /// 投机采样 (Speculative Sampling) 对单个草稿词元的校验结果
 pub const DraftVerdict = union(enum) {
-    /// 接受草稿词元
     accepted,
-    /// 拒绝草稿词元，并给出从剩余分布中重新抽样得到的替代词元
     rejected: u32,
 };
 
-/// 确定性草稿 (草稿分布 q 在 draft 上的概率为 1) 的标准投机采样校验：以概率 min(1, p(draft) / q(draft)) = p(draft) 接受；
-/// 拒绝时从 norm(max(0, p - q)) 抽样，即去掉 draft 后重新归一化的目标分布 p。输出词元的分布恰好等于 p (无偏)。
-/// p(draft) 为 0 或 1 时不消耗随机数，因此贪婪终结分布 (只含一个候选) 退化为精确匹配规则。
 pub fn verifyDraftToken(dist: Distribution, draft: u32, random: std.Random) DraftVerdict {
     const p = dist.probability(draft);
     if (p >= 1.0) return .accepted;
@@ -541,8 +410,7 @@ pub fn verifyDraftToken(dist: Distribution, draft: u32, random: std.Random) Draf
     return .{ .rejected = dist.sampleExcluding(random, draft) };
 }
 
-/// 采样器 (Sampler)：持有采样选项与以 `options.seed` 初始化的伪随机数生成器，由调用方创建并在整个生成过程中复用；
-/// 每次随机抽样消耗确定数量的随机数，因此相同种子、相同模型与相同输入得到相同的生成序列。
+/// 采样器 (Sampler)
 pub const Sampler = struct {
     options: SamplingOptions,
     prng: std.Random.DefaultPrng,
@@ -551,7 +419,6 @@ pub const Sampler = struct {
         return .{ .options = options, .prng = .init(options.seed) };
     }
 
-    /// 以默认选项 (`SamplingOptions.defaultOptions()`) 创建采样器
     pub fn initDefault() Sampler {
         return init(.{});
     }
@@ -564,28 +431,18 @@ pub const Sampler = struct {
         return self.prng.random();
     }
 
-    /// 由候选集构建终结分布 (见 `buildDistribution`)
     pub fn distribution(self: *const Sampler, candidates: []Candidate, log_normalizer: ?f32) Distribution {
         return buildDistribution(candidates, self.options, log_normalizer);
     }
 
-    /// 终结步骤：从候选集抽样一个词元 (CPU 与 GPU 路径共用，相同候选集与相同随机状态得到相同词元)
     pub fn sampleCandidates(self: *Sampler, candidates: []Candidate, log_normalizer: ?f32) u32 {
         return self.distribution(candidates, log_normalizer).sample(self.random());
     }
 
-    /// 投机采样校验草稿词元 (见 `verifyDraftToken`)
     pub fn verifyDraft(self: *Sampler, dist: Distribution, draft: u32) DraftVerdict {
         return verifyDraftToken(dist, draft, self.random());
     }
 
-    /// 从完整词表的已处理对数几率 (重复惩罚已施加，排除词元为 -inf，尚未除以温度) 中抽样一个词元。
-    /// - 贪婪采样：返回首个最大值 (NaN 被忽略)；
-    /// - 启用 Top-K：`selectTopK` 部分选择 k 个候选，代价 O(V log k)；
-    /// - 只启用核采样：先求完整词表的对数配分函数，再从 `initial_nucleus_candidates` 个候选开始部分选择，
-    ///   累积概率未达到 top_p 时按 8 倍扩大候选数重选；典型的尖峰分布一轮完成 (O(V log 256))，
-    ///   极端平坦分布最坏扩大到整个词表 (O(V log V)，与完整排序同阶)；
-    /// - 均未启用：按完整 Softmax 分布做一次 O(V) 逆累积分布扫描，不排序。
     pub fn sampleLogits(self: *Sampler, executor: Executor, allocator: std.mem.Allocator, logits: []const f32) !usize {
         const n = logits.len;
         if (n == 0) return error.EmptyLogits;
@@ -614,7 +471,6 @@ pub const Sampler = struct {
         }
     }
 
-    /// 完整 Softmax 分布的 O(V) 逆累积分布抽样 (Inverse CDF Sampling)：按词元 ID 顺序累加权重
     fn sampleFull(self: *Sampler, executor: Executor, logits: []const f32, inv_temperature: f32) !usize {
         const p = try logSumExpParallel(executor, logits, inv_temperature);
         if (p.max == -std.math.inf(f32)) return 0;
@@ -629,4 +485,105 @@ pub const Sampler = struct {
         }
         return last;
     }
+
+    /// 对输入对数几率执行重复惩罚、词元排除并采样出下一个预测词元
+    pub fn sampleWithExclusions(
+        self: *Sampler,
+        logits: []f32,
+        recent_tokens: []const usize,
+        excluded: []const TokenRange,
+        executor: anytype,
+    ) !usize {
+        const n = logits.len;
+        if (n == 0) return error.EmptyLogits;
+        if (self.options.isGreedy()) {
+            return argmaxWithPenalty(logits, n, excluded, recent_tokens, self.options.repetition_penalty);
+        }
+        try applyRepetitionPenaltyInPlace(std.heap.page_allocator, logits, recent_tokens, self.options.repetition_penalty);
+        maskExcludedInPlace(logits, excluded);
+        const exec: Executor = if (@TypeOf(executor) == *Executor or @TypeOf(executor) == *const Executor) executor.* else if (@TypeOf(executor) == Executor) executor else Executor.serial;
+        return self.sampleLogits(exec, std.heap.page_allocator, logits);
+    }
 };
+
+test "sampling argmaxWithPenalty dynamic vocab and negative logits" {
+    const pad_only = [_]TokenRange{.single(0)};
+    const logits = [_]f32{ 1.0, 2.0, 6.0, -0.5 };
+    // 无重复惩罚时，token 2 (6.0) 最大
+    try std.testing.expectEqual(@as(usize, 2), argmaxWithPenalty(&logits, 4, &pad_only, &.{}, 1.0));
+    // 对 token 2 施加 10.0 惩罚 -> 6.0 / 10.0 = 0.6，此时 token 1 (2.0) 最大
+    try std.testing.expectEqual(@as(usize, 1), argmaxWithPenalty(&logits, 4, &pad_only, &.{2}, 10.0));
+    // 对正数与负数同时施加惩罚，验证负数乘以 penalty 的分支与越界 token 过滤
+    const neg_logits = [_]f32{ -2.0, -1.0, -0.5, -3.0 };
+    try std.testing.expectEqual(@as(usize, 1), argmaxWithPenalty(&neg_logits, 4, &pad_only, &.{ 2, 999999 }, 4.0));
+    // 不排除任何词元时 token 0 同样可以被选中
+    const first_max = [_]f32{ 9.0, 2.0, 6.0, -0.5 };
+    try std.testing.expectEqual(@as(usize, 0), argmaxWithPenalty(&first_max, 4, &.{}, &.{}, 1.0));
+    try std.testing.expectEqual(@as(usize, 2), argmaxWithPenalty(&first_max, 4, &pad_only, &.{}, 1.0));
+}
+
+test "sampling exclusion ranges and BF16 additive mask agree" {
+    const excluded = [_]TokenRange{ .single(0), .{ .first = 5, .last = 7 }, .{ .first = 30, .last = 40 } };
+    var mask: [10]u16 = undefined;
+    fillExclusionMaskBf16(&mask, &excluded);
+    for (mask, 0..) |bits, v| {
+        const expected: u16 = if (isExcluded(&excluded, v)) bf16_neg_inf_bits else bf16_zero_bits;
+        try std.testing.expectEqual(expected, bits);
+    }
+    try std.testing.expect(std.math.isNegativeInf(@as(f32, @bitCast(@as(u32, bf16_neg_inf_bits) << 16))));
+    try std.testing.expect(anyExcluded(&excluded, 7, 9));
+    try std.testing.expect(!anyExcluded(&excluded, 8, 30));
+    try std.testing.expect(anyExcluded(&excluded, 8, 31));
+    try std.testing.expectEqual(@as(f32, 2.0), applyRepetitionPenalty(4.0, 2.0));
+    try std.testing.expectEqual(@as(f32, -8.0), applyRepetitionPenalty(-4.0, 2.0));
+    try std.testing.expect(!penaltyActive(1.0));
+    try std.testing.expect(!penaltyActive(0.9));
+}
+
+test "sampling options default to full softmax sampling and detect greedy decoding" {
+    const opts = SamplingOptions.defaultOptions();
+    try std.testing.expectEqual(@as(f32, 1.0), opts.temperature);
+    try std.testing.expectEqual(@as(usize, 0), opts.top_k);
+    try std.testing.expectEqual(@as(f32, 1.0), opts.top_p);
+    try std.testing.expectEqual(@as(f32, 1.0), opts.repetition_penalty);
+    try std.testing.expect(!opts.isGreedy());
+    try std.testing.expect(SamplingOptions.greedy.isPlainGreedy());
+    try std.testing.expect((SamplingOptions{ .temperature = -1.0 }).isGreedy());
+    try std.testing.expect((SamplingOptions{ .temperature = std.math.nan(f32) }).isGreedy());
+    try std.testing.expect((SamplingOptions{ .top_k = 1 }).isGreedy());
+    try std.testing.expect(!(SamplingOptions{ .temperature = 0.0, .repetition_penalty = 1.2 }).isPlainGreedy());
+
+    try std.testing.expectEqual(@as(usize, 1), SamplingOptions.greedy.candidateCount(1000));
+    try std.testing.expectEqual(@as(usize, 64), (SamplingOptions{ .top_k = 64 }).candidateCount(1000));
+    try std.testing.expectEqual(@as(usize, 10), (SamplingOptions{ .top_k = 64 }).candidateCount(10));
+    try std.testing.expectEqual(bounded_candidate_count, opts.candidateCount(262_144));
+    try std.testing.expect((SamplingOptions{ .top_p = 0.9 }).needsLogNormalizer());
+    try std.testing.expect(!(SamplingOptions{ .top_p = 0.9, .top_k = 40 }).needsLogNormalizer());
+}
+
+test "sampling temperature <= 0 and top_k == 1 reproduce greedy argmax" {
+    const allocator = std.testing.allocator;
+    var prng = std.Random.DefaultPrng.init(7);
+    const rnd = prng.random();
+    const vocab: usize = 5000;
+    const logits = try allocator.alloc(f32, vocab);
+    defer allocator.free(logits);
+    for (0..4) |_| {
+        for (logits) |*l| l.* = rnd.floatNorm(f32) * 3.0;
+        logits[rnd.uintLessThan(usize, vocab)] = -std.math.inf(f32);
+        logits[rnd.uintLessThan(usize, vocab)] = std.math.nan(f32);
+        const expected = argmaxWithPenalty(logits, vocab, &.{}, &.{}, 1.0);
+        for ([_]SamplingOptions{
+            .{ .temperature = 0.0 },
+            .{ .temperature = -2.0, .top_k = 50 },
+            .{ .temperature = 1.5, .top_k = 1 },
+            .{ .temperature = 0.7, .top_k = 1, .top_p = 0.5 },
+        }) |opts| {
+            var sampler = Sampler.init(opts);
+            for (0..5) |_| {
+                try std.testing.expectEqual(expected, try sampler.sampleLogits(Executor.serial, allocator, logits));
+            }
+        }
+    }
+}
+

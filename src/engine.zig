@@ -10,6 +10,17 @@ pub const causal_lm = @import("engine/causal_lm.zig");
 pub const CausalLMStepResult = causal_lm.CausalLMStepResult;
 pub const trainCausalLMStep = causal_lm.trainCausalLMStep;
 
+// 采样与对数几率处理基础设施 (Sampling & Logits Processing)
+pub const sampling = @import("engine/sampling.zig");
+pub const Sampler = sampling.Sampler;
+pub const SamplingOptions = sampling.SamplingOptions;
+pub const TokenRange = sampling.TokenRange;
+
+pub const logits_processor = @import("engine/logits_processor.zig");
+pub const LogitsProcessor = logits_processor.LogitsProcessor;
+pub const LogitsProcessorOptions = logits_processor.LogitsProcessorOptions;
+pub const TokenExclusionMask = logits_processor.TokenExclusionMask;
+
 pub const ClassificationStepResult = struct {
     loss: f32,
     accuracy: f32,
@@ -541,4 +552,10 @@ test "engine evaluateClassification weights batches by sample count" {
         expected_loss += step.loss / 3.0;
     }
     try std.testing.expectApproxEqAbs(expected_loss, res.loss, 1e-5);
+}
+
+test {
+    std.testing.refAllDecls(@This());
+    _ = @import("engine/sampling.zig");
+    _ = @import("engine/logits_processor.zig");
 }

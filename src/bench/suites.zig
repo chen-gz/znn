@@ -8,6 +8,7 @@ const optim = @import("../optim.zig");
 const dataset = @import("../dataset.zig");
 const backend = @import("../backend.zig");
 const models = @import("../models.zig");
+const engine = @import("../engine.zig");
 
 /// Suite 4: Layers (Forward & Backward)
 pub fn runLayerBenchmarks(runner: *BenchmarkRunner, allocator: std.mem.Allocator) !void {
@@ -1601,7 +1602,7 @@ fn runWholeModelScaleBenchmarks(
             prompt16: [16]usize,
             prompt8: [8]usize,
             /// 带 1.25 重复惩罚的贪婪采样：基准测量确定性的解码路径
-            sampler: backend.sampling.Sampler = .init(.{ .temperature = 0.0, .repetition_penalty = 1.25 }),
+            sampler: models.gemma4.Sampler = .init(.{ .temperature = 0.0, .repetition_penalty = 1.25 }),
 
             pub fn init(alloc: std.mem.Allocator) !@This() {
                 var init_threaded = std.Io.Threaded.init(alloc, .{});
@@ -1759,7 +1760,7 @@ fn runWholeModelScaleBenchmarks(
             prompt16: [16]usize,
             prompt8: [8]usize,
             /// 带 1.25 重复惩罚的贪婪采样：基准测量确定性的解码路径
-            sampler: backend.sampling.Sampler = .init(.{ .temperature = 0.0, .repetition_penalty = 1.25 }),
+            sampler: models.gemma4.Sampler = .init(.{ .temperature = 0.0, .repetition_penalty = 1.25 }),
 
             pub fn init(alloc: std.mem.Allocator, mmap_slice: []const u8) !@This() {
                 var model = try BenchQ4Model.loadFromMmap(alloc, mmap_slice);

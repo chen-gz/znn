@@ -1,10 +1,10 @@
 const std = @import("std");
-const c = @import("../backend/cblas.zig");
 const tensor = @import("../tensor.zig");
 const transposeShape = tensor.transposeShape;
 const Op = @import("types.zig").Op;
 
 const backend = @import("../backend.zig");
+const c = backend.cblas;
 const vec_math = backend.vec_math;
 
 /// 二维矩阵在基础线性代数子程序 (Basic Linear Algebra Subprograms, BLAS) 中的存储描述：

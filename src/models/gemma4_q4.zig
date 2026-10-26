@@ -11,28 +11,29 @@ const nn = @import("../nn.zig");
 const gemma4 = @import("gemma4.zig");
 
 const offload = backend.offload;
-const logits_processor = offload.logits_processor;
 const Stream = offload.Stream;
 const Q4Weights = offload.Q4Weights;
-const TokenExclusionMask = offload.TokenExclusionMask;
-const GpuRope = offload.Rope;
-const softcapLogits = logits_processor.softcapLogits;
-const penalizeDevice = logits_processor.penalizeDevice;
-const DeviceCandidates = logits_processor.DeviceCandidates;
-const HostCandidates = logits_processor.HostCandidates;
-const sampling = backend.sampling;
-const SamplingOptions = backend.sampling.SamplingOptions;
+const TokenExclusionMask = nn.TokenExclusionMask;
+const transformer_blocks = nn.transformer_blocks;
+const softcapLogits = transformer_blocks.softcapLogits;
+const penalizeDevice = transformer_blocks.penalizeDevice;
+const DeviceCandidates = transformer_blocks.DeviceCandidates;
+const HostCandidates = transformer_blocks.HostCandidates;
+const GpuRope = nn.Rope;
 
 const Tensor = tensor.Tensor;
 const Q4Block = tensor.quant.Q4Block;
-const Embedding = nn.transformer.Embedding;
-const RMSNorm = nn.RMSNorm;
+const Candidate = tensor.Candidate;
+const SamplingOptions = tensor.SamplingOptions;
+const TokenRange = tensor.TokenRange;
+const Sampler = gemma4.Sampler;
 const Gemma4Config = gemma4.Gemma4Config;
 const Gemma4AttentionType = gemma4.Gemma4AttentionType;
 const Gemma4KVCache = gemma4.Gemma4KVCache;
+const LmHeadWeights = transformer_blocks.LmHeadWeights;
+const Embedding = nn.transformer.Embedding;
+const RMSNorm = nn.RMSNorm;
 const vec_math = backend.vec_math;
-const LmHeadWeights = backend.offload.LmHeadWeights;
-const Sampler = backend.sampling.Sampler;
 
 const freePersistentTensor = nn.core.freePersistentTensor;
 const deinitModel = nn.core.deinitModel;
@@ -672,7 +673,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const recent = gemma4.recentWindowFor(recent_tokens, sampler.options);
             // 1. 优先通过 GPU 常驻 LM Head 执行巨型词表投影与采样 (消除 2.3 秒延迟至 5~10 ms)；GPU 执行失败时回退 CPU。
             //    GPU 路径只在成功读回结果之后才消耗随机数，回退不会打乱采样器的随机序列
-            if (graph.options.device == .gpu and backend.offload.isAvailable()) {
+            if (graph.options.device.isGpu() and backend.offload.isAvailable()) {
                 if (self.sampleNextTokenGpu(h_last, embed_u16, recent, sampler, graph)) |tok| {
                     return tok;
                 } else |_| {}
@@ -694,7 +695,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             if (self.gpu_context) |*ctx| return ctx.sampleHidden(h_last, recent_tokens, sampler, stream);
 
             const arena = graph.arenaAllocator();
-            var mask = try backend.offload.TokenExclusionMask.init(arena, config.vocab_size, config.sampling_excluded_tokens);
+            var mask = try TokenExclusionMask.init(arena, config.vocab_size, config.sampling_excluded_tokens);
             defer mask.deinit();
             if (self.lm_head_weights) |*w| {
                 return selectTokenFromHidden(arena, w, &mask, config, h_last, recent_tokens, sampler, stream);
@@ -761,7 +762,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
 
             const embed_u16 = try embedSliceFromMmap(mmap_bytes);
 
-            if (graph.options.device == .gpu and self.gpu_context != null) {
+            if (graph.options.device.isGpu() and self.gpu_context != null) {
                 const next_tok = try self.gpu_context.?.prefill(prompt_tokens, embed_u16, sampler, graph.options.mlx_stream);
                 // 键值内容只存在于 GPU：CPU 层缓存仅推进游标，切回 CPU 解码前由 syncCpuCache 写回内容
                 self.kv_owner = .gpu;
@@ -820,7 +821,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             try tensor.checkIndices(&tokens, config.vocab_size);
             const embed_u16 = try embedSliceFromMmap(mmap_bytes);
 
-            if (graph.options.device == .gpu and self.gpu_context != null) {
+            if (graph.options.device.isGpu() and self.gpu_context != null) {
                 const gpu_ctx = try self.syncGpuCache(cache);
                 const next_tok = try gpu_ctx.decodeStep(token, embed_u16, recent_tokens, sampler, graph.options.mlx_stream);
                 for (cache.layers) |*cl| {
@@ -864,7 +865,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             try tensor.checkIndices(input_tokens, config.vocab_size);
             const embed_u16 = try embedSliceFromMmap(mmap_bytes);
 
-            if (graph.options.device == .gpu and self.gpu_context != null) {
+            if (graph.options.device.isGpu() and self.gpu_context != null) {
                 const gpu_ctx = try self.syncGpuCache(cache);
                 const accepted_count = try gpu_ctx.decodeSpeculative(
                     input_tokens,
@@ -887,7 +888,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
         }
 
         pub const GenerateOptions = struct {
-            sampling: backend.sampling.SamplingOptions = config.generation,
+            sampling: SamplingOptions = config.generation,
             max_new_tokens: usize = 256,
             stop_tokens: []const usize = &default_stop_tokens,
             enable_speculative: bool = true,
@@ -921,7 +922,7 @@ pub fn Gemma4Q4ForCausalLM(comptime cfg: Gemma4Config) type {
             const use_gpu = (self.gpu_context != null and backend.offload.isAvailable());
             var graph = autodiff.Graph.init(allocator, .{
                 .enable_grad = false,
-                .device = if (use_gpu) .gpu else .cpu,
+                .device = if (use_gpu) .metal else .cpu,
             });
             errdefer graph.deinit();
 
@@ -1102,7 +1103,7 @@ pub fn recentWindowFor(tokens: []const usize, opts: SamplingOptions) []const usi
     return tokens[tokens.len - window ..];
 }
 
-fn processorOpts(cfg: anytype) logits_processor.LogitsProcessorOptions {
+fn processorOpts(cfg: anytype) transformer_blocks.LogitsProcessorOptions {
     return .{
         .vocab_size = cfg.vocab_size,
         .final_logit_softcapping = cfg.final_logit_softcapping,
@@ -1119,7 +1120,7 @@ pub fn deviceCandidates(
     options: SamplingOptions,
     s: ?Stream,
 ) !DeviceCandidates {
-    return logits_processor.deviceCandidates(allocator, logits, processorOpts(cfg), mask, recent_tokens, options, s);
+    return transformer_blocks.deviceCandidates(allocator, logits, processorOpts(cfg), mask, recent_tokens, options, s);
 }
 
 pub fn selectToken(
@@ -1128,10 +1129,10 @@ pub fn selectToken(
     cfg: anytype,
     mask: *const TokenExclusionMask,
     recent_tokens: []const usize,
-    sampler: *Sampler,
+    sampler: anytype,
     s: ?Stream,
 ) !usize {
-    return logits_processor.selectToken(allocator, logits, processorOpts(cfg), mask, recent_tokens, sampler, s);
+    return transformer_blocks.selectToken(allocator, logits, processorOpts(cfg), mask, recent_tokens, sampler, s);
 }
 
 pub fn selectTokenFromHidden(
@@ -1141,16 +1142,10 @@ pub fn selectTokenFromHidden(
     cfg: anytype,
     h_last: []const f32,
     recent_tokens: []const usize,
-    sampler: *Sampler,
+    sampler: anytype,
     s: ?Stream,
 ) !usize {
-    const head: offload.LmHead = switch (@TypeOf(lm_head.*)) {
-        offload.LmHead => lm_head.*,
-        offload.LmHeadWeights => .{ .dense = lm_head.* },
-        offload.QuantWeights => .{ .quant = lm_head.* },
-        else => @compileError("Unsupported lm_head type"),
-    };
-    return logits_processor.selectTokenFromHidden(allocator, &head, processorOpts(cfg), mask, h_last, recent_tokens, sampler, s);
+    return transformer_blocks.selectTokenFromHidden(allocator, lm_head, processorOpts(cfg), mask, h_last, recent_tokens, sampler, s);
 }
 
 /// 第 layer_idx 层注意力投影的输出维度：全局注意力层 attention_k_eq_v 为 true，不存储独立的 V 投影 (v_dim = 0)
@@ -1347,7 +1342,7 @@ pub const Gemma4GpuLayer = struct {
     }
 
     pub fn mlpResidual(self: *const Gemma4GpuLayer, x1: offload.Array, stream: ?Stream) !offload.Array {
-        var post_mlp = try offload.gatedMlp(
+        var post_mlp = try transformer_blocks.gatedMlp(
             x1,
             &self.fused_gate_up,
             null,
@@ -1359,7 +1354,7 @@ pub const Gemma4GpuLayer = struct {
             stream,
         );
         defer post_mlp.deinit();
-        var x2 = try offload.residualScale(x1, post_mlp, null, stream);
+        var x2 = try transformer_blocks.residualScale(x1, post_mlp, null, stream);
         if (self.layer_scalar == 1.0) return x2;
         defer x2.deinit();
         return x2.mulScalar(self.layer_scalar, stream);
@@ -1615,11 +1610,11 @@ pub const Gemma4GpuContext = struct {
             try k_raw.sliceAxis(2, 0, lw.k_dim, s);
         defer v_raw.deinit();
 
-        var q_rot = try offload.projectHeads(q_raw, lw.q_norm_w, t, lw.num_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
+        var q_rot = try transformer_blocks.projectHeads(q_raw, lw.q_norm_w, t, lw.num_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
         errdefer q_rot.deinit();
-        var k_rot = try offload.projectHeads(k_raw, lw.k_norm_w, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
+        var k_rot = try transformer_blocks.projectHeads(k_raw, lw.k_norm_w, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, &lw.rope, pos, s);
         errdefer k_rot.deinit();
-        const v_normed = try offload.projectHeads(v_raw, null, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, null, pos, s);
+        const v_normed = try transformer_blocks.projectHeads(v_raw, null, t, lw.num_kv_heads, lw.head_dim, lw.rms_norm_eps, null, pos, s);
 
         return .{ .q_rot = q_rot, .k_rot = k_rot, .v = v_normed };
     }
@@ -1634,14 +1629,14 @@ pub const Gemma4GpuContext = struct {
 
         var post_attn = try offload.fastRmsNorm(o_out, lw.post_attn_w, lw.rms_norm_eps, s);
         defer post_attn.deinit();
-        var x1 = try offload.residualScale(x_cur, post_attn, null, s);
+        var x1 = try transformer_blocks.residualScale(x_cur, post_attn, null, s);
         defer x1.deinit();
         return if (use_compiled) lw.runMlp(x1, s) else lw.mlpResidual(x1, s);
     }
 
     fn finalNorm(self: *const Gemma4GpuContext, x_cur: offload.Array, t: usize, rows: usize, s: Stream) !offload.Array {
         _ = t;
-        return offload.finalHidden(x_cur, self.final_norm_w, self.config.rms_norm_eps, rows, self.config.hidden_size, s);
+        return transformer_blocks.finalHidden(x_cur, self.final_norm_w, self.config.rms_norm_eps, rows, self.config.hidden_size, s);
     }
 
     pub fn prefill(
@@ -1843,7 +1838,7 @@ pub const Gemma4GpuContext = struct {
         for (0..M) |i| {
             const row = logits_slice[i * V .. (i + 1) * V];
             const window = recentWindowFor(history[0 .. recent_len + i], sampling_opts);
-            const pred = sampling.argmaxWithPenalty(row, V, self.config.sampling_excluded_tokens, window, sampling_opts.repetition_penalty);
+            const pred = tensor.argmaxWithPenalty(row, V, self.config.sampling_excluded_tokens, window, sampling_opts.repetition_penalty);
             accepted_tokens[i] = pred;
             if (i + 1 < M and pred != input_tokens[i + 1]) return i + 1;
         }
@@ -1879,7 +1874,7 @@ pub const Gemma4GpuContext = struct {
         for (pending) |*p| n_arrays += p.arrays(all_arrays[n_arrays..]);
         offload.evalMultiple(all_arrays[0..n_arrays]);
 
-        const buf = try self.allocator.alloc(sampling.Candidate, pending[0].len());
+        const buf = try self.allocator.alloc(Candidate, pending[0].len());
         defer self.allocator.free(buf);
         for (0..M) |i| {
             const host = try pending[i].read(buf);

@@ -15,12 +15,11 @@ const gemma4 = @import("gemma4.zig");
 const gemma4_q4 = @import("gemma4_q4.zig");
 
 const offload = backend.offload;
-const logits_processor = offload.logits_processor;
-const sampling = backend.sampling;
-const safetensors = backend.safetensors;
+const transformer_blocks = nn.transformer_blocks;
+const safetensors = tensor.safetensors;
 const activation = backend.activation;
 const vec_math = backend.vec_math;
-const rope_mod = backend.rope;
+const rope_mod = tensor.rope;
 
 const Tensor = tensor.Tensor;
 const Embedding = nn.transformer.Embedding;
@@ -40,13 +39,13 @@ pub const Stream = offload.Stream;
 pub const GpuKvCache = offload.GpuKvCache;
 pub const DeviceKvCache = backend.DeviceKvCache;
 pub const KvCache = backend.KvCache;
-pub const TokenExclusionMask = offload.TokenExclusionMask;
-pub const Sampler = sampling.Sampler;
-pub const SamplingOptions = sampling.SamplingOptions;
+pub const TokenExclusionMask = nn.TokenExclusionMask;
+pub const Sampler = gemma4.Sampler;
+pub const SamplingOptions = tensor.SamplingOptions;
 pub const SafetensorsArchive = safetensors.SafetensorsArchive;
 pub const TensorMeta = safetensors.TensorMeta;
 pub const GeluApproximation = activation.GeluApproximation;
-pub const GpuRope = offload.Rope;
+pub const GpuRope = nn.Rope;
 
 pub const default_generation = gemma4.default_generation;
 pub const num_kv_layers: usize = 42 - 18;
@@ -275,10 +274,10 @@ pub const GpuLayerE4B = struct {
     ) !offload.Array {
         var post_attn = try offload.fastRmsNorm(o_out, self.post_attn_w, self.rms_norm_eps, s);
         defer post_attn.deinit();
-        var x1 = try offload.residualScale(x_in, post_attn, null, s);
+        var x1 = try transformer_blocks.residualScale(x_in, post_attn, null, s);
         defer x1.deinit();
 
-        var post_mlp = try offload.gatedMlp(
+        var post_mlp = try transformer_blocks.gatedMlp(
             x1,
             &self.fused_gate_up,
             null,
@@ -290,7 +289,7 @@ pub const GpuLayerE4B = struct {
             s,
         );
         defer post_mlp.deinit();
-        var x2 = try offload.residualScale(x1, post_mlp, null, s);
+        var x2 = try transformer_blocks.residualScale(x1, post_mlp, null, s);
         defer x2.deinit();
 
         var ple_gate_raw = try self.ple_gate.forwardArray(x2, s);
@@ -305,7 +304,7 @@ pub const GpuLayerE4B = struct {
         var ple_normed = try offload.fastRmsNorm(ple_projected, self.ple_norm_w, self.rms_norm_eps, s);
         defer ple_normed.deinit();
 
-        return offload.residualScale(x2, ple_normed, self.layer_scalar_w, s);
+        return transformer_blocks.residualScale(x2, ple_normed, self.layer_scalar_w, s);
     }
 
     pub fn tailRun(self: *const GpuLayerE4B, in_arrs: [3]offload.Array) !offload.Array {
@@ -1072,10 +1071,10 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                 var v_raw_slice = try qkv_4d.sliceAxis(axis, l.num_heads + l.num_kv_heads, total_heads, s);
                 defer v_raw_slice.deinit();
 
-                q_rot_opt = try offload.projectHeads(q_raw_slice, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
-                var k_rot = try offload.projectHeads(k_raw_slice, l.k_norm_w.?, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
+                q_rot_opt = try transformer_blocks.projectHeads(q_raw_slice, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
+                var k_rot = try transformer_blocks.projectHeads(k_raw_slice, l.k_norm_w.?, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
                 defer k_rot.deinit();
-                var v_4d = try offload.projectHeads(v_raw_slice, null, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, null, pos, s);
+                var v_4d = try transformer_blocks.projectHeads(v_raw_slice, null, seq_len, l.num_kv_heads, l.head_dim, l.rms_norm_eps, null, pos, s);
                 defer v_4d.deinit();
 
                 if (self.gpu_kv[l_idx] == null) {
@@ -1098,7 +1097,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                     eff_v_free = view.v;
                 }
             } else {
-                q_rot_opt = try offload.projectHeads(qkv_raw, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
+                q_rot_opt = try transformer_blocks.projectHeads(qkv_raw, l.q_norm_w, seq_len, l.num_heads, l.head_dim, l.rms_norm_eps, &l.rope, pos, s);
                 const cache = &self.gpu_kv[l.prev_kv_idx].?;
                 eff_k = cache.step_eff_k orelse cache.k;
                 eff_v = cache.step_eff_v orelse cache.v;
@@ -1224,7 +1223,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, 0, T, s);
             defer logits_bf16.deinit();
 
-            const best_tok = try logits_processor.selectToken(
+            const best_tok = try transformer_blocks.selectToken(
                 self.allocator,
                 logits_bf16,
                 .{
@@ -1251,7 +1250,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
             var logits_bf16 = try self.forwardTokenArrayToLogits(indices_arr, pos, 1, s);
             defer logits_bf16.deinit();
 
-            const best_tok = try logits_processor.selectToken(
+            const best_tok = try transformer_blocks.selectToken(
                 self.allocator,
                 logits_bf16,
                 .{
@@ -1375,14 +1374,14 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                 const recent = gemma4.recentWindowFor(hist_tokens, self.sampler.options);
 
                 if (self.sampler.isGreedy()) {
-                    return sampling.argmaxWithPenalty(last_logits, config.vocab_size, config.sampling_excluded_tokens, recent, penalty);
+                    return tensor.argmaxWithPenalty(last_logits, config.vocab_size, config.sampling_excluded_tokens, recent, penalty);
                 }
 
                 const arena = graph.arenaAllocator();
                 const work_logits = try arena.alloc(f32, config.vocab_size);
                 @memcpy(work_logits, last_logits);
-                try sampling.applyRepetitionPenaltyInPlace(arena, work_logits, recent, penalty);
-                sampling.maskExcludedInPlace(work_logits, config.sampling_excluded_tokens);
+                try tensor.applyRepetitionPenaltyInPlace(arena, work_logits, recent, penalty);
+                tensor.maskExcludedInPlace(work_logits, config.sampling_excluded_tokens);
                 return self.sampler.sampleLogits(graph.executor(), arena, work_logits);
             }
 

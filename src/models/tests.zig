@@ -10,7 +10,20 @@ const Tensor = tensor.Tensor;
 const gemma4 = models.gemma4;
 const gemma4_q4 = models.gemma4_q4;
 const gemma4_e4b = models.gemma4_e4b;
-const sampling = backend.sampling;
+const sampling = struct {
+    pub const Sampler = gemma4.Sampler;
+    pub const SamplingOptions = tensor.SamplingOptions;
+    pub const Candidate = tensor.Candidate;
+    pub const TokenRange = tensor.TokenRange;
+    pub const argmaxWithPenalty = tensor.argmaxWithPenalty;
+    pub const fillExclusionMaskBf16 = tensor.fillExclusionMaskBf16;
+    pub const applyRepetitionPenaltyInPlace = tensor.applyRepetitionPenaltyInPlace;
+    pub const maskExcludedInPlace = tensor.maskExcludedInPlace;
+    pub const bf16_neg_inf_bits = tensor.bf16_neg_inf_bits;
+    pub const buildDistribution = tensor.buildDistribution;
+    pub const selectTopK = gemma4.selectTopK;
+    pub const logSumExpScaled = gemma4.logSumExpScaled;
+};
 const Gemma4E4BModel = gemma4_e4b.Gemma4E4BModel;
 
 test {
@@ -140,7 +153,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
 
         // 验证 Apple MLX GPU 加速模式输出精度等价性
         if (backend.mlx.has_mlx) {
-            var g_gpu = autodiff.Graph.init(allocator, .{ .device = .gpu });
+            var g_gpu = autodiff.Graph.init(allocator, .{ .device = .metal });
             defer g_gpu.deinit();
 
             const token_ids_gpu = try g_gpu.zeros(&.{ 2, 4 }, false);
@@ -203,7 +216,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
 
         // 验证 TinyQ4Gemma4 在 Apple MLX GPU 模式下的等价性
         if (backend.mlx.has_mlx) {
-            var g_gpu = autodiff.Graph.init(allocator, .{ .device = .gpu });
+            var g_gpu = autodiff.Graph.init(allocator, .{ .device = .metal });
             defer g_gpu.deinit();
 
             const token_ids_gpu = try g_gpu.zeros(&.{ 1, 4 }, false);
@@ -263,14 +276,14 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
         // 验证在 Apple MLX GPU 硬件加速模式下的预填充与增量解码等价性
         if (backend.offload.isAvailable()) {
             cache.reset();
-            var g_gpu_prefill = autodiff.Graph.init(allocator, .{ .device = .gpu });
+            var g_gpu_prefill = autodiff.Graph.init(allocator, .{ .device = .metal });
             defer g_gpu_prefill.deinit();
 
             const next_gpu_1 = try mmap_model.prefill(&g_gpu_prefill, &prompt, &cache, mock_mmap, &greedy);
             try std.testing.expectEqual(@as(usize, 3), cache.layers[0].core.curr_len);
             try std.testing.expectEqual(next_1, next_gpu_1);
 
-            var g_gpu_decode = autodiff.Graph.init(allocator, .{ .device = .gpu });
+            var g_gpu_decode = autodiff.Graph.init(allocator, .{ .device = .metal });
             defer g_gpu_decode.deinit();
 
             const next_gpu_2 = try mmap_model.decodeStep(&g_gpu_decode, next_gpu_1, &cache, mock_mmap, &prompt, &greedy);
@@ -279,7 +292,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
 
             // 验证在 GPU 模式下的投机采样多词元校验
             var accepted_buf: [3]usize = undefined;
-            var g_gpu_spec = autodiff.Graph.init(allocator, .{ .device = .gpu });
+            var g_gpu_spec = autodiff.Graph.init(allocator, .{ .device = .metal });
             defer g_gpu_spec.deinit();
 
             const input_spec = [_]usize{ next_gpu_2, 10, 25 };
@@ -1231,7 +1244,7 @@ test "Gemma 4 GPU candidate selection matches the CPU sampler for identical logi
     defer stream.deinit();
     var logits_arr = try backend.mlx.Array.fromSlice(&raw, &.{ 1, cfg.vocab_size });
     defer logits_arr.deinit();
-    var mask = try backend.offload.TokenExclusionMask.init(allocator, cfg.vocab_size, cfg.sampling_excluded_tokens);
+    var mask = try nn.TokenExclusionMask.init(allocator, cfg.vocab_size, cfg.sampling_excluded_tokens);
     defer mask.deinit();
 
     // CPU 参考：截断 → 惩罚 → 排除
@@ -1244,7 +1257,7 @@ test "Gemma 4 GPU candidate selection matches the CPU sampler for identical logi
         .{ .temperature = 0.9, .top_k = 16, .top_p = 0.95, .repetition_penalty = 1.4, .seed = 5 },
         .{ .temperature = 1.2, .top_p = 0.8, .repetition_penalty = 1.4, .seed = 6 },
     }) |opts| {
-        var pending = try backend.offload.deviceCandidates(allocator, logits_arr, cfg, &mask, &recent, opts, stream);
+        var pending = try nn.deviceCandidates(allocator, logits_arr, cfg, &mask, &recent, opts, stream);
         defer pending.deinit();
         var buf: [128]sampling.Candidate = undefined;
         const host = try pending.read(&buf);
@@ -1273,7 +1286,7 @@ test "Gemma 4 GPU candidate selection matches the CPU sampler for identical logi
         }
 
         var sel_sampler = sampling.Sampler.init(opts);
-        const tok = try backend.offload.selectToken(allocator, logits_arr, cfg, &mask, &recent, &sel_sampler, stream);
+        const tok = try nn.selectToken(allocator, logits_arr, cfg, &mask, &recent, &sel_sampler, stream);
         try std.testing.expect(!cfg.isSamplingExcluded(tok));
     }
 }

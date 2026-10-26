@@ -3,18 +3,19 @@
 //!   增量解码循环复用；
 //! - `attentionForward`：多头 / 分组查询注意力 (Grouped-Query Attention, GQA) 批量前向，供计算图算子 `Graph.attention`
 //!   的前向与前向重演使用 (反向内核位于 `autodiff/backward_nn.zig`，复用本文件保存的注意力概率)。
-//! 掩码的可见性规则统一由 `backend/attention_mask.zig` 定义。
+//! 掩码的可见性规则统一由 `tensor/attention.zig` 定义。
 
 const std = @import("std");
-const c = @import("../backend/cblas.zig");
-const attention_mask = @import("../backend/attention_mask.zig");
-const vec_math = @import("../backend/vec_math.zig");
+const backend = @import("../backend.zig");
+const c = backend.cblas;
+const attention = @import("attention.zig");
+const vec_math = backend.vec_math;
 const Tensor = @import("core.zig").Tensor;
 
-pub const Mask = attention_mask.Mask;
-pub const KeyRange = attention_mask.KeyRange;
-pub const visibleRange = attention_mask.visibleRange;
-pub const fillAdditiveMask = attention_mask.fillAdditiveMask;
+pub const Mask = attention.Mask;
+pub const KeyRange = attention.KeyRange;
+pub const visibleRange = attention.visibleRange;
+pub const fillAdditiveMask = attention.fillAdditiveMask;
 
 /// 注意力算子配置 (遵循 AGENTS.md §4：所有字段均有默认值)
 pub const Options = struct {

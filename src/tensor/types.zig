@@ -1,5 +1,6 @@
 const std = @import("std");
-const vec_math = @import("../backend/vec_math.zig");
+const backend = @import("../backend.zig");
+const vec_math = backend.vec_math;
 const shape_mod = @import("shape.zig");
 pub const Shape = shape_mod.Shape;
 pub const computeContiguousStrides = shape_mod.computeContiguousStrides;
@@ -694,3 +695,339 @@ pub const LongTensor = GenericTensor(i64);
 pub const BoolTensor = GenericTensor(bool);
 pub const BFloat16Tensor = GenericTensor(bf16);
 pub const UsizeTensor = GenericTensor(usize);
+
+// ============================================================================
+// 词元采样类型 (Token Range & Sampling Options)
+// ============================================================================
+
+/// 词元 ID 闭区间 [first, last]
+pub const TokenRange = struct {
+    first: usize,
+    last: usize,
+
+    /// 只包含单个词元的区间
+    pub fn single(id: usize) TokenRange {
+        return .{ .first = id, .last = id };
+    }
+
+    pub fn contains(self: TokenRange, v: usize) bool {
+        return v >= self.first and v <= self.last;
+    }
+
+    /// 是否与半开区间 [begin, end) 相交
+    pub fn intersects(self: TokenRange, begin: usize, end: usize) bool {
+        return begin <= self.last and end > self.first;
+    }
+};
+
+/// 采样候选词元元组
+pub const Candidate = struct {
+    id: u32,
+    logit: f32,
+
+    pub fn before(a: Candidate, b: Candidate) bool {
+        return a.logit > b.logit or (a.logit == b.logit and a.id < b.id);
+    }
+
+    pub fn lessThan(_: void, a: Candidate, b: Candidate) bool {
+        return a.before(b);
+    }
+};
+
+pub const bounded_candidate_count: usize = 1024;
+
+/// 采样选项 (Sampling Options)
+pub const SamplingOptions = struct {
+    temperature: f32 = 1.0,
+    top_k: usize = 0,
+    top_p: f32 = 1.0,
+    repetition_penalty: f32 = 1.0,
+    repetition_window: ?usize = null,
+    seed: u64 = 0,
+
+    pub const greedy: SamplingOptions = .{ .temperature = 0.0 };
+
+    pub fn defaultOptions() SamplingOptions {
+        return .{};
+    }
+
+    pub fn isGreedy(self: SamplingOptions) bool {
+        return !(self.temperature > 0.0) or self.top_k == 1;
+    }
+
+    pub fn isPlainGreedy(self: SamplingOptions) bool {
+        const active = self.repetition_penalty != 1.0 and !std.math.isNan(self.repetition_penalty) and self.repetition_penalty > 0;
+        return self.isGreedy() and !active;
+    }
+
+    pub fn candidateCount(self: SamplingOptions, vocab_size: usize) usize {
+        const k: usize = if (self.isGreedy()) 1 else if (self.top_k > 0) self.top_k else bounded_candidate_count;
+        return @max(1, @min(k, vocab_size));
+    }
+
+    pub fn needsLogNormalizer(self: SamplingOptions) bool {
+        return !self.isGreedy() and self.top_k == 0 and self.top_p < 1.0;
+    }
+
+    pub fn recentTokens(self: SamplingOptions, tokens: []const usize, default_window: usize) []const usize {
+        const win = self.repetition_window orelse default_window;
+        return if (tokens.len > win) tokens[tokens.len - win ..] else tokens;
+    }
+};
+
+pub fn isExcluded(excluded: []const TokenRange, v: usize) bool {
+    for (excluded) |r| {
+        if (r.contains(v)) return true;
+    }
+    return false;
+}
+
+pub fn anyExcluded(excluded: []const TokenRange, begin: usize, end: usize) bool {
+    for (excluded) |r| {
+        if (r.intersects(begin, end)) return true;
+    }
+    return false;
+}
+
+pub fn penaltyActive(repetition_penalty: f32) bool {
+    return repetition_penalty > 1.0;
+}
+
+pub fn applyRepetitionPenalty(logit: f32, repetition_penalty: f32) f32 {
+    return if (logit > 0.0) logit / repetition_penalty else logit * repetition_penalty;
+}
+
+pub const bf16_neg_inf_bits: u16 = 0xFF80;
+pub const bf16_zero_bits: u16 = 0x0000;
+
+pub fn fillExclusionMaskBf16(out: []u16, excluded: []const TokenRange) void {
+    @memset(out, bf16_zero_bits);
+    for (excluded) |r| {
+        if (r.first >= out.len) continue;
+        const stop = @min(r.last, out.len - 1);
+        @memset(out[r.first .. stop + 1], bf16_neg_inf_bits);
+    }
+}
+
+pub const penalty_bitset_words: usize = 4096;
+pub const penalty_window_tokens: usize = penalty_bitset_words * 64;
+
+pub fn argmaxWithPenalty(
+    logits_slice: []const f32,
+    vocab_size: usize,
+    excluded: []const TokenRange,
+    recent_tokens: []const usize,
+    repetition_penalty: f32,
+) usize {
+    std.debug.assert(logits_slice.len >= vocab_size);
+    const apply_penalty = penaltyActive(repetition_penalty);
+    const V = @Vector(16, f32);
+
+    var bitset: [penalty_bitset_words]u64 = undefined;
+    var max_val: f32 = -std.math.inf(f32);
+    var max_id: usize = 0;
+
+    var win_base: usize = 0;
+    while (win_base < vocab_size) : (win_base += penalty_window_tokens) {
+        const win_end = @min(win_base + penalty_window_tokens, vocab_size);
+        const words = bitset[0 .. (win_end - win_base + 63) / 64];
+        @memset(words, 0);
+        if (apply_penalty) {
+            for (recent_tokens) |rec| {
+                if (rec >= win_base and rec < win_end) {
+                    const off = rec - win_base;
+                    words[off / 64] |= @as(u64, 1) << @intCast(off % 64);
+                }
+            }
+        }
+
+        for (words, 0..) |word, w| {
+            const base_v = win_base + w * 64;
+            const end_v = @min(base_v + 64, win_end);
+            const check_excluded = anyExcluded(excluded, base_v, end_v);
+
+            if (word == 0 and !check_excluded and end_v - base_v == 64) {
+                const chunk: *const [64]f32 = @ptrCast(logits_slice[base_v .. base_v + 64]);
+                var m_vec: V = @splat(-std.math.inf(f32));
+                inline for (0..4) |unroll| {
+                    const sub: *const [16]f32 = @ptrCast(chunk[unroll * 16 ..][0..16]);
+                    m_vec = @max(m_vec, @as(V, sub.*));
+                }
+                const block_max = @reduce(.Max, m_vec);
+                if (block_max > max_val) {
+                    for (chunk, 0..) |val, i| {
+                        if (val > max_val) {
+                            max_val = val;
+                            max_id = base_v + i;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            var bit_cursor = word;
+            for (base_v..end_v) |v| {
+                const bit = bit_cursor & 1;
+                bit_cursor >>= 1;
+                if (check_excluded and isExcluded(excluded, v)) continue;
+                var val = logits_slice[v];
+                if (std.math.isNan(val)) continue;
+                if (bit == 1) val = applyRepetitionPenalty(val, repetition_penalty);
+                if (val > max_val) {
+                    max_val = val;
+                    max_id = v;
+                }
+            }
+        }
+    }
+    return max_id;
+}
+
+pub fn applyRepetitionPenaltyInPlace(
+    allocator: std.mem.Allocator,
+    logits: []f32,
+    recent_tokens: []const usize,
+    repetition_penalty: f32,
+) !void {
+    if (!penaltyActive(repetition_penalty) or recent_tokens.len == 0) return;
+    var seen = try std.DynamicBitSetUnmanaged.initEmpty(allocator, logits.len);
+    defer seen.deinit(allocator);
+    for (recent_tokens) |tok| {
+        if (tok >= logits.len or seen.isSet(tok)) continue;
+        seen.set(tok);
+        logits[tok] = applyRepetitionPenalty(logits[tok], repetition_penalty);
+    }
+}
+
+pub fn maskExcludedInPlace(logits: []f32, excluded: []const TokenRange) void {
+    for (excluded) |r| {
+        if (r.first >= logits.len) continue;
+        const stop = @min(r.last, logits.len - 1);
+        @memset(logits[r.first .. stop + 1], -std.math.inf(f32));
+    }
+}
+
+pub fn usableLogit(x: f32) bool {
+    return !std.math.isNan(x) and x > -std.math.inf(f32);
+}
+
+pub const Distribution = struct {
+    candidates: []const Candidate,
+    inv_temperature: f32,
+    max_scaled: f32,
+    mass: f64,
+    covers_nucleus: bool,
+
+    pub fn weight(self: Distribution, cand: Candidate) f64 {
+        return @exp(@as(f64, cand.logit * self.inv_temperature - self.max_scaled));
+    }
+
+    pub fn probability(self: Distribution, id: u32) f64 {
+        if (self.mass <= 0.0) return 0.0;
+        for (self.candidates) |cand| {
+            if (cand.id == id) return self.weight(cand) / self.mass;
+        }
+        return 0.0;
+    }
+
+    pub fn sample(self: Distribution, random: std.Random) u32 {
+        return self.sampleExcluding(random, null);
+    }
+
+    pub fn sampleExcluding(self: Distribution, random: std.Random, excluded: ?u32) u32 {
+        if (self.candidates.len == 0) return 0;
+        var total = self.mass;
+        var remaining: usize = 0;
+        var first_other: ?u32 = null;
+        var last_other: u32 = self.candidates[0].id;
+        for (self.candidates) |cand| {
+            if (excluded) |x| {
+                if (cand.id == x) {
+                    total -= self.weight(cand);
+                    continue;
+                }
+            }
+            remaining += 1;
+            if (first_other == null) first_other = cand.id;
+            last_other = cand.id;
+        }
+        const fallback = first_other orelse return self.candidates[0].id;
+        if (remaining == 1 or !(total > 0.0)) return fallback;
+
+        const target = random.float(f64) * total;
+        var cum: f64 = 0.0;
+        for (self.candidates) |cand| {
+            if (excluded) |x| {
+                if (cand.id == x) continue;
+            }
+            cum += self.weight(cand);
+            if (cum > target) return cand.id;
+        }
+        return last_other;
+    }
+};
+
+pub fn buildDistribution(candidates: []Candidate, options: SamplingOptions, log_normalizer: ?f32) Distribution {
+    var n: usize = 0;
+    for (candidates) |cand| {
+        if (!usableLogit(cand.logit)) continue;
+        candidates[n] = cand;
+        n += 1;
+    }
+    const sorted = candidates[0..n];
+    std.mem.sortUnstable(Candidate, sorted, {}, Candidate.lessThan);
+
+    if (n == 0) return .{ .candidates = sorted, .inv_temperature = 1.0, .max_scaled = 0.0, .mass = 0.0, .covers_nucleus = true };
+    if (options.isGreedy()) {
+        return .{ .candidates = sorted[0..1], .inv_temperature = 1.0, .max_scaled = sorted[0].logit, .mass = 1.0, .covers_nucleus = true };
+    }
+
+    const kept_k = if (options.top_k > 0) sorted[0..@min(options.top_k, n)] else sorted;
+    const inv_t = 1.0 / options.temperature;
+    var dist = Distribution{
+        .candidates = kept_k,
+        .inv_temperature = inv_t,
+        .max_scaled = kept_k[0].logit * inv_t,
+        .mass = 0.0,
+        .covers_nucleus = true,
+    };
+
+    var candidate_mass: f64 = 0.0;
+    for (kept_k) |cand| candidate_mass += dist.weight(cand);
+    const use_normalizer = options.top_k == 0 and log_normalizer != null;
+    const total: f64 = if (use_normalizer)
+        @max(candidate_mass, @exp(@as(f64, log_normalizer.? - dist.max_scaled)))
+    else
+        candidate_mass;
+
+    if (options.top_p < 1.0) {
+        const threshold = @as(f64, options.top_p) * total;
+        var cum: f64 = 0.0;
+        var kept: usize = 0;
+        while (kept < kept_k.len) : (kept += 1) {
+            if (kept > 0 and cum >= threshold) break;
+            cum += dist.weight(kept_k[kept]);
+        }
+        dist.candidates = kept_k[0..kept];
+        dist.mass = cum;
+        dist.covers_nucleus = cum >= threshold;
+    } else {
+        dist.mass = candidate_mass;
+        dist.covers_nucleus = !use_normalizer;
+    }
+    return dist;
+}
+
+pub const DraftVerdict = union(enum) {
+    accepted,
+    rejected: u32,
+};
+
+pub fn verifyDraftToken(dist: Distribution, draft: u32, random: std.Random) DraftVerdict {
+    const p = dist.probability(draft);
+    if (p >= 1.0) return .accepted;
+    if (p > 0.0 and random.float(f64) < p) return .accepted;
+    return .{ .rejected = dist.sampleExcluding(random, draft) };
+}
+
+

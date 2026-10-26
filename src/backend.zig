@@ -6,8 +6,6 @@ const std = @import("std");
 pub const activation = @import("backend/activation.zig");
 pub const GeluApproximation = activation.GeluApproximation;
 
-pub const attention_mask = @import("backend/attention_mask.zig");
-
 pub const executor = @import("backend/executor.zig");
 pub const Executor = executor.Executor;
 
@@ -20,59 +18,51 @@ pub const DeviceArray = device.DeviceArray;
 pub const DeviceKvCache = device.DeviceKvCache;
 pub const KvCache = device.KvCache;
 pub const BackendType = device.BackendType;
+pub const isAvailable = device.isAvailable;
+pub const isTypeAvailable = device.isTypeAvailable;
+pub const defaultDevice = device.defaultDevice;
+pub const defaultGpu = device.defaultGpu;
+pub const activeBackend = device.activeBackend;
+
+pub const buffer = @import("backend/buffer.zig");
+pub const DeviceBuffer = buffer.DeviceBuffer;
+pub const BufferHandle = buffer.BufferHandle;
+pub const BufferError = buffer.BufferError;
+
+pub const kernels = @import("backend/kernels.zig");
+pub const KernelError = kernels.KernelError;
+pub const KernelDType = kernels.KernelDType;
+pub const GemmConfig = kernels.GemmConfig;
+pub const RmsNormConfig = kernels.RmsNormConfig;
+pub const RopeConfig = kernels.RopeConfig;
+pub const SoftmaxConfig = kernels.SoftmaxConfig;
+pub const ElementwiseConfig = kernels.ElementwiseConfig;
+pub const GeluConfig = kernels.GeluConfig;
+pub const SoftcapConfig = kernels.SoftcapConfig;
+pub const EmbeddingConfig = kernels.EmbeddingConfig;
 
 pub const mlx = @import("backend/mlx.zig");
 pub const cuda = @import("backend/cuda.zig");
 pub const CudaKvCache = cuda.CudaKvCache;
 pub const cuda_kernels = @import("backend/cuda_kernels.zig");
 
-pub const mlx_blocks = @import("backend/mlx_blocks.zig");
-pub const Rope = mlx_blocks.Rope;
-pub const projectHeads = mlx_blocks.projectHeads;
-pub const gatedMlp = mlx_blocks.gatedMlp;
-pub const residualScale = mlx_blocks.residualScale;
-pub const finalHidden = mlx_blocks.finalHidden;
-
-pub const logits_processor = @import("backend/logits_processor.zig");
-pub const LogitsProcessor = logits_processor.LogitsProcessor;
-pub const LogitsProcessorOptions = logits_processor.LogitsProcessorOptions;
-pub const softcapLogits = logits_processor.softcapLogits;
-pub const penalizeDevice = logits_processor.penalizeDevice;
-pub const deviceCandidates = logits_processor.deviceCandidates;
-pub const selectToken = logits_processor.selectToken;
-pub const selectTokenFromHidden = logits_processor.selectTokenFromHidden;
-pub const DeviceCandidates = logits_processor.DeviceCandidates;
-pub const HostCandidates = logits_processor.HostCandidates;
-
 pub const offload = @import("backend/offload.zig");
 pub const GpuKvCache = offload.GpuKvCache;
-pub const ops = @import("backend/ops.zig");
-
-pub const rope = @import("backend/rope.zig");
-
-pub const safetensors = @import("backend/safetensors.zig");
-pub const SafetensorsArchive = safetensors.SafetensorsArchive;
-pub const TensorMeta = safetensors.TensorMeta;
-
-pub const sampling = @import("backend/sampling.zig");
 
 pub const vec_math = @import("backend/vec_math.zig");
 
 test {
     std.testing.refAllDecls(@This());
     _ = @import("backend/device.zig");
+    _ = @import("backend/buffer.zig");
+    _ = @import("backend/kernels.zig");
     _ = @import("backend/activation.zig");
-    _ = @import("backend/attention_mask.zig");
     _ = @import("backend/executor.zig");
     _ = @import("backend/cblas.zig");
     _ = @import("backend/mlx.zig");
     _ = @import("backend/cuda.zig");
     _ = @import("backend/cuda_kernels.zig");
     _ = @import("backend/offload.zig");
-    _ = @import("backend/ops.zig");
-    _ = @import("backend/safetensors.zig");
-    _ = @import("backend/rope.zig");
-    _ = @import("backend/sampling.zig");
     _ = @import("backend/vec_math.zig");
     _ = @import("backend/tests.zig");
 }

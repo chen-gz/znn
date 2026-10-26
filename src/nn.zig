@@ -146,6 +146,22 @@ pub const grpoLossGraph = transformer.grpoLossGraph;
 pub const promptLookup = llm.promptLookup;
 pub const SpeculativeDraftEngine = llm.SpeculativeDraftEngine;
 
+// 硬件加速 Transformer 组合块 (MLX Transformer Blocks)
+pub const transformer_blocks = @import("nn/transformer_blocks.zig");
+pub const Rope = transformer_blocks.Rope;
+pub const projectHeads = transformer_blocks.projectHeads;
+pub const gatedMlp = transformer_blocks.gatedMlp;
+pub const residualScale = transformer_blocks.residualScale;
+pub const finalHidden = transformer_blocks.finalHidden;
+pub const TokenExclusionMask = transformer_blocks.TokenExclusionMask;
+pub const softcapLogits = transformer_blocks.softcapLogits;
+pub const penalizeDevice = transformer_blocks.penalizeDevice;
+pub const DeviceCandidates = transformer_blocks.DeviceCandidates;
+pub const HostCandidates = transformer_blocks.HostCandidates;
+pub const deviceCandidates = transformer_blocks.deviceCandidates;
+pub const selectToken = transformer_blocks.selectToken;
+pub const selectTokenFromHidden = transformer_blocks.selectTokenFromHidden;
+
 // 6. 权重序列化 (Serialization - Safetensors)
 pub const saveModel = serialization.saveModel;
 pub const loadModel = serialization.loadModel;

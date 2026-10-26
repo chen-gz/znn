@@ -7,10 +7,6 @@
 
 const std = @import("std");
 const mlx = @import("mlx.zig");
-const activation = @import("activation.zig");
-const attention_mask = @import("attention_mask.zig");
-const rope_mod = @import("rope.zig");
-const sampling = @import("sampling.zig");
 const cuda = @import("cuda.zig");
 
 /// 当前硬件环境是否支持统一卸载 (macOS Apple Silicon aarch64 且已集成 MLX)
@@ -46,273 +42,6 @@ pub const OffloadError = mlx.MlxError || cuda.CudaError || error{
     NonContiguousTensor,
     EmptyTensor,
 };
-
-/// 借用或包装数组句柄守卫
-pub const ArrayBorrow = struct {
-    arr: mlx.Array,
-    needs_deinit: bool,
-
-    pub fn deinit(self: *ArrayBorrow) void {
-        if (self.needs_deinit) {
-            self.arr.deinit();
-        }
-    }
-};
-
-/// 从输入张量或数组借用 MLX 数组句柄 (若已在 GPU 驻留则零开销借用；若在主机内存则零拷贝包装)
-pub fn borrowArray(t: anytype) OffloadError!ArrayBorrow {
-    const T = @TypeOf(t);
-    if (T == mlx.Array) {
-        return .{ .arr = t, .needs_deinit = false };
-    }
-    const info = @typeInfo(T);
-    if (info == .pointer and @hasField(info.pointer.child, "device_array")) {
-        if (t.device_array) |da| {
-            if (da.asMlx()) |arr| {
-                return .{ .arr = arr, .needs_deinit = false };
-            }
-        }
-        if (t.data.len > 0) {
-            const arr = try mlx.Array.fromTensorZeroCopy(t);
-            return .{ .arr = arr, .needs_deinit = true };
-        }
-        return error.EmptyTensor;
-    }
-    const arr = try mlx.Array.fromTensorZeroCopy(t);
-    return .{ .arr = arr, .needs_deinit = true };
-}
-
-/// 将计算结果安全存入输出张量 (若输出为 GPU 驻留张量则直接接管句柄；若为 CPU 主机张量则拷回内存)
-pub fn storeOutput(out: anytype, res_mlx: mlx.Array) OffloadError!void {
-    const T = @TypeOf(out);
-    const info = @typeInfo(T);
-    if (info == .pointer and @hasField(info.pointer.child, "device_array")) {
-        if (out.device == .gpu or out.data.len == 0) {
-            if (out.device_array) |*old| old.deinit();
-            out.device_array = .{ .mlx = res_mlx };
-            out.device = .gpu;
-            return;
-        }
-    }
-    var to_free = res_mlx;
-    defer to_free.deinit();
-    try res_mlx.copyToTensor(out);
-}
-
-/// 通用矩阵乘法硬件卸载 (General Matrix Multiply Offload, GEMM Offload)：C = A * B
-/// 支持二维矩阵乘法以及高维张量批处理矩阵乘法 (Batch MatMul)
-pub fn matmul(
-    A: anytype,
-    B: anytype,
-    C: anytype,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    var a_b = try borrowArray(A);
-    defer a_b.deinit();
-    var b_b = try borrowArray(B);
-    defer b_b.deinit();
-
-    var c_mlx = try mlx.Array.matmul(a_b.arr, b_b.arr, stream);
-    errdefer c_mlx.deinit();
-
-    try storeOutput(C, c_mlx);
-}
-
-/// 快速均方根层归一化硬件卸载 (Root Mean Square Layer Normalization Offload, RMSNorm Offload)
-pub fn rmsNorm(
-    X: anytype,
-    weight: anytype,
-    out: anytype,
-    eps: f32,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    var x_b = try borrowArray(X);
-    defer x_b.deinit();
-
-    var w_b: ?ArrayBorrow = null;
-    defer if (w_b) |*w| w.deinit();
-    const WT = @TypeOf(weight);
-    if (@typeInfo(WT) == .optional) {
-        if (weight) |w| {
-            w_b = try borrowArray(w);
-        }
-    } else if (@typeInfo(WT) != .null) {
-        w_b = try borrowArray(weight);
-    }
-    const D = X.shape.dims[X.shape.len - 1];
-    var w_reshaped: ?mlx.Array = null;
-    defer if (w_reshaped) |*wr| wr.deinit();
-
-    const w_arr: ?mlx.Array = if (w_b) |w| blk: {
-        if (w.arr.ndim() != 1) {
-            w_reshaped = try w.arr.reshape(&.{D}, stream);
-            break :blk w_reshaped.?;
-        }
-        break :blk w.arr;
-    } else null;
-
-    var out_mlx = try mlx.Array.fastRmsNorm(x_b.arr, w_arr, eps, stream);
-    errdefer out_mlx.deinit();
-
-    try storeOutput(out, out_mlx);
-}
-
-/// 快速旋转位置编码硬件卸载 (Rotary Position Embedding Offload, RoPE Offload)：对 `[..., T, head_dim]` 张量的每一行
-/// 按共享配置 `RopeOptions` 旋转，第 t 行的绝对位置为 start_pos + t。部分旋转 / 比例旋转经共享周期表 (`fillPeriods`)
-/// 交给 MLX `fast.rope`；旋转子空间带偏移 (rotary_offset != 0)、head_dim 为奇数或超出周期表容量时返回
-/// `error.OffloadNotSupported` (调用方回退 CPU 内核)
-pub fn rope(
-    X: anytype,
-    out: anytype,
-    options: rope_mod.RopeOptions,
-    start_pos: usize,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    if (!ropeSupported(X.shape.dims[X.shape.len - 1], options)) return error.OffloadNotSupported;
-    const head_dim = X.shape.dims[X.shape.len - 1];
-    const traditional = options.mode == .interleaved;
-    var x_b = try borrowArray(X);
-    defer x_b.deinit();
-
-    var y_mlx = if (options.numAngles(head_dim) == head_dim / 2)
-        try mlx.Array.fastRoPE(x_b.arr, head_dim, traditional, options.base, 1.0, start_pos, stream)
-    else blk: {
-        var periods: [rope_mod.max_angles]f32 = undefined;
-        options.fillPeriods(head_dim, periods[0 .. head_dim / 2]);
-        var freqs = try mlx.Array.fromSlice(periods[0 .. head_dim / 2], &.{head_dim / 2});
-        defer freqs.deinit();
-        break :blk try mlx.Array.fastRoPEWithFreqs(x_b.arr, head_dim, traditional, 1.0, start_pos, freqs, stream);
-    };
-    errdefer y_mlx.deinit();
-
-    try storeOutput(out, y_mlx);
-}
-
-/// `rope` 能否在 MLX 上执行：旋转整行 (rotary_offset == 0) 的偶数 head_dim，且周期表不超过 `rope_mod.max_angles`
-pub fn ropeSupported(head_dim: usize, options: rope_mod.RopeOptions) bool {
-    return options.rotary_offset == 0 and head_dim > 0 and head_dim % 2 == 0 and head_dim / 2 <= rope_mod.max_angles;
-}
-
-/// 快速缩放点积注意力硬件卸载 (Scaled Dot-Product Attention Offload, SDPA Offload / FlashAttention)：
-/// q [B, q_heads, tq, d]、k [B, kv_heads, tk, d]、v [B, kv_heads, tk, dv] (分组查询注意力 (Grouped-Query Attention, GQA)
-/// 由融合内核原生处理)，掩码与位置语义见 `maskedAttention`，结果写入 out [B, q_heads, tq, dv]
-pub fn attention(
-    allocator: std.mem.Allocator,
-    queries: anytype,
-    keys: anytype,
-    values: anytype,
-    out: anytype,
-    scale: f32,
-    mask: attention_mask.Mask,
-    q_pos0: usize,
-    k_pos0: usize,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    var q_b = try borrowArray(queries);
-    defer q_b.deinit();
-    var k_b = try borrowArray(keys);
-    defer k_b.deinit();
-    var v_b = try borrowArray(values);
-    defer v_b.deinit();
-
-    var out_mlx = try maskedAttention(allocator, q_b.arr, k_b.arr, v_b.arr, scale, mask, q_pos0, k_pos0, stream);
-    errdefer out_mlx.deinit();
-
-    try storeOutput(out, out_mlx);
-}
-
-/// 归一化指数函数硬件卸载 (Softmax Offload)
-pub fn softmax(
-    A: anytype,
-    out: anytype,
-    axis: c_int,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    var a_b = try borrowArray(A);
-    defer a_b.deinit();
-
-    var res_mlx = try mlx.Array.softmax(a_b.arr, axis, stream);
-    errdefer res_mlx.deinit();
-
-    try storeOutput(out, res_mlx);
-}
-
-/// 逐元素加法硬件卸载
-pub fn add(
-    A: anytype,
-    B: anytype,
-    C: anytype,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    var a_b = try borrowArray(A);
-    defer a_b.deinit();
-    var b_b = try borrowArray(B);
-    defer b_b.deinit();
-
-    var c_mlx = try mlx.Array.add(a_b.arr, b_b.arr, stream);
-    errdefer c_mlx.deinit();
-
-    try storeOutput(C, c_mlx);
-}
-
-/// 逐元素乘法硬件卸载
-pub fn multiply(
-    A: anytype,
-    B: anytype,
-    C: anytype,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    var a_b = try borrowArray(A);
-    defer a_b.deinit();
-    var b_b = try borrowArray(B);
-    defer b_b.deinit();
-
-    var c_mlx = try mlx.Array.multiply(a_b.arr, b_b.arr, stream);
-    errdefer c_mlx.deinit();
-
-    try storeOutput(C, c_mlx);
-}
-
-/// 标量乘法硬件卸载
-pub fn mulScalar(
-    A: anytype,
-    scalar: f32,
-    C: anytype,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    var a_b = try borrowArray(A);
-    defer a_b.deinit();
-
-    var c_mlx = try mlx.Array.mulScalar(a_b.arr, scalar, stream);
-    errdefer c_mlx.deinit();
-
-    try storeOutput(C, c_mlx);
-}
-
-/// 高斯误差线性单元硬件卸载 (GELU Offload)
-pub fn gelu(
-    X: anytype,
-    out: anytype,
-    approx: activation.GeluApproximation,
-    stream: ?Stream,
-) OffloadError!void {
-    if (!isAvailable()) return error.OffloadNotSupported;
-    var x_b = try borrowArray(X);
-    defer x_b.deinit();
-
-    var out_mlx = try x_b.arr.gelu(approx, stream);
-    errdefer out_mlx.deinit();
-
-    try storeOutput(out, out_mlx);
-}
 
 /// 语言模型输出头 (Language Model Head, LM Head) 常驻词表矩阵的量化模式
 pub const QuantMode = enum {
@@ -449,52 +178,6 @@ pub const LmHeadWeights = struct {
         var logits_bf16 = try self.forwardArrayBf16(x, stream);
         defer logits_bf16.deinit();
         return logits_bf16.astype(.float32, stream);
-    }
-};
-
-/// 词表加性排除掩码 (Additive Token Exclusion Mask)：[vocab_size] 的 BF16 常驻数组，排除词元为 -inf，其余为 0。
-/// 与对数几率相加后再求 argmax 或选取随机采样候选，使 GPU 路径与 CPU `sampling.argmaxWithPenalty` /
-/// `sampling.maskExcludedInPlace` 排除完全相同的词元集合。
-pub const TokenExclusionMask = struct {
-    /// 排除集合与词表不相交时为 null，直接使用原始对数几率
-    mask: ?mlx.Array = null,
-    vocab_size: usize,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        vocab_size: usize,
-        excluded: []const sampling.TokenRange,
-    ) OffloadError!TokenExclusionMask {
-        if (!isAvailable()) return error.OffloadNotSupported;
-        if (vocab_size == 0) return error.InvalidShape;
-        if (!sampling.anyExcluded(excluded, 0, vocab_size)) return .{ .vocab_size = vocab_size };
-        const bits = try allocator.alloc(u16, vocab_size);
-        defer allocator.free(bits);
-        sampling.fillExclusionMaskBf16(bits, excluded);
-        // mlx_array_new_data 立即复制数据，临时缓冲区可在返回前释放
-        const mask = try mlx.Array.fromSliceBf16(bits, &.{vocab_size});
-        return .{ .mask = mask, .vocab_size = vocab_size };
-    }
-
-    pub fn deinit(self: *TokenExclusionMask) void {
-        if (self.mask) |*m| m.deinit();
-        self.mask = null;
-    }
-
-    /// 对 logits [..., vocab_size] 叠加排除掩码，返回新数组 (排除词元为 -inf)；排除集合与词表不相交时返回共享同一数据的新句柄
-    pub fn apply(self: *const TokenExclusionMask, logits: mlx.Array, stream: ?Stream) OffloadError!mlx.Array {
-        if (!isAvailable()) return error.OffloadNotSupported;
-        const nd = logits.ndim();
-        if (nd == 0 or logits.dimSize(@intCast(nd - 1)) != self.vocab_size) return error.ShapeMismatch;
-        const m = self.mask orelse return logits.share();
-        return mlx.Array.add(logits, m, stream);
-    }
-
-    /// 沿最后一轴对 logits [..., vocab_size] 求未被排除词元中的最大值下标 (uint32，形状去掉最后一轴)
-    pub fn argmax(self: *const TokenExclusionMask, logits: mlx.Array, stream: ?Stream) OffloadError!mlx.Array {
-        var masked = try self.apply(logits, stream);
-        defer masked.deinit();
-        return masked.argmax(@intCast(logits.ndim() - 1), false, stream);
     }
 };
 
@@ -829,37 +512,6 @@ pub const QuantWeights = struct {
             stream,
         );
     }
-
-    /// 前向量化矩阵乘法 (Quantized Matrix Multiplication, QMM)：out = X * W^T
-    pub fn forward(
-        self: Q4Weights,
-        X: anytype,
-        out: anytype,
-        stream: ?Stream,
-    ) OffloadError!void {
-        if (!isAvailable()) return error.OffloadNotSupported;
-        var total_elements: usize = 1;
-        for (0..X.shape.len) |d| {
-            total_elements *= X.shape.dims[d];
-        }
-        const in_f = self.in_features;
-        if (total_elements % in_f != 0) return error.ShapeMismatch;
-        const rows = total_elements / in_f;
-
-        var x_b = try borrowArray(X);
-        defer x_b.deinit();
-
-        var x_2d = if (x_b.arr.ndim() == 2)
-            x_b.arr
-        else
-            try x_b.arr.reshape(&.{ rows, in_f }, stream);
-        defer if (x_b.arr.ndim() != 2) x_2d.deinit();
-
-        var res_mlx = try self.forwardArray(x_2d, stream);
-        errdefer res_mlx.deinit();
-
-        try storeOutput(out, res_mlx);
-    }
 };
 
 pub const Q4Weights = QuantWeights;
@@ -898,31 +550,59 @@ pub const LmHead = union(enum) {
     }
 };
 
-/// 量化矩阵乘法硬件加速便捷入口 (Quantized Matrix Multiplication, QMM)
-pub fn q4MatMul(
-    X: anytype,
-    out: anytype,
-    weights: *const QuantWeights,
-    stream: ?Stream,
-) OffloadError!void {
-    return weights.forward(X, out, stream);
-}
+pub const Mask = union(enum) {
+    none,
+    causal,
+    sliding: usize,
 
-pub const quantMatMul = q4MatMul;
+    pub const default: Mask = .none;
+
+    pub fn isVisible(self: Mask, q_pos: usize, k_pos: usize) bool {
+        return switch (self) {
+            .none => true,
+            .causal => k_pos <= q_pos,
+            .sliding => |window| k_pos <= q_pos and q_pos - k_pos < window,
+        };
+    }
+
+    pub fn simplify(self: Mask, tq: usize, tk: usize, q_pos0: usize, k_pos0: usize) Mask {
+        if (tq == 0 or tk == 0) return .none;
+        const first_q = q_pos0;
+        const last_q = q_pos0 + tq - 1;
+        const last_k = k_pos0 + tk - 1;
+        return switch (self) {
+            .none => .none,
+            .causal => if (last_k <= first_q) .none else .causal,
+            .sliding => |window| if (last_q < k_pos0 + window)
+                Mask.simplify(.causal, tq, tk, q_pos0, k_pos0)
+            else
+                self,
+        };
+    }
+
+    pub fn fillAdditive(self: Mask, dst: []f32, tq: usize, tk: usize, q_pos0: usize, k_pos0: usize) void {
+        const masked_value: f32 = -1e9;
+        @memset(dst, 0.0);
+        for (0..tq) |i| {
+            const q_pos = q_pos0 + i;
+            for (0..tk) |j| {
+                const k_pos = k_pos0 + j;
+                if (!self.isVisible(q_pos, k_pos)) {
+                    dst[i * tk + j] = masked_value;
+                }
+            }
+        }
+    }
+};
 
 /// 带掩码的分组查询缩放点积注意力 (Masked Grouped-Query Scaled Dot-Product Attention)
-/// q: [B, num_heads, tq, head_dim]，k / v: [B, num_kv_heads, tk, head_dim]（num_heads 为 num_kv_heads 的整数倍，dtype 任意且一致）；
-/// 第 i 个查询的绝对位置为 q_pos0 + i，第 j 个键的绝对位置为 k_pos0 + j，可见性见 `attention_mask.Mask`。
-/// 掩码先在 `[tq, tk]` 网格上化简 (`Mask.simplify`)：无掩码与右下对齐的因果掩码直接使用融合内核的内置模式，
-/// 其余情况在主机端构建加性掩码 (`fillAdditiveMask`)，按查询的 dtype 交给融合内核 (`mask_mode = "array"`)。
-/// 打分在 Softmax 前乘以 scale。
 pub fn maskedAttention(
     allocator: std.mem.Allocator,
     q: mlx.Array,
     k: mlx.Array,
     v: mlx.Array,
     scale: f32,
-    mask: attention_mask.Mask,
+    mask: Mask,
     q_pos0: usize,
     k_pos0: usize,
     stream: ?Stream,
@@ -934,17 +614,15 @@ pub fn maskedAttention(
 
     switch (mask.simplify(tq, tk, q_pos0, k_pos0)) {
         .none => return mlx.Array.fastScaledDotProductAttention(q, k, v, scale, .none, stream),
-        // 融合内核的因果模式按右下角对齐：第 i 个查询可见前 i + tk - tq + 1 个键
         .causal => if (q_pos0 + tq == k_pos0 + tk) return mlx.Array.fastScaledDotProductAttention(q, k, v, scale, .causal, stream),
         .sliding => {},
     }
 
     const mask_buf = try allocator.alloc(f32, tq * tk);
     defer allocator.free(mask_buf);
-    attention_mask.fillAdditiveMask(mask_buf, tq, tk, q_pos0, k_pos0, mask);
+    mask.fillAdditive(mask_buf, tq, tk, q_pos0, k_pos0);
     var mask_f32 = try mlx.Array.fromSlice(mask_buf, &.{ 1, 1, tq, tk });
     defer mask_f32.deinit();
-    // 加性掩码的 dtype 须可提升至查询的 dtype (如 bfloat16)，-1e9 在 bfloat16 中仍为有限的极大负值
     const q_dtype = q.dtype();
     var mask_cast: ?mlx.Array = if (q_dtype != .float32) try mask_f32.astype(q_dtype, stream) else null;
     defer if (mask_cast) |*m| m.deinit();
@@ -952,10 +630,7 @@ pub fn maskedAttention(
     return mlx.Array.fastScaledDotProductAttention(q, k, v, scale, .{ .additive = mask_cast orelse mask_f32 }, stream);
 }
 
-/// 键值缓存一步前向的注意力：键值视图须为 `GpuKvCache.writeStep` 返回的视图 (或与其覆盖相同绝对位置的视图)，
-/// 视图第 0 个键的绝对位置为 `visibleKeyRange` 的起点；查询位于 [pos, pos + seq_len)。
-/// 掩码化简后：可见键范围随查询变化时施加滑动窗口加性掩码，多词元步使用右下对齐因果掩码，
-/// 单词元解码步不需要掩码 (视图恰为该查询的可见键，含环形覆写的完整缓存)
+/// 键值缓存一步前向的注意力
 pub fn cachedAttention(
     allocator: std.mem.Allocator,
     q: mlx.Array,
@@ -969,9 +644,7 @@ pub fn cachedAttention(
     stream: ?Stream,
 ) OffloadError!mlx.Array {
     const range = GpuKvCache.visibleKeyRange(is_sliding, sliding_window, pos, seq_len);
-    const mask: attention_mask.Mask = if (is_sliding) .{ .sliding = sliding_window } else .causal;
-    // 环形覆写的完整缓存不按绝对位置排列，但它恰为单查询的可见键 [pos + 1 - sliding_window, pos]，
-    // 按这一绝对位置区间描述时掩码化简为无掩码，与槽位顺序无关
+    const mask: Mask = if (is_sliding) .{ .sliding = sliding_window } else .causal;
     return maskedAttention(allocator, q, k, v, scale, mask, pos, range.start, stream);
 }
 
@@ -1201,26 +874,3 @@ pub const GpuKvCache = struct {
         self.capacity = new_cap;
     }
 };
-
-// ============================================================================
-// 共享 MLX 组合块与对数几率处理器转导出
-// ============================================================================
-
-pub const mlx_blocks = @import("mlx_blocks.zig");
-pub const blocks = mlx_blocks;
-pub const Rope = mlx_blocks.Rope;
-pub const projectHeads = mlx_blocks.projectHeads;
-pub const gatedMlp = mlx_blocks.gatedMlp;
-pub const residualScale = mlx_blocks.residualScale;
-pub const finalHidden = mlx_blocks.finalHidden;
-
-pub const logits_processor = @import("logits_processor.zig");
-pub const softcapLogits = logits_processor.softcapLogits;
-pub const penalizeDevice = logits_processor.penalizeDevice;
-pub const deviceCandidates = logits_processor.deviceCandidates;
-pub const selectToken = logits_processor.selectToken;
-pub const selectTokenFromHidden = logits_processor.selectTokenFromHidden;
-pub const DeviceCandidates = logits_processor.DeviceCandidates;
-pub const HostCandidates = logits_processor.HostCandidates;
-pub const LogitsProcessorOptions = logits_processor.LogitsProcessorOptions;
-pub const LogitsProcessor = logits_processor.LogitsProcessor;

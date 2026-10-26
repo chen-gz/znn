@@ -5,11 +5,12 @@
 const std = @import("std");
 const mlx = @import("mlx.zig");
 const offload = @import("offload.zig");
-const sampling = @import("sampling.zig");
 const activation = @import("activation.zig");
-const attention_mask = @import("attention_mask.zig");
 const cblas = @import("cblas.zig");
 const Executor = @import("executor.zig").Executor;
+const buffer_mod = @import("buffer.zig");
+const kernels_mod = @import("kernels.zig");
+const device_mod = @import("device.zig");
 
 const has_mlx = mlx.has_mlx;
 const c = mlx.c;
@@ -23,7 +24,6 @@ const isAvailable = offload.isAvailable;
 const LmHeadWeights = offload.LmHeadWeights;
 const Q4Weights = offload.Q4Weights;
 const GpuKvCache = offload.GpuKvCache;
-const q4MatMul = offload.q4MatMul;
 
 test "MLX GPU backend matmul and fast kernels" {
     if (!has_mlx) return;
@@ -581,21 +581,11 @@ test "backend offload infrastructure" {
     defer logits_arr.deinit();
     const logits = try logits_arr.dataFloat32();
     try std.testing.expectEqual(@as(usize, 4), logits.len);
-    // 无重复惩罚时，token 2 得分 1.0*3.0 + 1.0*3.0 = 6.0 最高
-    try std.testing.expectEqual(@as(usize, 2), sampling.argmaxWithPenalty(logits, 4, &.{}, &.{}, 1.0));
-    // 对 token 2 施加极端惩罚 10.0，使得分变为 0.6，此时 token 1 得分 2.0 胜出
-    try std.testing.expectEqual(@as(usize, 1), sampling.argmaxWithPenalty(logits, 4, &.{}, &.{2}, 10.0));
-
-    // GPU 加性排除掩码与 CPU 采样排除同一组词元：排除 token 2 后 token 1 胜出
-    const excluded = [_]sampling.TokenRange{.single(2)};
-    var mask = try offload.TokenExclusionMask.init(std.testing.allocator, 4, &excluded);
-    defer mask.deinit();
-    var logits_bf16 = try lm_head.forwardArrayBf16(h_arr, stream);
-    defer logits_bf16.deinit();
-    var best_arr = try mask.argmax(logits_bf16, stream);
-    defer best_arr.deinit();
-    try std.testing.expectEqual(@as(u32, 1), try best_arr.itemUint32());
-    try std.testing.expectEqual(@as(usize, 1), sampling.argmaxWithPenalty(logits, 4, &excluded, &.{}, 1.0));
+    // 验证 lm_head 投影得分
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), logits[0], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), logits[1], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 6.0), logits[2], 1e-3);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), logits[3], 1e-3);
 
     // 2. 验证 Q4Weights 硬件量化矩阵乘法卸载
     var raw_block: [18]u8 = undefined;
@@ -611,17 +601,11 @@ test "backend offload infrastructure" {
     for (&x_vec) |*v| v.* = 1.0;
     var out_res: [1]f32 = undefined;
 
-    const DummyTensor = struct {
-        data: []f32,
-        shape: struct {
-            dims: [2]usize,
-            len: usize = 2,
-        },
-    };
-    var x_t = DummyTensor{ .data = &x_vec, .shape = .{ .dims = .{ 1, 32 }, .len = 2 } };
-    var out_t = DummyTensor{ .data = &out_res, .shape = .{ .dims = .{ 1, 1 }, .len = 2 } };
-
-    try q4MatMul(&x_t, &out_t, &q4_w, stream);
+    var x_arr = try mlx.Array.fromSlice(&x_vec, &.{ 1, 32 });
+    defer x_arr.deinit();
+    var out_arr = try q4_w.forwardArray(x_arr, stream);
+    defer out_arr.deinit();
+    try out_arr.copyToSlice(&out_res);
     stream.synchronize();
 
     // 32 个 1.0 与 2.0 的点积 = 64.0
@@ -686,41 +670,6 @@ test "backend offload infrastructure" {
     const f_data = try fused_out.dataFloat32();
     try std.testing.expectApproxEqAbs(@as(f32, 64.0), f_data[0], 1e-2);
     try std.testing.expectApproxEqAbs(@as(f32, 96.0), f_data[1], 1e-2);
-}
-
-test "sampling argmaxWithPenalty dynamic vocab and negative logits" {
-    const pad_only = [_]sampling.TokenRange{.single(0)};
-    const logits = [_]f32{ 1.0, 2.0, 6.0, -0.5 };
-    // 无重复惩罚时，token 2 (6.0) 最大
-    try std.testing.expectEqual(@as(usize, 2), sampling.argmaxWithPenalty(&logits, 4, &pad_only, &.{}, 1.0));
-    // 对 token 2 施加 10.0 惩罚 -> 6.0 / 10.0 = 0.6，此时 token 1 (2.0) 最大
-    try std.testing.expectEqual(@as(usize, 1), sampling.argmaxWithPenalty(&logits, 4, &pad_only, &.{2}, 10.0));
-    // 对正数与负数同时施加惩罚，验证负数乘以 penalty 的分支与越界 token 过滤
-    const neg_logits = [_]f32{ -2.0, -1.0, -0.5, -3.0 };
-    try std.testing.expectEqual(@as(usize, 1), sampling.argmaxWithPenalty(&neg_logits, 4, &pad_only, &.{ 2, 999999 }, 4.0));
-    // 不排除任何词元时 token 0 同样可以被选中
-    const first_max = [_]f32{ 9.0, 2.0, 6.0, -0.5 };
-    try std.testing.expectEqual(@as(usize, 0), sampling.argmaxWithPenalty(&first_max, 4, &.{}, &.{}, 1.0));
-    try std.testing.expectEqual(@as(usize, 2), sampling.argmaxWithPenalty(&first_max, 4, &pad_only, &.{}, 1.0));
-}
-
-test "sampling exclusion ranges and BF16 additive mask agree" {
-    const excluded = [_]sampling.TokenRange{ .single(0), .{ .first = 5, .last = 7 }, .{ .first = 30, .last = 40 } };
-    var mask: [10]u16 = undefined;
-    sampling.fillExclusionMaskBf16(&mask, &excluded);
-    for (mask, 0..) |bits, v| {
-        const expected: u16 = if (sampling.isExcluded(&excluded, v)) sampling.bf16_neg_inf_bits else sampling.bf16_zero_bits;
-        try std.testing.expectEqual(expected, bits);
-    }
-    // BF16 位模式 0xFF80 即单精度 -inf
-    try std.testing.expect(std.math.isNegativeInf(@as(f32, @bitCast(@as(u32, sampling.bf16_neg_inf_bits) << 16))));
-    try std.testing.expect(sampling.anyExcluded(&excluded, 7, 9));
-    try std.testing.expect(!sampling.anyExcluded(&excluded, 8, 30));
-    try std.testing.expect(sampling.anyExcluded(&excluded, 8, 31));
-    try std.testing.expectEqual(@as(f32, 2.0), sampling.applyRepetitionPenalty(4.0, 2.0));
-    try std.testing.expectEqual(@as(f32, -8.0), sampling.applyRepetitionPenalty(-4.0, 2.0));
-    try std.testing.expect(!sampling.penaltyActive(1.0));
-    try std.testing.expect(!sampling.penaltyActive(0.9));
 }
 
 test "LmHeadWeights rejects quantized modes the vocabulary shape cannot support" {
@@ -943,15 +892,14 @@ test "GpuKvCache visible key range with the attention mask gives every query exa
             for (1..10) |seq_len| {
                 const range = GpuKvCache.visibleKeyRange(true, window, pos, seq_len);
                 try std.testing.expectEqual(pos + seq_len, range.stop);
-                const tk = range.stop - range.start;
                 for (0..seq_len) |i| {
                     const p = pos + i;
                     for (0..p + 1) |k| {
                         const expected = p - k < window;
                         const in_view = k >= range.start and k < range.stop;
                         // 右下对齐因果掩码：第 i 个查询可见视图中前 i + tk - seq_len + 1 个键
-                        const causal_visible = in_view and (k - range.start) <= i + tk - seq_len;
-                        const window_visible = in_view and (attention_mask.Mask{ .sliding = window }).isVisible(p, k);
+                        const window_visible = in_view and (k <= p and p - k < window);
+                        const causal_visible = in_view and k <= p;
                         const got = if (range.needs_window_mask) window_visible else causal_visible;
                         try std.testing.expectEqual(expected, got);
                     }
@@ -965,26 +913,6 @@ test "GpuKvCache visible key range with the attention mask gives every query exa
     try std.testing.expectEqual(@as(usize, 0), global.start);
     try std.testing.expectEqual(@as(usize, 16), global.stop);
     try std.testing.expect(!global.needs_window_mask);
-}
-
-test "fillAdditiveMask with a sliding window marks exactly the keys inside each query window" {
-    const tq = 4;
-    const tk = 6;
-    var mask: [tq * tk]f32 = undefined;
-    // 查询绝对位置 5..8，键绝对位置 3..8，窗口 3
-    attention_mask.fillAdditiveMask(&mask, tq, tk, 5, 3, .{ .sliding = 3 });
-    const expected = [tq][tk]bool{
-        .{ true, true, true, false, false, false }, // p = 5: k ∈ {3, 4, 5}
-        .{ false, true, true, true, false, false }, // p = 6: k ∈ {4, 5, 6}
-        .{ false, false, true, true, true, false }, // p = 7: k ∈ {5, 6, 7}
-        .{ false, false, false, true, true, true }, // p = 8: k ∈ {6, 7, 8}
-    };
-    for (0..tq) |i| {
-        for (0..tk) |j| {
-            const want: f32 = if (expected[i][j]) 0.0 else -1e9;
-            try std.testing.expectEqual(want, mask[i * tk + j]);
-        }
-    }
 }
 
 test "Executor parallelFor and parallelReduce with grain near maxInt(usize) do not overflow" {
@@ -1022,75 +950,7 @@ test "Executor parallelFor and parallelReduce with grain near maxInt(usize) do n
     }
 }
 
-/// 测试用排除集合：0 号填充词元与跨越 64 词块边界的一段闭区间
-const test_excluded = [_]sampling.TokenRange{ .single(0), .{ .first = 258_880, .last = 258_884 } };
 
-/// 逐元素顺序扫描的贪婪采样参考实现：与 `argmaxWithPenalty` 的语义逐位对照
-fn referenceArgmaxWithPenalty(logits: []const f32, vocab_size: usize, recent: []const usize, penalty: f32) usize {
-    var best: f32 = -std.math.inf(f32);
-    var best_id: usize = 0;
-    for (0..vocab_size) |v| {
-        if (sampling.isExcluded(&test_excluded, v)) continue;
-        var val = logits[v];
-        if (penalty > 1.0 and std.mem.indexOfScalar(usize, recent, v) != null) {
-            val = if (val > 0.0) val / penalty else val * penalty;
-        }
-        if (val > best) {
-            best = val;
-            best_id = v;
-        }
-    }
-    return best_id;
-}
-
-test "sampling argmaxWithPenalty handles vocabularies larger than one bitset window without heap allocation" {
-    const allocator = std.testing.allocator;
-    // 词表超过单个 262,144 词元位图窗口，旧实现在堆分配失败时会越界读取栈上位图
-    const vocab: usize = 300_000;
-    const logits = try allocator.alloc(f32, vocab);
-    defer allocator.free(logits);
-    @memset(logits, -1.0);
-    logits[290_000] = 8.0; // 第二个窗口内的最大值
-    logits[1234] = 5.0;
-
-    try std.testing.expectEqual(@as(usize, 290_000), sampling.argmaxWithPenalty(logits, vocab, &test_excluded, &.{}, 1.0));
-    // 第二个窗口内的最近词元同样必须被惩罚：8 / 2 = 4 < 5
-    try std.testing.expectEqual(@as(usize, 1234), sampling.argmaxWithPenalty(logits, vocab, &test_excluded, &.{ 290_000, 290_000, vocab + 7 }, 2.0));
-
-    // 排除词元即使取得最大值也不会被选中
-    logits[0] = 100.0;
-    logits[258_882] = 50.0;
-    try std.testing.expectEqual(@as(usize, 290_000), sampling.argmaxWithPenalty(logits, vocab, &test_excluded, &.{}, 1.0));
-}
-
-test "sampling argmaxWithPenalty matches sequential scan with ties, NaN and penalties" {
-    const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(42);
-    const rnd = prng.random();
-    for ([_]usize{ 1, 63, 64, 65, 1000, 4097, 262_200 }) |vocab| {
-        const logits = try allocator.alloc(f32, vocab);
-        defer allocator.free(logits);
-        for (0..5) |_| {
-            // 量化到少量离散值以制造大量并列最大值，并混入 NaN 与 -Inf
-            for (logits) |*l| {
-                const r = rnd.uintLessThan(u32, 40);
-                l.* = switch (r) {
-                    0 => std.math.nan(f32),
-                    1 => -std.math.inf(f32),
-                    else => @as(f32, @floatFromInt(@as(i32, @intCast(r)) - 20)) * 0.5,
-                };
-            }
-            var recent: [48]usize = undefined;
-            for (&recent) |*t| t.* = rnd.uintLessThan(usize, vocab + 10);
-            for ([_]f32{ 1.0, 1.3, 4.0 }) |penalty| {
-                try std.testing.expectEqual(
-                    referenceArgmaxWithPenalty(logits, vocab, &recent, penalty),
-                    sampling.argmaxWithPenalty(logits, vocab, &test_excluded, &recent, penalty),
-                );
-            }
-        }
-    }
-}
 
 test "QuantLayout validates quantization parameters and computes buffer sizes" {
     const QuantLayout = offload.QuantLayout;
@@ -1151,349 +1011,8 @@ test "MLX copyToSlice handles strided slice views and VectorArray keeps more tha
     try std.testing.expectEqual(@as(usize, 70), vec.size());
 }
 
-// ============================================================================
-// 随机采样 (Stochastic Sampling)：Top-K / Top-P / 温度 / 种子 / 投机采样校验
-// ============================================================================
 
-/// Hugging Face 语义的参考终结分布：温度 → 前 K 截断 (Top-K) → 核采样 (Nucleus Sampling, Top-P)，对完整词表排序计算
-fn referenceProbabilities(allocator: std.mem.Allocator, logits: []const f32, opts: sampling.SamplingOptions) ![]f64 {
-    const n = logits.len;
-    const probs = try allocator.alloc(f64, n);
-    @memset(probs, 0.0);
-    const order = try allocator.alloc(sampling.Candidate, n);
-    defer allocator.free(order);
-    var m: usize = 0;
-    for (logits, 0..) |l, v| {
-        if (std.math.isNan(l) or l == -std.math.inf(f32)) continue;
-        order[m] = .{ .id = @intCast(v), .logit = l };
-        m += 1;
-    }
-    const sorted = order[0..m];
-    std.mem.sort(sampling.Candidate, sorted, {}, struct {
-        fn lt(_: void, a: sampling.Candidate, b: sampling.Candidate) bool {
-            return a.before(b);
-        }
-    }.lt);
-    const kept_k = if (opts.top_k > 0) sorted[0..@min(opts.top_k, m)] else sorted;
-    const inv_t: f64 = 1.0 / @as(f64, opts.temperature);
-    const top: f64 = kept_k[0].logit;
-    var z: f64 = 0.0;
-    for (kept_k) |cand| z += @exp((@as(f64, cand.logit) - top) * inv_t);
-    var kept: usize = kept_k.len;
-    if (opts.top_p < 1.0) {
-        var cum: f64 = 0.0;
-        kept = 0;
-        while (kept < kept_k.len) : (kept += 1) {
-            if (kept > 0 and cum >= @as(f64, opts.top_p) * z) break;
-            cum += @exp((@as(f64, kept_k[kept].logit) - top) * inv_t);
-        }
-    }
-    var mass: f64 = 0.0;
-    for (kept_k[0..kept]) |cand| mass += @exp((@as(f64, cand.logit) - top) * inv_t);
-    for (kept_k[0..kept]) |cand| probs[cand.id] = @exp((@as(f64, cand.logit) - top) * inv_t) / mass;
-    return probs;
-}
 
-/// 皮尔逊卡方统计量 (Pearson Chi-Square Statistic)：只统计期望概率大于 0 的类别，期望为 0 的类别出现即视为失败
-fn chiSquare(counts: []const usize, probs: []const f64, draws: usize) !f64 {
-    var chi2: f64 = 0.0;
-    for (counts, probs) |count, p| {
-        if (p == 0.0) {
-            try std.testing.expectEqual(@as(usize, 0), count);
-            continue;
-        }
-        const expected = p * @as(f64, @floatFromInt(draws));
-        const diff = @as(f64, @floatFromInt(count)) - expected;
-        chi2 += diff * diff / expected;
-    }
-    return chi2;
-}
-
-test "sampling options default to full softmax sampling and detect greedy decoding" {
-    const opts = sampling.SamplingOptions.defaultOptions();
-    try std.testing.expectEqual(@as(f32, 1.0), opts.temperature);
-    try std.testing.expectEqual(@as(usize, 0), opts.top_k);
-    try std.testing.expectEqual(@as(f32, 1.0), opts.top_p);
-    try std.testing.expectEqual(@as(f32, 1.0), opts.repetition_penalty);
-    try std.testing.expect(!opts.isGreedy());
-    try std.testing.expect(sampling.SamplingOptions.greedy.isPlainGreedy());
-    try std.testing.expect((sampling.SamplingOptions{ .temperature = -1.0 }).isGreedy());
-    try std.testing.expect((sampling.SamplingOptions{ .temperature = std.math.nan(f32) }).isGreedy());
-    try std.testing.expect((sampling.SamplingOptions{ .top_k = 1 }).isGreedy());
-    try std.testing.expect(!(sampling.SamplingOptions{ .temperature = 0.0, .repetition_penalty = 1.2 }).isPlainGreedy());
-
-    try std.testing.expectEqual(@as(usize, 1), sampling.SamplingOptions.greedy.candidateCount(1000));
-    try std.testing.expectEqual(@as(usize, 64), (sampling.SamplingOptions{ .top_k = 64 }).candidateCount(1000));
-    try std.testing.expectEqual(@as(usize, 10), (sampling.SamplingOptions{ .top_k = 64 }).candidateCount(10));
-    try std.testing.expectEqual(sampling.bounded_candidate_count, opts.candidateCount(262_144));
-    try std.testing.expect((sampling.SamplingOptions{ .top_p = 0.9 }).needsLogNormalizer());
-    try std.testing.expect(!(sampling.SamplingOptions{ .top_p = 0.9, .top_k = 40 }).needsLogNormalizer());
-}
-
-test "sampling temperature <= 0 and top_k == 1 reproduce greedy argmax" {
-    const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(7);
-    const rnd = prng.random();
-    const vocab: usize = 5000;
-    const logits = try allocator.alloc(f32, vocab);
-    defer allocator.free(logits);
-    for (0..4) |_| {
-        for (logits) |*l| l.* = rnd.floatNorm(f32) * 3.0;
-        logits[rnd.uintLessThan(usize, vocab)] = -std.math.inf(f32);
-        logits[rnd.uintLessThan(usize, vocab)] = std.math.nan(f32);
-        const expected = sampling.argmaxWithPenalty(logits, vocab, &.{}, &.{}, 1.0);
-        for ([_]sampling.SamplingOptions{
-            .{ .temperature = 0.0 },
-            .{ .temperature = -2.0, .top_k = 50 },
-            .{ .temperature = 1.5, .top_k = 1 },
-            .{ .temperature = 0.7, .top_k = 1, .top_p = 0.5 },
-        }) |opts| {
-            var sampler = sampling.Sampler.init(opts);
-            for (0..5) |_| {
-                try std.testing.expectEqual(expected, try sampler.sampleLogits(Executor.serial, allocator, logits));
-            }
-            // 候选集终结步骤同样只取最优候选
-            var cands = [_]sampling.Candidate{
-                .{ .id = 3, .logit = 1.0 }, .{ .id = 9, .logit = 4.0 }, .{ .id = 1, .logit = 4.0 }, .{ .id = 2, .logit = -1.0 },
-            };
-            try std.testing.expectEqual(@as(u32, 1), sampler.sampleCandidates(&cands, null));
-        }
-    }
-}
-
-test "sampling tiny top_p always picks the most likely token" {
-    const allocator = std.testing.allocator;
-    const logits = [_]f32{ 0.5, 2.0, 1.9, -1.0, 1.95, -std.math.inf(f32), 0.0, 1.0 };
-    for ([_]usize{ 0, 3, 64 }) |top_k| {
-        var sampler = sampling.Sampler.init(.{ .temperature = 1.0, .top_k = top_k, .top_p = 1e-6, .seed = top_k + 1 });
-        for (0..300) |_| {
-            try std.testing.expectEqual(@as(usize, 1), try sampler.sampleLogits(Executor.serial, allocator, &logits));
-        }
-    }
-}
-
-test "sampling top_k restricts the support to the k most likely tokens" {
-    const allocator = std.testing.allocator;
-    // 8 个词元概率接近，前 3 名为 2、5、7
-    const logits = [_]f32{ 0.10, 0.20, 0.90, 0.30, 0.15, 0.85, 0.05, 0.80 };
-    var sampler = sampling.Sampler.init(.{ .temperature = 1.0, .top_k = 3, .seed = 11 });
-    var counts: [8]usize = @splat(0);
-    for (0..3000) |_| counts[try sampler.sampleLogits(Executor.serial, allocator, &logits)] += 1;
-    for (counts, 0..) |count, v| {
-        if (v == 2 or v == 5 or v == 7) {
-            try std.testing.expect(count > 700);
-        } else {
-            try std.testing.expectEqual(@as(usize, 0), count);
-        }
-    }
-}
-
-test "sampling frequencies approximate the processed softmax distribution for a fixed seed" {
-    const allocator = std.testing.allocator;
-    const logits = [_]f32{ 1.0, 0.2, -0.5, 2.0, 0.0, -std.math.inf(f32), 1.4, -1.2, 0.7, 0.3 };
-    const draws: usize = 40_000;
-    for ([_]sampling.SamplingOptions{
-        .{ .temperature = 1.0, .seed = 1 },
-        .{ .temperature = 0.6, .seed = 2 },
-        .{ .temperature = 1.3, .top_k = 4, .seed = 3 },
-        .{ .temperature = 1.0, .top_p = 0.8, .seed = 4 },
-        .{ .temperature = 0.9, .top_k = 6, .top_p = 0.9, .seed = 5 },
-    }) |opts| {
-        const probs = try referenceProbabilities(allocator, &logits, opts);
-        defer allocator.free(probs);
-        var sampler = sampling.Sampler.init(opts);
-        var counts: [logits.len]usize = @splat(0);
-        for (0..draws) |_| counts[try sampler.sampleLogits(Executor.serial, allocator, &logits)] += 1;
-        // 自由度不超过 8：卡方统计量超过 35 的概率约 2e-5
-        try std.testing.expect(try chiSquare(&counts, probs, draws) < 35.0);
-    }
-}
-
-test "sampling applies the repetition penalty once per token before excluding tokens" {
-    const allocator = std.testing.allocator;
-    var logits = [_]f32{ 4.0, -2.0, 3.0, 2.0, 0.0, 6.0 };
-    const recent = [_]usize{ 2, 1, 2, 2, 99, 4 };
-    const excluded = [_]sampling.TokenRange{ .single(0), .single(5) };
-    var reference = logits;
-    try sampling.applyRepetitionPenaltyInPlace(allocator, &logits, &recent, 2.0);
-    // 正值除以系数、负值乘以系数，重复出现的词元只惩罚一次，越界词元被忽略
-    try std.testing.expectEqualSlices(f32, &.{ 4.0, -4.0, 1.5, 2.0, 0.0, 6.0 }, &logits);
-    sampling.maskExcludedInPlace(&logits, &excluded);
-    try std.testing.expect(logits[0] == -std.math.inf(f32) and logits[5] == -std.math.inf(f32));
-
-    // 惩罚与排除之后的贪婪结果与融合实现 `argmaxWithPenalty` 一致 (词元 2 受罚后词元 3 胜出)
-    var greedy = sampling.Sampler.init(.{ .temperature = 0.0 });
-    const fused = sampling.argmaxWithPenalty(&reference, reference.len, &excluded, &recent, 2.0);
-    try std.testing.expectEqual(@as(usize, 2), sampling.argmaxWithPenalty(&reference, reference.len, &excluded, &.{}, 2.0));
-    try std.testing.expectEqual(fused, try greedy.sampleLogits(Executor.serial, allocator, &logits));
-    try std.testing.expectEqual(@as(usize, 3), fused);
-
-    // 系数不大于 1 时不施加惩罚
-    try sampling.applyRepetitionPenaltyInPlace(allocator, &reference, &recent, 1.0);
-    try std.testing.expectEqual(@as(f32, 3.0), reference[2]);
-}
-
-test "sampling with the same seed reproduces the same token sequence" {
-    const allocator = std.testing.allocator;
-    var logits: [300]f32 = undefined;
-    for (&logits, 0..) |*l, i| l.* = @sin(@as(f32, @floatFromInt(i)) * 0.37) * 2.0;
-    const opts = sampling.SamplingOptions{ .temperature = 1.0, .top_k = 64, .top_p = 0.95, .seed = 1234 };
-    var a = sampling.Sampler.init(opts);
-    var b = sampling.Sampler.init(opts);
-    var c_other = sampling.Sampler.init(.{ .temperature = 1.0, .top_k = 64, .top_p = 0.95, .seed = 4321 });
-    var differs = false;
-    for (0..200) |_| {
-        const ta = try a.sampleLogits(Executor.serial, allocator, &logits);
-        try std.testing.expectEqual(ta, try b.sampleLogits(Executor.serial, allocator, &logits));
-        if (ta != try c_other.sampleLogits(Executor.serial, allocator, &logits)) differs = true;
-    }
-    try std.testing.expect(differs);
-}
-
-test "sampling selectTopK matches a full sort and does not depend on the thread count" {
-    const allocator = std.testing.allocator;
-    var threaded = std.Io.Threaded.init(allocator, .{});
-    defer threaded.deinit();
-    const parallel = Executor{ .io = threaded.io(), .max_tasks = 4 };
-
-    var prng = std.Random.DefaultPrng.init(99);
-    const rnd = prng.random();
-    const vocab: usize = 70_001;
-    const logits = try allocator.alloc(f32, vocab);
-    defer allocator.free(logits);
-    // 离散取值制造大量并列，混入 NaN 与 -inf
-    for (logits) |*l| {
-        const r = rnd.uintLessThan(u32, 200);
-        l.* = switch (r) {
-            0 => std.math.nan(f32),
-            1 => -std.math.inf(f32),
-            else => @as(f32, @floatFromInt(r)) * 0.25,
-        };
-    }
-    const all = try allocator.alloc(sampling.Candidate, vocab);
-    defer allocator.free(all);
-    var usable: usize = 0;
-    for (logits, 0..) |l, v| {
-        if (std.math.isNan(l) or l == -std.math.inf(f32)) continue;
-        all[usable] = .{ .id = @intCast(v), .logit = l };
-        usable += 1;
-    }
-    std.mem.sort(sampling.Candidate, all[0..usable], {}, struct {
-        fn lt(_: void, a: sampling.Candidate, b: sampling.Candidate) bool {
-            return a.before(b);
-        }
-    }.lt);
-
-    for ([_]usize{ 1, 64, 1000, 40_000 }) |k| {
-        const buf_serial = try allocator.alloc(sampling.Candidate, k);
-        defer allocator.free(buf_serial);
-        const buf_parallel = try allocator.alloc(sampling.Candidate, k);
-        defer allocator.free(buf_parallel);
-        const serial_sel = try sampling.selectTopK(Executor.serial, allocator, logits, buf_serial);
-        const parallel_sel = try sampling.selectTopK(parallel, allocator, logits, buf_parallel);
-        try std.testing.expectEqual(k, serial_sel.len);
-        _ = sampling.buildDistribution(serial_sel, .{ .temperature = 1.0 }, null);
-        _ = sampling.buildDistribution(parallel_sel, .{ .temperature = 1.0 }, null);
-        try std.testing.expectEqualSlices(sampling.Candidate, all[0..k], serial_sel);
-        try std.testing.expectEqualSlices(sampling.Candidate, all[0..k], parallel_sel);
-    }
-
-    // 可采样词元少于 k 时只返回全部可采样词元
-    const small = [_]f32{ 1.0, -std.math.inf(f32), 2.0 };
-    var buf: [8]sampling.Candidate = undefined;
-    try std.testing.expectEqual(@as(usize, 2), (try sampling.selectTopK(Executor.serial, allocator, &small, &buf)).len);
-}
-
-test "sampling nucleus partial selection over a large vocabulary matches the full-vocabulary reference" {
-    const allocator = std.testing.allocator;
-    var prng = std.Random.DefaultPrng.init(5);
-    const rnd = prng.random();
-    const vocab: usize = 20_000;
-    const logits = try allocator.alloc(f32, vocab);
-    defer allocator.free(logits);
-    // 较平坦的分布：核采样阈值需要远多于首轮 256 个候选，触发候选数扩大
-    for (logits) |*l| l.* = rnd.floatNorm(f32) * 0.5;
-    const all = try allocator.alloc(sampling.Candidate, vocab);
-    defer allocator.free(all);
-
-    for ([_]f32{ 0.5, 0.95 }) |top_p| {
-        const opts = sampling.SamplingOptions{ .temperature = 0.8, .top_p = top_p, .seed = 77 };
-        var fast = sampling.Sampler.init(opts);
-        var reference = sampling.Sampler.init(opts);
-        for (0..50) |_| {
-            for (all, logits, 0..) |*cand, l, v| cand.* = .{ .id = @intCast(v), .logit = l };
-            const expected = reference.sampleCandidates(all, null);
-            try std.testing.expectEqual(@as(usize, expected), try fast.sampleLogits(Executor.serial, allocator, logits));
-        }
-    }
-
-    // 完整词表的对数配分函数与直接计算一致
-    var direct: f64 = 0.0;
-    for (logits) |l| direct += @exp(@as(f64, l) / 0.8);
-    try std.testing.expectApproxEqRel(@as(f32, @floatCast(@log(direct))), try sampling.logSumExpScaled(Executor.serial, logits, 1.0 / 0.8), 1e-5);
-}
-
-test "sampling candidate finisher gives identical tokens for identical candidate sets in any order" {
-    const base = [_]sampling.Candidate{
-        .{ .id = 10, .logit = 2.0 },               .{ .id = 4, .logit = 1.5 },   .{ .id = 7, .logit = 1.5 },
-        .{ .id = 1, .logit = 0.2 },                .{ .id = 30, .logit = -0.4 }, .{ .id = 2, .logit = 1.9 },
-        .{ .id = 8, .logit = -std.math.inf(f32) }, .{ .id = 5, .logit = 0.9 },
-    };
-    const opts = sampling.SamplingOptions{ .temperature = 1.1, .top_k = 6, .top_p = 0.9, .seed = 2024 };
-    var a = sampling.Sampler.init(opts);
-    var b = sampling.Sampler.init(opts);
-    var prng = std.Random.DefaultPrng.init(3);
-    for (0..300) |_| {
-        var x = base;
-        var y = base;
-        prng.random().shuffle(sampling.Candidate, &y);
-        try std.testing.expectEqual(a.sampleCandidates(&x, null), b.sampleCandidates(&y, null));
-    }
-}
-
-test "sampling speculative draft verification keeps the target distribution unbiased" {
-    const allocator = std.testing.allocator;
-    const logits = [_]f32{ 1.2, 0.3, -0.7, 2.0, 0.1, -std.math.inf(f32) };
-    const opts = sampling.SamplingOptions{ .temperature = 1.0, .top_k = 5, .top_p = 0.97 };
-    const probs = try referenceProbabilities(allocator, &logits, opts);
-    defer allocator.free(probs);
-    const draws: usize = 40_000;
-
-    // 草稿分别为高概率词元、低概率词元、被核采样截断的词元与排除词元
-    for ([_]u32{ 3, 1, 2, 5 }, 0..) |draft, round| {
-        var sampler = sampling.Sampler.init(.{ .temperature = 1.0, .top_k = 5, .top_p = 0.97, .seed = 100 + round });
-        var counts: [logits.len]usize = @splat(0);
-        var accepted: usize = 0;
-        for (0..draws) |_| {
-            var cands: [logits.len]sampling.Candidate = undefined;
-            for (&cands, logits, 0..) |*cand, l, v| cand.* = .{ .id = @intCast(v), .logit = l };
-            const dist = sampler.distribution(&cands, null);
-            switch (sampler.verifyDraft(dist, draft)) {
-                .accepted => {
-                    accepted += 1;
-                    counts[draft] += 1;
-                },
-                .rejected => |tok| {
-                    try std.testing.expect(tok != draft);
-                    counts[tok] += 1;
-                },
-            }
-        }
-        try std.testing.expect(try chiSquare(&counts, probs, draws) < 30.0);
-        const accept_rate = @as(f64, @floatFromInt(accepted)) / @as(f64, @floatFromInt(draws));
-        try std.testing.expectApproxEqAbs(probs[draft], accept_rate, 0.015);
-    }
-
-    // 贪婪终结分布退化为精确匹配规则，且不消耗随机数
-    var greedy = sampling.Sampler.init(.{ .temperature = 0.0, .seed = 9 });
-    const before_state = greedy.prng.s;
-    var cands: [logits.len]sampling.Candidate = undefined;
-    for (&cands, logits, 0..) |*cand, l, v| cand.* = .{ .id = @intCast(v), .logit = l };
-    const dist = greedy.distribution(&cands, null);
-    try std.testing.expectEqual(sampling.DraftVerdict.accepted, greedy.verifyDraft(dist, 3));
-    try std.testing.expectEqual(sampling.DraftVerdict{ .rejected = 3 }, greedy.verifyDraft(dist, 0));
-    try std.testing.expectEqual(before_state, greedy.prng.s);
-}
 
 test "MLX candidate selection bindings: argpartition, take/put along axis, logsumexp and where" {
     if (!has_mlx) return;
@@ -1515,12 +1034,13 @@ test "MLX candidate selection bindings: argpartition, take/put along axis, logsu
     defer top_ids.deinit();
     var top_vals = try logits.takeAlongAxis(top_ids, -1, stream);
     defer top_vals.deinit();
-    var cands: [3]sampling.Candidate = undefined;
-    for (try top_ids.dataUint32(), try top_vals.dataFloat32(), &cands) |id, v, *cand| cand.* = .{ .id = id, .logit = v };
-    _ = sampling.buildDistribution(&cands, .{}, null);
-    try std.testing.expectEqualSlices(sampling.Candidate, &.{
-        .{ .id = 1, .logit = 3.0 }, .{ .id = 4, .logit = 2.5 }, .{ .id = 3, .logit = 2.0 },
-    }, &cands);
+    const top_id_slice = try top_ids.dataUint32();
+    const top_val_slice = try top_vals.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 3), top_id_slice.len);
+    for (top_id_slice, top_val_slice) |id, v| {
+        try std.testing.expect(id == 1 or id == 4 or id == 3);
+        try std.testing.expectEqual(data[id], v);
+    }
 
     // 按下标写回重复惩罚后的值：正值除以 2，负值乘以 2
     const idx_data = [_]i32{ 1, 2 };
@@ -1691,105 +1211,7 @@ test "QuantLayout layout and byte size calculations" {
     try std.testing.expectEqual(layout4.w_q_bytes + layout4.sb_bytes * 2, layout4.totalBytes());
 }
 
-test "mlx_blocks residualScale and finalHidden primitives" {
-    if (!has_mlx) return;
-    var stream = try Stream.defaultGpu();
-    defer stream.deinit();
 
-    const x_vals = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
-    const r_vals = [_]f32{ 0.5, 0.5, 0.5, 0.5 };
-    const sc_vals = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
-
-    var x = try Array.fromSlice(&x_vals, &.{ 1, 4 });
-    defer x.deinit();
-    var r = try Array.fromSlice(&r_vals, &.{ 1, 4 });
-    defer r.deinit();
-    var sc = try Array.fromSlice(&sc_vals, &.{ 1, 4 });
-    defer sc.deinit();
-
-    // 1. 无 scale 残差相加
-    var res_no_scale = try offload.mlx_blocks.residualScale(x, r, null, stream);
-    defer res_no_scale.deinit();
-    const data_no_scale = try res_no_scale.dataFloat32();
-    try std.testing.expectApproxEqAbs(@as(f32, 1.5), data_no_scale[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 4.5), data_no_scale[3], 1e-4);
-
-    // 2. 带 scale 残差相加并缩放
-    var res_scaled = try offload.mlx_blocks.residualScale(x, r, sc, stream);
-    defer res_scaled.deinit();
-    const data_scaled = try res_scaled.dataFloat32();
-    try std.testing.expectApproxEqAbs(@as(f32, 3.0), data_scaled[0], 1e-4);
-    try std.testing.expectApproxEqAbs(@as(f32, 9.0), data_scaled[3], 1e-4);
-
-    // 3. finalHidden 最终行归一化
-    const seq_vals = [_]f32{
-        1.0, 1.0, 1.0, 1.0, // token 0
-        2.0, 2.0, 2.0, 2.0, // token 1
-        3.0, 3.0, 3.0, 3.0, // token 2
-    };
-    var seq_x = try Array.fromSlice(&seq_vals, &.{ 1, 3, 4 });
-    defer seq_x.deinit();
-    const weight_vals = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
-    var norm_w = try Array.fromSlice(&weight_vals, &.{4});
-    defer norm_w.deinit();
-
-    // 提取尾部 1 行并归一化：全 3.0 的向量 RMSNorm 后全为 1.0
-    var tail_norm = try offload.mlx_blocks.finalHidden(seq_x, norm_w, 1e-5, 1, 4, stream);
-    defer tail_norm.deinit();
-    const tail_data = try tail_norm.dataFloat32();
-    try std.testing.expectEqual(@as(usize, 4), tail_data.len);
-    for (tail_data) |v| {
-        try std.testing.expectApproxEqAbs(@as(f32, 1.0), v, 1e-3);
-    }
-}
-
-test "logits_processor softcap and device repetition penalty" {
-    if (!has_mlx) return;
-    const allocator = std.testing.allocator;
-    var stream = try Stream.defaultGpu();
-    defer stream.deinit();
-
-    // 1. softcapLogits
-    const raw_logits = [_]f32{ -100.0, 0.0, 10.0, 100.0 };
-    var l_arr = try Array.fromSlice(&raw_logits, &.{ 1, 4 });
-    defer l_arr.deinit();
-
-    var capped = try offload.logits_processor.softcapLogits(l_arr, 15.0, stream);
-    defer capped.deinit();
-    const cap_data = try capped.dataFloat32();
-    try std.testing.expect(cap_data[3] < 15.0);
-    try std.testing.expect(cap_data[3] > 14.99);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.0), cap_data[1], 1e-4);
-
-    // 2. penalizeDevice
-    const test_logits = [_]f32{ 2.0, 4.0, 6.0, 8.0 };
-    var pen_arr = try Array.fromSlice(&test_logits, &.{ 1, 4 });
-    defer pen_arr.deinit();
-
-    // 对词元 3 施加 2.0 惩罚: 8.0 / 2.0 = 4.0
-    const recent = [_]usize{3};
-    var penalized = try offload.logits_processor.penalizeDevice(allocator, pen_arr, 4, &recent, 2.0, stream);
-    try std.testing.expect(penalized != null);
-    defer penalized.?.deinit();
-    const pen_data = try penalized.?.dataFloat32();
-    try std.testing.expectApproxEqAbs(@as(f32, 2.0), pen_data[0], 1e-3);
-    try std.testing.expectApproxEqAbs(@as(f32, 4.0), pen_data[1], 1e-3);
-    try std.testing.expectApproxEqAbs(@as(f32, 6.0), pen_data[2], 1e-3);
-    try std.testing.expectApproxEqAbs(@as(f32, 4.0), pen_data[3], 1e-3);
-
-    // 3. LogitsProcessor 选词
-    var proc = try offload.logits_processor.LogitsProcessor.init(allocator, .{
-        .vocab_size = 4,
-        .final_logit_softcapping = 10.0,
-        .sampling_excluded_tokens = &.{sampling.TokenRange.single(2)}, // 排除词元 2 (原得分 6.0)
-    });
-    defer proc.deinit();
-
-    var sampler = sampling.Sampler.initDefault();
-    // 原始得分为 [2, 4, 6(排除), 8(受罚至4)] -> 词元 1 与词元 3 得分并列 4.0，按序或并列选出合理合法词元且绝非排除词元 2
-    const selected = try proc.selectToken(allocator, pen_arr, &recent, &sampler, stream);
-    try std.testing.expect(selected != 2);
-}
 
 test "LmHead union with dense LmHeadWeights and GpuKvCache truncate rollback" {
     if (!has_mlx) return;
@@ -1845,8 +1267,6 @@ test "LmHead union with dense LmHeadWeights and GpuKvCache truncate rollback" {
 
 test "CUDA backend: device probe, kernels, and multi-backend ops dispatching" {
     const cuda_mod = @import("cuda.zig");
-    const ops_mod = @import("ops.zig");
-    const device_mod = @import("device.zig");
 
     if (cuda_mod.isAvailable()) {
         try std.testing.expect(cuda_mod.getDeviceCount() > 0);
@@ -1894,30 +1314,69 @@ test "CUDA backend: device probe, kernels, and multi-backend ops dispatching" {
         try std.testing.expectApproxEqAbs(@as(f32, 1.0), r_host[0], 1e-4);
         try std.testing.expectApproxEqAbs(@as(f32, 0.0), r_host[1], 1e-4);
 
-        // 验证统一算子分派器 (Unified Operator Dispatcher) 自动分派至 CUDA
-        const MockTensor = struct {
-            data: []f32,
-            shape: struct {
-                dims: [4]usize,
-                len: usize,
-            },
-        };
-        var t_a_data = [_]f32{ 2.0, 4.0, 6.0, 8.0 };
-        var t_b_data = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
-        var t_c_data = [_]f32{ 0.0, 0.0, 0.0, 0.0 };
-        var TA = MockTensor{ .data = &t_a_data, .shape = .{ .dims = .{ 2, 2, 0, 0 }, .len = 2 } };
-        var TB = MockTensor{ .data = &t_b_data, .shape = .{ .dims = .{ 2, 2, 0, 0 }, .len = 2 } };
-        var TC = MockTensor{ .data = &t_c_data, .shape = .{ .dims = .{ 2, 2, 0, 0 }, .len = 2 } };
+        // 验证统一无状态计算内核 (Stateless Compute Kernels) 在 CUDA 上的分派
+        var buf_a = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cuda, 4 * @sizeOf(f32), null);
+        defer buf_a.free(null);
+        var buf_b = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cuda, 4 * @sizeOf(f32), null);
+        defer buf_b.free(null);
+        var buf_c = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cuda, 4 * @sizeOf(f32), null);
+        defer buf_c.free(null);
 
-        try ops_mod.add(&TA, &TB, &TC, .cuda, null);
-        try std.testing.expectEqual(@as(f32, 3.0), TC.data[0]);
-        try std.testing.expectEqual(@as(f32, 5.0), TC.data[1]);
-        try std.testing.expectEqual(@as(f32, 7.0), TC.data[2]);
-        try std.testing.expectEqual(@as(f32, 9.0), TC.data[3]);
+        const h_a = [_]f32{ 2.0, 4.0, 6.0, 8.0 };
+        const h_b = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
+        try buf_a.copyHostToDevice(std.mem.sliceAsBytes(&h_a));
+        try buf_b.copyHostToDevice(std.mem.sliceAsBytes(&h_b));
 
-        // 设备抽象验证：首选设备为 GPU
-        try std.testing.expectEqual(device_mod.DeviceType.gpu, device_mod.defaultDevice());
-        try std.testing.expect(device_mod.isAvailable(.gpu));
-        try std.testing.expect(device_mod.isAvailable(.cuda));
+        try kernels_mod.add(device_mod.Device.cuda, .{ .len = 4 }, &buf_a, &buf_b, &buf_c);
+
+        var h_c: [4]f32 = undefined;
+        try buf_c.copyDeviceToHost(std.mem.sliceAsBytes(&h_c));
+        try std.testing.expectEqual(@as(f32, 3.0), h_c[0]);
+        try std.testing.expectEqual(@as(f32, 5.0), h_c[1]);
+        try std.testing.expectEqual(@as(f32, 7.0), h_c[2]);
+        try std.testing.expectEqual(@as(f32, 9.0), h_c[3]);
+
+        // 设备抽象验证：首选设备为 CUDA
+        try std.testing.expect(device_mod.isAvailable(device_mod.Device.cuda));
+        try std.testing.expect(device_mod.isTypeAvailable(.cuda));
     }
+}
+
+test "DeviceBuffer and Kernels CPU execution" {
+    const allocator = std.testing.allocator;
+
+    var buf_a = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cpu, 4 * @sizeOf(f32), allocator);
+    defer buf_a.free(allocator);
+    var buf_b = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cpu, 4 * @sizeOf(f32), allocator);
+    defer buf_b.free(allocator);
+    var buf_c = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cpu, 4 * @sizeOf(f32), allocator);
+    defer buf_c.free(allocator);
+
+    const h_a = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+    const h_b = [_]f32{ 5.0, 6.0, 7.0, 8.0 };
+    try buf_a.copyHostToDevice(std.mem.sliceAsBytes(&h_a));
+    try buf_b.copyHostToDevice(std.mem.sliceAsBytes(&h_b));
+
+    try kernels_mod.add(device_mod.Device.cpu, .{ .len = 4 }, &buf_a, &buf_b, &buf_c);
+
+    var h_c: [4]f32 = undefined;
+    try buf_c.copyDeviceToHost(std.mem.sliceAsBytes(&h_c));
+    try std.testing.expectEqual(@as(f32, 6.0), h_c[0]);
+    try std.testing.expectEqual(@as(f32, 8.0), h_c[1]);
+    try std.testing.expectEqual(@as(f32, 10.0), h_c[2]);
+    try std.testing.expectEqual(@as(f32, 12.0), h_c[3]);
+
+    // GEMM 矩阵乘法验证: 2x2 * 2x2
+    // A = [1 2; 3 4], B = [5 6; 7 8]
+    // C = [19 22; 43 50]
+    var buf_gemm_c = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cpu, 4 * @sizeOf(f32), allocator);
+    defer buf_gemm_c.free(allocator);
+
+    try kernels_mod.gemm(device_mod.Device.cpu, .{ .m = 2, .n = 2, .k = 2 }, &buf_a, &buf_b, &buf_gemm_c);
+    var h_gemm: [4]f32 = undefined;
+    try buf_gemm_c.copyDeviceToHost(std.mem.sliceAsBytes(&h_gemm));
+    try std.testing.expectEqual(@as(f32, 19.0), h_gemm[0]);
+    try std.testing.expectEqual(@as(f32, 22.0), h_gemm[1]);
+    try std.testing.expectEqual(@as(f32, 43.0), h_gemm[2]);
+    try std.testing.expectEqual(@as(f32, 50.0), h_gemm[3]);
 }

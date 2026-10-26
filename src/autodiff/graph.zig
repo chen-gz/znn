@@ -11,6 +11,7 @@ pub const Op = types.Op;
 const graph_nn = @import("graph_nn.zig");
 const graph_init = @import("graph_init.zig");
 const backend = @import("../backend.zig");
+const ops = @import("ops.zig");
 pub const Executor = backend.Executor;
 
 /// 计算图执行模式
@@ -604,7 +605,7 @@ pub const Graph = struct {
             if (A.shape.len != 2 or B.shape.len != 2) return error.IncompatibleDimensions;
             if (A.shape.dims[1] != B.shape.dims[0]) return error.ShapeMismatch;
             const out = try self.tensorND(&.{ A.shape.dims[0], B.shape.dims[1] }, req_grad);
-            try backend.ops.matmul(A, B, out, self.options.device, self.options.mlx_stream);
+            try ops.matmul(A, B, out, self.options.device, self.options.mlx_stream);
             break :blk out;
         } else try A.matmul(B, allocator);
         return self.registerSingleOutputOp(C, &.{ A, B }, .MatMul, .{ .MatMul = {} }, req_grad);
@@ -646,7 +647,7 @@ pub const Graph = struct {
         };
         if (self.useDevice()) {
             const out = try self.tensorND(A_in.shape.slice(), req_grad);
-            try backend.ops.gelu(A_in, out, approximation, self.options.device, self.options.mlx_stream);
+            try ops.gelu(A_in, out, approximation, self.options.device, self.options.mlx_stream);
             return self.registerSingleOutputOp(
                 out,
                 &.{A_in},
@@ -700,7 +701,7 @@ pub const Graph = struct {
         const req_grad = self.enable_grad and A_in.requires_grad;
         if (self.useDevice()) {
             const out = try self.tensorND(A_in.shape.slice(), req_grad);
-            try backend.ops.softcap(A_in, out, cap, self.options.device, self.options.mlx_stream);
+            try ops.softcap(A_in, out, cap, self.options.device, self.options.mlx_stream);
             return self.registerSingleOutputOp(
                 out,
                 &.{A_in},
@@ -770,7 +771,7 @@ pub const Graph = struct {
         const req_grad = self.enable_grad and A_in.requires_grad;
         if (self.useDevice()) {
             const out = try self.tensorND(A_in.shape.slice(), req_grad);
-            try backend.ops.mulScalar(A_in, val, out, self.options.device, self.options.mlx_stream);
+            try ops.mulScalar(A_in, val, out, self.options.device, self.options.mlx_stream);
             return self.registerSingleOutputOp(
                 out,
                 &.{A_in},
@@ -839,7 +840,7 @@ pub const Graph = struct {
         const C = if (self.useDevice()) blk: {
             const out_shape = try tensor_mod.broadcastShapes(A.shape, B.shape);
             const out = try self.tensorND(out_shape.slice(), req_grad);
-            try backend.ops.add(A, B, out, self.options.device, self.options.mlx_stream);
+            try ops.add(A, B, out, self.options.device, self.options.mlx_stream);
             break :blk out;
         } else try A.add(B, allocator);
         return self.registerSingleOutputOp(
@@ -871,7 +872,7 @@ pub const Graph = struct {
         const C = if (self.useDevice()) blk: {
             const out_shape = try tensor_mod.broadcastShapes(A.shape, B.shape);
             const out = try self.tensorND(out_shape.slice(), req_grad);
-            try backend.ops.multiply(A, B, out, self.options.device, self.options.mlx_stream);
+            try ops.multiply(A, B, out, self.options.device, self.options.mlx_stream);
             break :blk out;
         } else try A.mul(B, allocator);
         return self.registerSingleOutputOp(

@@ -284,7 +284,7 @@ test "CausalSelfAttention Module" {
     try std.testing.expectEqualSlices(usize, &.{ 2, 3, 8 }, y_eager.shape.dims[0..y_eager.shape.len]);
 
     if (backend.mlx.has_mlx) {
-        var y_gpu_graph = autodiff.Graph.init(arena, .{ .enable_grad = false, .device = .gpu });
+        var y_gpu_graph = autodiff.Graph.init(arena, .{ .enable_grad = false, .device = .metal });
         defer y_gpu_graph.deinit();
         const y_gpu = try attn.forward(&y_gpu_graph, x_3d);
         try std.testing.expectEqualSlices(usize, &.{ 2, 3, 8 }, y_gpu.shape.dims[0..y_gpu.shape.len]);
@@ -2044,4 +2044,58 @@ test "Sequential accepts BatchNorm layers whose forward takes a const receiver" 
     // 推理模式下 BatchNorm 使用初始滑动统计量 (均值 0、方差 1)，近似恒等变换
     try std.testing.expectApproxEqAbs(@as(f32, 4.0), y.data[0], 1e-3);
     try std.testing.expectApproxEqAbs(@as(f32, 0.0), y.data[2], 1e-6);
+}
+
+test "transformer_blocks residualScale and finalHidden primitives" {
+    if (!backend.mlx.has_mlx) return;
+    const Stream = backend.mlx.Stream;
+    const Array = backend.mlx.Array;
+    var stream = try Stream.defaultGpu();
+    defer stream.deinit();
+
+    const x_vals = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+    const r_vals = [_]f32{ 0.5, 0.5, 0.5, 0.5 };
+    const sc_vals = [_]f32{ 2.0, 2.0, 2.0, 2.0 };
+
+    var x = try Array.fromSlice(&x_vals, &.{ 1, 4 });
+    defer x.deinit();
+    var r = try Array.fromSlice(&r_vals, &.{ 1, 4 });
+    defer r.deinit();
+    var sc = try Array.fromSlice(&sc_vals, &.{ 1, 4 });
+    defer sc.deinit();
+
+    // 1. 无 scale 残差相加
+    var res_no_scale = try nn.transformer_blocks.residualScale(x, r, null, stream);
+    defer res_no_scale.deinit();
+    const data_no_scale = try res_no_scale.dataFloat32();
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), data_no_scale[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 4.5), data_no_scale[3], 1e-4);
+
+    // 2. 带 scale 残差相加并缩放
+    var res_scaled = try nn.transformer_blocks.residualScale(x, r, sc, stream);
+    defer res_scaled.deinit();
+    const data_scaled = try res_scaled.dataFloat32();
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), data_scaled[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 9.0), data_scaled[3], 1e-4);
+
+    // 3. finalHidden 最终行归一化
+    const seq_vals = [_]f32{
+        1.0, 1.0, 1.0, 1.0, // token 0
+        2.0, 2.0, 2.0, 2.0, // token 1
+        3.0, 3.0, 3.0, 3.0, // token 2
+    };
+    var seq_x = try Array.fromSlice(&seq_vals, &.{ 1, 3, 4 });
+    defer seq_x.deinit();
+    const weight_vals = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
+    var norm_w = try Array.fromSlice(&weight_vals, &.{4});
+    defer norm_w.deinit();
+
+    // 提取尾部 1 行并归一化：全 3.0 的向量 RMSNorm 后全为 1.0
+    var tail_norm = try nn.transformer_blocks.finalHidden(seq_x, norm_w, 1e-5, 1, 4, stream);
+    defer tail_norm.deinit();
+    const tail_data = try tail_norm.dataFloat32();
+    try std.testing.expectEqual(@as(usize, 4), tail_data.len);
+    for (tail_data) |v| {
+        try std.testing.expectApproxEqAbs(@as(f32, 1.0), v, 1e-3);
+    }
 }

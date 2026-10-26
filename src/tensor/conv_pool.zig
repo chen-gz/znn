@@ -1,5 +1,6 @@
 const std = @import("std");
-const c = @import("../backend/cblas.zig");
+const backend = @import("../backend.zig");
+const c = backend.cblas;
 const core = @import("core.zig");
 const types = @import("types.zig");
 const Tensor = core.Tensor;

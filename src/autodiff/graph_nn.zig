@@ -1,5 +1,5 @@
 const std = @import("std");
-const backend = @import("../backend.zig");
+const ops = @import("ops.zig");
 const tensor_mod = @import("../tensor.zig");
 const Tensor = tensor_mod.Tensor;
 const types = @import("types.zig");
@@ -479,7 +479,7 @@ pub fn softmax(self: *Graph, A_in: *Tensor) !*Tensor {
     const C = if (self.useDevice()) blk: {
         if (A.shape.len == 0) return error.IncompatibleDimensions;
         const out = try self.tensorND(A.shape.dims[0..A.shape.len], req_grad);
-        try backend.ops.softmax(A, out, -1, self.options.device, self.options.mlx_stream);
+        try ops.softmax(A, out, -1, self.options.device, self.options.mlx_stream);
         break :blk out;
     } else try A.softmax(allocator);
     return self.registerSingleOutputOp(C, &.{A}, .Softmax, .{ .Softmax = {} }, req_grad);
@@ -501,7 +501,7 @@ pub fn rmsNorm(self: *Graph, X_in: *Tensor, W_in: ?*Tensor, options: tensor_mod.
     const Y = if (self.useDevice() and (W == null or options.weight_offset == 0.0)) blk: {
         if (W) |w| if (w.shape.numel() != D) return error.ShapeMismatch;
         const out = try self.tensorND(X.shape.dims[0..X.shape.len], req_grad);
-        try backend.ops.rmsNorm(X, W, out, options.eps, self.options.device, self.options.mlx_stream);
+        try ops.rmsNorm(X, W, out, options.eps, self.options.device, self.options.mlx_stream);
         break :blk out;
     } else try X.rmsNorm(W, options, if (req_grad) inv_rms else null, allocator);
 
@@ -723,9 +723,9 @@ pub fn rope(self: *Graph, X_in: *Tensor, start_pos: usize, options: tensor_mod.R
     if (X.shape.len == 0) return error.IncompatibleDimensions;
     const req_grad = self.enable_grad and X.requires_grad;
     const D = X.shape.dims[X.shape.len - 1];
-    const Y = if (self.useDevice() and backend.ops.ropeSupported(D, options)) blk: {
+    const Y = if (self.useDevice() and ops.ropeSupported(D, options)) blk: {
         const out = try self.tensorND(X.shape.dims[0..X.shape.len], req_grad);
-        try backend.ops.rope(X, out, options, start_pos, self.options.device, self.options.mlx_stream);
+        try ops.rope(X, out, options, start_pos, self.options.device, self.options.mlx_stream);
         break :blk out;
     } else try X.rope(start_pos, options, allocator);
     return self.registerSingleOutputOp(
@@ -747,7 +747,7 @@ pub fn batchMatMul(self: *Graph, A_in: *Tensor, B_in: *Tensor) !*Tensor {
         if (A.shape.len != 4 or B.shape.len != 4) return error.IncompatibleDimensions;
         if (A.shape.dims[0] != B.shape.dims[0] or A.shape.dims[1] != B.shape.dims[1] or A.shape.dims[3] != B.shape.dims[2]) return error.ShapeMismatch;
         const out = try self.tensorND(&.{ A.shape.dims[0], A.shape.dims[1], A.shape.dims[2], B.shape.dims[3] }, req_grad);
-        try backend.ops.matmul(A, B, out, self.options.device, self.options.mlx_stream);
+        try ops.matmul(A, B, out, self.options.device, self.options.mlx_stream);
         break :blk out;
     } else try A.batchMatMul(B, allocator);
     return self.registerSingleOutputOp(C, &.{ A, B }, .BatchMatMul, .{ .BatchMatMul = {} }, req_grad);
@@ -771,7 +771,7 @@ pub fn attention(self: *Graph, q_in: *Tensor, k_in: *Tensor, v_in: *Tensor, opti
     const probs: []f32 = if (req_grad) try allocator.alloc(f32, shape.probsLen()) else &.{};
     var dispatched_device = false;
     if (self.useDevice() and !req_grad) {
-        if (backend.ops.attention(self.backing_allocator, q, k, v, out, options.resolveScale(shape.head_dim), options.mask, options.q_pos0, options.k_pos0, self.options.device, self.options.mlx_stream)) |_| {
+        if (ops.attention(self.backing_allocator, q, k, v, out, options.resolveScale(shape.head_dim), options.mask, options.q_pos0, options.k_pos0, self.options.device, self.options.mlx_stream)) |_| {
             dispatched_device = true;
         } else |_| {}
     }
@@ -835,7 +835,7 @@ pub fn embedding(self: *Graph, W_in: *Tensor, X: anytype) !*Tensor {
 
     if (self.useDevice() and (W.device.isGpu() or W.device_array != null)) {
         const Y = try self.tensorND(shape_slice, req_grad);
-        try backend.ops.embedding(W, x_tensor, Y, self.options.device, self.options.mlx_stream);
+        try ops.embedding(W, x_tensor, Y, self.options.device, self.options.mlx_stream);
         return self.registerSingleOutputOp(
             Y,
             &.{ W, x_tensor },

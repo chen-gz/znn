@@ -1410,7 +1410,7 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
     var g_cpu = Graph.init(allocator, .{ .enable_grad = false, .device = .cpu });
     defer g_cpu.deinit();
 
-    var g_gpu = Graph.init(allocator, .{ .enable_grad = false, .device = .gpu });
+    var g_gpu = Graph.init(allocator, .{ .enable_grad = false, .device = .metal });
     defer g_gpu.deinit();
 
     // 1. 验证矩阵乘法 GPU 卸载 (MatMul)
@@ -1521,7 +1521,7 @@ test "Graph MLX GPU accelerated matmul, rmsNorm, and scaledDotProductAttention" 
 
 test "Graph: GPU forward with training gradients (requires_grad = true) and backward propagation" {
     const backend = @import("../backend.zig");
-    if (!backend.device.isAvailable(.gpu)) return;
+    const dev = backend.device.defaultGpu() orelse return;
 
     const allocator = std.testing.allocator;
 
@@ -1537,7 +1537,7 @@ test "Graph: GPU forward with training gradients (requires_grad = true) and back
     try g_cpu.backward(loss_cpu);
 
     // 2. GPU 硬件加速前向与反向传播
-    var g_gpu = Graph.init(allocator, .{ .enable_grad = true, .device = .gpu });
+    var g_gpu = Graph.init(allocator, .{ .enable_grad = true, .device = dev });
     defer g_gpu.deinit();
 
     const x_gpu = try g_gpu.array(&.{ 2, 3 }, &.{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 }, true);

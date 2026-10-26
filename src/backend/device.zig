@@ -1,50 +1,81 @@
 //! 计算设备抽象与硬件探测 (Device Abstraction & Hardware Detection)
 //!
-//! 定义多后端统一计算设备（中央处理器 CPU、图形处理器 GPU / 硬件加速器、统一计算设备架构 CUDA）与可用性探测，
-//! 与底层具体厂商驱动（Apple MLX、NVIDIA CUDA、Vulkan 等）解耦。
+//! 定义具体目标计算设备 (CPU, CUDA, Metal)，支持多卡索引 (.index: u32 = 0)，
+//! 完全剔除含糊不清的 .gpu 枚举，与具体驱动实现解耦。
 
 const std = @import("std");
-const mlx = @import("mlx.zig");
 const cuda = @import("cuda.zig");
+const mlx = @import("mlx.zig");
 const offload = @import("offload.zig");
 
-/// 目标计算设备类型枚举 (中央处理器 CPU 与图形处理器 GPU / CUDA)
+/// 目标计算设备硬件类型枚举 (Hardware Device Type)
 pub const DeviceType = enum {
     cpu,
-    gpu,
     cuda,
+    metal,
 
-    pub fn isGpu(self: DeviceType) bool {
-        return self == .gpu or self == .cuda;
+    pub fn isCpu(self: DeviceType) bool {
+        return self == .cpu;
     }
 
     pub fn isCuda(self: DeviceType) bool {
         return self == .cuda;
     }
 
-    pub fn isCpu(self: DeviceType) bool {
-        return self == .cpu;
+    pub fn isMetal(self: DeviceType) bool {
+        return self == .metal;
     }
 
-    /// 转换为底层 MLX 的 DeviceType (用于 Apple Silicon Metal 驱动互操作)
-    pub fn toMlx(self: DeviceType) mlx.DeviceType {
-        return switch (self) {
-            .cpu => .cpu,
-            .gpu, .cuda => .gpu,
-        };
-    }
-
-    /// 从 MLX DeviceType 转换
-    pub fn fromMlx(dev: mlx.DeviceType) DeviceType {
-        return switch (dev) {
-            .cpu => .cpu,
-            .gpu => .gpu,
-        };
+    pub fn isGpu(self: DeviceType) bool {
+        return self == .cuda or self == .metal;
     }
 };
 
-/// 计算设备别名
-pub const Device = DeviceType;
+/// 计算设备结构体 (Compute Device with Ordinal)
+/// 遵循 AGENTS.md §4 规范：默认字段值提供开箱即用，暴露 defaultOptions()
+pub const Device = struct {
+    type: DeviceType = .cpu,
+    index: u32 = 0,
+
+    pub const cpu: Device = .{ .type = .cpu, .index = 0 };
+    pub const cuda: Device = .{ .type = .cuda, .index = 0 };
+    pub const metal: Device = .{ .type = .metal, .index = 0 };
+
+    pub fn defaultOptions() Device {
+        return defaultDevice();
+    }
+
+    pub fn isCpu(self: Device) bool {
+        return self.type.isCpu();
+    }
+
+    pub fn isCuda(self: Device) bool {
+        return self.type.isCuda();
+    }
+
+    pub fn isMetal(self: Device) bool {
+        return self.type.isMetal();
+    }
+
+    pub fn isGpu(self: Device) bool {
+        return self.type.isGpu();
+    }
+
+    pub fn eql(self: Device, other: Device) bool {
+        return self.type == other.type and self.index == other.index;
+    }
+
+    pub fn format(
+        self: Device,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{s}:{d}", .{ @tagName(self.type), self.index });
+    }
+};
 
 /// 跨硬件统一设备显存数组联合体 (Unified Device Memory Array Union)
 pub const DeviceArray = union(enum) {
@@ -72,13 +103,6 @@ pub const DeviceArray = union(enum) {
         }
     }
 
-    pub fn copyToTensor(self: DeviceArray, t: anytype) !void {
-        switch (self) {
-            .mlx => |arr| try arr.copyToTensor(t),
-            .cuda => |arr| try arr.copyToTensor(t),
-        }
-    }
-
     pub fn eval(self: DeviceArray) void {
         switch (self) {
             .mlx => |arr| arr.eval(),
@@ -86,21 +110,21 @@ pub const DeviceArray = union(enum) {
         }
     }
 
-    pub fn reshape(self: DeviceArray, new_dims: []const usize, stream_opt: anytype) !DeviceArray {
+    pub fn reshape(self: DeviceArray, new_dims: []const usize, stream_opt: ?mlx.Stream) !DeviceArray {
         return switch (self) {
             .mlx => |arr| .{ .mlx = try arr.reshape(new_dims, stream_opt) },
             .cuda => |arr| .{ .cuda = try arr.reshape(new_dims) },
         };
     }
 
-    pub fn transposeAxes(self: DeviceArray, axes: []const usize, stream_opt: anytype) !DeviceArray {
+    pub fn transposeAxes(self: DeviceArray, axes: []const usize, stream_opt: ?mlx.Stream) !DeviceArray {
         return switch (self) {
             .mlx => |arr| .{ .mlx = try arr.transposeAxes(axes, stream_opt) },
             .cuda => error.OperationNotSupported,
         };
     }
 
-    pub fn sliceAxis(self: DeviceArray, axis: usize, start: usize, end: usize, stream_opt: anytype) !DeviceArray {
+    pub fn sliceAxis(self: DeviceArray, axis: usize, start: usize, end: usize, stream_opt: ?mlx.Stream) !DeviceArray {
         return switch (self) {
             .mlx => |arr| .{ .mlx = try arr.sliceAxis(axis, start, end, stream_opt) },
             .cuda => error.OperationNotSupported,
@@ -189,49 +213,64 @@ pub const BackendType = enum {
     mlx,
 };
 
-/// 探测指定计算设备在当前平台是否可用
-pub fn isAvailable(dev: DeviceType) bool {
-    return switch (dev) {
+/// 检查指定设备在当前平台是否可用
+pub fn isAvailable(device: Device) bool {
+    return switch (device.type) {
+        .cpu => true,
+        .cuda => cuda.isAvailable() and device.index < cuda.deviceCount(),
+        .metal => mlx.has_mlx and device.index == 0,
+    };
+}
+
+/// 检查指定设备类型在当前平台是否可用
+pub fn isTypeAvailable(dev_type: DeviceType) bool {
+    return switch (dev_type) {
         .cpu => true,
         .cuda => cuda.isAvailable(),
-        .gpu => cuda.isAvailable() or mlx.has_mlx,
+        .metal => mlx.has_mlx,
     };
 }
 
-/// 获取指定设备类型实际分派的底层硬件后端类型
-pub fn activeBackend(dev: DeviceType) BackendType {
-    return switch (dev) {
+/// 获取系统默认首选计算设备 (CUDA > Metal > CPU)
+pub fn defaultDevice() Device {
+    if (cuda.isAvailable()) return Device.cuda;
+    if (mlx.has_mlx) return Device.metal;
+    return Device.cpu;
+}
+
+/// 获取首选 GPU 设备 (CUDA 或 Metal，若无 GPU 可用返回 null)
+pub fn defaultGpu() ?Device {
+    if (cuda.isAvailable()) return Device.cuda;
+    if (mlx.has_mlx) return Device.metal;
+    return null;
+}
+
+/// 获取指定设备实际分派的底层硬件后端类型
+pub fn activeBackend(dev: Device) BackendType {
+    return switch (dev.type) {
         .cpu => .cpu,
         .cuda => if (cuda.isAvailable()) .cuda else .cpu,
-        .gpu => if (cuda.isAvailable()) .cuda else if (mlx.has_mlx) .mlx else .cpu,
+        .metal => if (mlx.has_mlx) .mlx else .cpu,
     };
-}
-
-/// 获取当前系统的默认首选计算设备 (若图形处理器 GPU 可用优先使用 GPU，否则回退到中央处理器 CPU)
-pub fn defaultDevice() DeviceType {
-    if (isAvailable(.gpu)) return .gpu;
-    return .cpu;
 }
 
 test "device: detection and conversions" {
     const dev = defaultDevice();
     if (cuda.isAvailable()) {
-        try std.testing.expectEqual(Device.gpu, dev);
-        try std.testing.expect(isAvailable(.gpu));
-        try std.testing.expect(isAvailable(.cuda));
+        try std.testing.expectEqual(Device.cuda, dev);
+        try std.testing.expect(isAvailable(Device.cuda));
+        try std.testing.expect(isTypeAvailable(.cuda));
         try std.testing.expect(dev.isGpu());
-        try std.testing.expectEqual(BackendType.cuda, activeBackend(.gpu));
-        try std.testing.expectEqual(BackendType.cuda, activeBackend(.cuda));
+        try std.testing.expectEqual(BackendType.cuda, activeBackend(Device.cuda));
     } else if (mlx.has_mlx) {
-        try std.testing.expectEqual(Device.gpu, dev);
-        try std.testing.expect(isAvailable(.gpu));
+        try std.testing.expectEqual(Device.metal, dev);
+        try std.testing.expect(isAvailable(Device.metal));
         try std.testing.expect(dev.isGpu());
-        try std.testing.expectEqual(mlx.DeviceType.gpu, dev.toMlx());
-        try std.testing.expectEqual(BackendType.mlx, activeBackend(.gpu));
+        try std.testing.expectEqual(BackendType.mlx, activeBackend(Device.metal));
     } else {
         try std.testing.expectEqual(Device.cpu, dev);
-        try std.testing.expect(isAvailable(.cpu));
+        try std.testing.expect(isAvailable(Device.cpu));
         try std.testing.expect(dev.isCpu());
-        try std.testing.expectEqual(BackendType.cpu, activeBackend(.gpu));
+        try std.testing.expectEqual(BackendType.cpu, activeBackend(Device.cpu));
     }
 }

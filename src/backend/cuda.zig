@@ -10,7 +10,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const activation = @import("activation.zig");
 const GeluApproximation = activation.GeluApproximation;
-const rope_mod = @import("rope.zig");
 const kernels = @import("cuda_kernels.zig");
 
 pub const CUdevice = c_int;
@@ -271,6 +270,10 @@ pub fn getDeviceCount() u32 {
     return @intCast(count);
 }
 
+pub fn deviceCount() u32 {
+    return getDeviceCount();
+}
+
 /// 获取首选图形处理器的名称
 pub fn getDeviceName(buf: []u8) []const u8 {
     const api = getApi() catch return "CPU";
@@ -424,23 +427,14 @@ pub const Array = struct {
         };
     }
 
-    /// 从主机张量创建设备数组
-    pub fn fromTensor(t: anytype) CudaError!Array {
-        const slice = t.data;
-        const dims = t.shape.dims[0..t.shape.len];
-        return fromSlice(slice, dims);
-    }
-
-    /// 拷贝设备数组数据回主机张量
-    pub fn copyToTensor(self: Array, t: anytype) CudaError!void {
-        if (self.len != t.data.len) return error.ShapeMismatch;
-        try copyDeviceToHost(t.data.ptr, self.ptr, self.len * @sizeOf(f32));
-    }
-
     /// 拷贝到主机切片
     pub fn toHostSlice(self: Array, dest: []f32) CudaError!void {
         if (self.len != dest.len) return error.ShapeMismatch;
         try copyDeviceToHost(dest.ptr, self.ptr, self.len * @sizeOf(f32));
+    }
+
+    pub fn copyToSlice(self: Array, dest: []f32) CudaError!void {
+        return self.toHostSlice(dest);
     }
 
     /// 克隆设备数组
@@ -1111,6 +1105,260 @@ pub const Array = struct {
         };
     }
 };
+
+// ============================================================================
+// 底层强类型内核启动函数 (Low-Level Typed Kernel Launchers)
+// ============================================================================
+
+pub fn launchSgemm(
+    a_ptr: CUdeviceptr,
+    b_ptr: CUdeviceptr,
+    c_ptr: CUdeviceptr,
+    m: usize,
+    n: usize,
+    k: usize,
+    batch: usize,
+) CudaError!void {
+    try ensureContext();
+    const api = try getApi();
+    const func = fn_sgemm orelse return error.KernelNotFound;
+    var m_u32: u32 = @intCast(m);
+    var n_u32: u32 = @intCast(n);
+    var k_u32: u32 = @intCast(k);
+    var str_a: u32 = @intCast(m * k);
+    var str_b: u32 = @intCast(k * n);
+    var str_c: u32 = @intCast(m * n);
+    var d_a = a_ptr;
+    var d_b = b_ptr;
+    var d_c = c_ptr;
+    var params = [_]?*anyopaque{
+        &d_a, &d_b, &d_c, &m_u32, &n_u32, &k_u32, &str_a, &str_b, &str_c,
+    };
+    const block_dim: c_uint = 16;
+    const grid_x: c_uint = @intCast((n + block_dim - 1) / block_dim);
+    const grid_y: c_uint = @intCast((m + block_dim - 1) / block_dim);
+    const grid_z: c_uint = @intCast(batch);
+    if (api.cuLaunchKernel(func, grid_x, grid_y, grid_z, block_dim, block_dim, 1, 0, null, &params, null) != .success) {
+        return error.CudaOperationFailed;
+    }
+}
+
+pub fn launchRmsNorm(
+    x_ptr: CUdeviceptr,
+    w_ptr: CUdeviceptr,
+    out_ptr: CUdeviceptr,
+    rows: usize,
+    cols: usize,
+    eps: f32,
+) CudaError!void {
+    try ensureContext();
+    const api = try getApi();
+    const func = fn_rms_norm orelse return error.KernelNotFound;
+    var d_x = x_ptr;
+    var d_w = w_ptr;
+    var d_out = out_ptr;
+    var eps_val = eps;
+    var rows_u32: u32 = @intCast(rows);
+    var cols_u32: u32 = @intCast(cols);
+    var params = [_]?*anyopaque{
+        &d_x, &d_w, &d_out, &eps_val, &rows_u32, &cols_u32,
+    };
+    if (api.cuLaunchKernel(func, rows_u32, 1, 1, 1, 1, 1, 0, null, &params, null) != .success) {
+        return error.CudaOperationFailed;
+    }
+}
+
+pub fn launchRope(
+    x_ptr: CUdeviceptr,
+    out_ptr: CUdeviceptr,
+    total_tokens: usize,
+    head_dim: usize,
+    traditional: bool,
+    base: f32,
+    start_pos: usize,
+) CudaError!void {
+    try ensureContext();
+    const api = try getApi();
+    const func = fn_rope orelse return error.KernelNotFound;
+    var d_x = x_ptr;
+    var d_out = out_ptr;
+    var total_tokens_u32: u32 = @intCast(total_tokens);
+    var head_dim_u32: u32 = @intCast(head_dim);
+    var start_pos_u32: u32 = @intCast(start_pos);
+    var base_val = base;
+    var trad_val: u32 = if (traditional) 1 else 0;
+    var params = [_]?*anyopaque{
+        &d_x, &d_out, &total_tokens_u32, &head_dim_u32, &start_pos_u32, &base_val, &trad_val,
+    };
+    if (api.cuLaunchKernel(func, total_tokens_u32, 1, 1, 1, 1, 1, 0, null, &params, null) != .success) {
+        return error.CudaOperationFailed;
+    }
+}
+
+pub fn launchSoftmax(
+    x_ptr: CUdeviceptr,
+    out_ptr: CUdeviceptr,
+    rows: usize,
+    cols: usize,
+) CudaError!void {
+    try ensureContext();
+    const api = try getApi();
+    const func = fn_softmax orelse return error.KernelNotFound;
+    var d_x = x_ptr;
+    var d_out = out_ptr;
+    var rows_u32: u32 = @intCast(rows);
+    var cols_u32: u32 = @intCast(cols);
+    var params = [_]?*anyopaque{
+        &d_x, &d_out, &rows_u32, &cols_u32,
+    };
+    if (api.cuLaunchKernel(func, rows_u32, 1, 1, 1, 1, 1, 0, null, &params, null) != .success) {
+        return error.CudaOperationFailed;
+    }
+}
+
+pub fn launchAdd(
+    a_ptr: CUdeviceptr,
+    b_ptr: CUdeviceptr,
+    out_ptr: CUdeviceptr,
+    len: usize,
+) CudaError!void {
+    try ensureContext();
+    const api = try getApi();
+    const func = fn_add orelse return error.KernelNotFound;
+    var d_a = a_ptr;
+    var d_b = b_ptr;
+    var d_c = out_ptr;
+    var n_u32: u32 = @intCast(len);
+    var params = [_]?*anyopaque{
+        &d_a, &d_b, &d_c, &n_u32,
+    };
+    const block_dim: c_uint = 256;
+    const grid_dim: c_uint = @intCast((len + block_dim - 1) / block_dim);
+    if (api.cuLaunchKernel(func, grid_dim, 1, 1, block_dim, 1, 1, 0, null, &params, null) != .success) {
+        return error.CudaOperationFailed;
+    }
+}
+
+pub fn launchMultiply(
+    a_ptr: CUdeviceptr,
+    b_ptr: CUdeviceptr,
+    out_ptr: CUdeviceptr,
+    len: usize,
+) CudaError!void {
+    try ensureContext();
+    const api = try getApi();
+    const func = fn_multiply orelse return error.KernelNotFound;
+    var d_a = a_ptr;
+    var d_b = b_ptr;
+    var d_c = out_ptr;
+    var n_u32: u32 = @intCast(len);
+    var params = [_]?*anyopaque{
+        &d_a, &d_b, &d_c, &n_u32,
+    };
+    const block_dim: c_uint = 256;
+    const grid_dim: c_uint = @intCast((len + block_dim - 1) / block_dim);
+    if (api.cuLaunchKernel(func, grid_dim, 1, 1, block_dim, 1, 1, 0, null, &params, null) != .success) {
+        return error.CudaOperationFailed;
+    }
+}
+
+pub fn launchMulScalar(
+    a_ptr: CUdeviceptr,
+    scalar: f32,
+    out_ptr: CUdeviceptr,
+    len: usize,
+) CudaError!void {
+    try ensureContext();
+    const api = try getApi();
+    const func = fn_mul_scalar orelse return error.KernelNotFound;
+    var d_a = a_ptr;
+    var s_val = scalar;
+    var d_c = out_ptr;
+    var n_u32: u32 = @intCast(len);
+    var params = [_]?*anyopaque{
+        &d_a, &s_val, &d_c, &n_u32,
+    };
+    const block_dim: c_uint = 256;
+    const grid_dim: c_uint = @intCast((len + block_dim - 1) / block_dim);
+    if (api.cuLaunchKernel(func, grid_dim, 1, 1, block_dim, 1, 1, 0, null, &params, null) != .success) {
+        return error.CudaOperationFailed;
+    }
+}
+
+pub fn launchGelu(
+    x_ptr: CUdeviceptr,
+    out_ptr: CUdeviceptr,
+    len: usize,
+    use_tanh: bool,
+) CudaError!void {
+    _ = use_tanh;
+    try ensureContext();
+    const api = try getApi();
+    const func = fn_gelu orelse return error.KernelNotFound;
+    var d_a = x_ptr;
+    var d_out = out_ptr;
+    var n_u32: u32 = @intCast(len);
+    var params = [_]?*anyopaque{
+        &d_a, &d_out, &n_u32,
+    };
+    const block_dim: c_uint = 256;
+    const grid_dim: c_uint = @intCast((len + block_dim - 1) / block_dim);
+    if (api.cuLaunchKernel(func, grid_dim, 1, 1, block_dim, 1, 1, 0, null, &params, null) != .success) {
+        return error.CudaOperationFailed;
+    }
+}
+
+pub fn launchSoftcap(
+    x_ptr: CUdeviceptr,
+    out_ptr: CUdeviceptr,
+    len: usize,
+    cap: f32,
+) CudaError!void {
+    try ensureContext();
+    const api = try getApi();
+    const func = fn_softcap orelse return error.KernelNotFound;
+    var d_in = x_ptr;
+    var d_out = out_ptr;
+    var n_u32: u32 = @intCast(len);
+    var cap_f32 = cap;
+    var params = [_]?*anyopaque{
+        &d_in, &d_out, &n_u32, &cap_f32,
+    };
+    const block_dim: c_uint = 256;
+    const grid_dim: c_uint = @intCast((len + block_dim - 1) / block_dim);
+    if (api.cuLaunchKernel(func, grid_dim, 1, 1, block_dim, 1, 1, 0, null, &params, null) != .success) {
+        return error.CudaOperationFailed;
+    }
+}
+
+pub fn launchEmbedding(
+    weights_ptr: CUdeviceptr,
+    indices_ptr: CUdeviceptr,
+    out_ptr: CUdeviceptr,
+    n: usize,
+    d: usize,
+    v: usize,
+) CudaError!void {
+    try ensureContext();
+    const api = try getApi();
+    const func = fn_embedding orelse return error.KernelNotFound;
+    var n_u32: u32 = @intCast(n);
+    var d_u32: u32 = @intCast(d);
+    var v_u32: u32 = @intCast(v);
+    var d_idx = indices_ptr;
+    var d_w = weights_ptr;
+    var d_out = out_ptr;
+    var params = [_]?*anyopaque{
+        &d_idx, &d_w, &d_out, &n_u32, &d_u32, &v_u32,
+    };
+    const block_x: c_uint = 16;
+    const block_y: c_uint = 16;
+    const grid_x: c_uint = @intCast((d + block_x - 1) / block_x);
+    const grid_y: c_uint = @intCast((n + block_y - 1) / block_y);
+    if (api.cuLaunchKernel(func, grid_x, grid_y, 1, block_x, block_y, 1, 0, null, &params, null) != .success) {
+        return error.CudaOperationFailed;
+    }
+}
 
 /// 统一计算设备架构键值缓存 (Compute Unified Device Architecture Key-Value Cache, CudaKvCache)
 pub const CudaKvCache = struct {

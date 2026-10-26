@@ -1,5 +1,6 @@
 const std = @import("std");
-const c = @import("../backend/cblas.zig");
+const backend = @import("../backend.zig");
+const c = backend.cblas;
 const core = @import("core.zig");
 const types = @import("types.zig");
 const conv_pool = @import("conv_pool.zig");
@@ -7,14 +8,14 @@ const Tensor = core.Tensor;
 const ConvOptions = types.ConvOptions;
 const PoolOptions = types.PoolOptions;
 const RmsNormOptions = types.RmsNormOptions;
-const rope_mod = @import("../backend/rope.zig");
+const rope_mod = @import("rope.zig");
 const RopeOptions = rope_mod.RopeOptions;
-const RopeTable = @import("rope.zig").RopeTable;
+const RopeTable = rope_mod.RopeTable;
 const ops_mod = @import("ops.zig");
 const zeros = ops_mod.zeros;
 const free = ops_mod.free;
 const shape_mod = @import("shape.zig");
-const vec_math = @import("../backend/vec_math.zig");
+const vec_math = backend.vec_math;
 
 pub const conv1d = conv_pool.conv1d;
 pub const conv2d = conv_pool.conv2d;

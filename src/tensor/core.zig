@@ -1,6 +1,6 @@
 const std = @import("std");
 const backend = @import("../backend.zig");
-const c = @import("../backend/cblas.zig");
+const c = backend.cblas;
 const shape_mod = @import("shape.zig");
 pub const Shape = shape_mod.Shape;
 pub const computeContiguousStrides = shape_mod.computeContiguousStrides;
@@ -211,22 +211,22 @@ pub const Tensor = struct {
         }
     }
 
-    /// 迁移张量至指定设备 (.cpu, .gpu 或 .cuda)
+    /// 迁移张量至指定设备 (.cpu, .cuda 或 .metal)
     pub fn toDevice(self: *Tensor, target: backend.Device) !void {
-        if (self.device == target and self.device_array != null) return;
-        switch (target) {
-            .gpu, .cuda => {
+        if (self.device.eql(target) and self.device_array != null) return;
+        switch (target.type) {
+            .cuda, .metal => {
                 if (!backend.device.isAvailable(target)) return error.DeviceNotSupported;
                 const active = backend.device.activeBackend(target);
                 if (active == .cuda) {
                     if (self.device_array == null or !self.device_array.?.isCuda()) {
                         if (self.device_array) |*old| old.deinit();
-                        self.device_array = .{ .cuda = try backend.cuda.Array.fromTensor(self) };
+                        self.device_array = .{ .cuda = try backend.cuda.Array.fromSlice(self.data, self.shape.dims[0..self.shape.len]) };
                     }
                 } else if (active == .mlx) {
                     if (self.device_array == null or !self.device_array.?.isMlx()) {
                         if (self.device_array) |*old| old.deinit();
-                        self.device_array = .{ .mlx = try backend.mlx.Array.fromTensorZeroCopy(self) };
+                        self.device_array = .{ .mlx = try backend.mlx.Array.fromSliceZeroCopy(self.data, self.shape.dims[0..self.shape.len]) };
                     }
                 }
                 self.device = target;
@@ -243,7 +243,7 @@ pub const Tensor = struct {
         if (self.device_array) |da| {
             if (da.asCuda()) |arr| return arr;
         }
-        return backend.cuda.Array.fromTensor(self);
+        return backend.cuda.Array.fromSlice(self.data, self.shape.dims[0..self.shape.len]);
     }
 
     /// 将只读张量转换为 MLX 数组 (Apple Machine Learning Explore, MLX)
@@ -251,7 +251,7 @@ pub const Tensor = struct {
         if (self.device_array) |da| {
             if (da.asMlx()) |arr| return arr;
         }
-        return backend.mlx.Array.fromTensor(self);
+        return backend.mlx.Array.fromSlice(self.data, self.shape.dims[0..self.shape.len]);
     }
 
     /// 将张量以零拷贝 (Zero-Copy) 方式映射为 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
@@ -259,12 +259,12 @@ pub const Tensor = struct {
         if (self.device_array) |da| {
             if (da.asMlx()) |arr| return arr;
         }
-        return backend.mlx.Array.fromTensorZeroCopy(self);
+        return backend.mlx.Array.fromSliceZeroCopy(self.data, self.shape.dims[0..self.shape.len]);
     }
 
     /// 将 MLX 数组计算完成后的数据拷贝回张量
     pub fn copyFromMlxArray(self: *Tensor, arr: backend.mlx.Array) !void {
-        return arr.copyToTensor(self);
+        return arr.copyToSlice(self.data);
     }
 
     /// 从已求值的 MLX 数组新建分配一个张量
