@@ -72,3 +72,15 @@
 - **保持端到端大模型训练能力完备**：
   - 框架必须完整支持因果自回归语言模型的全生命周期训练（计算图构建、交叉熵损失、反向传播与优化器更新），确保可以直接加载 `models.GPT` 等模型编写预训练、SFT 与微调脚本。
 
+## 8. AI Prompts & Phased Task Blueprints (`prompts/`)
+- **Dedicated AI Prompts & Plans Hub (`prompts/` 目录规范)**：
+  - 仓库根目录下的 [`prompts/`](prompts/) 文件夹专门用于归档由 AI 生成的大段复杂任务提示词 (Prompts)、接口契约、阶段蓝图与断点恢复指南。
+- **Mandatory Pre-Execution Plan Logging (任务开始前必须建档)**：
+  - 任何 AI 助手或多 Agent 系统在启动复杂重构、架构演化或多步骤任务之前，**必须首先把推进的计划、接口设计、提示词与验收标准写入 `prompts/` 目录下**（例如 `prompts/02_tensor_storage_and_zero_alloc_ops.md`）。
+- **Token Limitation & Context Preservation (Token 限制与断点恢复)**：
+  - 由于大模型单次对话的上下文窗口与 Token 预算存在硬限制，不可预期的中断或限流是常态。在 `prompts/` 中保留自包含的、结构清晰的各阶段提示词，是保证任务可被随时断点重启的核心机制。
+- **Inspection & Continuation Workflow (推进与复工流程)**：
+  - 任何 AI 在接手或继续推进项目时，**必须首先检查 `prompts/` 目录下的计划与对应 prompt**，从中恢复上下文和验收条件，避免凭空脑补或重复审计；
+  - 某个里程碑任务完成并验证通过后，负责推进的 AI 应当及时更新对应 prompt 文件的状态标记（标记已完成并记录实际测试验证结果），并将下一个里程碑的执行 prompt 准备就绪，一并使用 `jj` 提交入库。
+
+
