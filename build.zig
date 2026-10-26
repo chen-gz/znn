@@ -157,27 +157,43 @@ fn forwardArgs(b: *std.Build, run_cmd: *std.Build.Step.Run) void {
     }
 }
 
+fn configureMacos(b: *std.Build, mod: *std.Build.Module, sdk: ?[]const u8, enable_mlx: bool) void {
+    if (sdk) |path| {
+        mod.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ path, "System", "Library", "Frameworks" }) });
+        mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ path, "usr", "lib" }) });
+    }
+    mod.linkFramework("Accelerate", .{});
+    if (enable_mlx) {
+        mod.addIncludePath(b.path("deps/mlx-c/include"));
+        mod.addLibraryPath(b.path("deps/mlx-c/lib"));
+        mod.addRPath(b.path("deps/mlx-c/lib"));
+        mod.linkSystemLibrary("mlxc", .{});
+        mod.linkSystemLibrary("mlx", .{});
+        mod.linkFramework("Metal", .{});
+        mod.linkFramework("Foundation", .{});
+        mod.linkFramework("QuartzCore", .{});
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const supports_mlx = target.result.os.tag == .macos and target.result.cpu.arch == .aarch64;
+    const enable_mlx = b.option(bool, "mlx", "Enable Apple MLX acceleration (requires Apple Silicon and MLX libraries)") orelse supports_mlx;
+    if (enable_mlx and !supports_mlx) @panic("MLX requires a macOS aarch64 target; use -Dmlx=false for this target");
+    const macos_sdk = b.option([]const u8, "macos-sdk", "macOS SDK directory for explicit framework and library search paths");
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "enable_mlx", enable_mlx);
 
     const mod = b.addModule("zig_ml", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
+        .optimize = optimize,
         .link_libc = true,
     });
+    mod.addOptions("build_options", build_options);
     if (target.result.os.tag == .macos) {
-        mod.linkFramework("Accelerate", .{});
-        if (target.result.cpu.arch == .aarch64) {
-            mod.addIncludePath(b.path("deps/mlx-c/include"));
-            mod.addLibraryPath(b.path("deps/mlx-c/lib"));
-            mod.addRPath(b.path("deps/mlx-c/lib"));
-            mod.linkSystemLibrary("mlxc", .{});
-            mod.linkSystemLibrary("mlx", .{});
-            mod.linkFramework("Metal", .{});
-            mod.linkFramework("Foundation", .{});
-            mod.linkFramework("QuartzCore", .{});
-        }
+        configureMacos(b, mod, macos_sdk, enable_mlx);
     }
 
     const test_step = b.step("test", "Run tests");
@@ -220,17 +236,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         if (target.result.os.tag == .macos) {
-            exe.root_module.linkFramework("Accelerate", .{});
-            if (target.result.cpu.arch == .aarch64) {
-                exe.root_module.addIncludePath(b.path("deps/mlx-c/include"));
-                exe.root_module.addLibraryPath(b.path("deps/mlx-c/lib"));
-                exe.root_module.addRPath(b.path("deps/mlx-c/lib"));
-                exe.root_module.linkSystemLibrary("mlxc", .{});
-                exe.root_module.linkSystemLibrary("mlx", .{});
-                exe.root_module.linkFramework("Metal", .{});
-                exe.root_module.linkFramework("Foundation", .{});
-                exe.root_module.linkFramework("QuartzCore", .{});
-            }
+            configureMacos(b, exe.root_module, macos_sdk, enable_mlx);
         }
         b.installArtifact(exe);
 
@@ -280,7 +286,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     if (target.result.os.tag == .macos) {
-        exe_download.root_module.linkFramework("Accelerate", .{});
+        configureMacos(b, exe_download.root_module, macos_sdk, false);
     }
 
     const download_cmd = b.addRunArtifact(exe_download);
@@ -307,7 +313,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     if (target.result.os.tag == .macos) {
-        exe_quantize.root_module.linkFramework("Accelerate", .{});
+        configureMacos(b, exe_quantize.root_module, macos_sdk, enable_mlx);
     }
     const quantize_cmd = b.addRunArtifact(exe_quantize);
     forwardArgs(b, quantize_cmd);
@@ -328,7 +334,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     if (target.result.os.tag == .macos) {
-        exe_pack.root_module.linkFramework("Accelerate", .{});
+        configureMacos(b, exe_pack.root_module, macos_sdk, enable_mlx);
     }
     b.installArtifact(exe_pack);
     const pack_cmd = b.addRunArtifact(exe_pack);

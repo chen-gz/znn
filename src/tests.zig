@@ -88,16 +88,14 @@ test "basic imports and struct definitions" {
 test "measureTime utility" {
     const std = @import("std");
     const helper = struct {
-        fn add(a: i32, b: i32) i32 {
-            var i: i32 = 0;
-            while (i < 1000) : (i += 1) {
-                std.mem.doNotOptimizeAway(i);
-            }
+        fn add(a: i32, b: i32) !i32 {
+            // Wait beyond clock resolution even in optimized builds.
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
             return a + b;
         }
     };
     const timed = try measureTime(helper.add, .{ 5, 10 });
-    try std.testing.expectEqual(@as(i32, 15), timed.result);
+    try std.testing.expectEqual(@as(i32, 15), try timed.result);
     try std.testing.expect(timed.elapsed_ns > 0);
 }
 
@@ -112,10 +110,7 @@ test "ScopeTimer utility" {
     {
         const t = ScopeTimer.start(&elapsed);
         defer t.end();
-        var i: i32 = 0;
-        while (i < 1000) : (i += 1) {
-            std.mem.doNotOptimizeAway(i);
-        }
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }
     try std.testing.expect(elapsed > 0);
 }

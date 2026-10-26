@@ -123,3 +123,40 @@ Next: restore a supported full-test environment, run the complete suite and
 `run-book-models`, then define ownership, synchronization, and view lifetime
 contracts for the `DeviceBuffer` migration. Keep M2 and M3 acceptance checkboxes
 open until their complete validation matrices pass.
+
+### Validation infrastructure follow-up
+
+Before the storage migration, restore executable CPU validation on Apple Silicon
+without the optional MLX libraries. Add an explicit `-Dmlx=false` build option
+(default behavior unchanged), wire it into the library and dependent examples,
+propagate the selected optimization mode to the library, and guard raw MLX-only
+buffer access on unsupported targets. Accept an explicit macOS SDK path for
+framework lookup. Update build instructions and run full CPU tests in Debug and
+ReleaseFast plus layer checks and all model graph exports. GPU tests must be
+reported as not exercised. This work does not claim GPU or storage migration
+completion.
+
+### Destination arithmetic follow-up
+
+Implement CPU `addInto(dest, a, b)` and `mulInto(dest, a, b)` as the first two
+allocation-free destination operators. Keep existing eager APIs unchanged.
+Use the existing broadcast/stride kernels after validating shape, storage span,
+contiguous output, and device residency. Reject overlapping output/input storage
+before writing; independent graph-owned outputs remain valid for later replay.
+Unsupported device states must return an explicit error rather than silently
+reading stale host data or allocating a synchronized copy.
+
+Files: new `src/tensor/destination.zig` and `tests_destination.zig`, public exports
+in `src/tensor/ops.zig` and `src/tensor.zig`, and `TensorError` additions if needed.
+Acceptance: broadcasting, scalars, empty dimensions, strided inputs, shape/layout
+errors, device errors, and overlapping views; every rejected call leaves output
+unchanged. Exercise repeated calls with preallocated stack storage. Run the full
+CPU suite in Debug and ReleaseFast and export model graphs. Matrix multiply,
+normalization, softmax, activation destinations, and unified storage stay pending.
+
+Validation infrastructure result (2026-10-26): full CPU Debug and ReleaseFast
+runs each passed 391/391 tests after adding a disabled-Metal regression and
+replacing sub-resolution timing-test workloads with a 1 ms wait. All 18 model
+graphs exported, and all 84 checked source files passed the layer audit. Native
+GPU execution remains untested. This supersedes the earlier missing-MLX blocker
+for CPU validation only.

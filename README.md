@@ -36,16 +36,27 @@ just bench                              # benchmark suite in ReleaseFast
 just bench --suite gemm --filter conv   # suites: gemm, ops, activations, layers, models, optimizers, tokenizer
 ```
 
-To run unit tests directly via the `zig test` CLI (e.g. for IDE integrations / ZLS) with Apple MLX and macOS system frameworks:
+Use the build entry point for tests so the generated backend options and system
+libraries are configured together. Apple Silicon builds enable MLX by default
+and require the libraries under `deps/mlx-c/lib`. To run the CPU path without
+those libraries:
 
 ```bash
-zig test src/root.zig \
-  -I deps/mlx-c/include \
-  -L deps/mlx-c/lib \
-  -lmlxc -lmlx \
-  -framework Metal -framework Foundation -framework QuartzCore -framework Accelerate \
-  -lc
+zig build test -Dmlx=false
+zig build test -Dmlx=false -Doptimize=ReleaseFast
+zig build run-book-models -Dmlx=false
 ```
+
+GPU-specific tests require their corresponding hardware and libraries; a CPU
+run does not validate Metal or CUDA execution. If Zig cannot discover the macOS
+SDK framework paths, supply the SDK explicitly:
+
+```bash
+zig build test -Dmlx=false -Dmacos-sdk="$(xcrun --show-sdk-path)"
+```
+
+Use the same build command in editor test integrations instead of invoking
+`zig test src/root.zig` without its generated `build_options` module.
 
 Datasets are downloaded on demand:
 

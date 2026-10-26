@@ -127,6 +127,7 @@ pub const DeviceBuffer = struct {
                 cuda.copyDeviceToHost(dst.ptr, dptr, dst.len) catch return error.DeviceTransferFailed;
             },
             .metal => |arr| {
+                if (!mlx.has_mlx) return error.UnsupportedDevice;
                 arr.eval();
                 const src_ptr = mlx.c.mlx_array_data_uint8(arr.handle) orelse return error.DeviceTransferFailed;
                 @memcpy(dst, src_ptr[0..dst.len]);
@@ -212,4 +213,21 @@ test "buffer: allocation, copy and lifecycle" {
 
     try buf.setZero();
     try testing.expectEqual(@as(f32, 0.0), slice[42]);
+}
+
+test "buffer: disabled MLX rejects Metal access" {
+    if (mlx.has_mlx) return error.SkipZigTest;
+    const testing = std.testing;
+    try testing.expect(!device_mod.isAvailable(Device.metal));
+    try testing.expectError(error.DeviceNotAvailable, DeviceBuffer.alloc(Device.metal, 1, testing.allocator));
+
+    // A disabled backend must reject a stale handle without touching its payload.
+    const buffer = DeviceBuffer{
+        .device = Device.metal,
+        .byte_size = 1,
+        .handle = .{ .metal = .{ .handle = null } },
+    };
+    var output = [_]u8{42};
+    try testing.expectError(error.UnsupportedDevice, buffer.copyDeviceToHost(&output));
+    try testing.expectEqual(@as(u8, 42), output[0]);
 }

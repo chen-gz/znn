@@ -6,11 +6,12 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const activation = @import("activation.zig");
 const GeluApproximation = activation.GeluApproximation;
 
 /// 当前构建目标是否支持 Apple 机器学习拓展 (Machine Learning Explore, MLX)
-pub const has_mlx: bool = (builtin.os.tag == .macos and builtin.cpu.arch == .aarch64);
+pub const has_mlx: bool = build_options.enable_mlx and builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
 
 pub const c = if (has_mlx) @import("mlx_c.zig") else struct {
     pub const mlx_array = extern struct { ctx: ?*anyopaque = null };
