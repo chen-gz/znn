@@ -20,6 +20,8 @@ pub const TensorError = error{
     DimensionOutOfBounds,
     InvalidStorage,
     AliasedOutput,
+    IncompatibleDimensions,
+    DivisionByZero,
 };
 
 // ============================================================================

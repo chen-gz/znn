@@ -19,6 +19,10 @@ const core_mod = @import("core.zig");
 pub const Tensor = core_mod.Tensor;
 pub const addInto = @import("destination.zig").addInto;
 pub const mulInto = @import("destination.zig").mulInto;
+pub const matmulInto = @import("destination.zig").matmulInto;
+pub const rmsNormInto = @import("destination.zig").rmsNormInto;
+pub const softmaxInto = @import("destination.zig").softmaxInto;
+pub const geluInto = @import("destination.zig").geluInto;
 
 const linalg_mod = @import("linalg.zig");
 pub const QRResult = linalg_mod.QRResult;

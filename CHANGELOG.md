@@ -11,13 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Allocation-free CPU `tensor.addInto` and `tensor.mulInto` operations write
-  broadcasting results into independent preallocated output buffers. Explicit
+- Allocation-free CPU `addInto`, `mulInto`, `matmulInto`, `rmsNormInto`,
+  `softmaxInto`, and `geluInto` operations write into independent preallocated
+  output buffers. Explicit
   errors reject invalid shapes, layouts, storage, device residency, and overlapping
   input/output spans before writes. Strided inputs and independent graph outputs
   are supported; these functions do not implicitly transfer device data.
 
+- CPU device buffers now retain shared allocation ownership and allocator
+  provenance. Explicit retained byte views survive parent release, empty buffers
+  allocate nothing, and typed access validates alignment.
+
+### Changed
+
+- `DeviceBuffer.free()` no longer accepts an allocator. Call sites release through
+  stored ownership; descriptor copies must use `retain()` to acquire a reference.
+
 ### Fixed
+
+- CPU buffer copies now handle overlapping ranges safely. Metal device-copy
+  construction uses the supported MLX copy API instead of a nonexistent method.
+
 
 - Added an explicit `-Dmlx=false` build path for CPU validation without optional
   Apple acceleration libraries, plus `-Dmacos-sdk` for explicit SDK lookup.

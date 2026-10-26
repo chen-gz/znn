@@ -950,8 +950,6 @@ test "Executor parallelFor and parallelReduce with grain near maxInt(usize) do n
     }
 }
 
-
-
 test "QuantLayout validates quantization parameters and computes buffer sizes" {
     const QuantLayout = offload.QuantLayout;
     // 4-bit / 分组 64：每个 uint32 打包 8 个权重
@@ -1010,9 +1008,6 @@ test "MLX copyToSlice handles strided slice views and VectorArray keeps more tha
     defer vec.deinit();
     try std.testing.expectEqual(@as(usize, 70), vec.size());
 }
-
-
-
 
 test "MLX candidate selection bindings: argpartition, take/put along axis, logsumexp and where" {
     if (!has_mlx) return;
@@ -1211,8 +1206,6 @@ test "QuantLayout layout and byte size calculations" {
     try std.testing.expectEqual(layout4.w_q_bytes + layout4.sb_bytes * 2, layout4.totalBytes());
 }
 
-
-
 test "LmHead union with dense LmHeadWeights and GpuKvCache truncate rollback" {
     if (!has_mlx) return;
     const allocator = std.testing.allocator;
@@ -1316,11 +1309,11 @@ test "CUDA backend: device probe, kernels, and multi-backend ops dispatching" {
 
         // 验证统一无状态计算内核 (Stateless Compute Kernels) 在 CUDA 上的分派
         var buf_a = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cuda, 4 * @sizeOf(f32), null);
-        defer buf_a.free(null);
+        defer buf_a.free();
         var buf_b = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cuda, 4 * @sizeOf(f32), null);
-        defer buf_b.free(null);
+        defer buf_b.free();
         var buf_c = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cuda, 4 * @sizeOf(f32), null);
-        defer buf_c.free(null);
+        defer buf_c.free();
 
         const h_a = [_]f32{ 2.0, 4.0, 6.0, 8.0 };
         const h_b = [_]f32{ 1.0, 1.0, 1.0, 1.0 };
@@ -1346,11 +1339,11 @@ test "DeviceBuffer and Kernels CPU execution" {
     const allocator = std.testing.allocator;
 
     var buf_a = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cpu, 4 * @sizeOf(f32), allocator);
-    defer buf_a.free(allocator);
+    defer buf_a.free();
     var buf_b = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cpu, 4 * @sizeOf(f32), allocator);
-    defer buf_b.free(allocator);
+    defer buf_b.free();
     var buf_c = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cpu, 4 * @sizeOf(f32), allocator);
-    defer buf_c.free(allocator);
+    defer buf_c.free();
 
     const h_a = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
     const h_b = [_]f32{ 5.0, 6.0, 7.0, 8.0 };
@@ -1370,7 +1363,7 @@ test "DeviceBuffer and Kernels CPU execution" {
     // A = [1 2; 3 4], B = [5 6; 7 8]
     // C = [19 22; 43 50]
     var buf_gemm_c = try buffer_mod.DeviceBuffer.alloc(device_mod.Device.cpu, 4 * @sizeOf(f32), allocator);
-    defer buf_gemm_c.free(allocator);
+    defer buf_gemm_c.free();
 
     try kernels_mod.gemm(device_mod.Device.cpu, .{ .m = 2, .n = 2, .k = 2 }, &buf_a, &buf_b, &buf_gemm_c);
     var h_gemm: [4]f32 = undefined;

@@ -98,6 +98,10 @@ pub const OpHandle = core.OpHandle;
 // --- Re-export operations & factory functions ---
 pub const addInto = ops.addInto;
 pub const mulInto = ops.mulInto;
+pub const matmulInto = ops.matmulInto;
+pub const rmsNormInto = ops.rmsNormInto;
+pub const softmaxInto = ops.softmaxInto;
+pub const geluInto = ops.geluInto;
 pub const array = ops.array;
 pub const zeros = ops.zeros;
 pub const ones = ops.ones;

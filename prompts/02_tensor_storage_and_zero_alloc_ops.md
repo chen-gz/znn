@@ -1,6 +1,6 @@
 # Milestone 2: 张量存储统一与算子零分配体系 (Tensor Storage & Destination Ops)
 
-> **Status**: In Progress (guards and CPU destination arithmetic implemented; full M2 pending)  
+> **Status**: In Progress (CPU ownership and six destination APIs implemented; Tensor/GPU migration pending)  
 > **Target Package**: `src/tensor/` (Layer 1) & `src/backend/buffer.zig` (Layer 0)  
 > **Key Files**: `src/tensor/core.zig`, `src/tensor/ops.zig`, `src/tensor/types.zig`
 
@@ -35,9 +35,9 @@ pub const Tensor = struct {
     is_buffer: bool = false,            // 区分可训练参数与非参数缓冲区
     name: ?[]const u8 = null,
 
-    /// 获取 CPU 连续宿主切片（若张量位于 GPU，则自动触发物理缓冲区同步）
-    pub fn asHostSlice(self: *const Tensor) []const f32;
-    pub fn asHostSliceMut(self: *Tensor) []f32;
+    /// CPU-only host access, without implicit allocation or device transfer.
+    pub fn asHostSlice(self: *const Tensor) TensorError![]const f32;
+    pub fn asHostSliceMut(self: *Tensor) TensorError![]f32;
 
     /// 显存句柄访问
     pub fn deviceBuffer(self: *const Tensor) *const backend.DeviceBuffer {
@@ -75,125 +75,64 @@ pub const TensorError = error{
 ## 3. 验收标准与验证命令 (Acceptance Criteria)
 
 - [ ] `Tensor` 结构体中不再包含独立的 `device_array` 与裸 `data: []f32` 字段，全局统一为 `storage: backend.DeviceBuffer`；
-- [ ] 核心算子均具备对应的 `*Into` 签名，并在单元测试中验证零内存分配；
-- [ ] 原地操作保护机制由运行时 `TensorError.InPlaceOpOnGraphTensor` 显式抛出并有测试覆盖；
-- [ ] `zig build check-layers` 严格无违规通过；
-- [ ] `zig build test` 全量通过（0 错误，0 内存泄漏）；
-- [ ] `zig build run-book-models` 18 个模型图正常导出。
+- [x] CPU 核心算子均具备对应的 `*Into` 签名，并在单元测试中验证零内存分配；
+- [x] 原地操作保护机制由运行时 `TensorError.InPlaceOpOnGraphTensor` 显式抛出并有测试覆盖；
+- [x] `zig build check-layers` 严格无违规通过；
+- [x] CPU `zig build test -Dmlx=false` 全量通过（0 错误，0 内存泄漏）；
+- [x] CPU `zig build run-book-models -Dmlx=false` 18 个模型图正常导出。
 
-## 4. Execution checkpoint (2026-10-26)
+## 4. Current implementation and continuation
 
-First delivery targets the existing in-place arithmetic guards. `mulScalar_`,
-`addScalar_`, and `add_` currently use debug assertions, so optimized builds can
-silently mutate graph tensors. Replace these guards with explicit
-`TensorError.InPlaceOpOnGraphTensor` returns before any write. Scalar methods
-become fallible; update every repository caller, including regression examples.
+Implemented and independently reviewed:
 
-Files: `src/tensor/types.zig`, `src/tensor.zig`, `src/tensor/reductions.zig`,
-`src/tensor/core.zig`, `src/tensor/tests.zig`, and the linear, logistic, and ridge regression examples.
-Validate leaf tensors requiring gradients, creator-backed tensors, strided views,
-shape mismatch atomicity, and ordinary eager operations. Run the tensor tests in
-Debug and ReleaseFast, the full test suite, the layer checker, and model exports.
-The storage migration and destination operations remain pending; this delivery
-does not complete M2. Next work should establish storage ownership and view
-lifetimes before replacing the existing host/device fields.
+- In-place arithmetic returns explicit errors before graph data is modified in
+  Debug and ReleaseFast. Nested slice/transpose views preserve mutation guards.
+- CPU-only builds use `-Dmlx=false`, with optional `-Dmacos-sdk` lookup.
+- All six destination APIs are implemented for CPU storage. Inputs may be
+  strided; output must be independent and contiguous. Shape, layout, storage,
+  residency, and alias checks run before writes. No device transfer is implicit.
+- Matrix multiplication supports rank-two inputs and a zero contraction dimension.
+  Softmax accepts any axis. Root mean square normalization accepts optional
+  strided weights. GELU supports both approximation modes and scalar inputs.
+- CPU DeviceBuffer allocations retain allocator provenance and an atomic shared
+  owner. `retain()` and byte-range `slice()` acquire ownership explicitly; plain
+  descriptor assignment does not. Either parent or view may be released first.
+  `free()` releases through the stored allocator and resets the descriptor.
+- Empty CPU buffers/views allocate nothing. Allocation bases remain 64-byte
+  aligned; typed view access validates element alignment. CPU copies are safe
+  with overlapping ranges. Allocation failure cleanup has regression coverage.
 
-Review extension: slice and transpose views must retain a separate
-`is_graph_view` mutation-protection bit without claiming to be differentiable
-view operators. Propagate it through nested views, and enforce it in all five
-existing guarded in-place operations (including `clip_` and `maskedFill_`).
-Independent contiguous copies remain mutable. This does not add storage version
-counters or retroactively track changes to the parent's graph membership.
+### Remaining storage migration contract
 
-### Validation and continuation
+Do not mechanically replace Tensor fields before resolving these requirements:
 
-- Passed `zig build check-layers` (84 source files).
-- The two new regression test bodies passed in Debug and ReleaseFast against
-  the actual tensor module via an isolated test entry point. The entry point
-  used the same test bodies and a separate named tensor module to avoid linking
-  unrelated graph execution code. This is focused validation, not a full-suite run.
-- Full native `zig build test` and model exports remain unverified because
-  `deps/mlx-c/lib` is absent from this checkout. The x86_64 cross-build additionally
-  exposes an existing unguarded `mlx.c.mlx_array_data_uint8` reference in
-  `src/backend/buffer.zig` on a target without MLX; this host has no Rosetta runtime.
-- An independent agent reviewed the guards, view propagation, and callers and
-  found no blocking defect in this bounded change.
+1. Implement fallible host-only accessors and separate explicit synchronization.
+   Device transfers
+   may fail or allocate and must not be hidden in an accessor.
+2. Establish typed GPU buffer adoption and borrowing. Current Metal buffers are
+   byte arrays, while MLX execution requires typed shaped arrays. GPU retain/view
+   operations currently return UnsupportedDevice; GPU empty allocations remain
+   unsupported. Raw Metal buffer kernels are not yet implemented.
+3. Fix partial Metal transfers that replace the backing array with a shorter
+   payload while retaining the advertised byte capacity. Audit CUDA reshaped-array
+   ownership before enabling shared GPU storage.
+4. Migrate Tensor factories, slices, transpose views, graph reshape views, graph
+   arena allocations, external parameters, and cleanup together. Preserve empty
+   tensors and scalar storage. Remove obsolete data/device_array fields and all
+   consumers in the same cohesive migration.
+5. Route graph replay through destination operations only after ownership and
+   residency contracts are established. M3 execution-buffer reuse is still pending.
 
-Next: restore a supported full-test environment, run the complete suite and
-`run-book-models`, then define ownership, synchronization, and view lifetime
-contracts for the `DeviceBuffer` migration. Keep M2 and M3 acceptance checkboxes
-open until their complete validation matrices pass.
+### Validation checkpoint
 
-### Validation infrastructure follow-up
+Validated on 2026-10-26 with Zig 0.17.0 on Apple Silicon:
 
-Before the storage migration, restore executable CPU validation on Apple Silicon
-without the optional MLX libraries. Add an explicit `-Dmlx=false` build option
-(default behavior unchanged), wire it into the library and dependent examples,
-propagate the selected optimization mode to the library, and guard raw MLX-only
-buffer access on unsupported targets. Accept an explicit macOS SDK path for
-framework lookup. Update build instructions and run full CPU tests in Debug and
-ReleaseFast plus layer checks and all model graph exports. GPU tests must be
-reported as not exercised. This work does not claim GPU or storage migration
-completion.
+- Full CPU Debug and ReleaseFast suites each passed 409/409 tests.
+- Layer checks passed for 86 source files; all 18 canonical model graphs exported.
+- GPU-enabled and x86_64 Linux source passed compile-only checks.
+- Independent reviews found no blocking ownership or destination-operation defects.
+- Metal and CUDA execution were not exercised. These results do not complete M2.
 
-### Destination arithmetic follow-up
-
-Implement CPU `addInto(dest, a, b)` and `mulInto(dest, a, b)` as the first two
-allocation-free destination operators. Keep existing eager APIs unchanged.
-Use the existing broadcast/stride kernels after validating shape, storage span,
-contiguous output, and device residency. Reject overlapping output/input storage
-before writing; independent graph-owned outputs remain valid for later replay.
-Unsupported device states must return an explicit error rather than silently
-reading stale host data or allocating a synchronized copy.
-
-Files: new `src/tensor/destination.zig` and `tests_destination.zig`, public exports
-in `src/tensor/ops.zig` and `src/tensor.zig`, and `TensorError` additions if needed.
-Acceptance: broadcasting, scalars, empty dimensions, strided inputs, shape/layout
-errors, device errors, and overlapping views; every rejected call leaves output
-unchanged. Exercise repeated calls with preallocated stack storage. Run the full
-CPU suite in Debug and ReleaseFast and export model graphs. Matrix multiply,
-normalization, softmax, activation destinations, and unified storage stay pending.
-
-Validation infrastructure result (2026-10-26): full CPU Debug and ReleaseFast
-runs each passed 391/391 tests after adding a disabled-Metal regression and
-replacing sub-resolution timing-test workloads with a 1 ms wait. All 18 model
-graphs exported, and all 84 checked source files passed the layer audit. Native
-GPU execution remains untested. This supersedes the earlier missing-MLX blocker
-for CPU validation only.
-
-### Storage migration prerequisites from code audit
-
-The existing `DeviceBuffer` cannot yet replace `Tensor.data` mechanically:
-
-- Define ownership and offsets first. Tensor slices, transpose views, and graph
-  reshapes share allocations; copying an owning buffer descriptor must not create
-  a second owner. Graph arena buffers and external parameters have different
-  lifetimes and allocator provenance.
-- Preserve empty tensors. `DeviceBuffer.alloc` rejects zero bytes today, while
-  zero-element tensors are supported. Rank-zero scalars still need one element.
-- Separate allocation alignment from view alignment. Owning buffers may be
-  64-byte aligned, but arbitrary float offsets cannot promise 64-byte alignment.
-- Keep transfers explicit and fallible. The draft infallible `asHostSlice()`
-  signature cannot perform allocation or failed device transfer safely. Host-only
-  accessors and explicit synchronization must be separate operations.
-- Preserve typed GPU execution. Current Metal buffers hold byte arrays, whereas
-  MLX operates on typed shaped arrays; Metal branches in the raw buffer kernels
-  are not implemented. Establish adoption/borrowing and kernel contracts before
-  replacing existing device arrays.
-- Audit partial Metal uploads and CUDA reshaped-array ownership before relying
-  on these paths for shared storage. Partial uploads currently replace the Metal
-  array without updating the advertised capacity.
-
-Next concrete delivery should define and test empty storage, ownership/offset
-rules, and allocator-safe CPU allocation/release, then migrate tensor factories
-and graph cleanup together. Remaining destination operations and device execution
-remain open; no full M2 or M3 completion is claimed.
-
-Destination arithmetic validation (2026-10-26): five new regression tests cover
-preallocated graph outputs, broadcasting, transposed and zero-stride inputs,
-scalars, empty outputs, malformed metadata, CPU/device residency, exact/partial
-aliases, conservative strided-span overlap, adjacent nonoverlapping storage, and
-creator-backed independent outputs. Full CPU Debug and ReleaseFast each passed
-396/396 tests; layer checks passed for 86 source files and all 18 model graphs
-exported. Independent review found no blocking defects. GPU-enabled source also
-passed a compile-only check; GPU execution remains untested.
+Reproduce with `zig build test -Dmlx=false`, repeat with
+`-Doptimize=ReleaseFast`, and run `zig build run-book-models -Dmlx=false`.
+Supply `-Dmacos-sdk` with the local SDK path if framework discovery needs it.

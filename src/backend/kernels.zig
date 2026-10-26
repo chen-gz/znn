@@ -510,11 +510,11 @@ test "kernels: gemm, rmsNorm, softmax, add, multiply, gelu" {
 
     // GEMM: [2, 2] * [2, 2]
     var a = try DeviceBuffer.alloc(dev, 4 * @sizeOf(f32), allocator);
-    defer a.free(allocator);
+    defer a.free();
     var b = try DeviceBuffer.alloc(dev, 4 * @sizeOf(f32), allocator);
-    defer b.free(allocator);
+    defer b.free();
     var c = try DeviceBuffer.alloc(dev, 4 * @sizeOf(f32), allocator);
-    defer c.free(allocator);
+    defer c.free();
 
     const a_s = try a.asCpuSliceMut(f32);
     @memcpy(a_s, &[_]f32{ 1.0, 2.0, 3.0, 4.0 });
