@@ -11,46 +11,44 @@
 ```text
 src/
 ├── root.zig                      # 顶层公共门面 (Facade)，聚合导出所有核心子模块
-├── backend.zig                   # 硬件后端与执行器门面 (导出 device, ops, activation, attention_mask, logits_processor, mlx_blocks, safetensors, Device, DeviceType, BackendType, GeluApproximation, AttentionMask, VisibleRange, Executor, cblas, mlx, cuda, cuda_kernels, offload, KvCache, DeviceKvCache, rope, sampling, vec_math)
+├── backend.zig                   # 硬件后端与执行器门面 (导出 device, buffer, kernels, activation, Executor, cblas, mlx, cuda, cuda_kernels, offload, vec_math, Device, DeviceType, BackendType, DeviceBuffer, BufferHandle, GpuKvCache, DeviceKvCache, KvCache)
 ├── backend/
 │   ├── activation.zig            # 逐元素激活的标量公式唯一来源 (GeluApproximation：GELU 精确 erf 形式与 tanh 近似形式的前向与导数)
-│   ├── attention_mask.zig        # 注意力掩码规则唯一来源 (Mask = none | causal | sliding, visibleRange, isSlidingWindowVisible, fillAdditiveMask)
+│   ├── buffer.zig                # 硬件抽象层纯物理设备缓冲区 (DeviceBuffer, BufferHandle, 64 字节 SIMD 对齐裸内存生命周期，零形状与自动微分泄露)
 │   ├── cblas.zig                 # macOS Accelerate (AMX) 构建期链接与跨平台 8 路 SIMD GEMM 后备内核
 │   ├── cuda.zig                  # NVIDIA CUDA 统一计算设备架构驱动 API 动态加载、显存分配与 GPU 数组封装
 │   ├── cuda_kernels.zig          # 基于并行线程执行 (PTX) 虚拟指令集的底层深度学习算子内核 (GEMM, RMSNorm, Add, Mul, GELU, Softmax, RoPE)
 │   ├── device.zig                # 硬件计算设备抽象与探测 (DeviceType = enum { cpu, gpu, cuda }, Device, BackendType, isAvailable, defaultDevice)
 │   ├── executor.zig              # 基于 std.Io 的多核并行执行器 (parallelFor, 逐位确定性 parallelReduce)
-│   ├── logits_processor.zig      # 模型无关的设备端对数几率截断 (softcapLogits)、重复惩罚 (penalizeDevice)、候选生成 (deviceCandidates) 与词元选取 (selectToken / LogitsProcessor)
+│   ├── kernels.zig               # 跨硬件无状态底层算子分派引擎 (GemmConfig, RmsNormConfig, RopeConfig, SoftmaxConfig, ElementwiseConfig, GeluConfig, SoftcapConfig, EmbeddingConfig)
 │   ├── mlx.zig                   # Apple 机器学习拓展 (Machine Learning Explore, MLX) C-API 绑定、GPU 数组算子与类型安全闭包编译封装 (compileFn)
-│   ├── mlx_blocks.zig            # 模型无关的 MLX GPU 组合块 (Rope, projectHeads, gatedMlp, residualScale, finalHidden)
-│   ├── offload.zig               # 与模型无关的硬件加速卸载原语 (borrowArray, storeOutput, GEMM, RMSNorm, RoPE, SDPA, 滑动窗口注意力, LmHead / LmHeadWeights, TokenExclusionMask, QuantWeights, GpuKvCache, DeviceKvCache, KvCache)
-│   ├── ops.zig                   # 统一多后端算子分派器 (matmul, rmsNorm, softmax, add, multiply, mulScalar, gelu, cachedAttention)
-│   ├── rope.zig                  # 旋转位置编码配置 RopeOptions (含 proportional 预设) 与旋转角数量 / 频率 / MLX 周期表的唯一公式 (CPU 与 GPU 共用)
-│   ├── safetensors.zig           # 零依赖 Safetensors (F32/BF16/F16) 零拷贝内存映射归档解析 (SafetensorsArchive, TensorMeta)
-│   ├── sampling.zig              # 通用采样基础设施 (TokenRange 排除区间, argmaxWithPenalty, BF16 排除掩码, SamplingOptions / Sampler 温度 + Top-K + Top-P 随机采样, selectTopK 部分选择, 投机采样校验)
+│   ├── offload.zig               # 与模型无关的硬件加速卸载原语 (borrowArray, storeOutput, GpuKvCache, DeviceKvCache, KvCache)
 │   ├── vec_math.zig              # SIMD 行原语的唯一来源 (exp8, sum / max / sumSquares, dot / dotBf16, axpy, softmaxRow, logSumExpRow, sigmoid, softcap, BF16 展开)
-│   └── tests.zig                 # 硬件计算后端与 GPU 算子卸载单元测试集
-├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, Q4Block, RopeOptions, RopeTable, AttentionMask, AttentionOptions, RmsNormOptions, attendOneQuery, embeddingLookupInto, checkIndices, losses, ops)
+│   └── tests.zig                 # 硬件计算后端、HAL 设备缓冲区与底层算子单元测试集
+├── tensor.zig                    # 张量门面 (导出 Tensor, GenericTensor, StaticTensor, Shape, DType, Q4Block, RopeOptions, RopeTable, AttentionMask, AttentionOptions, RmsNormOptions, SafetensorsArchive, attendOneQuery, embeddingLookupInto, checkIndices, losses, ops)
 ├── tensor/
 │   ├── shape.zig                 # 8D Shape 维度系统、跨步推导与 NumPy 广播规则
 │   ├── types.zig                 # DType、原生 bf16、SliceRange、ConvOptions、PoolOptions、AttentionOptions、RmsNormOptions、索引校验 (indexScalarToUsize, checkIndices) 与 GenericTensor(T)
 │   ├── static.zig                # 编译期静态形状校验张量包装器 StaticTensor(T, dims)
 │   ├── core.zig                  # f32 自动微分张量核心、索引、基础算术、激活函数 (含 softcap 与参数化 gelu) 与多态整型标签交叉熵
 │   ├── conv_pool.zig             # 1D/2D 卷积、转置卷积、最大/平均池化与自适应平均池化数值内核
+│   ├── attention.zig             # 注意力掩码规则唯一来源 (Mask = none | causal | sliding, visibleRange, fillAdditiveMask, KeyRange)
 │   ├── attention_kernels.zig     # 缩放点积注意力 CPU 内核 (attendOneQuery 单查询步注意力与 attentionForward 批处理注意力，支持因果/滑动窗口掩码、Tq != Tk 与零拷贝 GQA)
 │   ├── losses.zig                # 逐元素与逐行损失计算核 (ceRow, accumulateCeGradRow, dpoTerm, grpoTerm)，供 Tensor、Op.forward 与反向传播共用
 │   ├── nn_kernels.zig            # 归一化 (RMSNorm 含可选权重与 weight_offset, LayerNorm, BatchNorm1d/2d, GroupNorm)、Dropout、RoPE、嵌入查表 (embedding, embeddingLookupInto) 与 BatchMatMul
-│   ├── rope.zig                  # RopeTable：CPU RoPE 前向、反向与增量解码共用的旋转表 (init / angles / applyRow(inverse))
+│   ├── rope.zig                  # RopeTable 与 RoPE 旋转表体系：CPU RoPE 前向、反向与增量解码共用的旋转表 (init / angles / applyRow(inverse))
+│   ├── safetensors.zig           # 零依赖 Safetensors (F32/BF16/F16) 零拷贝内存映射归档解析 (SafetensorsArchive, TensorMeta)
 │   ├── reductions.zig            # 多轴归约 (sum, mean, var, std, min, max, argmin, argmax)、条件掩码、跨步切片与排序检索
 │   ├── quant.zig                 # 4-bit 量化 (Q4Block split-half 排布)、F32/BF16 量化 (quantizeSlice / quantizeSliceBf16)、反量化与矩阵乘法 (q4MatMulInto / q4MatMul)
 │   ├── linalg.zig                # 豪斯霍尔德 QR 分解 (qr)、雅可比对称特征分解 (symeig) 与单边雅可比奇异值分解 (svd)
 │   ├── weight_init.zig           # He, Xavier, LeCun, Normal, Uniform 权重初始化与激活增益计算 (经 nn.init_mod 导出)
 │   ├── ops.zig                   # 张量创建工厂、拼接切分 (concat/split/stack) 与线性方程组求解
 │   └── tests.zig                 # 张量与线性代数单元测试集
-├── autodiff.zig                  # 自动微分门面 (导出 Graph, GraphOptions, Op, OpType, OpContext)
+├── autodiff.zig                  # 自动微分门面 (导出 Graph, GraphOptions, Op, OpType, OpContext, ops)
 ├── autodiff/
 │   ├── types.zig                 # 算子枚举 OpType (含 GeluTanh, Softcap, Attention, Q4MatMul)、算子上下文联合体 OpContext 与 Op 节点数据结构
 │   ├── op.zig                    # 单源前向重演 (op.forward) 与反向传播 (op.backward) 分发
+│   ├── ops.zig                   # 统一多后端算子分派器 (matmul, rmsNorm, softmax, add, multiply, mulScalar, gelu, cachedAttention, 具名 Tensor 参数零鸭子类型)
 │   ├── backward_core.zig         # 核心算子反向传播 (MatMul, 激活, 损失函数, 形状/视图, 广播四则运算)
 │   ├── backward_nn.zig           # 神经网络算子反向传播 (1D/2D Conv/Deconv, Pooling, Norm, RoPE, Attention)
 │   ├── backward_math.zig         # 初等数学、正则化、按轴归约与条件切片算子反向传播
@@ -67,6 +65,7 @@ src/
 │   ├── recurrent.zig             # RNNCell, GRUCell, 泛型时序展开容器 Recurrent(Cell), RNN, GRU, LSTMCell, LSTM, StackedLSTM 与命名返回结构体
 │   ├── attention.zig             # LayerKVCache, KVCache, ScaledDotProductAttention, 泛型 GQAAttention(Proj), CausalSelfAttention (MHA/GQA/MQA), MLACache, MLALayer
 │   ├── transformer.zig           # Embedding, MLP, 泛型门控前馈网络 GatedMLP(Proj), SwiGLU, MoELayer (可配置专家激活), TransformerBlock
+│   ├── transformer_blocks.zig    # 模型无关的 Transformer 组合块与设备端算子 (Rope, projectHeads, gatedMlp, residualScale, finalHidden, TokenExclusionMask)
 │   ├── llm.zig                   # LoRALinear, SFT/DPO/GRPO 对齐损失函数与投机采样草稿引擎 (SpeculativeDraftEngine, promptLookup)
 │   ├── serialization.zig         # 零依赖 Safetensors (F32/BF16/F16) 零拷贝内存映射归档解析 (SafetensorsArchive) 与模型权重序列化
 │   ├── visualization.zig         # Schema 2.0 节点/边枚举、作用域解析与局部图构建器 LocalGraphBuilder
@@ -76,6 +75,11 @@ src/
 │   ├── tests.zig                 # 核心网络层、循环网络、Transformer/LLM 与 Safetensors 测试
 │   ├── tests_init.zig            # 权重自动初始化与增益推导专项测试
 │   └── tests_module.zig          # 编译期反射协议、字段路径命名与权重共享 (Tied Weights) 生命周期测试
+├── engine.zig                    # 训练工作流、评估调度器与采样门面 (导出 ClassificationTrainer, trainCausalLMStep, sampling, logits_processor)
+├── engine/
+│   ├── causal_lm.zig             # 因果语言模型单步训练循环与指标统计
+│   ├── sampling.zig              # 通用采样基础设施 (TokenRange 排除区间, argmaxWithPenalty, BF16 排除掩码, SamplingOptions / Sampler 温度 + Top-K + Top-P 随机采样, selectTopK 部分选择, 投机采样校验)
+│   └── logits_processor.zig      # 模型无关的设备端对数几率截断 (softcapLogits)、重复惩罚 (penalizeDevice)、候选生成 (deviceCandidates) 与词元选取 (selectToken / LogitsProcessor)
 ├── models.zig                    # 专用模型门面 (导出 gpt, gemma4, gemma4_q4, gemma4_e4b, GPT, GPTConfig, TransformerDecoder, DefaultGPT, Gemma4ForCausalLM, DefaultGemma4Q4, Gemma4E4BModel, Gemma4E4BDecoderLayer, Gemma4E4BForCausalLM)
 ├── models/
 │   ├── gpt.zig                   # GPT 架构定义 (GPTConfig, TransformerDecoder, GPT, DefaultGPT)
@@ -169,7 +173,7 @@ flowchart TD
 ### 2.4 统一算子配置结构体 (`ConvOptions`, `PoolOptions` & `RopeOptions`)
 * **`ConvOptions` (`src/tensor/types.zig`)**：`stride: usize = 1, padding: usize = 0`，统一用于 `conv1d`、`conv2d`、`convTranspose1d`、`convTranspose2d`；
 * **`PoolOptions` (`src/tensor/types.zig`)**：`stride: ?usize = null, padding: usize = 0`（提供 `resolveStride(pool_size)`，当 `stride == null` 时默认等于 `pool_size`），统一用于 `maxpool1d`、`avgpool1d`、`maxpool2d`、`avgpool2d`；
-* **`RopeOptions` (`src/backend/rope.zig`，经 `tensor.RopeOptions` 导出)**：`rotary_offset: usize = 0, base: f32 = 10000.0, mode: Mode = .interleaved, partial_rotary_factor: f32 = 1.0`（支持 `.interleaved` 相邻配对与 `.split_half` 半切分配对以及比例旋转因子），统一用于 `Tensor.rope(start_pos, options, alloc)`、`Graph.rope(x, start_pos, options)`、`MLALayer.rope` 与 Gemma 4 的 `GpuRope`。旋转子空间 `rot_dim = head_dim - rotary_offset`，参与旋转的角度数 `num_angles = floor(rot_dim / 2 * partial_rotary_factor)`，频率分母始终是完整 `rot_dim`，半切分配对间距为 `rot_dim / 2`，其余角度保持恒等；`RopeOptions.proportional(theta, factor)` 是 Hugging Face / mlx-lm 比例旋转位置编码 (Proportional RoPE) 的预设，`fillPeriods` 生成 MLX `fast.rope` 的周期表。
+* **`RopeOptions` (`src/tensor/rope.zig`，经 `tensor.RopeOptions` 导出)**：`rotary_offset: usize = 0, base: f32 = 10000.0, mode: Mode = .interleaved, partial_rotary_factor: f32 = 1.0`（支持 `.interleaved` 相邻配对与 `.split_half` 半切分配对以及比例旋转因子），统一用于 `Tensor.rope(start_pos, options, alloc)`、`Graph.rope(x, start_pos, options)`、`MLALayer.rope` 与 Gemma 4 的 `GpuRope`。旋转子空间 `rot_dim = head_dim - rotary_offset`，参与旋转的角度数 `num_angles = floor(rot_dim / 2 * partial_rotary_factor)`，频率分母始终是完整 `rot_dim`，半切分配对间距为 `rot_dim / 2`，其余角度保持恒等；`RopeOptions.proportional(theta, factor)` 是 Hugging Face / mlx-lm 比例旋转位置编码 (Proportional RoPE) 的预设，`fillPeriods` 生成 MLX `fast.rope` 的周期表。
 * **`RopeTable` (`src/tensor/rope.zig`)**：`init(head_dim, options)` 预计算频率，`angles(pos, cos, sin)` 每个位置只算一次三角函数，`applyRow(row, cos, sin, comptime inverse)` 原地旋转一行；CPU 前向内核、RoPE 反向传播 (`inverse = true`，dX = Rᵀ dY) 与 `MLALayer.forwardInference` 共用这一份旋转实现。
 
 ### 2.5 4-bit 分块量化与 Split-Half 向量化排布 (`src/tensor/quant.zig`)
@@ -373,7 +377,7 @@ flowchart LR
    - 矩阵 $B$ 初始置零，保证微调起点与原模型输出严格对齐。
 6. **后训练偏好对齐损失与采样 (`SFT` / `DPO` / `GRPO` & `sampleTopP` / `sampleTopK`, `nn/llm.zig`)**：
    - 掩码交叉熵 (`maskedCrossEntropyLoss`)、直接偏好优化 (`dpoLoss`) 与群体相对策略优化 (`grpoLoss`) 均完整接入动态计算图求导。
-   - `sampleTopP` / `sampleTopK` 每次对完整词表排序，面向小词表训练示例；大词表推理 (Gemma 4) 使用 `backend/sampling.zig` 的 `Sampler`：
+   - `sampleTopP` / `sampleTopK` 每次对完整词表排序，面向小词表训练示例；大词表推理 (Gemma 4) 使用 `src/engine/sampling.zig` 的 `Sampler`：
      温度、前 K 截断 (Top-K) 与核采样 (Nucleus Sampling, Top-P) 共用一个候选集终结步骤，CPU 以分块有界堆部分选择候选，GPU 以 `argpartition` 只传回候选，相同候选集与种子得到相同词元。
 
 ---
@@ -433,7 +437,7 @@ flowchart LR
 * **零工具链外部依赖**：通过纯 Zig 动态加载 `libcuda.so.1` / `nvcuda.dll`，只要系统安装了标准 NVIDIA 显示驱动即可直接运行，无需安装臃肿的 CUDA Toolkit 或 nvcc 编译器；
 * **PTX 原生指令即时编译**：内置手写优化的并行线程执行 (Parallel Thread Execution, PTX) 虚拟汇编，由显卡驱动内置的 JIT 编译器自动针对当前 GPU 架构（从 Ampere、Ada Lovelace 到最新的 Blackwell RTX 5080）生成最优机器码；
 * **核心深度学习算子覆盖**：完整支持通用矩阵乘法 (General Matrix Multiply, GEMM)、均方根层归一化 (Root Mean Square Layer Normalization, RMSNorm)、逐元素加法/乘法/标量缩放、高斯误差线性单元 (Gaussian Error Linear Unit, GELU)、数值稳定行级 Softmax 以及旋转位置编码 (Rotary Position Embedding, RoPE)；
-* **多后端统一算子分派 (`src/backend/ops.zig`)**：设备抽象 `DeviceType` 统一调度中央处理器 CPU SIMD、Apple 机器学习拓展 MLX 与 NVIDIA 统一计算设备架构 CUDA，上层模型与训练调度器无需修改代码即可在多平台硬件间无缝迁移。
+* **多后端统一算子分派 (`src/autodiff/ops.zig` & `src/backend/kernels.zig`)**：设备抽象 `DeviceType` 统一调度中央处理器 CPU SIMD、Apple 机器学习拓展 MLX 与 NVIDIA 统一计算设备架构 CUDA，上层模型与训练调度器无需修改代码即可在多平台硬件间无缝迁移。
 
 ---
 

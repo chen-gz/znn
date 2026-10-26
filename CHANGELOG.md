@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **严格硬件后端隔离与硬件抽象层 (HAL) 彻底重构 (`src/backend/buffer.zig`, `src/backend/kernels.zig`, `src/backend/device.zig`, `src/backend/tests.zig`, `src/tensor/attention.zig`, `src/tensor/rope.zig`, `src/tensor/safetensors.zig`, `src/engine/sampling.zig`, `src/engine/logits_processor.zig`, `src/nn/transformer_blocks.zig`, `src/autodiff/ops.zig`, `tools/check_layers.zig`)**:
+  - **彻底清除底层鸭子类型与泛型反射 (Duck-Typing & anytype Purge)**：
+    - 彻底删除 `src/backend/ops.zig` (566 行基于 `anytype` 的张量隐式反射与越级调用)，清理 `src/backend/offload.zig` 中的所有反射代码；
+    - 建立纯净的底层物理设备缓冲区 `src/backend/buffer.zig` (`DeviceBuffer` / `BufferHandle`)，提供 64 字节 SIMD 对齐的纯物理内存生命周期管理，严禁在 Layer 0 触碰形状 (Shape)、步长 (Strides) 或计算图/自动微分逻辑；
+    - 建立统一无状态底层计算算子引擎 `src/backend/kernels.zig` (+537 行)，提供跨 CPU/CBLAS、NVIDIA CUDA 与 Apple Metal/MLX 的纯净 C-ABI 算子执行契约；
+    - 将多后端具名张量调度器迁移至 `src/autodiff/ops.zig` (Layer 2)，完全采用具体 `*const Tensor` / `*Tensor` 强类型，杜绝跨层反射。
+  - **根除包层级越级依赖与领域模块精确归位 (Domain Module Relocations)**：
+    - 严格杜绝上层包越级直接导入 `src/backend/` 下的私有子实现，外部调用一律通过公共门面 `src/backend.zig` 统一对外暴露；
+    - 6 个错配领域模块精确迁移至对应原生层级：
+      - `logits_processor.zig` 与 `sampling.zig` 迁移至 `src/engine/` (Layer 5)；
+      - `attention_mask.zig` (改名为 `attention.zig`) 与 `safetensors.zig` 迁移至 `src/tensor/` (Layer 1)；
+      - `rope.zig` 统一合并收敛至 `src/tensor/rope.zig` (Layer 1)；
+      - `mlx_blocks.zig` 迁移并升级为 `src/nn/transformer_blocks.zig` (Layer 3)。
+  - **静态层级检查器强化 (`tools/check_layers.zig`)**：
+    - 在 `tools/check_layers.zig` 中新增对 Layer 0 (`src/backend`) 鸭子类型代码模式 (`anytype`) 的静态 AST 级禁令扫描；
+    - 强制上层包对 `backend` 的跨包导入必须且只能指向公共门面 `src/backend.zig`，杜绝任何穿透内部子模块的非法耦合；
+    - 检查覆盖 84 个核心源文件，100% 保持严格单向依赖拓扑。
+  - **上层计算图与模型对齐**：
+    - `src/autodiff/ops.zig`、`graph.zig`、`graph_nn.zig` 与 `backward_nn.zig` 全面接入统一算子分派；
+    - `src/models/gemma4.zig`、`gemma4_q4.zig`、`gemma4_e4b.zig` 与 `gpt.zig` 彻底消除原位设备数组操作，接入标准门面；
+    - 387 个单元测试全量通过，18 个经典网络模型全部正常导出 JSON 结构图。
+
 - **通用 KVCache 模块化集成与 HAL 跨后端算子彻底解耦 (`src/nn/attention.zig`, `src/nn/transformer.zig`, `src/models/gpt.zig`, `src/backend/cuda_kernels.zig`, `src/backend/cuda.zig`, `src/backend/ops.zig`, `src/autodiff/graph_nn.zig`, `src/autodiff/graph.zig`)**:
   - **KVCache 全模块化集成 (nn.Module First-Class KVCache)**：
     - 为 `CausalSelfAttention`、`TransformerBlock`、`TransformerDecoder` 与 `models.GPT` 全面接入统一的 `forwardWithCache` 接口，使自回归增量生成与 KV 缓存机制 100% 融入规范的 `nn.Module` 与计算图体系；
