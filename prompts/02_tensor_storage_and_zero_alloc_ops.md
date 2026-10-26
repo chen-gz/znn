@@ -1,6 +1,6 @@
 # Milestone 2: 张量存储统一与算子零分配体系 (Tensor Storage & Destination Ops)
 
-> **Status**: In Progress (in-place guard delivery implemented; full M2 pending)  
+> **Status**: In Progress (guards and CPU destination arithmetic implemented; full M2 pending)  
 > **Target Package**: `src/tensor/` (Layer 1) & `src/backend/buffer.zig` (Layer 0)  
 > **Key Files**: `src/tensor/core.zig`, `src/tensor/ops.zig`, `src/tensor/types.zig`
 
@@ -160,3 +160,40 @@ replacing sub-resolution timing-test workloads with a 1 ms wait. All 18 model
 graphs exported, and all 84 checked source files passed the layer audit. Native
 GPU execution remains untested. This supersedes the earlier missing-MLX blocker
 for CPU validation only.
+
+### Storage migration prerequisites from code audit
+
+The existing `DeviceBuffer` cannot yet replace `Tensor.data` mechanically:
+
+- Define ownership and offsets first. Tensor slices, transpose views, and graph
+  reshapes share allocations; copying an owning buffer descriptor must not create
+  a second owner. Graph arena buffers and external parameters have different
+  lifetimes and allocator provenance.
+- Preserve empty tensors. `DeviceBuffer.alloc` rejects zero bytes today, while
+  zero-element tensors are supported. Rank-zero scalars still need one element.
+- Separate allocation alignment from view alignment. Owning buffers may be
+  64-byte aligned, but arbitrary float offsets cannot promise 64-byte alignment.
+- Keep transfers explicit and fallible. The draft infallible `asHostSlice()`
+  signature cannot perform allocation or failed device transfer safely. Host-only
+  accessors and explicit synchronization must be separate operations.
+- Preserve typed GPU execution. Current Metal buffers hold byte arrays, whereas
+  MLX operates on typed shaped arrays; Metal branches in the raw buffer kernels
+  are not implemented. Establish adoption/borrowing and kernel contracts before
+  replacing existing device arrays.
+- Audit partial Metal uploads and CUDA reshaped-array ownership before relying
+  on these paths for shared storage. Partial uploads currently replace the Metal
+  array without updating the advertised capacity.
+
+Next concrete delivery should define and test empty storage, ownership/offset
+rules, and allocator-safe CPU allocation/release, then migrate tensor factories
+and graph cleanup together. Remaining destination operations and device execution
+remain open; no full M2 or M3 completion is claimed.
+
+Destination arithmetic validation (2026-10-26): five new regression tests cover
+preallocated graph outputs, broadcasting, transposed and zero-stride inputs,
+scalars, empty outputs, malformed metadata, CPU/device residency, exact/partial
+aliases, conservative strided-span overlap, adjacent nonoverlapping storage, and
+creator-backed independent outputs. Full CPU Debug and ReleaseFast each passed
+396/396 tests; layer checks passed for 86 source files and all 18 model graphs
+exported. Independent review found no blocking defects. GPU-enabled source also
+passed a compile-only check; GPU execution remains untested.

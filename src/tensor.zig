@@ -96,6 +96,8 @@ pub const Tensor = core.Tensor;
 pub const OpHandle = core.OpHandle;
 
 // --- Re-export operations & factory functions ---
+pub const addInto = ops.addInto;
+pub const mulInto = ops.mulInto;
 pub const array = ops.array;
 pub const zeros = ops.zeros;
 pub const ones = ops.ones;
@@ -142,4 +144,5 @@ pub const svd = ops.svd;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tensor/tests.zig");
+    _ = @import("tensor/tests_destination.zig");
 }

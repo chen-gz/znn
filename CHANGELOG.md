@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Allocation-free CPU `tensor.addInto` and `tensor.mulInto` operations write
+  broadcasting results into independent preallocated output buffers. Explicit
+  errors reject invalid shapes, layouts, storage, device residency, and overlapping
+  input/output spans before writes. Strided inputs and independent graph outputs
+  are supported; these functions do not implicitly transfer device data.
+
 ### Fixed
 
 - Added an explicit `-Dmlx=false` build path for CPU validation without optional

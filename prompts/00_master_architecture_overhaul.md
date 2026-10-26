@@ -45,7 +45,7 @@ Layer 7: root (顶层聚合门面与 tests.zig)
 | Milestone | 目标与范围 | 核心交付成果 | 验收状态 |
 | :--- | :--- | :--- | :--- |
 | **M1** | 后端严格隔离与 HAL 建立 | 纯物理 `DeviceBuffer`、`kernels.zig`、消除 566 行 duck-typing `ops.zig`、迁移 6 大错配模块、层级检查器静态禁令 | **✅ 已完成 (51 文件, +3788/-2696 行)** |
-| **M2** | 张量物理存储统一与算子零分配 | `Tensor.storage: DeviceBuffer` 单一真实来源、引入成套 `*Into` 算子、显式强类型 `TensorError` | **⏳ In progress (in-place guards; remaining M2 pending)** |
+| **M2** | 张量物理存储统一与算子零分配 | `Tensor.storage: DeviceBuffer` 单一真实来源、引入成套 `*Into` 算子、显式强类型 `TensorError` | **⏳ In progress (guards and CPU addInto/mulInto; storage pending)** |
 | **M3** | 自动微分前向重演与分配器受控 | `op.forward` 废除 `copyFromEager` 直写输出、`backward` 显式传入 `scratch_allocator`、根除 `c_allocator` | **⏳ 待启动** |
 | **M4** | `nn.Module` 协议规范化与图层治理 | 编译期 `verifyModule(T)`、`createParameter`/`createBuffer` 划分、`Q4Linear` 接入 `walk`、统一 `KVCache` | **⏳ 待启动** |
 | **M5** | 核心模型全模块化重构 | 消除 `GPT` 与 `Gemma 4` 中的切片索引与过程式偏移、模型脱离特定硬件引擎、统一 `forwardWithCache` | **⏳ 待启动** |

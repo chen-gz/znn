@@ -17,6 +17,8 @@ pub const GenericTensor = types_mod.GenericTensor;
 
 const core_mod = @import("core.zig");
 pub const Tensor = core_mod.Tensor;
+pub const addInto = @import("destination.zig").addInto;
+pub const mulInto = @import("destination.zig").mulInto;
 
 const linalg_mod = @import("linalg.zig");
 pub const QRResult = linalg_mod.QRResult;

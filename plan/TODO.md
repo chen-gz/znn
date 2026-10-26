@@ -438,6 +438,10 @@
   - [x] **全量验证保障**：`zig build check-layers` 与 `zig build test`（387 passed, 0 failed, 0 leaks）及 18 个经典网络模型全部正常导出 JSON 结构图。
 
 - [ ] **6.2 Milestone 2: 张量存储统一与算子执行规范化 (Tensor Storage & Zero-Allocation Ops)**
+  - [x] CPU `addInto` / `mulInto` with broadcasting, preallocated output, and explicit validation of storage/layout/device/aliasing.
+  - [x] Explicit in-place arithmetic errors and inherited protection for graph-backed views.
+  - [x] Optional `-Dmlx=false` CPU validation path, including optimized library tests.
+  - [ ] Remaining destination kernels and the storage ownership/transfer migration (see `prompts/02_tensor_storage_and_zero_alloc_ops.md`).
   - [ ] **统一张量物理存储抽象 (Unified Storage)**：
     - 重构 `src/tensor/core.zig` 中的 `Tensor` 结构体：以单一 `storage: backend.DeviceBuffer` 取代双重 `data: []f32` 与 `device_array: ?DeviceArray` 状态，彻底根除双内存失步隐患；
     - CPU 访问通过统一的 `storage.asHostSlice()` 进行瞬时映射，GPU/CUDA 访问直接消费 `storage.handle.cuda`。

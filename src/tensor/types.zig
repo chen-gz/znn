@@ -18,6 +18,8 @@ pub const TensorError = error{
     NonContiguousLayout,
     UnsupportedDType,
     DimensionOutOfBounds,
+    InvalidStorage,
+    AliasedOutput,
 };
 
 // ============================================================================
