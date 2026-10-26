@@ -76,14 +76,20 @@ pub fn main() !void {
     tensor.manualSeed(12345);
 
     // NumPy-like data generation using our new Tensor vectorization APIs!
-    const x_tensor = (try tensor.rand(allocator, &.{ N, 1 })).mulScalar_(4.0).addScalar_(-2.0);
+    const x_tensor = try tensor.rand(allocator, &.{ N, 1 });
     defer tensor.free(allocator, x_tensor);
+    _ = try x_tensor.mulScalar_(4.0);
+    _ = try x_tensor.addScalar_(-2.0);
 
-    const noise_tensor = (try tensor.rand(allocator, &.{ N, 1 })).mulScalar_(0.1).addScalar_(-0.05);
+    const noise_tensor = try tensor.rand(allocator, &.{ N, 1 });
     defer tensor.free(allocator, noise_tensor);
+    _ = try noise_tensor.mulScalar_(0.1);
+    _ = try noise_tensor.addScalar_(-0.05);
 
-    const y_tensor = (try x_tensor.clone(allocator)).mulScalar_(true_w).addScalar_(true_b);
+    const y_tensor = try x_tensor.clone(allocator);
     defer tensor.free(allocator, y_tensor);
+    _ = try y_tensor.mulScalar_(true_w);
+    _ = try y_tensor.addScalar_(true_b);
     _ = try y_tensor.add_(noise_tensor);
 
     // 2. Solve using Gradient Descent

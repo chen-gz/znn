@@ -1,6 +1,6 @@
 # Milestone 2: 张量存储统一与算子零分配体系 (Tensor Storage & Destination Ops)
 
-> **Status**: Ready to Launch (Next Milestone)  
+> **Status**: In Progress (in-place guard delivery implemented; full M2 pending)  
 > **Target Package**: `src/tensor/` (Layer 1) & `src/backend/buffer.zig` (Layer 0)  
 > **Key Files**: `src/tensor/core.zig`, `src/tensor/ops.zig`, `src/tensor/types.zig`
 
@@ -80,3 +80,46 @@ pub const TensorError = error{
 - [ ] `zig build check-layers` 严格无违规通过；
 - [ ] `zig build test` 全量通过（0 错误，0 内存泄漏）；
 - [ ] `zig build run-book-models` 18 个模型图正常导出。
+
+## 4. Execution checkpoint (2026-10-26)
+
+First delivery targets the existing in-place arithmetic guards. `mulScalar_`,
+`addScalar_`, and `add_` currently use debug assertions, so optimized builds can
+silently mutate graph tensors. Replace these guards with explicit
+`TensorError.InPlaceOpOnGraphTensor` returns before any write. Scalar methods
+become fallible; update every repository caller, including regression examples.
+
+Files: `src/tensor/types.zig`, `src/tensor.zig`, `src/tensor/reductions.zig`,
+`src/tensor/core.zig`, `src/tensor/tests.zig`, and the linear, logistic, and ridge regression examples.
+Validate leaf tensors requiring gradients, creator-backed tensors, strided views,
+shape mismatch atomicity, and ordinary eager operations. Run the tensor tests in
+Debug and ReleaseFast, the full test suite, the layer checker, and model exports.
+The storage migration and destination operations remain pending; this delivery
+does not complete M2. Next work should establish storage ownership and view
+lifetimes before replacing the existing host/device fields.
+
+Review extension: slice and transpose views must retain a separate
+`is_graph_view` mutation-protection bit without claiming to be differentiable
+view operators. Propagate it through nested views, and enforce it in all five
+existing guarded in-place operations (including `clip_` and `maskedFill_`).
+Independent contiguous copies remain mutable. This does not add storage version
+counters or retroactively track changes to the parent's graph membership.
+
+### Validation and continuation
+
+- Passed `zig build check-layers` (84 source files).
+- The two new regression test bodies passed in Debug and ReleaseFast against
+  the actual tensor module via an isolated test entry point. The entry point
+  used the same test bodies and a separate named tensor module to avoid linking
+  unrelated graph execution code. This is focused validation, not a full-suite run.
+- Full native `zig build test` and model exports remain unverified because
+  `deps/mlx-c/lib` is absent from this checkout. The x86_64 cross-build additionally
+  exposes an existing unguarded `mlx.c.mlx_array_data_uint8` reference in
+  `src/backend/buffer.zig` on a target without MLX; this host has no Rosetta runtime.
+- An independent agent reviewed the guards, view propagation, and callers and
+  found no blocking defect in this bounded change.
+
+Next: restore a supported full-test environment, run the complete suite and
+`run-book-models`, then define ownership, synchronization, and view lifetime
+contracts for the `DeviceBuffer` migration. Keep M2 and M3 acceptance checkboxes
+open until their complete validation matrices pass.

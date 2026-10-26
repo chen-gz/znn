@@ -20,7 +20,7 @@
 * **不支持高阶导数 (No Higher-Order Gradients)**：
   [`Tensor.grad`](../src/tensor/core.zig) 是一维切片 (`[]f32`)，反向传播由 [`Graph.backward`](../src/autodiff/graph.zig) 调度 [`backward_core.zig`](../src/autodiff/backward_core.zig)、[`backward_nn.zig`](../src/autodiff/backward_nn.zig) 与 [`backward_math.zig`](../src/autodiff/backward_math.zig) 执行单向链式传导，梯度计算本身不在图上注册为新节点，暂不支持二阶导数或 Hessian 向量积。
 * **就地操作 (In-place Ops) 版本计数器与前向零梯度内存优化**：
-  就地算子（如 [`mulScalar_`](../src/tensor/reductions.zig)、[`add_`](../src/tensor/reductions.zig)）目前通过 `assert(!requires_grad and creator == null)` 防御，尚缺计算图版本计数器（Version Counter）。无梯度推理图 (`Graph.initNoGrad`) 已不为中间张量分配 `grad` 缓冲，但也不记录 `Op` 节点，因此没有可供规划或重放的计算图；同时 `op.forward` 与 `runAndRecordPreallocatedOp` 经 `copyFromEager` 先算到临时张量再拷贝，输出缓冲还会被预先清零，这些是降低推理内存与带宽开销的关键优化点。
+  就地算子（如 [`mulScalar_`](../src/tensor/reductions.zig)、[`add_`](../src/tensor/reductions.zig)）目前通过显式 `TensorError.InPlaceOpOnGraphTensor` 错误防御，并保留共享视图的图存储保护状态，尚缺计算图版本计数器（Version Counter）。无梯度推理图 (`Graph.initNoGrad`) 已不为中间张量分配 `grad` 缓冲，但也不记录 `Op` 节点，因此没有可供规划或重放的计算图；同时 `op.forward` 与 `runAndRecordPreallocatedOp` 经 `copyFromEager` 先算到临时张量再拷贝，输出缓冲还会被预先清零，这些是降低推理内存与带宽开销的关键优化点。
 
 ### 3. 硬件加速与平台生态 (Hardware Acceleration & Parallelism)
 > 📐 **专项设计**：详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)（Apple Silicon Metal 优先；并发经 `io: std.Io` 注入；`eager` / `deferred` 双模式；按流有序命令队列；Phase 0–5 路线图），对应任务见第二部分 2.4 与 2.5。

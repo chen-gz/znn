@@ -49,6 +49,7 @@ pub const Tensor = struct {
     strides: Shape, // 各维度的跨度步长（用于非连续张量及快速视图映射）
     requires_grad: bool, // 是否需要求梯度（如模型参数为 true，输入数据为 false）
     creator: ?*OpHandle, // 产生此张量的算子节点句柄（前向图中的父节点，由 `autodiff.Op.creatorOf` 还原为 `*Op`）
+    is_graph_view: bool = false, // Shared storage was borrowed from a graph tensor.
     is_view: bool = false, // 是否为零拷贝视图切片（若为 true，deinit 时不释放 data/grad）
     is_custom_initialized: bool = false, // 是否已被层专属自定义初始化 (避免被 Graph 自动初始化重写)
     init_constant: ?f32 = null, // 结构性常量初始值 (如 LSTM 遗忘门偏置 1.0)，Graph 自动初始化时以该常量填充，不依赖命名
@@ -761,6 +762,7 @@ pub const Tensor = struct {
             .requires_grad = self.requires_grad,
             .creator = null,
             .is_view = true,
+            .is_graph_view = self.is_graph_view or self.requires_grad or self.creator != null,
         };
         return view;
     }

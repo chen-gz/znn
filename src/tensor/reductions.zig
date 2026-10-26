@@ -10,6 +10,7 @@ const broadcastShapes = shape_mod.broadcastShapes;
 const computeBroadcastStrides = shape_mod.computeBroadcastStrides;
 const types_mod = @import("types.zig");
 const SliceRange = types_mod.SliceRange;
+const TensorError = types_mod.TensorError;
 const GenericTensor = types_mod.GenericTensor;
 const isTruthyScalar = types_mod.isTruthyScalar;
 const ops_mod = @import("ops.zig");
@@ -51,9 +52,8 @@ pub fn mapInPlace(self: *Tensor, arg: anytype, comptime f: fn (*f32, @TypeOf(arg
     }
 }
 
-pub fn mulScalar_(self: *Tensor, val: f32) *Tensor {
-    std.debug.assert(!self.requires_grad);
-    std.debug.assert(self.creator == null);
+pub fn mulScalar_(self: *Tensor, val: f32) TensorError!*Tensor {
+    if (self.requires_grad or self.creator != null or self.is_graph_view) return error.InPlaceOpOnGraphTensor;
     mapInPlace(self, val, struct {
         fn f(item: *f32, v: f32) void {
             item.* *= v;
@@ -62,9 +62,8 @@ pub fn mulScalar_(self: *Tensor, val: f32) *Tensor {
     return self;
 }
 
-pub fn addScalar_(self: *Tensor, val: f32) *Tensor {
-    std.debug.assert(!self.requires_grad);
-    std.debug.assert(self.creator == null);
+pub fn addScalar_(self: *Tensor, val: f32) TensorError!*Tensor {
+    if (self.requires_grad or self.creator != null or self.is_graph_view) return error.InPlaceOpOnGraphTensor;
     mapInPlace(self, val, struct {
         fn f(item: *f32, v: f32) void {
             item.* += v;
@@ -74,9 +73,8 @@ pub fn addScalar_(self: *Tensor, val: f32) *Tensor {
 }
 
 /// 原地逐元素加法 `self += other`：两者必须同形状，支持任意跨步视图
-pub fn add_(self: *Tensor, other: *Tensor) !*Tensor {
-    std.debug.assert(!self.requires_grad);
-    std.debug.assert(self.creator == null);
+pub fn add_(self: *Tensor, other: *Tensor) TensorError!*Tensor {
+    if (self.requires_grad or self.creator != null or self.is_graph_view) return error.InPlaceOpOnGraphTensor;
     if (!self.shape.eq(other.shape)) return error.ShapeMismatch;
     var it = shape_mod.RowIter(2).init(self.shape, .{ self.strides, other.strides });
     const s_self = it.inner_strides[0];
@@ -389,7 +387,7 @@ pub fn maskedFill(self: *Tensor, mask: anytype, value: f32, allocator: std.mem.A
 
 /// 原地条件掩码填充 (支持 `*Tensor` 或 `*BoolTensor` / `*GenericTensor(T)`)
 pub fn maskedFill_(self: *Tensor, mask: anytype, value: f32) !*Tensor {
-    if (self.requires_grad or self.creator != null) return error.InPlaceOpOnGraphTensor;
+    if (self.requires_grad or self.creator != null or self.is_graph_view) return error.InPlaceOpOnGraphTensor;
     if (!self.shape.eq(mask.shape)) return error.ShapeMismatch;
     if (self.isContiguous() and mask.isContiguous() and self.data.len >= self.shape.numel() and mask.data.len >= self.shape.numel()) {
         const count = self.shape.numel();
@@ -586,6 +584,7 @@ pub fn slice(self: *Tensor, ranges: []const SliceRange, allocator: std.mem.Alloc
         .requires_grad = false,
         .creator = null,
         .is_view = true,
+        .is_graph_view = self.is_graph_view or self.requires_grad or self.creator != null,
     };
     return out;
 }
@@ -625,7 +624,7 @@ pub fn clip(self: *Tensor, min_val: f32, max_val: f32, allocator: std.mem.Alloca
 
 /// 就地截断操作 (In-place Clip)
 pub fn clip_(self: *Tensor, min_val: f32, max_val: f32) !*Tensor {
-    if (self.requires_grad or self.creator != null) return error.InPlaceOpOnGraphTensor;
+    if (self.requires_grad or self.creator != null or self.is_graph_view) return error.InPlaceOpOnGraphTensor;
     if (min_val > max_val) return error.InvalidRange;
     mapInPlace(self, [2]f32{ min_val, max_val }, struct {
         fn f(item: *f32, range: [2]f32) void {

@@ -39,6 +39,7 @@ pub const broadcastBinaryOpRaw = shape.broadcastBinaryOpRaw;
 
 // --- Re-export data types, generic tensors, and static tensors ---
 pub const DType = types.DType;
+pub const TensorError = types.TensorError;
 pub const bf16 = types.bf16;
 pub const SliceRange = types.SliceRange;
 pub const ConvOptions = types.ConvOptions;

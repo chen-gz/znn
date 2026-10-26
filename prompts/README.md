@@ -25,7 +25,7 @@
 | :--- | :--- | :--- | :--- |
 | [`00_master_architecture_overhaul.md`](00_master_architecture_overhaul.md) | **全景总览** | ZNN 架构深度重构总目标、审计发现与 6 大里程碑总体规划 | **基线已建立** |
 | [`01_backend_isolation_and_clean_hal.md`](01_backend_isolation_and_clean_hal.md) | **M1** | 硬件后端严格隔离、纯物理 `DeviceBuffer`、`kernels.zig` 与 6 大错配模块重定位 | **✅ Done & Merged** |
-| [`02_tensor_storage_and_zero_alloc_ops.md`](02_tensor_storage_and_zero_alloc_ops.md) | **M2** | 统一张量存储 `storage: DeviceBuffer`、目标写入 `*Into` 算子、强类型 `TensorError` | **⏳ 下一步 (Ready)** |
+| [`02_tensor_storage_and_zero_alloc_ops.md`](02_tensor_storage_and_zero_alloc_ops.md) | **M2** | 统一张量存储 `storage: DeviceBuffer`、目标写入 `*Into` 算子、强类型 `TensorError` | **⏳ In progress (in-place guards implemented; full validation pending)** |
 | [`03_autodiff_forward_replay_and_allocator.md`](03_autodiff_forward_replay_and_allocator.md) | **M3** | 计算图前向重演零堆分配（`*Into` 直接写入）、反向传播引入 `scratch_allocator`、清除 `c_allocator` | **⏳ 待启动 (Queued)** |
 | [`04_nn_module_protocol_and_layer_composability.md`](04_nn_module_protocol_and_layer_composability.md) | **M4** | PyTorch 风格 `nn.Module` 强类型协议、参数与缓冲区明确划分、反射迭代器、统一 `KVCache` | **⏳ 待启动 (Queued)** |
 | [`05_composable_models_gpt_and_gemma4.md`](05_composable_models_gpt_and_gemma4.md) | **M5** | 消除 `GPT` 与 `Gemma 4` 过程式指针偏移与裸切片索引，统一声明式模块调用，剥离执行引擎至 `engine/` | **⏳ 待启动 (Queued)** |

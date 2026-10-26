@@ -1481,9 +1481,9 @@ test "audit: in-place ops on views only touch the visible elements" {
     // 第 1 列 (跨步视图) 乘以 10
     const col = try X.slice(&.{ .{}, .{ .start = 1, .end = 2 } }, allocator);
     defer free(allocator, col);
-    _ = col.mulScalar_(10.0);
+    _ = try col.mulScalar_(10.0);
     try std.testing.expectEqualSlices(f32, &.{ 1, 20, 3, 4, 50, 6 }, X.data);
-    _ = col.addScalar_(1.0);
+    _ = try col.addScalar_(1.0);
     try std.testing.expectEqualSlices(f32, &.{ 1, 21, 3, 4, 51, 6 }, X.data);
     _ = try col.clip_(0.0, 30.0);
     try std.testing.expectEqualSlices(f32, &.{ 1, 21, 3, 4, 30, 6 }, X.data);
@@ -2570,4 +2570,78 @@ test "Tensor: toDevice and syncHost with CUDA and CPU" {
         try std.testing.expectEqual(@as(f32, 10.0), t.data[0]);
         try std.testing.expectEqual(@as(f32, 40.0), t.data[3]);
     }
+}
+
+test "in-place arithmetic rejects gradient and creator tensors before writing" {
+    var memory: [65536]u8 = undefined;
+    var arena = std.heap.FixedBufferAllocator.init(&memory);
+    const allocator = arena.allocator();
+    const x = try array(allocator, &.{ 2, 2 }, &.{ 1, 2, 3, 4 });
+
+    const other = try ones(allocator, &.{ 2, 2 });
+
+    var creator_token: u8 = 0;
+
+    // Exercise each guard independently and together, including graph views.
+    for (0..3) |state| {
+        x.requires_grad = state != 1;
+        x.creator = if (state != 0) @ptrCast(&creator_token) else null;
+        try std.testing.expectError(error.InPlaceOpOnGraphTensor, x.mulScalar_(2));
+        try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, x.data);
+        try std.testing.expectError(error.InPlaceOpOnGraphTensor, x.addScalar_(2));
+        try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, x.data);
+        try std.testing.expectError(error.InPlaceOpOnGraphTensor, x.add_(other));
+        try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, x.data);
+    }
+    for (0..2) |state| {
+        x.requires_grad = state == 0;
+        x.creator = if (state == 1) @ptrCast(&creator_token) else null;
+        const view = try x.slice(&.{ .{}, .{ .start = 0, .end = 1 } }, allocator);
+
+        const nested = try view.transposeView(0, 1, allocator);
+
+        const transposed = try x.transposeView(0, 1, allocator);
+
+        const nested_slice = try transposed.slice(&.{.{ .start = 0, .end = 1 }}, allocator);
+
+        for ([_]*Tensor{ view, nested, transposed, nested_slice }) |v| {
+            const operand = try ones(allocator, v.shape.slice());
+
+            try std.testing.expectError(error.InPlaceOpOnGraphTensor, v.mulScalar_(2));
+            try std.testing.expectError(error.InPlaceOpOnGraphTensor, v.addScalar_(2));
+            try std.testing.expectError(error.InPlaceOpOnGraphTensor, v.add_(operand));
+            try std.testing.expectError(error.InPlaceOpOnGraphTensor, v.clip_(0, 1));
+            try std.testing.expectError(error.InPlaceOpOnGraphTensor, v.maskedFill_(operand, 0));
+            try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, x.data);
+            const copy = try v.contiguous(allocator);
+
+            _ = try copy.addScalar_(10);
+            try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, x.data);
+        }
+    }
+    x.creator = null;
+    x.requires_grad = false;
+}
+
+test "in-place arithmetic returns destination and shape errors preserve data" {
+    var memory: [65536]u8 = undefined;
+    var arena = std.heap.FixedBufferAllocator.init(&memory);
+    const allocator = arena.allocator();
+    const x = try array(allocator, &.{2}, &.{ 1, 2 });
+
+    const other = try array(allocator, &.{2}, &.{ 3, 4 });
+
+    try std.testing.expect(x == try x.mulScalar_(2));
+    try std.testing.expect(x == try x.addScalar_(1));
+    try std.testing.expect(x == try x.add_(other));
+    try std.testing.expectEqualSlices(f32, &.{ 6, 9 }, x.data);
+    const bad = try ones(allocator, &.{ 1, 2 });
+
+    try std.testing.expectError(error.ShapeMismatch, x.add_(bad));
+    try std.testing.expectEqualSlices(f32, &.{ 6, 9 }, x.data);
+    const empty = try zeros(allocator, &.{0});
+
+    try std.testing.expect(empty == try empty.mulScalar_(2));
+    try std.testing.expect(empty == try empty.addScalar_(1));
+    try std.testing.expect(empty == try empty.add_(empty));
 }

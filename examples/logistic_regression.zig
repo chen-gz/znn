@@ -83,8 +83,10 @@ pub fn main() !void {
     tensor.manualSeed(12345);
 
     // X shape is 100 x 2
-    const x_tensor = (try tensor.rand(allocator, &.{ N, 2 })).mulScalar_(4.0).addScalar_(-2.0);
+    const x_tensor = try tensor.rand(allocator, &.{ N, 2 });
     defer tensor.free(allocator, x_tensor);
+    _ = try x_tensor.mulScalar_(4.0);
+    _ = try x_tensor.addScalar_(-2.0);
 
     const y_tensor = try tensor.zeros(allocator, &.{ N, 1 });
     defer tensor.free(allocator, y_tensor);

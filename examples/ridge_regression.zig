@@ -179,14 +179,20 @@ pub fn main() !void {
 
     tensor.manualSeed(42);
 
-    const x_1d = (try tensor.rand(allocator, &.{ N, 1 })).mulScalar_(4.0).addScalar_(-2.0);
+    const x_1d = try tensor.rand(allocator, &.{ N, 1 });
     defer tensor.free(allocator, x_1d);
+    _ = try x_1d.mulScalar_(4.0);
+    _ = try x_1d.addScalar_(-2.0);
 
-    const noise_1d = (try tensor.rand(allocator, &.{ N, 1 })).mulScalar_(0.4).addScalar_(-0.2);
+    const noise_1d = try tensor.rand(allocator, &.{ N, 1 });
     defer tensor.free(allocator, noise_1d);
+    _ = try noise_1d.mulScalar_(0.4);
+    _ = try noise_1d.addScalar_(-0.2);
 
-    const y_1d = (try x_1d.clone(allocator)).mulScalar_(true_w).addScalar_(true_b);
+    const y_1d = try x_1d.clone(allocator);
     defer tensor.free(allocator, y_1d);
+    _ = try y_1d.mulScalar_(true_w);
+    _ = try y_1d.addScalar_(true_b);
     _ = try y_1d.add_(noise_1d);
 
     std.debug.print("Running 1D Autograd Gradient Descent (lambda = {d:.1})...\n", .{lambda_1d});

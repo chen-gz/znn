@@ -9,6 +9,17 @@ pub const transposeShape = shape_mod.transposeShape;
 pub const broadcastShapes = shape_mod.broadcastShapes;
 pub const computeBroadcastStrides = shape_mod.computeBroadcastStrides;
 
+/// Explicit tensor validation errors, retained in every optimization mode.
+pub const TensorError = error{
+    InPlaceOpOnGraphTensor,
+    ShapeMismatch,
+    StrideMismatch,
+    DeviceMismatch,
+    NonContiguousLayout,
+    UnsupportedDType,
+    DimensionOutOfBounds,
+};
+
 // ============================================================================
 // 2. 数据类型系统与泛型张量 (Data Type, DType System & Generic Tensor)
 // ============================================================================
@@ -1029,5 +1040,3 @@ pub fn verifyDraftToken(dist: Distribution, draft: u32, random: std.Random) Draf
     if (p > 0.0 and random.float(f64) < p) return .accepted;
     return .{ .rejected = dist.sampleExcluding(random, draft) };
 }
-
-

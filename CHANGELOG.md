@@ -9,13 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- Require a remote fetch before continuing task work that has run for more than one hour since the previous fetch, and review newly available commits before proceeding.
-- Allow AI assistants to push completed work directly to GitHub without additional human approval, following the repository's fetch, rebase, and no-force-push rules.
-- Require AI assistants to review unfinished plans and prompts, prioritize actionable project work, audit implementation against documented architecture, and add or update relevant tests alongside behavior changes.
-- Require clear, runnable frontend examples and focused `jj` changes, starting a new change with `jj new` after each completed logical unit.
-- Prohibit direct use of `/private` for project worktrees, test checkouts, build outputs, and scratch files; allow `/tmp` for temporary files and test workspaces.
+- In-place tensor arithmetic now returns `TensorError.InPlaceOpOnGraphTensor`
+  before modifying graph-backed data in every optimization mode. Slice and
+  transpose views retain mutation protection through nested views. Scalar
+  `mulScalar_` and `addScalar_` calls now require error handling; regression
+  examples are updated. Explicit `TensorError` is exported from the tensor facade.
 
 - **严格硬件后端隔离与硬件抽象层 (HAL) 彻底重构 (`src/backend/buffer.zig`, `src/backend/kernels.zig`, `src/backend/device.zig`, `src/backend/tests.zig`, `src/tensor/attention.zig`, `src/tensor/rope.zig`, `src/tensor/safetensors.zig`, `src/engine/sampling.zig`, `src/engine/logits_processor.zig`, `src/nn/transformer_blocks.zig`, `src/autodiff/ops.zig`, `tools/check_layers.zig`)**:
   - **彻底清除底层鸭子类型与泛型反射 (Duck-Typing & anytype Purge)**：
@@ -475,6 +475,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 新增 `zig build check-layers`（同时纳入 `zig build test`）：扫描 `src/` 下全部 `@import`，要求跨包导入只指向更底层的包（`backend` ← `tensor` / `dataset` ← `autodiff` / `regression` / `manifold` ← `nn` / `cross_validation` ← `optim` / `models` ← `engine` ← `bench` ← `root`），违规时报告文件与行号；`AGENTS.md` 新增第 6 节《包级单向依赖》。
 
 ### Changed
+
+- Require a remote fetch before continuing task work that has run for more than one hour since the previous fetch, and review newly available commits before proceeding.
+- Allow AI assistants to push completed work directly to GitHub without additional human approval, following the repository's fetch, rebase, and no-force-push rules.
+- Require AI assistants to review unfinished plans and prompts, prioritize actionable project work, audit implementation against documented architecture, and add or update relevant tests alongside behavior changes.
+- Require clear, runnable frontend examples and focused `jj` changes, starting a new change with `jj new` after each completed logical unit.
+- Prohibit direct use of `/private` for project worktrees, test checkouts, build outputs, and scratch files; allow `/tmp` for temporary files and test workspaces.
+
 - **热路径消除瞬态线程派发 (`src/models/gemma4_q4.zig`)**:
   - 将 `Q4Linear.forward` 与 LM head argmax 中每次调用 `std.Thread.spawn` 的实现替换为经 `GraphOptions.io` 注入的 `Executor.parallelFor` / `Executor.parallelReduce`，消除了高频创建/销毁 OS 线程的系统开销（v0.3.0 每次调用约 1.9 ms）。
 - **二进制格式魔数升级 (`src/models/gemma4_q4.zig`, `tools/quantize_gemma4.zig`, `examples/gemma4.zig`)**:
