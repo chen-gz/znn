@@ -418,3 +418,77 @@
   - [x] 为 `models.GPT` 实现全生命周期自回归流式生成循环 `generate(allocator, prompt_tokens, options)`，支持 Prefill 与单步 Decode 自适应切换，并通过单元测试确认逐步增量解码与全序列前向输出 100% 位一致；
   - [x] 扩展纯 PTX 批处理矩阵乘法 (BMM)、`embedding_kernel` 与 `softcap_kernel`，彻底清除 `autodiff` 内部对 `backend.offload` 的最后单点绑定；
   - [ ] 在 Linux / WSL2 / Windows 带有 NVIDIA GPU 的物理机上运行 CUDA 端到端基准测试，验证首字延迟 (TTFT) 与自回归流式生成速率 (token/s)。
+
+---
+
+### 🏛️ Phase 6 (演化路线图): ZNN 系统深度架构重构与 PyTorch 风格模块化演进 (Architecture Overhaul & nn.Module Continuum)
+
+> 📌 **核心目标**：彻底解决底层硬件耦合与抽象泄漏，实现操作算子清晰化，全面对齐 PyTorch 风格的 `nn.Module` 声明式与组合式抽象，彻底消除模型中的裸指针切片与过程式过程代码。
+
+- [x] **6.1 Milestone 1: 严格硬件后端隔离与硬件抽象层 (HAL) 彻底重构 (已完成并合入 main)**
+  - [x] **消除鸭子类型与 `anytype` 反射**：删除 `src/backend/ops.zig` (566 行基于 `anytype` 的张量隐式反射与越级调用)，清理 `src/backend/offload.zig` 中的所有反射代码；
+  - [x] **纯物理设备缓冲区 (`src/backend/buffer.zig`)**：构建 64 字节 SIMD 对齐的 `DeviceBuffer` / `BufferHandle`，严禁在 Layer 0 触碰形状 (`Shape`)、步长 (`Strides`) 或计算图/自动微分逻辑；
+  - [x] **无状态底层计算算子引擎 (`src/backend/kernels.zig`)**：新增跨 CPU/CBLAS、NVIDIA CUDA、Apple Metal/MLX 的纯净 C-ABI 算子执行契约 (+537 行)；
+  - [x] **6 大错配领域模块精准归位**：
+    - `logits_processor.zig` 与 `sampling.zig` $\rightarrow$ `src/engine/` (Layer 5)；
+    - `attention_mask.zig` (改名为 `attention.zig`) 与 `safetensors.zig` $\rightarrow$ `src/tensor/` (Layer 1)；
+    - `rope.zig` 统一合并收敛至 `src/tensor/rope.zig` (Layer 1)；
+    - `mlx_blocks.zig` 迁移并升级为 `src/nn/transformer_blocks.zig` (Layer 3)；
+  - [x] **强化静态层级检查器 (`tools/check_layers.zig`)**：静态 AST 级禁令扫描 Layer 0 鸭子类型代码，强制上层跨包导入只能指向 `src/backend.zig` 门面；84 个核心源文件 100% 保持严格单向依赖拓扑；
+  - [x] **全量验证保障**：`zig build check-layers` 与 `zig build test`（387 passed, 0 failed, 0 leaks）及 18 个经典网络模型全部正常导出 JSON 结构图。
+
+- [ ] **6.2 Milestone 2: 张量存储统一与算子执行规范化 (Tensor Storage & Zero-Allocation Ops)**
+  - [ ] **统一张量物理存储抽象 (Unified Storage)**：
+    - 重构 `src/tensor/core.zig` 中的 `Tensor` 结构体：以单一 `storage: backend.DeviceBuffer` 取代双重 `data: []f32` 与 `device_array: ?DeviceArray` 状态，彻底根除双内存失步隐患；
+    - CPU 访问通过统一的 `storage.asHostSlice()` 进行瞬时映射，GPU/CUDA 访问直接消费 `storage.handle.cuda`。
+  - [ ] **目标写入张量算子体系 (Destination `*Into` Ops)**：
+    - 在 `src/tensor/` 引入成套目标写入算子：`matmulInto(dest, a, b)`、`addInto(dest, a, b)`、`mulInto(dest, a, b)`、`rmsNormInto(dest, x, weight, options)` 等；
+    - 确保前向重演可直接写入预分配的计算图节点缓冲区，实现前向计算真正零堆分配 (Zero Allocation)。
+  - [ ] **标准化张量错误分类系统 (Tensor Error Taxonomy)**：
+    - 以编译期/运行时显式强类型错误枚举 `TensorError`（如 `error.InPlaceOpOnGraphTensor`、`error.ShapeMismatch`、`error.DeviceMismatch`）替换原有在 ReleaseFast 模式下会被静默剥离的 raw `assert`。
+
+- [ ] **6.3 Milestone 3: 自动微分重放与分配器标准化 (Autodiff Forward Replay & Allocator Discipline)**
+  - [ ] **计算图前向重演零抖动 (Zero-Thrash Forward Replay)**：
+    - 彻底重构 `src/autodiff/op.zig` 中的 `op.forward`：废除 `copyFromEager`（该机制每次在堆上分配临时张量计算后再拷贝到目标节点），改为直接调用 Layer 1 的 `*Into` 算子写入 `self.outputs[0]`；
+    - 消除输出缓冲区的冗余显式预清零 (`@memset(0.0)`)。
+  - [ ] **反向求导显式分配器掌控 (Explicit Allocator in Backward)**：
+    - 为 `op.backward(self, scratch_allocator)` 引入显式工作区分配器契约；
+    - 全面根除反向求导算子内部对 `std.heap.c_allocator` 的野生硬编码调用，统一受控于计算图绑定的批次 Arena。
+  - [ ] **GraphOptions 清理与损失函数去重**：
+    - 移除 `GraphOptions` 中厂商特定的冗余字段（如 `mlx_stream`）；
+    - 清理并统一损失函数别名，所有算子通过 `src/autodiff/ops.zig` 统一调度。
+
+- [ ] **6.4 Milestone 4: `nn.Module` 协议标准化与图层规范化 (`nn.Module` Protocol & Layer Composability)**
+  - [ ] **PyTorch 风格的强类型 `nn.Module` 契约**：
+    - 在 `src/nn/module.zig` 中正式规范 Module 协议，提供编译期验证函数 `verifyModule(T)`：
+      - `pub fn init(allocator: Allocator, options: Options) !Self`
+      - `pub fn deinit(self: *Self, allocator: Allocator) void`
+      - `pub fn forward(self: *const Self, graph: *Graph, x: *Tensor) !*Tensor`
+      - `pub fn resetParameters(self: *Self, random: Random, options: InitOptions) void`
+  - [ ] **显式参数与缓冲区生命周期划分 (Parameters vs. Buffers)**：
+    - 引入 `createParameter(allocator, shape, requires_grad) -> *Tensor`（`.is_buffer = false`）与 `createBuffer(allocator, shape) -> *Tensor`（`.is_buffer = true`, `.requires_grad = false`）；
+    - 修复 `BatchNorm` 运行统计量（`running_mean`, `running_var`）与标量超参数生命周期，`setRequiresGrad` 严格忽略所有 `is_buffer = true` 的张量，优化器权重衰减自动过滤缓冲区。
+  - [ ] **反射迭代器完善与量化层支持**：
+    - 在 `src/nn/module.zig` 扩展 `buffers(model, alloc)`、`namedBuffers(model, alloc)`、`submodules(model, alloc)`；
+    - 改造 `Q4Linear` 使其权重与 scale 结构体能被 `walk` 透明遍历并支持命名前缀注册。
+  - [ ] **统一通用键值缓存与注意力层整合**：
+    - 统一收敛为单一由 Tensor 驱动的 `nn.KVCache`（位于 `src/nn/attention.zig`）；
+    - 将现有分散的注意力实现统一收敛至标准 `nn.GQAAttention`（支持 MHA、GQA、MQA、滑动窗口与头归一化）。
+
+- [ ] **6.5 Milestone 5: 核心模型全模块化重构 (Model Standardization: Composable GPT & Gemma 4)**
+  - [ ] **GPT 模型规范化重构 (`src/models/gpt.zig`)**：
+    - 消除 `pos_node.data` 过程式循环与硬编码索引，以模块化 `nn.Embedding` 替代；
+    - 消除非必要的动态 `reshape` 算子节点，统一为连续的模块化前向图调用。
+  - [ ] **Gemma 4 模型规范化重构 (`src/models/gemma4.zig`, `gemma4_q4.zig`, `gemma4_e4b.zig`)**：
+    - 彻底消除 `decodeAttention` 中对原始切片的手工偏移运算与指针解引用（如 `q_rot[h * hd .. (h + 1) * hd]` 与 `attendOneQuery` 直接访问 host float）；
+    - 统一基于声明式 `forward` / `forwardWithCache` 与 `nn.Module` 调用链完成端到端自回归前向与增量解码。
+  - [ ] **执行引擎与纯模型结构解耦 (Engine Decoupling)**：
+    - 遵循架构规则 §7，将特定硬件执行引擎与控制台调度器（如 `GpuLayerE4B`、`Gemma4GpuContext`）彻底从 `src/models/` 剥离，迁移至 `src/engine/`。
+
+- [ ] **6.6 Milestone 6: 端到端全量验证与对抗性加固 (Comprehensive E2E Verification & Hardening)**
+  - [ ] **全量自动化矩阵验证**：
+    - 确保 `zig build check-layers` 严格 100% 通过（8 层单向依赖拓扑）；
+    - 确保 `zig build test` 全量通过（0 错误，0 内存泄漏）；
+    - 确保 `zig build run-book-models` 全部 18 个模型图与前端 Schema 2.0 Web 可视化器完美对齐导出。
+  - [ ] **对抗性边界测试与压力验证**：
+    - 针对变长输入、边界上下文窗口溢出、GPU 显存瞬时溢出回退及空批次执行对抗性白盒测试与内存安全审计。
