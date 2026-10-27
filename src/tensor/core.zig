@@ -196,47 +196,79 @@ pub const Tensor = struct {
         }
     }
 
-    /// 将 GPU 驻留张量的数据物化同步回主机中央处理器 (Central Processing Unit, CPU) 缓冲区 (data)
-    pub fn syncHost(self: *Tensor, allocator: ?std.mem.Allocator) !void {
-        if (self.device_array) |da| {
-            const n_elements = self.shape.numel();
-            if (self.data.len < n_elements) {
-                const alloc = allocator orelse std.heap.smp_allocator;
-                if (!self.is_view and self.data.len > 0) {
-                    alloc.free(self.data);
-                }
-                self.data = try alloc.alloc(f32, n_elements);
-            }
-            try da.copyToSlice(self.data[0..n_elements]);
-            self.device = .cpu;
+    fn contiguousCount(self: *const Tensor) types_mod.TensorError!usize {
+        if (self.shape.len > self.shape.dims.len) return error.DimensionOutOfBounds;
+        if (self.strides.len != self.shape.len) return error.StrideMismatch;
+        for (self.shape.dims[0..self.shape.len]) |d| if (d == 0) return 0;
+        var count: usize = 1;
+        var stride: usize = 1;
+        var axis = self.shape.len;
+        while (axis > 0) {
+            axis -= 1;
+            const dim = self.shape.dims[axis];
+            if (dim != 1 and self.strides.dims[axis] != stride) return error.NonContiguousLayout;
+            stride = std.math.mul(usize, stride, dim) catch return error.InvalidStorage;
+            count = stride;
         }
+        return count;
     }
 
-    /// 迁移张量至指定设备 (.cpu, .cuda 或 .metal)
-    pub fn toDevice(self: *Tensor, target: backend.Device) !void {
-        if (self.device.eql(target) and self.device_array != null) return;
-        switch (target.type) {
-            .cuda, .metal => {
-                if (!backend.device.isAvailable(target)) return error.DeviceNotSupported;
-                const active = backend.device.activeBackend(target);
-                if (active == .cuda) {
-                    if (self.device_array == null or !self.device_array.?.isCuda()) {
-                        if (self.device_array) |*old| old.deinit();
-                        self.device_array = .{ .cuda = try backend.cuda.Array.fromSlice(self.data, self.shape.dims[0..self.shape.len]) };
-                    }
-                } else if (active == .mlx) {
-                    if (self.device_array == null or !self.device_array.?.isMlx()) {
-                        if (self.device_array) |*old| old.deinit();
-                        self.device_array = .{ .mlx = try backend.mlx.Array.fromSliceZeroCopy(self.data, self.shape.dims[0..self.shape.len]) };
-                    }
-                }
-                self.device = target;
-            },
-            .cpu => {
-                // 若有设备数组且主机缓冲区未物化，需要外部调用方通过 syncHost 提供分配器物化
-                self.device = .cpu;
-            },
+    /// Checked contiguous host access; never allocates or synchronizes devices.
+    pub fn asHostSlice(self: *const Tensor) types_mod.TensorError![]const f32 {
+        if (!self.device.eql(.cpu) or self.device_array != null) return error.DeviceMismatch;
+        const count = try self.contiguousCount();
+        if (count > self.data.len) return error.InvalidStorage;
+        return self.data[0..count];
+    }
+
+    /// Mutable host access preserves the graph's in-place mutation guard.
+    pub fn asHostSliceMut(self: *Tensor) types_mod.TensorError![]f32 {
+        if (self.requires_grad or self.creator != null or self.is_graph_view) return error.InPlaceOpOnGraphTensor;
+        const data = try self.asHostSlice();
+        return self.data[0..data.len];
+    }
+
+    /// Transfer into staging storage, committing only after successful copying.
+    /// Growing storage requires its owning allocator; graph outputs use their arena.
+    pub fn syncHost(self: *Tensor, allocator: ?std.mem.Allocator) !void {
+        const da = self.device_array orelse {
+            _ = try self.asHostSlice();
+            return;
+        };
+        const count = try self.contiguousCount();
+        if (self.is_view) return error.BorrowedStorage;
+        if (self.data.len < count and allocator == null) return error.HostAllocatorRequired;
+        const alloc = allocator orelse std.heap.smp_allocator;
+        const staged = try alloc.alloc(f32, count);
+        var adopted = false;
+        defer if (!adopted) alloc.free(staged);
+        try da.copyToSlice(staged);
+        if (self.data.len < count) {
+            if (self.data.len > 0) alloc.free(self.data);
+            self.data = staged;
+            adopted = true;
+        } else {
+            @memcpy(self.data[0..count], staged);
         }
+        self.device_array.?.deinit();
+        self.device_array = null;
+        self.device = .cpu;
+    }
+
+    /// Explicit upload; cross-device transfers require syncHost first.
+    pub fn toDevice(self: *Tensor, target: backend.Device) !void {
+        if (target.eql(.cpu)) return self.syncHost(null);
+        if (self.device.eql(target) and self.device_array != null) return;
+        if (!target.isGpu() or target.index != 0) return error.DeviceNotSupported;
+        const data = try self.asHostSlice();
+        if (!backend.device.isAvailable(target)) return error.DeviceNotSupported;
+        const replacement: backend.DeviceArray = switch (target.type) {
+            .cuda => .{ .cuda = try backend.cuda.Array.fromSlice(data, self.shape.dims[0..self.shape.len]) },
+            .metal => .{ .mlx = try backend.mlx.Array.fromSlice(data, self.shape.dims[0..self.shape.len]) },
+            .cpu => unreachable,
+        };
+        self.device_array = replacement;
+        self.device = target;
     }
 
     /// 将张量转换为统一计算设备架构 (Compute Unified Device Architecture, CUDA) 数组

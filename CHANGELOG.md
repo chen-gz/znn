@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Checked `Tensor.asHostSlice` and `asHostSliceMut` access contiguous CPU data
+  without implicit allocation or transfer, validating metadata and bounds while
+  preserving graph mutation guards.
+
 - `DeviceBuffer.fromDeviceArray` retains validated contiguous float32 CUDA/Metal
   arrays, with borrowed typed access and explicit exact-length `copyToHostF32`.
   Typed storage rejects raw byte transfers and zeroing to preserve array metadata.
@@ -33,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stored ownership; descriptor copies must use `retain()` to acquire a reference.
 
 ### Fixed
+
+- Host synchronization stages transfers before committing, preserving existing
+  data and ownership on allocation/transfer failure. Successful synchronization
+  releases the device array so subsequent host edits cannot reuse stale device
+  values. Growing host storage requires an explicit allocator, and graph callers
+  materialize into their own arenas. Device upload copies host data and rejects
+  implicit cross-device transitions; MLX host-copy evaluation failures propagate.
 
 - Metal `DeviceArray.clone` creates an independently owned copy instead of
   reusing the same handle. Explicit device-array retention uses CUDA ownership

@@ -126,10 +126,10 @@ Do not mechanically replace Tensor fields before resolving these requirements:
 
 Validated on 2026-10-26 with Zig 0.17.0 on Apple Silicon:
 
-- Full CPU Debug and ReleaseFast suites each passed 415 tests, with four GPU
-  runtime tests explicitly skipped (419 total).
+- Full CPU Debug and ReleaseFast suites each passed 417 tests, with five GPU
+  runtime tests explicitly skipped (422 total).
 - Layer checks passed for 86 source files; all 18 canonical model graphs exported
-  successfully after typed GPU buffer integration.
+  successfully after the host-access and transition changes.
 - GPU-enabled and x86_64 Linux source passed compile-only checks.
 - Independent reviews found no blocking ownership or destination-operation defects.
 - Metal and CUDA execution were not exercised. These results do not complete M2.
@@ -200,3 +200,19 @@ retain storage for slices/transpose/reshape views. Preserve graph arenas, extern
 parameter ownership, zero elements, and scalar storage. Update all consumers in
 one cohesive migration; do not keep duplicate authoritative host/device state.
 The typed adoption path needs GPU runtime validation before claiming M2 complete.
+
+## 8. Host access and transition implementation
+
+Tensor now exposes fallible contiguous CPU host accessors with checked rank,
+strides, counts, and bounds. Mutable access retains graph mutation guards. These
+accessors never trigger transfer or allocation. The storage fields themselves
+remain unchanged pending the cohesive Tensor/Graph migration.
+
+Host synchronization stages data before changing the tensor. Failure leaves the
+old data, device, and array ownership untouched. Successful synchronization releases
+the old device array so later CPU writes cannot be hidden by a stale cached handle.
+Growing host storage requires an explicit allocator; graph callers must use the
+graph arena for graph-owned host allocations. Borrowed-view materialization is rejected
+until shared storage is migrated. Device upload commits only after creating an owned copy of host bytes and rejects implicit
+cross-device transitions. Tests cover validation and failure atomicity without
+GPU libraries, plus conditional transfer/re-upload tests.

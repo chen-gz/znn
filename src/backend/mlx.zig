@@ -651,7 +651,7 @@ pub const Array = struct {
         if (dest.len != numel) return error.ShapeMismatch;
         if (numel == 0) return;
 
-        self.eval();
+        if (c.mlx_array_eval(self.handle) != 0) return error.MlxOperationFailed;
         // 非连续视图的元素按步长分布在底层缓冲区中，跨度可能大于 numel（切片视图）也可能小于 numel（广播视图），
         // 因此以多元素指针按步长寻址，而不是截取长度为 numel 的切片
         const src: [*]const f32 = c.mlx_array_data_float32(self.handle) orelse return error.MlxOperationFailed;

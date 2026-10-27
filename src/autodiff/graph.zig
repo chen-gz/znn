@@ -413,7 +413,7 @@ pub const Graph = struct {
     ) !*Tensor {
         for (inputs) |in| {
             if (in.device_array != null) {
-                try in.syncHost(self.backing_allocator);
+                try in.syncHost(if (in.is_graph_owned) self.arena.allocator() else self.backing_allocator);
             }
         }
         var temp_op = Op{
@@ -1193,12 +1193,12 @@ pub const Graph = struct {
         for (order.items) |op| {
             for (op.inputs) |in| {
                 if (in.device_array != null) {
-                    try in.syncHost(allocator);
+                    try in.syncHost(if (in.is_graph_owned) self.arena.allocator() else allocator);
                 }
             }
             for (op.outputs) |out| {
                 if (out.device_array != null) {
-                    try out.syncHost(allocator);
+                    try out.syncHost(if (out.is_graph_owned) self.arena.allocator() else allocator);
                 }
             }
         }

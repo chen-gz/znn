@@ -165,7 +165,7 @@ test "Gemma 4 specialized operators, modules, and CausalLM forward" {
             try std.testing.expectEqual(@as(usize, 4), logits_gpu.shape.dims[1]);
             try std.testing.expectEqual(@as(usize, 128), logits_gpu.shape.dims[2]);
 
-            try logits_gpu.syncHost(null);
+            try logits_gpu.syncHost(g_gpu.arena.allocator());
             for (logits.data, logits_gpu.data) |c_val, g_val| {
                 try std.testing.expectApproxEqAbs(c_val, g_val, 1e-3);
             }

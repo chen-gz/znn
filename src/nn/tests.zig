@@ -288,7 +288,7 @@ test "CausalSelfAttention Module" {
         defer y_gpu_graph.deinit();
         const y_gpu = try attn.forward(&y_gpu_graph, x_3d);
         try std.testing.expectEqualSlices(usize, &.{ 2, 3, 8 }, y_gpu.shape.dims[0..y_gpu.shape.len]);
-        try y_gpu.syncHost(null);
+        try y_gpu.syncHost(y_gpu_graph.arena.allocator());
         for (y_eager.data, y_gpu.data) |e_val, g_val| {
             try std.testing.expectApproxEqAbs(e_val, g_val, 1e-3);
         }

@@ -231,7 +231,7 @@ pub fn GPT(comptime config: GPTConfig) type {
 
             const prefill_logits = try self.forwardWithCache(&g_prefill, prompt_tensor, &caches, 0);
             if (prefill_logits.device_array != null) {
-                try prefill_logits.syncHost(allocator);
+                try prefill_logits.syncHost(g_prefill.arena.allocator());
             }
 
             const vocab_size = config.vocab_size;
@@ -266,7 +266,7 @@ pub fn GPT(comptime config: GPTConfig) type {
 
                 const step_logits = try self.forwardWithCache(&g_step, step_tensor, &caches, curr_pos);
                 if (step_logits.device_array != null) {
-                    try step_logits.syncHost(allocator);
+                    try step_logits.syncHost(g_step.arena.allocator());
                 }
 
                 var next_tok: usize = 0;

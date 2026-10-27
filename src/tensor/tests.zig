@@ -2645,3 +2645,92 @@ test "in-place arithmetic returns destination and shape errors preserve data" {
     try std.testing.expect(empty == try empty.addScalar_(1));
     try std.testing.expect(empty == try empty.add_(empty));
 }
+
+test "Tensor host access validates residency layout storage and graph mutation" {
+    var values = [_]f32{ 1, 2, 3, 4, 99 };
+    var t = Tensor{ .data = &values, .grad = &.{}, .shape = Shape.init(&.{ 2, 2 }), .strides = Shape.init(&.{ 2, 1 }), .requires_grad = false, .creator = null };
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, try t.asHostSlice());
+    (try t.asHostSliceMut())[0] = 5;
+    try std.testing.expectEqual(@as(f32, 5), values[0]);
+    t.requires_grad = true;
+    try std.testing.expectError(error.InPlaceOpOnGraphTensor, t.asHostSliceMut());
+    _ = try t.asHostSlice();
+    t.requires_grad = false;
+    t.is_graph_view = true;
+    try std.testing.expectError(error.InPlaceOpOnGraphTensor, t.asHostSliceMut());
+    t.is_graph_view = false;
+    t.device = .cuda;
+    try std.testing.expectError(error.DeviceMismatch, t.asHostSlice());
+    t.device = .cpu;
+    t.device_array = .{ .mlx = backend.mlx.Array.init() };
+    try std.testing.expectError(error.DeviceMismatch, t.asHostSlice());
+    t.device_array = null;
+    t.strides = Shape.init(&.{ 1, 2 });
+    try std.testing.expectError(error.NonContiguousLayout, t.asHostSlice());
+    t.strides = Shape.init(&.{1});
+    try std.testing.expectError(error.StrideMismatch, t.asHostSlice());
+    t.strides = Shape.init(&.{ 2, 1 });
+    t.data = values[0..3];
+    try std.testing.expectError(error.InvalidStorage, t.asHostSlice());
+    t.shape.len = 9;
+    try std.testing.expectError(error.DimensionOutOfBounds, t.asHostSlice());
+    t.shape = Shape.init(&.{ std.math.maxInt(usize), 2 });
+    try std.testing.expectError(error.InvalidStorage, t.asHostSlice());
+    t.shape = Shape.init(&.{});
+    t.strides = Shape.init(&.{});
+    try std.testing.expectEqual(@as(usize, 1), (try t.asHostSlice()).len);
+    t.shape = Shape.init(&.{ 0, 2 });
+    t.strides = Shape.init(&.{ 2, 1 });
+    try std.testing.expectEqual(@as(usize, 0), (try t.asHostSliceMut()).len);
+}
+
+test "Tensor synchronization failures preserve old data and ownership" {
+    var values = [_]f32{ 9, 8 };
+    var t = Tensor{ .data = &values, .grad = &.{}, .shape = Shape.init(&.{4}), .strides = Shape.init(&.{1}), .requires_grad = false, .creator = null, .device = .metal, .device_array = .{ .mlx = backend.mlx.Array.init() } };
+    try std.testing.expectError(error.HostAllocatorRequired, t.syncHost(null));
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, t.syncHost(failing.allocator()));
+    try std.testing.expectError(if (backend.mlx.has_mlx) error.ShapeMismatch else error.MlxNotSupported, t.syncHost(std.testing.allocator));
+    try std.testing.expect(t.data.ptr == &values);
+    try std.testing.expectEqualSlices(f32, &.{ 9, 8 }, t.data);
+    try std.testing.expectEqual(backend.Device.metal, t.device);
+    try std.testing.expect(t.device_array != null);
+    t.is_view = true;
+    try std.testing.expectError(error.BorrowedStorage, t.syncHost(std.testing.allocator));
+    t.is_view = false;
+    try std.testing.expectError(error.DeviceMismatch, t.toDevice(.cuda));
+    try std.testing.expectError(error.DeviceNotSupported, t.toDevice(.{ .type = .cuda, .index = 1 }));
+    try std.testing.expect(t.device_array != null);
+    try std.testing.expectEqualSlices(f32, &.{ 9, 8 }, t.data);
+}
+
+test "Tensor explicit GPU transitions materialize and re-upload edited host data" {
+    var exercised = false;
+    inline for (.{ backend.Device.cuda, backend.Device.metal }) |device| {
+        if (backend.device.isAvailable(device)) {
+            exercised = true;
+            const allocator = std.testing.allocator;
+            const t = try array(allocator, &.{4}, &.{ 1, 2, 3, 4 });
+            defer free(allocator, t);
+            try t.toDevice(device);
+            t.data[0] = 99; // Host storage is stale while the device owns the value.
+            try t.toDevice(.cpu);
+            try std.testing.expect(t.device_array == null);
+            try std.testing.expectEqual(@as(f32, 1), (try t.asHostSlice())[0]);
+            (try t.asHostSliceMut())[0] = 7;
+            try t.toDevice(device);
+            t.shape = Shape.init(&.{3});
+            try std.testing.expectError(error.ShapeMismatch, t.syncHost(allocator));
+            try std.testing.expectEqual(device, t.device);
+            try std.testing.expect(t.device_array != null);
+            t.shape = Shape.init(&.{4});
+            allocator.free(t.data);
+            t.data = &.{};
+            try std.testing.expectError(error.HostAllocatorRequired, t.syncHost(null));
+            try t.syncHost(allocator);
+            try std.testing.expect(t.device_array == null);
+            try std.testing.expectEqualSlices(f32, &.{ 7, 2, 3, 4 }, try t.asHostSlice());
+        }
+    }
+    if (!exercised) return error.SkipZigTest;
+}
