@@ -4,6 +4,7 @@
 - Always use `jj` (Jujutsu) for version control operations. Prefer `jj git clone <url>` over `git clone <url>` for initial setup.
 - For both `gemini` and `antigravity`, always run `jj log` immediately after modifying any files to save the current work and maintain visibility of the version control state.
 - **Remote refresh for long-running work (长时间任务同步远端)**: If work on a task has continued for more than one hour since the last remote fetch, run `jj git fetch` before continuing with further changes or validation. Review newly fetched bookmarks and commits relevant to the current branch, then rebase or reconcile as needed; never overwrite remote work.
+- **Workspace path restriction**: Never create or use project worktrees, test checkouts, build outputs, or scratch files under `/private` (including `/private/tmp`). Do not use `/tmp` when it resolves into `/private`; use the current project workspace or a project-approved workspace path instead.
 - Upon completing a logical task or a significant phase, use `jj describe -m "<type>(<scope>): <summary>"` (e.g. `feat(vis): ...`, `fix(autodiff): ...`, `docs(vis): ...`) with a body that explains what changed and why, so the history stays readable and meaningful.
 - **Keep commit history focused**: Once a logical change is complete and described, promptly run `jj new` before starting unrelated work. Keep each change in its own clearly described commit; do not bundle unrelated tasks into one change or leave completed work undescribed.
 - **Push Procedure (推送流程)**: work is pushed directly to `main`:
