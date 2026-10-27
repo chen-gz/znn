@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Require a remote fetch before continuing task work that has run for more than one hour since the previous fetch, and review newly available commits before proceeding.
+- Allow AI assistants to push completed work directly to GitHub without additional human approval, following the repository's fetch, rebase, and no-force-push rules.
+- Require AI assistants to review unfinished plans and prompts, prioritize actionable project work, audit implementation against documented architecture, and add or update relevant tests alongside behavior changes.
+
 - **严格硬件后端隔离与硬件抽象层 (HAL) 彻底重构 (`src/backend/buffer.zig`, `src/backend/kernels.zig`, `src/backend/device.zig`, `src/backend/tests.zig`, `src/tensor/attention.zig`, `src/tensor/rope.zig`, `src/tensor/safetensors.zig`, `src/engine/sampling.zig`, `src/engine/logits_processor.zig`, `src/nn/transformer_blocks.zig`, `src/autodiff/ops.zig`, `tools/check_layers.zig`)**:
   - **彻底清除底层鸭子类型与泛型反射 (Duck-Typing & anytype Purge)**：
     - 彻底删除 `src/backend/ops.zig` (566 行基于 `anytype` 的张量隐式反射与越级调用)，清理 `src/backend/offload.zig` 中的所有反射代码；

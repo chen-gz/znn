@@ -3,8 +3,10 @@
 ## 1. Version Control Guidelines (Jujutsu / jj)
 - Always use `jj` (Jujutsu) for version control operations. Prefer `jj git clone <url>` over `git clone <url>` for initial setup.
 - For both `gemini` and `antigravity`, always run `jj log` immediately after modifying any files to save the current work and maintain visibility of the version control state.
+- **Remote refresh for long-running work (长时间任务同步远端)**: If work on a task has continued for more than one hour since the last remote fetch, run `jj git fetch` before continuing with further changes or validation. Review newly fetched bookmarks and commits relevant to the current branch, then rebase or reconcile as needed; never overwrite remote work.
 - Upon completing a logical task or a significant phase, use `jj describe -m "<type>(<scope>): <summary>"` (e.g. `feat(vis): ...`, `fix(autodiff): ...`, `docs(vis): ...`) with a body that explains what changed and why, so the history stays readable and meaningful.
 - **Push Procedure (推送流程)**: work is pushed directly to `main`:
+  - AI assistants are authorized to push completed work directly to GitHub without requesting additional human approval, provided the required fetch/rebase checks pass and repository rules are followed.
   1. `jj git fetch`
   2. `jj bookmark set main -r @`
   3. `jj git push`
@@ -82,5 +84,12 @@
 - **Inspection & Continuation Workflow (推进与复工流程)**：
   - 任何 AI 在接手或继续推进项目时，**必须首先检查 `prompts/` 目录下的计划与对应 prompt**，从中恢复上下文和验收条件，避免凭空脑补或重复审计；
   - 某个里程碑任务完成并验证通过后，负责推进的 AI 应当及时更新对应 prompt 文件的状态标记（标记已完成并记录实际测试验证结果），并将下一个里程碑的执行 prompt 准备就绪，一并使用 `jj` 提交入库。
+
+## 9. Autonomous Project Progress, Architecture Audits & Tests (主动推进、架构审查与测试)
+- **Review unfinished work at task start**: Before choosing project work, inspect `plan/`, `prompts/`, `TODO.md` (if present), the current `jj` state, and relevant remote bookmarks. Identify incomplete, blocked, stale, or conflicting items; reconcile plan status with the actual code and remote state instead of trusting status labels alone.
+- **Prioritize and advance the project**: When the user has not specified a narrower task, select the highest-priority actionable item based on dependencies, correctness, security, and project priorities. Continue through implementation, documentation, and validation without waiting for the user to pick each routine next step. Ask only when a real product decision, missing requirement, or approval boundary blocks progress.
+- **Audit against current design**: During substantial work and periodic project reviews, inspect the relevant project layers and consumers for violations of `AGENTS.md`, documented architecture, package boundaries, ownership and error-handling contracts, and producer/consumer consistency. Report findings with concrete file and behavior evidence, prioritize them by impact, and fix in-scope violations rather than preserving known-invalid designs. Record larger follow-up audits in `plan/` or `prompts/` before execution.
+- **Tests ship with behavior changes**: Add or update tests in the same change as each behavior, API, data-format, or bug-fix change. Cover the intended behavior, relevant edge cases, and regression conditions; update obsolete assertions when a design changes. Run the narrowest relevant checks and the required broader suite for the affected layer before marking work complete, and record actual results in the corresponding plan/prompt. Do not claim validation that was not run or passed.
+- **Keep plans and tests truthful**: Mark a task or milestone complete only when its acceptance criteria and required tests pass. Keep `plan/`, `prompts/`, changelog entries, and code status synchronized; distinguish completed work from partial implementation, unvalidated hardware paths, and blocked follow-ups.
 
 
