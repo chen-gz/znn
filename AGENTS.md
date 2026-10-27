@@ -3,18 +3,36 @@
 ## 1. Version Control Guidelines (Jujutsu / jj)
 - Always use `jj` (Jujutsu) for version control operations. Prefer `jj git clone <url>` over `git clone <url>` for initial setup.
 - For both `gemini` and `antigravity`, always run `jj log` immediately after modifying any files to save the current work and maintain visibility of the version control state.
-- **Remote refresh for long-running work (长时间任务同步远端)**: If work on a task has continued for more than one hour since the last remote fetch, run `jj git fetch` before continuing with further changes or validation. Review newly fetched bookmarks and commits relevant to the current branch, then rebase or reconcile as needed; never overwrite remote work.
+- **Dedicated Branching per Milestone / Function (按独立功能与里程碑创建独立分支)**:
+  - 由于后续任务庞大，对于单独的 function 或 milestone，**必须为不同任务创建独立的 branch / bookmark**（例如 `feat/m2-tensor-storage`、`feat/zero-alloc-ops`）：
+    ```bash
+    jj bookmark create <branch-name> -r @
+    # 或者移动现有分支书签至当前提交
+    jj bookmark set <branch-name> -r @
+    ```
+  - 严禁将不同的独立功能或里程碑混在同一无名分支中；每个里程碑或独立任务在各自的 branch 上推进。
+- **Immediate Push to GitHub After Every Commit (每次 commit 后立即推送到 GitHub)**:
+  - **核心容灾机制**：由于任务庞大且大模型 Token 额度、上下文窗口或执行时间有限，任务随时可能发生中断。
+  - **每次完成代码修改并执行 `jj describe` 后，必须立即执行 `jj git push` 将当前分支推送到 GitHub**：
+    ```bash
+    jj bookmark set <branch-name> -r @
+    jj git push -b <branch-name>
+    jj log
+    ```
+  - 确保即使当前 Agent 遭遇中断或限流，其他 Agent 或用户可以在 GitHub 上直接检出（pick）对应分支并无损继续推进。
+- **Task Completion, Rebase to Main & Merge (任务完成后 Rebase 到 Main 并合并)**:
+  - 当一个 function 或 milestone 全部开发完成且全量测试通过后，直接 rebase 到 `main` 并合并推送到 GitHub：
+    1. 同步远端最新提交：`jj git fetch`
+    2. 将当前任务分支 rebase 到最新 main：`jj rebase -d main`
+    3. 运行全量测试验证：`zig build check-layers && zig build test`
+    4. 将 `main` 书签快进推进到当前提交：`jj bookmark set main -r @`
+    5. 推送 `main` 分支到 GitHub：`jj git push -b main`
+    6. （可选）删除已合入的任务分支：`jj bookmark delete <branch-name>` 与 `jj git push -b <branch-name> --delete`
+    7. 运行 `jj log` 校验状态
+  - 严禁任何形式的强制推送（严禁 `--force` 或 `-f`）。
 - **Workspace path restriction**: Never directly create or use project worktrees, test checkouts, build outputs, or scratch files under `/private` (including `/private/tmp`). The user-approved `/tmp` directory is allowed for temporary files and test workspaces.
 - Upon completing a logical task or a significant phase, use `jj describe -m "<type>(<scope>): <summary>"` (e.g. `feat(vis): ...`, `fix(autodiff): ...`, `docs(vis): ...`) with a body that explains what changed and why, so the history stays readable and meaningful.
 - **Keep commit history focused**: Once a logical change is complete and described, promptly run `jj new` before starting unrelated work. Keep each change in its own clearly described commit; do not bundle unrelated tasks into one change or leave completed work undescribed.
-- **Push Procedure (推送流程)**: work is pushed directly to `main`:
-  - AI assistants are authorized to push completed work directly to GitHub without requesting additional human approval, provided the required fetch/rebase checks pass and repository rules are followed.
-  1. `jj git fetch`
-  2. `jj bookmark set main -r @`
-  3. `jj git push`
-  4. `jj log` to verify the state.
-  - If the push is refused because `main` moved on the remote, run `jj rebase -d main`, resolve conflicts, re-run the tests, then push again.
-  - Force push is forbidden (no `--force`, `-f`, or other non-fast-forward updates).
 
 ## 2. Versioning & Release Rules (版本更新规则)
 遵循语义化版本规范 (Semantic Versioning: `MAJOR.MINOR.PATCH`):
