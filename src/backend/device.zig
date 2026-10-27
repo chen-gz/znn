@@ -91,9 +91,47 @@ pub const DeviceArray = union(enum) {
 
     pub fn clone(self: DeviceArray) !DeviceArray {
         return switch (self) {
-            .mlx => |arr| .{ .mlx = arr },
+            .mlx => |arr| .{ .mlx = try arr.clone() },
             .cuda => |arr| .{ .cuda = try arr.clone() },
         };
+    }
+
+    /// Acquire an owned reference; ordinary union copies remain borrowed.
+    pub fn retain(self: DeviceArray) !DeviceArray {
+        return switch (self) {
+            .mlx => |arr| .{ .mlx = try arr.share() },
+            .cuda => |arr| .{ .cuda = try arr.retain() },
+        };
+    }
+
+    /// Checked byte count for the contiguous float32 storage used by Tensor.
+    pub fn f32ByteSize(self: DeviceArray) !usize {
+        switch (self) {
+            .cuda => |arr| {
+                if (arr.dtype != .float32) return error.UnsupportedDType;
+                return arr.byteSize();
+            },
+            .mlx => |arr| {
+                if (!mlx.has_mlx) return error.MlxNotSupported;
+                if (arr.handle.ctx == null) return error.MlxOperationFailed;
+                if (arr.dtype() != .float32) return error.UnsupportedDType;
+                var dims: [8]usize = undefined;
+                const rank = try arr.shape(&dims);
+                var count: usize = 1;
+                for (dims[0..rank]) |d| {
+                    if (d == 0) {
+                        count = 0;
+                        break;
+                    }
+                }
+                if (count != 0) for (dims[0..rank]) |d| {
+                    count = std.math.mul(usize, count, d) catch return error.InvalidShape;
+                };
+                if (count != arr.size()) return error.ShapeMismatch;
+                if (count != 0 and !arr.isContiguousRowMajor()) return error.NonContiguousLayout;
+                return std.math.mul(usize, count, @sizeOf(f32)) catch error.InvalidShape;
+            },
+        }
     }
 
     pub fn copyToSlice(self: DeviceArray, dest: []f32) !void {

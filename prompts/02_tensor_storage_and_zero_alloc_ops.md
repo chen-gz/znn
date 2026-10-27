@@ -1,6 +1,6 @@
 # Milestone 2: 张量存储统一与算子零分配体系 (Tensor Storage & Destination Ops)
 
-> **Status**: In Progress (CPU ownership and six destination APIs implemented; Tensor/GPU migration pending)  
+> **Status**: In Progress (CPU ownership, typed GPU adoption, and six destination APIs implemented; Tensor migration pending)  
 > **Target Package**: `src/tensor/` (Layer 1) & `src/backend/buffer.zig` (Layer 0)  
 > **Key Files**: `src/tensor/core.zig`, `src/tensor/ops.zig`, `src/tensor/types.zig`
 
@@ -109,10 +109,10 @@ Do not mechanically replace Tensor fields before resolving these requirements:
 1. Implement fallible host-only accessors and separate explicit synchronization.
    Device transfers
    may fail or allocate and must not be hidden in an accessor.
-2. Establish typed GPU buffer adoption and borrowing. Current Metal buffers are
-   byte arrays, while MLX execution requires typed shaped arrays. GPU retain/view
-   operations currently return UnsupportedDevice; GPU empty allocations remain
-   unsupported. Raw Metal buffer kernels are not yet implemented.
+2. Integrate retained typed GPU buffers into Tensor factories and accessors.
+   Adoption supports contiguous float32 arrays; other types/layouts are rejected.
+   GPU byte slicing and raw GPU-buffer retention remain unsupported. Raw Metal
+   buffer kernels are not yet implemented.
 3. Validate Metal transfers and CUDA retained reshape lifetimes on supported
    GPU runtimes. Host control-record tests cannot validate device execution.
 4. Migrate Tensor factories, slices, transpose views, graph reshape views, graph
@@ -126,10 +126,10 @@ Do not mechanically replace Tensor fields before resolving these requirements:
 
 Validated on 2026-10-26 with Zig 0.17.0 on Apple Silicon:
 
-- Full CPU Debug and ReleaseFast suites each passed 413 tests, with Metal and
-  CUDA runtime tests explicitly skipped (415 total).
+- Full CPU Debug and ReleaseFast suites each passed 415 tests, with four GPU
+  runtime tests explicitly skipped (419 total).
 - Layer checks passed for 86 source files; all 18 canonical model graphs exported
-  successfully after the CUDA ownership and graph cleanup changes.
+  successfully after typed GPU buffer integration.
 - GPU-enabled and x86_64 Linux source passed compile-only checks.
 - Independent reviews found no blocking ownership or destination-operation defects.
 - Metal and CUDA execution were not exercised. These results do not complete M2.
@@ -171,12 +171,32 @@ invalid/overflowing shapes, and reference-count overflow using null device
 pointers. A conditional CUDA test covers real allocation lifetime and clone
 independence. It is skipped on this host, as is the Metal runtime regression.
 
-### Next storage integration delivery
+## 7. Typed GPU buffer integration implementation
 
-Define typed DeviceBuffer adoption for existing CUDA/Metal arrays, including
-checked shape/dtype byte counts, retained ownership, and explicit host transfer.
-Do not reinterpret shaped floating-point Metal arrays as the raw byte buffers
-used by existing transfer functions. Preserve the layer boundary by keeping
-Tensor/Graph metadata out of backend storage. After that contract is implemented
-and tested, migrate Tensor factories, views, and graph cleanup together. M2
-remains incomplete until the separate data/device_array state is removed.
+DeviceBuffer.fromDeviceArray validates and retains contiguous float32 CUDA/Metal
+arrays, the current Tensor representation. Shape/element/byte counts and ownership
+are checked before retention; CUDA control records also retain allocation size.
+Unsupported dtypes/layouts fail explicitly. The typed driver array is the owner;
+the raw kernel handle is a borrowed alias. free() releases the owner once and
+retain() acquires another independent reference. GPU byte slicing is unsupported.
+
+borrowedDeviceArray exposes a borrowed descriptor for typed kernels; callers must
+not deinitialize it. copyToHostF32 transfers explicitly into exact-length caller
+storage. Raw byte copies and setZero reject adopted storage so typed Metal arrays
+cannot be replaced by byte arrays. Existing raw buffer behavior is unchanged.
+DeviceArray.retain uses CUDA retention or MLX shared handles; Metal clone returns
+an independent copy instead of aliasing a handle's ownership.
+
+Tests cover invalid ownership, dtype and metadata, physical allocation-size
+mismatch, and invalid host destinations. Conditional CUDA/Metal tests cover
+source release before buffer use, retained buffers, clones, typed transfer, and
+raw-byte-operation rejection. Four GPU runtime tests are skipped on this host.
+
+### Next Tensor migration delivery
+
+Migrate Tensor factories, views, and Graph cleanup together onto DeviceBuffer.
+Replace direct host fields with fallible host access and explicit synchronization;
+retain storage for slices/transpose/reshape views. Preserve graph arenas, external
+parameter ownership, zero elements, and scalar storage. Update all consumers in
+one cohesive migration; do not keep duplicate authoritative host/device state.
+The typed adoption path needs GPU runtime validation before claiming M2 complete.

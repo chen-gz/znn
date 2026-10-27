@@ -20,6 +20,9 @@ pub const BufferError = error{
     UnsupportedDevice,
     MisalignedBuffer,
     ReferenceCountOverflow,
+    UnsupportedDType,
+    InvalidStorage,
+    NonContiguousLayout,
 };
 
 /// 底层驱动显存/物理内存句柄联合体
@@ -37,7 +40,7 @@ const CpuOwner = struct {
 
 var empty_cpu_storage: [0]u8 align(64) = .{};
 
-/// Physical device storage. CPU buffers share an allocation only through retain()
+/// Physical device storage. CPU and adopted typed arrays share through retain()
 /// or slice(); plain descriptor assignment does not acquire ownership. Each owned
 /// descriptor must be freed once and must not be accessed concurrently with free().
 /// Atomic reference counts protect lifetime, not concurrent access to buffer data.
@@ -46,9 +49,54 @@ pub const DeviceBuffer = struct {
     byte_size: usize,
     handle: BufferHandle,
     cpu_owner: ?*CpuOwner = null,
+    typed_owner: ?device_mod.DeviceArray = null,
 
     fn emptyCpu(device: Device) DeviceBuffer {
         return .{ .device = device, .byte_size = 0, .handle = .{ .cpu = empty_cpu_storage[0..].ptr } };
+    }
+
+    fn typedError(err: anyerror) BufferError {
+        return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.ReferenceCountOverflow => error.ReferenceCountOverflow,
+            error.UnsupportedDType => error.UnsupportedDType,
+            error.NonContiguousLayout => error.NonContiguousLayout,
+            error.MlxNotSupported, error.CudaNotSupported => error.UnsupportedDevice,
+            else => error.InvalidStorage,
+        };
+    }
+
+    /// Retain contiguous float32 device storage. The caller keeps its reference.
+    /// Typed ownership is distinct from the borrowed raw handle used by kernels.
+    pub fn fromDeviceArray(array: device_mod.DeviceArray) BufferError!DeviceBuffer {
+        const bytes = array.f32ByteSize() catch |err| return typedError(err);
+        const owned = array.retain() catch |err| return typedError(err);
+        return switch (owned) {
+            .cuda => |arr| .{ .device = Device.cuda, .byte_size = bytes, .handle = .{ .cuda = arr.ptr }, .typed_owner = owned },
+            .mlx => |arr| .{ .device = Device.metal, .byte_size = bytes, .handle = .{ .metal = arr }, .typed_owner = owned },
+        };
+    }
+
+    /// Borrow for typed kernel calls. Do not deinitialize the returned descriptor
+    /// or keep it after this buffer is freed; call retain() to acquire ownership.
+    pub fn borrowedDeviceArray(self: *const DeviceBuffer) BufferError!device_mod.DeviceArray {
+        return self.typed_owner orelse error.UnsupportedDevice;
+    }
+
+    /// Explicit exact-length transfer. Never allocates host storage implicitly.
+    pub fn copyToHostF32(self: *const DeviceBuffer, dest: []f32) BufferError!void {
+        const owner = self.typed_owner orelse return error.UnsupportedDevice;
+        const bytes = owner.f32ByteSize() catch |err| return typedError(err);
+        if (bytes != self.byte_size or dest.len != bytes / @sizeOf(f32)) return error.InvalidBufferSize;
+        if (bytes == 0) return;
+        switch (owner) {
+            .cuda => |arr| arr.toHostSlice(dest) catch return error.DeviceTransferFailed,
+            .mlx => |arr| {
+                if (!mlx.has_mlx) return error.UnsupportedDevice;
+                if (mlx.c.mlx_array_eval(arr.handle) != 0) return error.DeviceTransferFailed;
+                arr.copyToSlice(dest) catch return error.DeviceTransferFailed;
+            },
+        }
     }
 
     /// 物理设备缓冲区内存分配 (Physical Device Memory Allocation)
@@ -103,9 +151,10 @@ pub const DeviceBuffer = struct {
         }
     }
 
-    /// Acquire an independent reference to the same CPU storage. The allocator
+    /// Acquire an independent reference to CPU or adopted typed storage. The allocator
     /// used for allocation must remain alive until the final reference is freed.
     pub fn retain(self: *const DeviceBuffer) BufferError!DeviceBuffer {
+        if (self.typed_owner) |owner| return fromDeviceArray(owner);
         if (self.device.type != .cpu) return error.UnsupportedDevice;
         if (self.byte_size == 0) return emptyCpu(self.device);
         const owner = self.cpu_owner orelse return error.InvalidBufferSize;
@@ -134,6 +183,11 @@ pub const DeviceBuffer = struct {
     /// Release this descriptor using its allocation's stored allocator. CPU
     /// views can outlive their parent; repeated release of this descriptor is safe.
     pub fn free(self: *DeviceBuffer) void {
+        if (self.typed_owner) |*owner| {
+            owner.deinit();
+            self.* = emptyCpu(Device.cpu);
+            return;
+        }
         switch (self.handle) {
             .cpu => {
                 if (self.cpu_owner) |owner| {
@@ -188,6 +242,7 @@ pub const DeviceBuffer = struct {
 
     /// 将主机内存数据拷贝入设备缓冲区 (Host -> Device Copy)
     pub fn copyHostToDevice(self: *DeviceBuffer, src: []const u8) BufferError!void {
+        if (self.typed_owner != null) return error.UnsupportedDevice;
         if (src.len > self.byte_size) return error.BufferOverflow;
         if (src.len == 0) return;
         switch (self.handle) {
@@ -208,6 +263,7 @@ pub const DeviceBuffer = struct {
 
     /// 将设备缓冲区数据拷贝回主机内存 (Device -> Host Copy)
     pub fn copyDeviceToHost(self: *const DeviceBuffer, dst: []u8) BufferError!void {
+        if (self.typed_owner != null) return error.UnsupportedDevice;
         if (dst.len > self.byte_size) return error.BufferOverflow;
         if (dst.len == 0) return;
         switch (self.handle) {
@@ -229,6 +285,7 @@ pub const DeviceBuffer = struct {
 
     /// 设备内或同构设备间数据拷贝 (Device -> Device Copy)
     pub fn copyDeviceToDevice(dst: *DeviceBuffer, src: *const DeviceBuffer) BufferError!void {
+        if (dst.typed_owner != null or src.typed_owner != null) return error.UnsupportedDevice;
         if (!dst.device.eql(src.device)) return error.DeviceMismatch;
         if (dst.byte_size < src.byte_size) return error.BufferOverflow;
         if (src.byte_size == 0) return;
@@ -250,6 +307,7 @@ pub const DeviceBuffer = struct {
 
     /// 缓冲区清零 (Zero Memory Buffer)
     pub fn setZero(self: *DeviceBuffer) BufferError!void {
+        if (self.typed_owner != null) return error.UnsupportedDevice;
         switch (self.handle) {
             .cpu => |ptr| {
                 @memset(ptr[0..self.byte_size], 0);
@@ -536,4 +594,76 @@ test "buffer: Metal prefix copies preserve physical capacity and reject malforme
     defer wrong_type.free();
     try std.testing.expectError(error.InvalidBufferSize, wrong_type.copyDeviceToHost(&output));
     try std.testing.expectError(error.InvalidBufferSize, DeviceBuffer.copyDeviceToDevice(&wrong_type, &src));
+}
+
+test "buffer: typed adoption rejects invalid ownership and unsupported dtype" {
+    var invalid = cuda.Array{ .ptr = 0, .owner = null, .len = 1, .ndim = 1, .shape = .{ 1, 0, 0, 0, 0, 0, 0, 0 } };
+    try std.testing.expectError(error.InvalidStorage, DeviceBuffer.fromDeviceArray(.{ .cuda = invalid }));
+    invalid.dtype = .bfloat16;
+    try std.testing.expectError(error.UnsupportedDType, DeviceBuffer.fromDeviceArray(.{ .cuda = invalid }));
+    var raw = try DeviceBuffer.alloc(Device.cpu, 4, std.testing.allocator);
+    defer raw.free();
+    var output = [_]f32{99};
+    try std.testing.expectError(error.UnsupportedDevice, raw.copyToHostF32(&output));
+    try std.testing.expectError(error.UnsupportedDevice, raw.borrowedDeviceArray());
+    try std.testing.expectEqual(@as(f32, 99), output[0]);
+    if (!mlx.has_mlx) {
+        try std.testing.expectError(error.UnsupportedDevice, DeviceBuffer.fromDeviceArray(.{ .mlx = mlx.Array.init() }));
+    }
+}
+
+fn typedBufferLifecycle(array: *device_mod.DeviceArray) !void {
+    var buffer = try DeviceBuffer.fromDeviceArray(array.*);
+    array.deinit();
+    defer buffer.free();
+    var retained = try buffer.retain();
+    defer retained.free();
+    try std.testing.expectEqual(@as(usize, 16), buffer.byte_size);
+    var borrowed = try retained.borrowedDeviceArray();
+    var cloned = try borrowed.clone();
+    defer cloned.deinit();
+    buffer.free();
+    var output: [4]f32 = undefined;
+    try retained.copyToHostF32(&output);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, &output);
+    output = @splat(99);
+    try std.testing.expectError(error.InvalidBufferSize, retained.copyToHostF32(output[0..3]));
+    try std.testing.expectEqualSlices(f32, &@as([4]f32, @splat(99)), &output);
+    try std.testing.expectError(error.UnsupportedDevice, retained.copyHostToDevice(&.{}));
+    var bytes: [4]u8 = undefined;
+    try std.testing.expectError(error.UnsupportedDevice, retained.copyDeviceToHost(&bytes));
+    try std.testing.expectError(error.UnsupportedDevice, retained.setZero());
+    try std.testing.expectError(error.UnsupportedDevice, DeviceBuffer.copyDeviceToDevice(&retained, &retained));
+    try std.testing.expectError(error.UnsupportedDevice, retained.slice(0, 4));
+    retained.free();
+    try cloned.copyToSlice(&output);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, &output);
+}
+
+test "buffer: adopted CUDA arrays retain typed ownership and transfer explicitly" {
+    if (!cuda.isAvailable()) return error.SkipZigTest;
+    var original = try cuda.Array.fromSlice(&.{ 1, 2, 3, 4 }, &.{ 2, 2 });
+    defer original.deinit();
+    var owner = device_mod.DeviceArray{ .cuda = try original.retain() };
+    defer owner.deinit();
+    original.deinit();
+    try typedBufferLifecycle(&owner);
+}
+
+test "buffer: adopted Metal arrays preserve type and have independent handles" {
+    if (!mlx.has_mlx) return error.SkipZigTest;
+    var original = try mlx.Array.fromSlice(&.{ 1, 2, 3, 4 }, &.{ 2, 2 });
+    defer original.deinit();
+    var owner = try (device_mod.DeviceArray{ .mlx = original }).retain();
+    defer owner.deinit();
+    original.deinit();
+    try typedBufferLifecycle(&owner);
+    var wrong_type = try mlx.Array.zeros(&.{4}, .uint8, null);
+    defer wrong_type.deinit();
+    try std.testing.expectError(error.UnsupportedDType, DeviceBuffer.fromDeviceArray(.{ .mlx = wrong_type }));
+    var matrix = try mlx.Array.fromSlice(&.{ 1, 2, 3, 4 }, &.{ 2, 2 });
+    defer matrix.deinit();
+    var transposed = try matrix.transposeAxes(&.{ 1, 0 }, null);
+    defer transposed.deinit();
+    try std.testing.expectError(error.NonContiguousLayout, DeviceBuffer.fromDeviceArray(.{ .mlx = transposed }));
 }

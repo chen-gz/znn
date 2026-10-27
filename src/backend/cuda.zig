@@ -376,14 +376,15 @@ pub const DType = enum(u8) {
 
 const ArrayOwner = struct {
     ptr: CUdeviceptr,
+    byte_size: usize,
     allocator: std.mem.Allocator,
     references: std.atomic.Value(usize) = std.atomic.Value(usize).init(1),
 
     // Ownership transfers only on success; the caller cleans up the device
     // allocation if allocating this control record fails.
-    fn create(allocator: std.mem.Allocator, ptr: CUdeviceptr) CudaError!*ArrayOwner {
+    fn create(allocator: std.mem.Allocator, ptr: CUdeviceptr, byte_size: usize) CudaError!*ArrayOwner {
         const owner = allocator.create(ArrayOwner) catch return error.OutOfMemory;
-        owner.* = .{ .ptr = ptr, .allocator = allocator };
+        owner.* = .{ .ptr = ptr, .byte_size = byte_size, .allocator = allocator };
         return owner;
     }
 };
@@ -421,7 +422,7 @@ pub const Array = struct {
 
         return .{
             .ptr = dptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, dptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, dptr, total_len * @sizeOf(f32)),
             .shape = shape_arr,
             .ndim = dims.len,
             .len = total_len,
@@ -445,7 +446,7 @@ pub const Array = struct {
 
         return .{
             .ptr = dptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, dptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, dptr, slice.len * @sizeOf(f32)),
             .shape = shape_arr,
             .ndim = dims.len,
             .len = slice.len,
@@ -471,12 +472,27 @@ pub const Array = struct {
         try copyDeviceToDevice(new_ptr, self.ptr, bytes);
         return .{
             .ptr = new_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, new_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, new_ptr, self.len * @sizeOf(f32)),
             .shape = self.shape,
             .ndim = self.ndim,
             .len = self.len,
             .dtype = self.dtype,
         };
+    }
+
+    /// Validate the descriptor and return its physical byte count.
+    pub fn byteSize(self: Array) CudaError!usize {
+        const owner = self.owner orelse return error.InvalidArray;
+        if (self.ptr != owner.ptr or (self.len != 0 and self.ptr == 0)) return error.InvalidArray;
+        if (self.ndim > self.shape.len) return error.InvalidShape;
+        if (try checkedElements(self.shape[0..self.ndim]) != self.len) return error.ShapeMismatch;
+        const width: usize = switch (self.dtype) {
+            .float32 => 4,
+            .bfloat16 => 2,
+        };
+        const bytes = std.math.mul(usize, self.len, width) catch return error.InvalidShape;
+        if (bytes != owner.byte_size) return error.InvalidArray;
+        return bytes;
     }
 
     /// Acquire another owned reference without copying device data.
@@ -588,7 +604,7 @@ pub const Array = struct {
 
         return .{
             .ptr = c_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr, out_len * @sizeOf(f32)),
             .shape = res_shape,
             .ndim = a.ndim,
             .len = out_len,
@@ -643,7 +659,7 @@ pub const Array = struct {
 
         return .{
             .ptr = out_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr, x.len * @sizeOf(f32)),
             .shape = x.shape,
             .ndim = x.ndim,
             .len = x.len,
@@ -695,7 +711,7 @@ pub const Array = struct {
 
         return .{
             .ptr = c_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr, a.len * @sizeOf(f32)),
             .shape = a.shape,
             .ndim = a.ndim,
             .len = a.len,
@@ -747,7 +763,7 @@ pub const Array = struct {
 
         return .{
             .ptr = c_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr, a.len * @sizeOf(f32)),
             .shape = a.shape,
             .ndim = a.ndim,
             .len = a.len,
@@ -798,7 +814,7 @@ pub const Array = struct {
 
         return .{
             .ptr = c_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr, a.len * @sizeOf(f32)),
             .shape = a.shape,
             .ndim = a.ndim,
             .len = a.len,
@@ -848,7 +864,7 @@ pub const Array = struct {
 
         return .{
             .ptr = out_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr, a.len * @sizeOf(f32)),
             .shape = a.shape,
             .ndim = a.ndim,
             .len = a.len,
@@ -900,7 +916,7 @@ pub const Array = struct {
 
         return .{
             .ptr = out_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr, a.len * @sizeOf(f32)),
             .shape = a.shape,
             .ndim = a.ndim,
             .len = a.len,
@@ -964,7 +980,7 @@ pub const Array = struct {
 
         return .{
             .ptr = out_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr, x.len * @sizeOf(f32)),
             .shape = x.shape,
             .ndim = x.ndim,
             .len = x.len,
@@ -1112,7 +1128,7 @@ pub const Array = struct {
         res_shape[q.ndim - 2] = seq_len;
         return .{
             .ptr = out_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr, out_len * @sizeOf(f32)),
             .shape = res_shape,
             .ndim = q.ndim,
             .len = out_len,
@@ -1179,7 +1195,7 @@ pub const Array = struct {
 
         return .{
             .ptr = c_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr, out_len * @sizeOf(f32)),
             .shape = res_shape,
             .ndim = indices.ndim + 1,
             .len = out_len,
@@ -1230,7 +1246,7 @@ pub const Array = struct {
 
         return .{
             .ptr = out_ptr,
-            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr, x.len * @sizeOf(f32)),
             .shape = x.shape,
             .ndim = x.ndim,
             .len = x.len,
@@ -1700,7 +1716,7 @@ test "cuda: hardware probe and driver availability" {
 
 // Null device pointers isolate host ownership bookkeeping from GPU execution.
 fn ownershipLifecycle(allocator: std.mem.Allocator) !void {
-    var root = Array{ .ptr = 0, .owner = try ArrayOwner.create(allocator, 0), .len = 6, .ndim = 2, .shape = .{ 2, 3, 0, 0, 0, 0, 0, 0 } };
+    var root = Array{ .ptr = 0, .owner = try ArrayOwner.create(allocator, 0, 24), .len = 6, .ndim = 2, .shape = .{ 2, 3, 0, 0, 0, 0, 0, 0 } };
     defer root.deinit();
     var view = try root.reshape(&.{ 3, 2 });
     defer view.deinit();
@@ -1727,7 +1743,7 @@ test "cuda: retained reshape ownership and control-record allocation failure" {
 }
 
 test "cuda: invalid reshape and reference overflow leave ownership unchanged" {
-    var root = Array{ .ptr = 0, .owner = try ArrayOwner.create(std.testing.allocator, 0), .len = 6 };
+    var root = Array{ .ptr = 0, .owner = try ArrayOwner.create(std.testing.allocator, 0, 24), .len = 6 };
     defer root.deinit();
     try std.testing.expectError(error.ShapeMismatch, root.reshape(&.{7}));
     try std.testing.expectError(error.InvalidShape, root.reshape(&.{ std.math.maxInt(usize), 2 }));
@@ -1767,4 +1783,27 @@ test "cuda: real reshape views survive parent release and clones are independent
     nested.deinit();
     try cloned.toHostSlice(&output);
     try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, &output);
+}
+
+test "cuda: checked storage size rejects descriptor and allocation mismatches" {
+    // Synthetic address is never dereferenced or passed to the driver.
+    const owner = try ArrayOwner.create(std.testing.allocator, 1, 24);
+    var array = Array{ .ptr = 1, .owner = owner, .len = 6, .ndim = 2, .shape = .{ 2, 3, 0, 0, 0, 0, 0, 0 } };
+    defer {
+        owner.ptr = 0;
+        array.deinit();
+    }
+    try std.testing.expectEqual(@as(usize, 24), try array.byteSize());
+    array.ptr = 2;
+    try std.testing.expectError(error.InvalidArray, array.byteSize());
+    array.ptr = 1;
+    array.ndim = 9;
+    try std.testing.expectError(error.InvalidShape, array.byteSize());
+    array.ndim = 2;
+    array.shape[1] = 4;
+    try std.testing.expectError(error.ShapeMismatch, array.byteSize());
+    array.len = 8;
+    try std.testing.expectError(error.InvalidArray, array.byteSize());
+    array.shape[0] = std.math.maxInt(usize);
+    try std.testing.expectError(error.InvalidShape, array.byteSize());
 }

@@ -1105,9 +1105,24 @@ pub const Array = struct {
     /// 创建引用同一底层数组的新句柄 (共享数据，不复制)；新句柄须单独 `deinit`
     pub fn share(self: Array) !Array {
         if (!has_mlx) return error.MlxNotSupported;
+        if (self.handle.ctx == null) return error.MlxOperationFailed;
         var res = Array.init();
+        errdefer res.deinit();
         if (c.mlx_array_set(&res.handle, self.handle) != 0 or res.handle.ctx == null) return error.MlxOperationFailed;
         return res;
+    }
+
+    /// Return an independently owned copy, preserving shape and element type.
+    pub fn clone(self: Array) !Array {
+        if (!has_mlx) return error.MlxNotSupported;
+        if (self.handle.ctx == null) return error.MlxOperationFailed;
+        var stream = try Stream.defaultGpu();
+        defer stream.deinit();
+        var result = Array.init();
+        errdefer result.deinit();
+        if (c.mlx_copy(&result.handle, self.handle, stream.handle) != 0 or result.handle.ctx == null)
+            return error.MlxOperationFailed;
+        return result;
     }
 
     /// 沿指定轴均等切分 (Split into equal sections)

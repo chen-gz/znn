@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `DeviceBuffer.fromDeviceArray` retains validated contiguous float32 CUDA/Metal
+  arrays, with borrowed typed access and explicit exact-length `copyToHostF32`.
+  Typed storage rejects raw byte transfers and zeroing to preserve array metadata.
+  CUDA ownership records track allocation size for descriptor validation.
+
 - Allocation-free CPU `addInto`, `mulInto`, `matmulInto`, `rmsNormInto`,
   `softmaxInto`, and `geluInto` operations write into independent preallocated
   output buffers. Explicit
@@ -28,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stored ownership; descriptor copies must use `retain()` to acquire a reference.
 
 ### Fixed
+
+- Metal `DeviceArray.clone` creates an independently owned copy instead of
+  reusing the same handle. Explicit device-array retention uses CUDA ownership
+  or a separate MLX shared handle, with cleanup on failed handle creation.
 
 - CUDA array reshape views retain a shared allocation instead of independently
   freeing the same device pointer. Every array-producing operation creates an
