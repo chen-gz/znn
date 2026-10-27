@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Allow AI assistants to push completed work directly to GitHub without additional human approval, following the repository's fetch, rebase, and no-force-push rules.
 - Require AI assistants to review unfinished plans and prompts, prioritize actionable project work, audit implementation against documented architecture, and add or update relevant tests alongside behavior changes.
 - Require clear, runnable frontend examples and focused `jj` changes, starting a new change with `jj new` after each completed logical unit.
-- Prohibit project worktrees, test checkouts, build outputs, and scratch files under `/private` or `/tmp` paths that resolve there.
+- Prohibit direct use of `/private` for project worktrees, test checkouts, build outputs, and scratch files; allow `/tmp` for temporary files and test workspaces.
 
 - **严格硬件后端隔离与硬件抽象层 (HAL) 彻底重构 (`src/backend/buffer.zig`, `src/backend/kernels.zig`, `src/backend/device.zig`, `src/backend/tests.zig`, `src/tensor/attention.zig`, `src/tensor/rope.zig`, `src/tensor/safetensors.zig`, `src/engine/sampling.zig`, `src/engine/logits_processor.zig`, `src/nn/transformer_blocks.zig`, `src/autodiff/ops.zig`, `tools/check_layers.zig`)**:
   - **彻底清除底层鸭子类型与泛型反射 (Duck-Typing & anytype Purge)**：
