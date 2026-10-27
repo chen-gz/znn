@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Metal buffer prefix uploads and device copies preserve capacity and untouched
+  suffix bytes. Validate byte-array metadata before transfers, evaluate replacement
+  storage before releasing the original, and propagate evaluation failures.
+  Empty transfers avoid driver calls; oversized Metal allocations fail explicitly.
+
 - CPU buffer copies now handle overlapping ranges safely. Metal device-copy
   construction uses the supported MLX copy API instead of a nonexistent method.
 

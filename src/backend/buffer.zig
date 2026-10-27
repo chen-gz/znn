@@ -64,6 +64,7 @@ pub const DeviceBuffer = struct {
             if (device.type != .cpu) return error.InvalidBufferSize;
             return emptyCpu(device);
         }
+        if (device.type == .metal and byte_size > std.math.maxInt(c_int)) return error.InvalidBufferSize;
         if (!device_mod.isAvailable(device)) return error.DeviceNotAvailable;
 
         switch (device.type) {
@@ -157,9 +158,38 @@ pub const DeviceBuffer = struct {
         }
     }
 
+    // Metal buffers are one-dimensional contiguous byte arrays. Check physical
+    // capacity before using descriptor lengths in driver calls or host reads.
+    fn validateMetal(self: *const DeviceBuffer) BufferError!void {
+        if (!mlx.has_mlx) return error.UnsupportedDevice;
+        const arr = self.handle.metal;
+        if (self.byte_size > std.math.maxInt(c_int) or arr.handle.ctx == null or
+            arr.dtype() != .uint8 or arr.ndim() != 1 or arr.size() != self.byte_size or
+            !arr.isContiguousRowMajor()) return error.InvalidBufferSize;
+    }
+
+    // Build and evaluate a replacement before releasing the original handle.
+    // Slice update preserves capacity and the untouched suffix for prefix copies.
+    fn replaceMetalPrefix(self: *DeviceBuffer, update: mlx.Array, count: usize) BufferError!void {
+        if (!mlx.has_mlx) return error.UnsupportedDevice;
+        var stream = mlx.Stream.defaultGpu() catch return error.DeviceTransferFailed;
+        defer stream.deinit();
+        var replacement = mlx.Array.init();
+        errdefer replacement.deinit();
+        const start = [_]c_int{0};
+        const stop = [_]c_int{@intCast(count)};
+        const strides = [_]c_int{1};
+        if (mlx.c.mlx_slice_update(&replacement.handle, self.handle.metal.handle, update.handle, &start, 1, &stop, 1, &strides, 1, stream.handle) != 0 or
+            replacement.handle.ctx == null) return error.DeviceTransferFailed;
+        if (mlx.c.mlx_array_eval(replacement.handle) != 0) return error.DeviceTransferFailed;
+        self.handle.metal.deinit();
+        self.handle.metal = replacement;
+    }
+
     /// 将主机内存数据拷贝入设备缓冲区 (Host -> Device Copy)
     pub fn copyHostToDevice(self: *DeviceBuffer, src: []const u8) BufferError!void {
         if (src.len > self.byte_size) return error.BufferOverflow;
+        if (src.len == 0) return;
         switch (self.handle) {
             .cpu => |ptr| {
                 copyCpu(ptr[0..src.len], src);
@@ -167,10 +197,11 @@ pub const DeviceBuffer = struct {
             .cuda => |dptr| {
                 cuda.copyHostToDevice(dptr, src.ptr, src.len) catch return error.DeviceTransferFailed;
             },
-            .metal => |*arr| {
-                const new_arr = mlx.Array.fromRawData(src.ptr, &.{src.len}, .uint8) catch return error.DeviceTransferFailed;
-                arr.deinit();
-                arr.* = new_arr;
+            .metal => {
+                try self.validateMetal();
+                var update = mlx.Array.fromRawData(src.ptr, &.{src.len}, .uint8) catch return error.DeviceTransferFailed;
+                defer update.deinit();
+                try self.replaceMetalPrefix(update, src.len);
             },
         }
     }
@@ -178,6 +209,7 @@ pub const DeviceBuffer = struct {
     /// 将设备缓冲区数据拷贝回主机内存 (Device -> Host Copy)
     pub fn copyDeviceToHost(self: *const DeviceBuffer, dst: []u8) BufferError!void {
         if (dst.len > self.byte_size) return error.BufferOverflow;
+        if (dst.len == 0) return;
         switch (self.handle) {
             .cpu => |ptr| {
                 copyCpu(dst, ptr[0..dst.len]);
@@ -187,7 +219,8 @@ pub const DeviceBuffer = struct {
             },
             .metal => |arr| {
                 if (!mlx.has_mlx) return error.UnsupportedDevice;
-                arr.eval();
+                try self.validateMetal();
+                if (mlx.c.mlx_array_eval(arr.handle) != 0) return error.DeviceTransferFailed;
                 const src_ptr = mlx.c.mlx_array_data_uint8(arr.handle) orelse return error.DeviceTransferFailed;
                 @memcpy(dst, src_ptr[0..dst.len]);
             },
@@ -198,6 +231,7 @@ pub const DeviceBuffer = struct {
     pub fn copyDeviceToDevice(dst: *DeviceBuffer, src: *const DeviceBuffer) BufferError!void {
         if (!dst.device.eql(src.device)) return error.DeviceMismatch;
         if (dst.byte_size < src.byte_size) return error.BufferOverflow;
+        if (src.byte_size == 0) return;
 
         switch (dst.handle) {
             .cpu => |dst_ptr| {
@@ -206,16 +240,10 @@ pub const DeviceBuffer = struct {
             .cuda => |dst_dptr| {
                 cuda.copyDeviceToDevice(dst_dptr, src.handle.cuda, src.byte_size) catch return error.DeviceTransferFailed;
             },
-            .metal => |*dst_arr| {
-                if (!mlx.has_mlx) return error.UnsupportedDevice;
-                var stream = mlx.Stream.defaultGpu() catch return error.DeviceTransferFailed;
-                defer stream.deinit();
-                var cloned = mlx.Array.init();
-                errdefer cloned.deinit();
-                if (mlx.c.mlx_copy(&cloned.handle, src.handle.metal.handle, stream.handle) != 0 or cloned.handle.ctx == null)
-                    return error.DeviceTransferFailed;
-                dst_arr.deinit();
-                dst_arr.* = cloned;
+            .metal => {
+                try dst.validateMetal();
+                try src.validateMetal();
+                try dst.replaceMetalPrefix(src.handle.metal, src.byte_size);
             },
         }
     }
@@ -440,4 +468,72 @@ test "buffer: GPU retention and slicing are explicitly unsupported" {
     const gpu = DeviceBuffer{ .device = Device.cuda, .byte_size = 16, .handle = .{ .cuda = 0 } };
     try std.testing.expectError(error.UnsupportedDevice, gpu.retain());
     try std.testing.expectError(error.UnsupportedDevice, gpu.slice(0, 4));
+}
+
+test "buffer: prefix transfers preserve capacity and suffix" {
+    var dest = try DeviceBuffer.alloc(Device.cpu, 8, std.testing.allocator);
+    defer dest.free();
+    try dest.copyHostToDevice(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    try dest.copyHostToDevice(&.{ 9, 10 });
+    var src = try DeviceBuffer.alloc(Device.cpu, 3, std.testing.allocator);
+    defer src.free();
+    try src.copyHostToDevice(&.{ 11, 12, 13 });
+    try DeviceBuffer.copyDeviceToDevice(&dest, &src);
+    try DeviceBuffer.copyDeviceToDevice(&dest, &dest);
+    try std.testing.expectEqual(@as(usize, 8), dest.byte_size);
+    try std.testing.expectEqualSlices(u8, &.{ 11, 12, 13, 4, 5, 6, 7, 8 }, try dest.asCpuSlice(u8));
+    try std.testing.expectError(error.BufferOverflow, dest.copyHostToDevice(&@as([9]u8, @splat(0))));
+    try std.testing.expectError(error.BufferOverflow, DeviceBuffer.copyDeviceToDevice(&src, &dest));
+    var prefix: [2]u8 = undefined;
+    try dest.copyDeviceToHost(&prefix);
+    try std.testing.expectEqualSlices(u8, &.{ 11, 12 }, &prefix);
+    try std.testing.expectEqualSlices(u8, &.{ 11, 12, 13, 4, 5, 6, 7, 8 }, try dest.asCpuSlice(u8));
+}
+
+test "buffer: empty transfers do not invoke unavailable drivers" {
+    var dest = DeviceBuffer{ .device = Device.metal, .byte_size = 8, .handle = .{ .metal = mlx.Array.init() } };
+    var src = DeviceBuffer{ .device = Device.metal, .byte_size = 0, .handle = .{ .metal = mlx.Array.init() } };
+    try dest.copyHostToDevice(&.{});
+    var empty: [0]u8 = .{};
+    try dest.copyDeviceToHost(&empty);
+    try DeviceBuffer.copyDeviceToDevice(&dest, &src);
+    src.device = Device.cuda;
+    try std.testing.expectError(error.DeviceMismatch, DeviceBuffer.copyDeviceToDevice(&dest, &src));
+    try std.testing.expectEqual(@as(usize, 8), dest.byte_size);
+    try std.testing.expectEqual(@as(usize, 0), dest.handle.metal.size());
+    try std.testing.expectError(error.InvalidBufferSize, DeviceBuffer.alloc(Device.metal, @as(usize, std.math.maxInt(c_int)) + 1, null));
+}
+
+test "buffer: Metal prefix copies preserve physical capacity and reject malformed storage" {
+    if (!mlx.has_mlx) return error.SkipZigTest;
+    var dest = try DeviceBuffer.alloc(Device.metal, 8, null);
+    defer dest.free();
+    try dest.copyHostToDevice(&.{ 1, 2, 3, 4, 5, 6, 7, 8 });
+    try dest.copyHostToDevice(&.{ 9, 10 });
+    var output: [8]u8 = undefined;
+    try dest.copyDeviceToHost(&output);
+    try std.testing.expectEqualSlices(u8, &.{ 9, 10, 3, 4, 5, 6, 7, 8 }, &output);
+    var src = try DeviceBuffer.alloc(Device.metal, 3, null);
+    defer src.free();
+    try src.copyHostToDevice(&.{ 11, 12, 13 });
+    try DeviceBuffer.copyDeviceToDevice(&dest, &src);
+    try DeviceBuffer.copyDeviceToDevice(&dest, &dest);
+    try dest.copyHostToDevice(&.{});
+    try dest.copyDeviceToHost(&output);
+    try std.testing.expectEqualSlices(u8, &.{ 11, 12, 13, 4, 5, 6, 7, 8 }, &output);
+    try std.testing.expectEqual(@as(usize, 8), dest.byte_size);
+    try std.testing.expectEqual(@as(usize, 8), dest.handle.metal.size());
+    // A descriptor that advertises more bytes than its physical array must fail
+    // before reads or writes, even when the requested prefix fits the array.
+    src.byte_size = 4;
+    try std.testing.expectError(error.InvalidBufferSize, src.copyHostToDevice(&.{99}));
+    try std.testing.expectError(error.InvalidBufferSize, src.copyDeviceToHost(output[0..1]));
+    try std.testing.expectError(error.InvalidBufferSize, DeviceBuffer.copyDeviceToDevice(&dest, &src));
+    src.byte_size = 3;
+    try src.copyDeviceToHost(output[0..3]);
+    try std.testing.expectEqualSlices(u8, &.{ 11, 12, 13 }, output[0..3]);
+    var wrong_type = DeviceBuffer{ .device = Device.metal, .byte_size = 8, .handle = .{ .metal = try mlx.Array.zeros(&.{8}, .float32, null) } };
+    defer wrong_type.free();
+    try std.testing.expectError(error.InvalidBufferSize, wrong_type.copyDeviceToHost(&output));
+    try std.testing.expectError(error.InvalidBufferSize, DeviceBuffer.copyDeviceToDevice(&wrong_type, &src));
 }

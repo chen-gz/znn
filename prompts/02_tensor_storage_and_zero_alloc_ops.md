@@ -113,9 +113,9 @@ Do not mechanically replace Tensor fields before resolving these requirements:
    byte arrays, while MLX execution requires typed shaped arrays. GPU retain/view
    operations currently return UnsupportedDevice; GPU empty allocations remain
    unsupported. Raw Metal buffer kernels are not yet implemented.
-3. Fix partial Metal transfers that replace the backing array with a shorter
-   payload while retaining the advertised byte capacity. Audit CUDA reshaped-array
-   ownership before enabling shared GPU storage.
+3. Validate Metal transfer changes on a supported runtime. Audit CUDA
+   reshaped-array ownership before enabling shared GPU storage; its current
+   reshape returns the same allocation with a separately freed descriptor.
 4. Migrate Tensor factories, slices, transpose views, graph reshape views, graph
    arena allocations, external parameters, and cleanup together. Preserve empty
    tensors and scalar storage. Remove obsolete data/device_array fields and all
@@ -127,8 +127,11 @@ Do not mechanically replace Tensor fields before resolving these requirements:
 
 Validated on 2026-10-26 with Zig 0.17.0 on Apple Silicon:
 
-- Full CPU Debug and ReleaseFast suites each passed 409/409 tests.
-- Layer checks passed for 86 source files; all 18 canonical model graphs exported.
+- Full CPU Debug and ReleaseFast suites each passed 411 tests, with one Metal
+  runtime test explicitly skipped (412 total).
+- Layer checks passed for 86 source files. All 18 canonical model graphs exported
+  at the preceding CPU ownership checkpoint; transfer-only changes do not alter
+  model serialization.
 - GPU-enabled and x86_64 Linux source passed compile-only checks.
 - Independent reviews found no blocking ownership or destination-operation defects.
 - Metal and CUDA execution were not exercised. These results do not complete M2.
@@ -136,3 +139,24 @@ Validated on 2026-10-26 with Zig 0.17.0 on Apple Silicon:
 Reproduce with `zig build test -Dmlx=false`, repeat with
 `-Doptimize=ReleaseFast`, and run `zig build run-book-models -Dmlx=false`.
 Supply `-Dmacos-sdk` with the local SDK path if framework discovery needs it.
+
+## 5. Buffer transfer capacity implementation
+
+Metal prefix uploads and device copies preserve destination capacity and suffix
+bytes, matching the CPU/CUDA prefix-copy contract. Empty copies are no-ops after
+device/bounds validation. A fresh slice-update result is evaluated before the old
+handle is released. Byte-array type, rank, contiguity, and physical capacity are
+validated before nonempty transfers; malformed descriptors fail explicitly.
+Allocation sizes beyond Metal's signed shape range fail before narrowing casts.
+
+CPU prefix-copy and empty-transfer contracts pass in Debug and ReleaseFast.
+The conditional Metal regression covers uploads, self/device copies, suffix
+preservation, and malformed storage. It compiles with Metal enabled but was not
+executed because the optional libraries are unavailable. CPU/Linux compilation
+also passes. Runtime Metal validation remains required before GPU adoption.
+
+Next delivery should resolve CUDA Array.reshape ownership: it currently returns
+another descriptor for the same pointer, and both descriptors deallocate it.
+Establish retained allocation ownership across array-producing operations and
+reshape views, then test release ordering and failure cleanup before connecting
+that storage to Tensor/Graph. Full Tensor storage migration remains pending.
