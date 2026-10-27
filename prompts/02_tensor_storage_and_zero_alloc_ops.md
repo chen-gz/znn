@@ -113,9 +113,8 @@ Do not mechanically replace Tensor fields before resolving these requirements:
    byte arrays, while MLX execution requires typed shaped arrays. GPU retain/view
    operations currently return UnsupportedDevice; GPU empty allocations remain
    unsupported. Raw Metal buffer kernels are not yet implemented.
-3. Validate Metal transfer changes on a supported runtime. Audit CUDA
-   reshaped-array ownership before enabling shared GPU storage; its current
-   reshape returns the same allocation with a separately freed descriptor.
+3. Validate Metal transfers and CUDA retained reshape lifetimes on supported
+   GPU runtimes. Host control-record tests cannot validate device execution.
 4. Migrate Tensor factories, slices, transpose views, graph reshape views, graph
    arena allocations, external parameters, and cleanup together. Preserve empty
    tensors and scalar storage. Remove obsolete data/device_array fields and all
@@ -127,11 +126,10 @@ Do not mechanically replace Tensor fields before resolving these requirements:
 
 Validated on 2026-10-26 with Zig 0.17.0 on Apple Silicon:
 
-- Full CPU Debug and ReleaseFast suites each passed 411 tests, with one Metal
-  runtime test explicitly skipped (412 total).
-- Layer checks passed for 86 source files. All 18 canonical model graphs exported
-  at the preceding CPU ownership checkpoint; transfer-only changes do not alter
-  model serialization.
+- Full CPU Debug and ReleaseFast suites each passed 413 tests, with Metal and
+  CUDA runtime tests explicitly skipped (415 total).
+- Layer checks passed for 86 source files; all 18 canonical model graphs exported
+  successfully after the CUDA ownership and graph cleanup changes.
 - GPU-enabled and x86_64 Linux source passed compile-only checks.
 - Independent reviews found no blocking ownership or destination-operation defects.
 - Metal and CUDA execution were not exercised. These results do not complete M2.
@@ -155,8 +153,30 @@ preservation, and malformed storage. It compiles with Metal enabled but was not
 executed because the optional libraries are unavailable. CPU/Linux compilation
 also passes. Runtime Metal validation remains required before GPU adoption.
 
-Next delivery should resolve CUDA Array.reshape ownership: it currently returns
-another descriptor for the same pointer, and both descriptors deallocate it.
-Establish retained allocation ownership across array-producing operations and
-reshape views, then test release ordering and failure cleanup before connecting
-that storage to Tensor/Graph. Full Tensor storage migration remains pending.
+## 6. CUDA reshape ownership implementation
+
+Every CUDA Array producer now creates a shared atomic allocation record, storing
+its device pointer and host allocator. Retain and reshape acquire references;
+plain descriptor copies are borrowed. Reshape validates shape products before
+retention and may outlive its parent. Clone remains a deep copy. Deinitialization
+resets the descriptor and frees the device allocation only on final release.
+Existing allocation error paths release device bytes if owner creation fails.
+
+Tensor.toCudaArray returns an owned reference in both resident and upload paths.
+Graph reshape releases a newly retained device array if allocation or tensor-list
+registration fails; after registration the graph owns its cleanup.
+
+CPU tests exercise nested views, both release orders, allocation failure,
+invalid/overflowing shapes, and reference-count overflow using null device
+pointers. A conditional CUDA test covers real allocation lifetime and clone
+independence. It is skipped on this host, as is the Metal runtime regression.
+
+### Next storage integration delivery
+
+Define typed DeviceBuffer adoption for existing CUDA/Metal arrays, including
+checked shape/dtype byte counts, retained ownership, and explicit host transfer.
+Do not reinterpret shaped floating-point Metal arrays as the raw byte buffers
+used by existing transfer functions. Preserve the layer boundary by keeping
+Tensor/Graph metadata out of backend storage. After that contract is implemented
+and tested, migrate Tensor factories, views, and graph cleanup together. M2
+remains incomplete until the separate data/device_array state is removed.

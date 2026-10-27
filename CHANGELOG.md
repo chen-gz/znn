@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- CUDA array reshape views retain a shared allocation instead of independently
+  freeing the same device pointer. Every array-producing operation creates an
+  atomic ownership record; final release frees the allocation. Tensor conversion
+  returns an owned reference, and graph reshape cleans up unregistered device
+  views on allocation failure. Invalid/overflowing shapes fail before retention.
+
 - Metal buffer prefix uploads and device copies preserve capacity and untouched
   suffix bytes. Validate byte-array metadata before transfers, evaluate replacement
   storage before releasing the original, and propagate evaluation failures.

@@ -298,7 +298,9 @@ pub const Graph = struct {
         const req_grad = self.enable_grad and A.requires_grad;
 
         if (self.useDevice() and A.device_array != null) {
-            const arr = try A.device_array.?.reshape(new_shape_slice, self.options.mlx_stream);
+            var arr = try A.device_array.?.reshape(new_shape_slice, self.options.mlx_stream);
+            var registered = false;
+            errdefer if (!registered) arr.deinit();
             C.* = Tensor{
                 .data = if (req_grad) try allocator.alloc(f32, new_total) else &.{},
                 .grad = if (req_grad) try allocator.alloc(f32, new_total) else &.{},
@@ -313,6 +315,7 @@ pub const Graph = struct {
             };
             if (req_grad) @memset(C.grad, 0.0);
             try self.tensors.append(self.backing_allocator, C);
+            registered = true;
             return self.registerSingleOutputOp(C, &.{A}, .Reshape, .{ .Reshape = {} }, req_grad);
         }
 

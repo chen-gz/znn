@@ -46,6 +46,8 @@ pub const CudaError = error{
     DeviceNotFound,
     OperationNotSupported,
     EmptyTensor,
+    InvalidArray,
+    ReferenceCountOverflow,
 };
 
 /// 驱动 API 函数指针表
@@ -372,9 +374,35 @@ pub const DType = enum(u8) {
     bfloat16,
 };
 
+const ArrayOwner = struct {
+    ptr: CUdeviceptr,
+    allocator: std.mem.Allocator,
+    references: std.atomic.Value(usize) = std.atomic.Value(usize).init(1),
+
+    // Ownership transfers only on success; the caller cleans up the device
+    // allocation if allocating this control record fails.
+    fn create(allocator: std.mem.Allocator, ptr: CUdeviceptr) CudaError!*ArrayOwner {
+        const owner = allocator.create(ArrayOwner) catch return error.OutOfMemory;
+        owner.* = .{ .ptr = ptr, .allocator = allocator };
+        return owner;
+    }
+};
+
+fn checkedElements(dims: []const usize) CudaError!usize {
+    if (dims.len > 8) return error.InvalidShape;
+    for (dims) |d| if (d == 0) return 0;
+    var total: usize = 1;
+    for (dims) |d| total = std.math.mul(usize, total, d) catch return error.InvalidShape;
+    return total;
+}
+
 /// 统一计算设备架构设备端张量数组 (CUDA Device Array)
 pub const Array = struct {
+    // Plain descriptor copies are borrowed. retain()/reshape() acquire an owned
+    // reference; each owned descriptor must be deinitialized once. Atomic counts
+    // protect allocation lifetime, not concurrent mutation of a descriptor/data.
     ptr: CUdeviceptr,
+    owner: ?*ArrayOwner,
     shape: [8]usize = @splat(0),
     ndim: usize = 0,
     len: usize = 0,
@@ -382,10 +410,8 @@ pub const Array = struct {
 
     /// 创建全零初始化的显存数组
     pub fn zeros(dims: []const usize) CudaError!Array {
-        if (dims.len > 8) return error.InvalidShape;
-        var total_len: usize = 1;
-        for (dims) |d| total_len *= d;
-        const bytes = total_len * @sizeOf(f32);
+        const total_len = try checkedElements(dims);
+        const bytes = std.math.mul(usize, total_len, @sizeOf(f32)) catch return error.InvalidShape;
         const dptr = try alloc(bytes);
         errdefer free(dptr);
         try setZero(dptr, bytes);
@@ -395,6 +421,7 @@ pub const Array = struct {
 
         return .{
             .ptr = dptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, dptr),
             .shape = shape_arr,
             .ndim = dims.len,
             .len = total_len,
@@ -404,12 +431,10 @@ pub const Array = struct {
 
     /// 从切片初始化设备数组
     pub fn fromSlice(slice: []const f32, dims: []const usize) CudaError!Array {
-        if (dims.len > 8) return error.InvalidShape;
-        var total_len: usize = 1;
-        for (dims) |d| total_len *= d;
+        const total_len = try checkedElements(dims);
         if (total_len != slice.len) return error.ShapeMismatch;
 
-        const bytes = slice.len * @sizeOf(f32);
+        const bytes = std.math.mul(usize, slice.len, @sizeOf(f32)) catch return error.InvalidShape;
         const dptr = try alloc(bytes);
         errdefer free(dptr);
 
@@ -420,6 +445,7 @@ pub const Array = struct {
 
         return .{
             .ptr = dptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, dptr),
             .shape = shape_arr,
             .ndim = dims.len,
             .len = slice.len,
@@ -445,6 +471,7 @@ pub const Array = struct {
         try copyDeviceToDevice(new_ptr, self.ptr, bytes);
         return .{
             .ptr = new_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, new_ptr),
             .shape = self.shape,
             .ndim = self.ndim,
             .len = self.len,
@@ -452,32 +479,43 @@ pub const Array = struct {
         };
     }
 
-    /// 重塑形状 (浅拷贝视图)
-    pub fn reshape(self: Array, new_dims: []const usize) CudaError!Array {
-        if (new_dims.len > 8) return error.InvalidShape;
-        var total: usize = 1;
-        for (new_dims) |d| total *= d;
-        if (total != self.len) return error.ShapeMismatch;
-
-        var shape_arr: [8]usize = @splat(0);
-        @memcpy(shape_arr[0..new_dims.len], new_dims);
-
-        return .{
-            .ptr = self.ptr,
-            .shape = shape_arr,
-            .ndim = new_dims.len,
-            .len = self.len,
-            .dtype = self.dtype,
-        };
+    /// Acquire another owned reference without copying device data.
+    pub fn retain(self: Array) CudaError!Array {
+        const owner = self.owner orelse return error.InvalidArray;
+        var refs = owner.references.load(.monotonic);
+        while (true) {
+            if (refs == std.math.maxInt(usize)) return error.ReferenceCountOverflow;
+            if (owner.references.cmpxchgWeak(refs, refs + 1, .monotonic, .monotonic)) |actual| {
+                refs = actual;
+            } else break;
+        }
+        return self;
     }
 
-    /// 释放显存句柄
+    /// Reshape into an independently owned view of the same device allocation.
+    pub fn reshape(self: Array, new_dims: []const usize) CudaError!Array {
+        if (try checkedElements(new_dims) != self.len) return error.ShapeMismatch;
+        var view = try self.retain();
+        view.shape = @splat(0);
+        @memcpy(view.shape[0..new_dims.len], new_dims);
+        view.ndim = new_dims.len;
+        return view;
+    }
+
+    /// Release the allocation only when its last owned descriptor is released.
     pub fn deinit(self: *Array) void {
-        if (self.ptr != 0) {
-            free(self.ptr);
-            self.ptr = 0;
-            self.len = 0;
+        if (self.owner) |owner| {
+            if (owner.references.fetchSub(1, .acq_rel) == 1) {
+                const allocator = owner.allocator;
+                if (owner.ptr != 0) free(owner.ptr);
+                allocator.destroy(owner);
+            }
         }
+        self.owner = null;
+        self.ptr = 0;
+        self.len = 0;
+        self.ndim = 0;
+        self.shape = @splat(0);
     }
 
     /// 通用矩阵乘法 (General Matrix Multiply, GEMM / Batched GEMM, BMM): C = A * B
@@ -531,9 +569,16 @@ pub const Array = struct {
 
         if (api.cuLaunchKernel(
             func,
-            grid_x, grid_y, grid_z,
-            block_dim, block_dim, 1,
-            0, h_stream, &params, null,
+            grid_x,
+            grid_y,
+            grid_z,
+            block_dim,
+            block_dim,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
@@ -543,6 +588,7 @@ pub const Array = struct {
 
         return .{
             .ptr = c_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr),
             .shape = res_shape,
             .ndim = a.ndim,
             .len = out_len,
@@ -581,15 +627,23 @@ pub const Array = struct {
         const h_stream = if (stream) |s| s.handle else null;
         if (api.cuLaunchKernel(
             func,
-            rows_u32, 1, 1,
-            1, 1, 1,
-            0, h_stream, &params, null,
+            rows_u32,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
 
         return .{
             .ptr = out_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
             .shape = x.shape,
             .ndim = x.ndim,
             .len = x.len,
@@ -625,15 +679,23 @@ pub const Array = struct {
 
         if (api.cuLaunchKernel(
             func,
-            grid_dim, 1, 1,
-            block_dim, 1, 1,
-            0, h_stream, &params, null,
+            grid_dim,
+            1,
+            1,
+            block_dim,
+            1,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
 
         return .{
             .ptr = c_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr),
             .shape = a.shape,
             .ndim = a.ndim,
             .len = a.len,
@@ -669,15 +731,23 @@ pub const Array = struct {
 
         if (api.cuLaunchKernel(
             func,
-            grid_dim, 1, 1,
-            block_dim, 1, 1,
-            0, h_stream, &params, null,
+            grid_dim,
+            1,
+            1,
+            block_dim,
+            1,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
 
         return .{
             .ptr = c_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr),
             .shape = a.shape,
             .ndim = a.ndim,
             .len = a.len,
@@ -712,15 +782,23 @@ pub const Array = struct {
 
         if (api.cuLaunchKernel(
             func,
-            grid_dim, 1, 1,
-            block_dim, 1, 1,
-            0, h_stream, &params, null,
+            grid_dim,
+            1,
+            1,
+            block_dim,
+            1,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
 
         return .{
             .ptr = c_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr),
             .shape = a.shape,
             .ndim = a.ndim,
             .len = a.len,
@@ -754,15 +832,23 @@ pub const Array = struct {
 
         if (api.cuLaunchKernel(
             func,
-            grid_dim, 1, 1,
-            block_dim, 1, 1,
-            0, h_stream, &params, null,
+            grid_dim,
+            1,
+            1,
+            block_dim,
+            1,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
 
         return .{
             .ptr = out_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
             .shape = a.shape,
             .ndim = a.ndim,
             .len = a.len,
@@ -798,15 +884,23 @@ pub const Array = struct {
         const h_stream = if (stream) |s| s.handle else null;
         if (api.cuLaunchKernel(
             func,
-            rows_u32, 1, 1,
-            1, 1, 1,
-            0, h_stream, &params, null,
+            rows_u32,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
 
         return .{
             .ptr = out_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
             .shape = a.shape,
             .ndim = a.ndim,
             .len = a.len,
@@ -854,15 +948,23 @@ pub const Array = struct {
         const h_stream = if (stream) |s| s.handle else null;
         if (api.cuLaunchKernel(
             func,
-            total_tokens_u32, 1, 1,
-            1, 1, 1,
-            0, h_stream, &params, null,
+            total_tokens_u32,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
 
         return .{
             .ptr = out_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
             .shape = x.shape,
             .ndim = x.ndim,
             .len = x.len,
@@ -912,9 +1014,16 @@ pub const Array = struct {
         const h_stream = if (stream) |s| s.handle else null;
         if (api.cuLaunchKernel(
             func,
-            seq_u32, num_kv_u32, 1,
-            1, 1, 1,
-            0, h_stream, &params, null,
+            seq_u32,
+            num_kv_u32,
+            1,
+            1,
+            1,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
@@ -985,9 +1094,16 @@ pub const Array = struct {
         const h_stream = if (stream) |s| s.handle else null;
         if (api.cuLaunchKernel(
             func,
-            seq_len_u32, num_heads_u32, 1,
-            1, 1, 1,
-            0, h_stream, &params, null,
+            seq_len_u32,
+            num_heads_u32,
+            1,
+            1,
+            1,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
@@ -996,6 +1112,7 @@ pub const Array = struct {
         res_shape[q.ndim - 2] = seq_len;
         return .{
             .ptr = out_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
             .shape = res_shape,
             .ndim = q.ndim,
             .len = out_len,
@@ -1042,9 +1159,16 @@ pub const Array = struct {
 
         if (api.cuLaunchKernel(
             func,
-            grid_x, grid_y, 1,
-            block_x, block_y, 1,
-            0, h_stream, &params, null,
+            grid_x,
+            grid_y,
+            1,
+            block_x,
+            block_y,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
@@ -1055,6 +1179,7 @@ pub const Array = struct {
 
         return .{
             .ptr = c_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, c_ptr),
             .shape = res_shape,
             .ndim = indices.ndim + 1,
             .len = out_len,
@@ -1089,15 +1214,23 @@ pub const Array = struct {
 
         if (api.cuLaunchKernel(
             func,
-            grid_dim, 1, 1,
-            block_dim, 1, 1,
-            0, h_stream, &params, null,
+            grid_dim,
+            1,
+            1,
+            block_dim,
+            1,
+            1,
+            0,
+            h_stream,
+            &params,
+            null,
         ) != .success) {
             return error.CudaOperationFailed;
         }
 
         return .{
             .ptr = out_ptr,
+            .owner = try ArrayOwner.create(std.heap.smp_allocator, out_ptr),
             .shape = x.shape,
             .ndim = x.ndim,
             .len = x.len,
@@ -1563,4 +1696,75 @@ test "cuda: hardware probe and driver availability" {
         try std.testing.expectApproxEqAbs(@as(f32, 2.0), attn_back[0], 0.01);
         try std.testing.expectApproxEqAbs(@as(f32, 3.0), attn_back[1], 0.01);
     }
+}
+
+// Null device pointers isolate host ownership bookkeeping from GPU execution.
+fn ownershipLifecycle(allocator: std.mem.Allocator) !void {
+    var root = Array{ .ptr = 0, .owner = try ArrayOwner.create(allocator, 0), .len = 6, .ndim = 2, .shape = .{ 2, 3, 0, 0, 0, 0, 0, 0 } };
+    defer root.deinit();
+    var view = try root.reshape(&.{ 3, 2 });
+    defer view.deinit();
+    var nested = try view.reshape(&.{6});
+    defer nested.deinit();
+    var retained = try root.retain();
+    defer retained.deinit();
+    try std.testing.expectEqual(@as(usize, 4), root.owner.?.references.load(.monotonic));
+    view.deinit();
+    root.deinit();
+    root.deinit();
+    try std.testing.expectEqual(@as(usize, 2), nested.owner.?.references.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 6), nested.shape[0]);
+    nested.deinit();
+    try std.testing.expectEqual(@as(usize, 1), retained.owner.?.references.load(.monotonic));
+    var last_view = try retained.reshape(&.{ 1, 6 });
+    defer last_view.deinit();
+    retained.deinit();
+    try std.testing.expectEqual(@as(usize, 1), last_view.owner.?.references.load(.monotonic));
+}
+
+test "cuda: retained reshape ownership and control-record allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, ownershipLifecycle, .{});
+}
+
+test "cuda: invalid reshape and reference overflow leave ownership unchanged" {
+    var root = Array{ .ptr = 0, .owner = try ArrayOwner.create(std.testing.allocator, 0), .len = 6 };
+    defer root.deinit();
+    try std.testing.expectError(error.ShapeMismatch, root.reshape(&.{7}));
+    try std.testing.expectError(error.InvalidShape, root.reshape(&.{ std.math.maxInt(usize), 2 }));
+    try std.testing.expectError(error.InvalidShape, root.reshape(&@as([9]usize, @splat(1))));
+    try std.testing.expectEqual(@as(usize, 1), root.owner.?.references.load(.monotonic));
+    root.owner.?.references.store(std.math.maxInt(usize), .monotonic);
+    try std.testing.expectError(error.ReferenceCountOverflow, root.retain());
+    try std.testing.expectError(error.ReferenceCountOverflow, root.reshape(&.{6}));
+    root.owner.?.references.store(1, .monotonic);
+    root.deinit();
+    try std.testing.expectError(error.InvalidArray, root.retain());
+    try std.testing.expectError(error.InvalidArray, root.reshape(&.{0}));
+    try std.testing.expectEqual(@as(usize, 1), try checkedElements(&.{}));
+    try std.testing.expectEqual(@as(usize, 0), try checkedElements(&.{ std.math.maxInt(usize), 2, 0 }));
+    try std.testing.expectError(error.InvalidShape, Array.zeros(&.{ std.math.maxInt(usize), 2 }));
+    try std.testing.expectError(error.InvalidShape, Array.fromSlice(&.{}, &.{ std.math.maxInt(usize), 2 }));
+}
+
+test "cuda: real reshape views survive parent release and clones are independent" {
+    if (!isAvailable()) return error.SkipZigTest;
+    var root = try Array.fromSlice(&.{ 1, 2, 3, 4 }, &.{ 2, 2 });
+    defer root.deinit();
+    var view = try root.reshape(&.{4});
+    defer view.deinit();
+    var nested = try view.reshape(&.{ 1, 4 });
+    defer nested.deinit();
+    var cloned = try nested.clone();
+    defer cloned.deinit();
+    root.deinit();
+    view.deinit();
+    var output: [4]f32 = undefined;
+    try nested.toHostSlice(&output);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, &output);
+    try setZero(nested.ptr, 4 * @sizeOf(f32));
+    try cloned.toHostSlice(&output);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, &output);
+    nested.deinit();
+    try cloned.toHostSlice(&output);
+    try std.testing.expectEqualSlices(f32, &.{ 1, 2, 3, 4 }, &output);
 }

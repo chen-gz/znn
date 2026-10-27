@@ -240,9 +240,10 @@ pub const Tensor = struct {
     }
 
     /// 将张量转换为统一计算设备架构 (Compute Unified Device Architecture, CUDA) 数组
+    /// Returns an owned reference; the caller must deinitialize it.
     pub fn toCudaArray(self: *const Tensor) !backend.cuda.Array {
         if (self.device_array) |da| {
-            if (da.asCuda()) |arr| return arr;
+            if (da.asCuda()) |arr| return arr.retain();
         }
         return backend.cuda.Array.fromSlice(self.data, self.shape.dims[0..self.shape.len]);
     }
