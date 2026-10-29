@@ -51,8 +51,22 @@ pub const DeviceBuffer = struct {
     cpu_owner: ?*CpuOwner = null,
     typed_owner: ?device_mod.DeviceArray = null,
 
-    fn emptyCpu(device: Device) DeviceBuffer {
+    pub fn emptyCpu(device: Device) DeviceBuffer {
         return .{ .device = device, .byte_size = 0, .handle = .{ .cpu = empty_cpu_storage[0..].ptr } };
+    }
+
+    /// Construct a borrowed CPU descriptor wrapping host slice memory.
+    /// This descriptor does not own the memory and does not free it on deinit.
+    pub fn fromHostSlice(host_slice: []f32) DeviceBuffer {
+        if (host_slice.len == 0) return emptyCpu(Device.cpu);
+        const bytes: [*]u8 = @ptrCast(host_slice.ptr);
+        return .{
+            .device = Device.cpu,
+            .byte_size = host_slice.len * @sizeOf(f32),
+            .handle = .{ .cpu = bytes },
+            .cpu_owner = null,
+            .typed_owner = null,
+        };
     }
 
     fn typedError(err: anyerror) BufferError {

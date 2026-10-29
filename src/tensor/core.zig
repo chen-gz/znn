@@ -43,6 +43,7 @@ pub const OpHandle = opaque {};
 
 /// 张量（Tensor）结构体：承载机器学习网络中所有物理数据与流转拓扑信息
 pub const Tensor = struct {
+    storage: backend.DeviceBuffer = backend.DeviceBuffer.emptyCpu(.cpu), // 底层物理设备内存缓冲区单一真实来源
     data: []f32, // 前向传播的数据缓冲区（行优先存储的一维切片）
     grad: []f32, // 反向传播的梯度缓冲区（与 data 形状一致，不需梯度的节点可为空）
     shape: Shape, // 逻辑形状
@@ -60,6 +61,11 @@ pub const Tensor = struct {
     is_graph_owned: bool = false, // 是否由计算图拥有生命周期 (若为 true，计算图 reset/deinit 时自动释放 device_array)
     name: ?[]const u8 = null, // 可选张量调试名称 (如 "fc1.weight", "conv1.bias")
     name_buf: [64]u8 = undefined,
+
+    /// 显存/物理设备缓冲区访问 (Single source of truth)
+    pub fn deviceBuffer(self: *const Tensor) *const backend.DeviceBuffer {
+        return &self.storage;
+    }
 
     /// 设置张量的人类可读名称 (用于 Graph.printInitReport 等调试报告)
     pub fn setName(self: *Tensor, name: []const u8) void {
@@ -244,8 +250,13 @@ pub const Tensor = struct {
         defer if (!adopted) alloc.free(staged);
         try da.copyToSlice(staged);
         if (self.data.len < count) {
-            if (self.data.len > 0) alloc.free(self.data);
-            self.data = staged;
+            if (self.data.len > 0 and self.storage.cpu_owner == null) alloc.free(self.data);
+            var new_storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, count * @sizeOf(f32), alloc);
+            const new_data = try new_storage.asCpuSliceMut(f32);
+            @memcpy(new_data, staged);
+            self.storage.free();
+            self.storage = new_storage;
+            self.data = new_data;
             adopted = true;
         } else {
             @memcpy(self.data[0..count], staged);
@@ -267,6 +278,9 @@ pub const Tensor = struct {
             .metal => .{ .mlx = try backend.mlx.Array.fromSlice(data, self.shape.dims[0..self.shape.len]) },
             .cpu => unreachable,
         };
+        const new_storage = try backend.DeviceBuffer.fromDeviceArray(replacement);
+        self.storage.free();
+        self.storage = new_storage;
         self.device_array = replacement;
         self.device = target;
     }
@@ -787,7 +801,9 @@ pub const Tensor = struct {
             return error.DimensionOutOfBounds;
         }
         const view = try allocator.create(Tensor);
+        const view_storage = self.storage.retain() catch backend.DeviceBuffer.fromHostSlice(self.data);
         view.* = Tensor{
+            .storage = view_storage,
             .data = self.data,
             .grad = self.grad,
             .shape = transposeShape(self.shape, dim0, dim1),
@@ -1018,12 +1034,14 @@ pub const Tensor = struct {
     }
 
     pub fn deinit(self: *Tensor, allocator: std.mem.Allocator) void {
+        const had_cpu_owner = self.storage.cpu_owner != null;
+        self.storage.free();
         if (self.device_array) |*arr| {
             arr.deinit();
             self.device_array = null;
         }
         if (!self.is_view) {
-            if (self.data.len > 0) {
+            if (!had_cpu_owner and self.data.len > 0) {
                 allocator.free(self.data);
             }
             if (self.requires_grad and self.grad.len > 0) {

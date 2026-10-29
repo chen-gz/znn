@@ -54,8 +54,12 @@ pub fn allocUninit(allocator: std.mem.Allocator, shape: Shape) !*Tensor {
     }
     const t = try allocator.create(Tensor);
     errdefer allocator.destroy(t);
+    var storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, total_size * @sizeOf(f32), allocator);
+    errdefer storage.free();
+    const data = try storage.asCpuSliceMut(f32);
     t.* = Tensor{
-        .data = try allocator.alloc(f32, total_size),
+        .storage = storage,
+        .data = data,
         .grad = &.{},
         .shape = shape,
         .strides = computeContiguousStrides(shape),

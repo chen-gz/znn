@@ -20,10 +20,12 @@ const free = ops_mod.free;
 pub fn clone(self: Tensor, allocator: std.mem.Allocator) !*Tensor {
     const t = try allocator.create(Tensor);
     errdefer allocator.destroy(t);
-    const data = try allocator.alloc(f32, self.data.len);
-    errdefer allocator.free(data);
+    var storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, self.data.len * @sizeOf(f32), allocator);
+    errdefer storage.free();
+    const data = try storage.asCpuSliceMut(f32);
     const grad: []f32 = if (self.requires_grad) try allocator.alloc(f32, self.grad.len) else &.{};
     t.* = Tensor{
+        .storage = storage,
         .data = data,
         .grad = grad,
         .shape = self.shape,
@@ -576,7 +578,13 @@ pub fn slice(self: *Tensor, ranges: []const SliceRange, allocator: std.mem.Alloc
     if (is_empty) offset = 0;
 
     const out = try allocator.create(Tensor);
+    const slice_storage = if (is_empty)
+        backend.DeviceBuffer.emptyCpu(.cpu)
+    else
+        self.storage.slice(offset * @sizeOf(f32), (self.data.len - offset) * @sizeOf(f32)) catch backend.DeviceBuffer.fromHostSlice(self.data[offset..]);
+
     out.* = Tensor{
+        .storage = slice_storage,
         .data = if (is_empty) self.data[0..0] else self.data[offset..],
         .grad = if (!is_empty and self.requires_grad and self.grad.len > offset) self.grad[offset..] else &.{},
         .shape = Shape{ .dims = new_dims, .len = self.shape.len },

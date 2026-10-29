@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Tensor.storage: DeviceBuffer` physical device buffer abstraction and `Tensor.deviceBuffer()`
+  accessor. Tensor factories (`allocUninit`, `clone`, `Graph.tensorND`), views (`transposeView`,
+  `slice`, `Graph.reshape`), and device transitions manage backing storage through `DeviceBuffer`,
+  retaining shared ownership so views safely outlive parent tensors.
+
 - Checked `Tensor.asHostSlice` and `asHostSliceMut` access contiguous CPU data
   without implicit allocation or transfer, validating metadata and bounds while
   preserving graph mutation guards.
@@ -37,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stored ownership; descriptor copies must use `retain()` to acquire a reference.
 
 ### Fixed
+
+- Mark graph op output tensors `is_graph_owned = true` in `registerSingleOutputOp`
+  and eliminate duplicate tensor registration in `Graph.reshape`, `transposeND`,
+  and `slice`, ensuring graph-owned buffer storage is reclaimed on `deinit` and `reset`.
 
 - Host synchronization stages transfers before committing, preserving existing
   data and ownership on allocation/transfer failure. Successful synchronization

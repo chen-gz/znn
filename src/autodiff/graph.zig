@@ -173,6 +173,7 @@ pub const Graph = struct {
     pub fn deinit(self: *Graph) void {
         for (self.tensors.items) |t| {
             if (t.is_graph_owned) {
+                t.storage.free();
                 if (t.device_array) |*arr| {
                     arr.deinit();
                     t.device_array = null;
@@ -191,6 +192,7 @@ pub const Graph = struct {
     pub fn reset(self: *Graph) void {
         for (self.tensors.items) |t| {
             if (t.is_graph_owned) {
+                t.storage.free();
                 if (t.device_array) |*arr| {
                     arr.deinit();
                     t.device_array = null;
@@ -265,8 +267,11 @@ pub const Graph = struct {
         const effective_req_grad = self.enable_grad and requires_grad;
         const is_gpu = self.useDevice();
 
+        var storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, total_size * @sizeOf(f32), allocator);
+        const data = try storage.asCpuSliceMut(f32);
         t.* = Tensor{
-            .data = try allocator.alloc(f32, total_size),
+            .storage = storage,
+            .data = data,
             .grad = if (effective_req_grad) try allocator.alloc(f32, total_size) else &.{},
             .shape = shape,
             .strides = strides,
@@ -301,7 +306,9 @@ pub const Graph = struct {
             var arr = try A.device_array.?.reshape(new_shape_slice, self.options.mlx_stream);
             var registered = false;
             errdefer if (!registered) arr.deinit();
+            const dev_storage = try backend.DeviceBuffer.fromDeviceArray(arr);
             C.* = Tensor{
+                .storage = dev_storage,
                 .data = if (req_grad) try allocator.alloc(f32, new_total) else &.{},
                 .grad = if (req_grad) try allocator.alloc(f32, new_total) else &.{},
                 .shape = shape,
@@ -314,15 +321,24 @@ pub const Graph = struct {
                 .scope = self.currentScope(),
             };
             if (req_grad) @memset(C.grad, 0.0);
-            try self.tensors.append(self.backing_allocator, C);
             registered = true;
             return self.registerSingleOutputOp(C, &.{A}, .Reshape, .{ .Reshape = {} }, req_grad);
         }
 
         const can_alias = A.isContiguous() and A.data.len >= new_total;
+        var cpu_storage: backend.DeviceBuffer = undefined;
+        var data_slice: []f32 = undefined;
+        if (can_alias) {
+            cpu_storage = A.storage.retain() catch backend.DeviceBuffer.fromHostSlice(A.data[0..new_total]);
+            data_slice = A.data[0..new_total];
+        } else {
+            cpu_storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, new_total * @sizeOf(f32), allocator);
+            data_slice = try cpu_storage.asCpuSliceMut(f32);
+        }
 
         C.* = Tensor{
-            .data = if (can_alias) A.data[0..new_total] else try allocator.alloc(f32, new_total),
+            .storage = cpu_storage,
+            .data = data_slice,
             .grad = if (req_grad) try allocator.alloc(f32, new_total) else &.{},
             .shape = shape,
             .strides = strides,
@@ -376,6 +392,7 @@ pub const Graph = struct {
         const allocator = self.arena.allocator();
         C.scope = self.currentScope();
         C.requires_grad = req_grad;
+        C.is_graph_owned = true;
         if (req_grad and C.grad.len == 0) {
             C.grad = try allocator.alloc(f32, C.data.len);
             @memset(C.grad, 0.0);
@@ -460,7 +477,9 @@ pub const Graph = struct {
             out_shape.dims[dim1] = A.shape.dims[dim0];
             const numel = out_shape.numel();
             const C = try allocator.create(Tensor);
+            const dev_storage = try backend.DeviceBuffer.fromDeviceArray(res);
             C.* = Tensor{
+                .storage = dev_storage,
                 .data = if (req_grad) try allocator.alloc(f32, numel) else &.{},
                 .grad = if (req_grad) try allocator.alloc(f32, numel) else &.{},
                 .shape = out_shape,
@@ -473,7 +492,6 @@ pub const Graph = struct {
                 .scope = self.currentScope(),
             };
             if (req_grad) @memset(C.grad, 0.0);
-            try self.tensors.append(self.backing_allocator, C);
             return self.registerSingleOutputOp(
                 C,
                 &.{A},
@@ -1123,7 +1141,9 @@ pub const Graph = struct {
             const C = try allocator.create(Tensor);
             const shape = try Shape.fromSlice(new_dims[0..A.shape.len]);
             const numel = shape.numel();
+            const dev_storage = try backend.DeviceBuffer.fromDeviceArray(curr_arr);
             C.* = Tensor{
+                .storage = dev_storage,
                 .data = if (req_grad) try allocator.alloc(f32, numel) else &.{},
                 .grad = if (req_grad) try allocator.alloc(f32, numel) else &.{},
                 .shape = shape,
@@ -1136,7 +1156,6 @@ pub const Graph = struct {
                 .scope = self.currentScope(),
             };
             if (req_grad) @memset(C.grad, 0.0);
-            try self.tensors.append(self.backing_allocator, C);
             return self.registerSingleOutputOp(
                 C,
                 &.{A},

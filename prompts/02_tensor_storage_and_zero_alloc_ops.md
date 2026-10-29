@@ -216,3 +216,17 @@ graph arena for graph-owned host allocations. Borrowed-view materialization is r
 until shared storage is migrated. Device upload commits only after creating an owned copy of host bytes and rejects implicit
 cross-device transitions. Tests cover validation and failure atomicity without
 GPU libraries, plus conditional transfer/re-upload tests.
+
+## 9. Tensor DeviceBuffer storage migration implementation
+
+`Tensor` now holds `storage: backend.DeviceBuffer` as its physical storage
+abstraction, exposing `Tensor.deviceBuffer()` for immutable buffer access.
+Tensor factories (`allocUninit`, `clone`, `Graph.tensorND`), views (`transposeView`,
+`slice`, `Graph.reshape`), and device upload/synchronization routes operate
+through `DeviceBuffer`. Views retain or slice shared storage, enabling view
+lifetimes to safely outlive parent tensors regardless of deallocation order.
+Empty tensors allocate zero bytes and hold no `cpu_owner`. Graph op outputs
+are consistently marked `is_graph_owned = true` in `registerSingleOutputOp`,
+and duplicate op output tensor registrations in `Graph.reshape`, `transposeND`,
+and `slice` are eliminated so graph resets and deinitialization reclaim all
+graph-owned buffers without leaks or double-frees.

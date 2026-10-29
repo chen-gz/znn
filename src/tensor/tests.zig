@@ -2734,3 +2734,76 @@ test "Tensor explicit GPU transitions materialize and re-upload edited host data
     }
     if (!exercised) return error.SkipZigTest;
 }
+
+test "Tensor DeviceBuffer storage lifecycle, retention, and view independence" {
+    const allocator = std.testing.allocator;
+
+    // 1. Basic allocation and deviceBuffer accessor
+    const t = try array(allocator, &.{ 2, 3 }, &.{ 1, 2, 3, 4, 5, 6 });
+    const buf = t.deviceBuffer();
+    try std.testing.expectEqual(backend.Device.cpu, buf.device);
+    try std.testing.expectEqual(@as(usize, 6 * @sizeOf(f32)), buf.byte_size);
+    try std.testing.expectEqual(@as(usize, 1), buf.cpu_owner.?.references.load(.monotonic));
+
+    // 2. Transpose view retains storage and outlives parent
+    const vt = try t.transposeView(0, 1, allocator);
+    try std.testing.expectEqual(@as(usize, 2), t.deviceBuffer().cpu_owner.?.references.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 2), vt.deviceBuffer().cpu_owner.?.references.load(.monotonic));
+
+    // Free parent first
+    free(allocator, t);
+    try std.testing.expectEqual(@as(usize, 1), vt.deviceBuffer().cpu_owner.?.references.load(.monotonic));
+    try std.testing.expectEqual(@as(f32, 1), vt.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 4), vt.get(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 2), vt.get(&.{ 1, 0 }));
+    free(allocator, vt);
+
+    // 3. Reverse order: free view first, then parent
+    const t2 = try array(allocator, &.{ 2, 2 }, &.{ 10, 20, 30, 40 });
+    const vt2 = try t2.transposeView(0, 1, allocator);
+    try std.testing.expectEqual(@as(usize, 2), t2.deviceBuffer().cpu_owner.?.references.load(.monotonic));
+    free(allocator, vt2);
+    try std.testing.expectEqual(@as(usize, 1), t2.deviceBuffer().cpu_owner.?.references.load(.monotonic));
+    try std.testing.expectEqual(@as(f32, 10), t2.get(&.{ 0, 0 }));
+    free(allocator, t2);
+
+    // 4. Slice view retains/slices storage and outlives parent
+    const t3 = try array(allocator, &.{ 4, 4 }, &.{
+        1,  2,  3,  4,
+        5,  6,  7,  8,
+        9,  10, 11, 12,
+        13, 14, 15, 16,
+    });
+    const ranges = [_]tensor.SliceRange{
+        .{ .start = 1, .end = 3 },
+        .{ .start = 0, .end = 2 },
+    };
+    const s = try t3.slice(&ranges, allocator);
+    try std.testing.expectEqual(@as(usize, 2), t3.deviceBuffer().cpu_owner.?.references.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 2), s.deviceBuffer().cpu_owner.?.references.load(.monotonic));
+
+    // Free parent first
+    free(allocator, t3);
+    try std.testing.expectEqual(@as(usize, 1), s.deviceBuffer().cpu_owner.?.references.load(.monotonic));
+    try std.testing.expectEqual(@as(f32, 5), s.get(&.{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 6), s.get(&.{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 9), s.get(&.{ 1, 0 }));
+    try std.testing.expectEqual(@as(f32, 10), s.get(&.{ 1, 1 }));
+    free(allocator, s);
+
+    // 5. Empty tensor allocation
+    const empty_t = try zeros(allocator, &.{0});
+    try std.testing.expectEqual(@as(usize, 0), empty_t.deviceBuffer().byte_size);
+    try std.testing.expect(empty_t.deviceBuffer().cpu_owner == null);
+    free(allocator, empty_t);
+
+    // 6. Clone independence
+    const orig = try array(allocator, &.{2}, &.{ 7, 8 });
+    const cloned = try orig.clone(allocator);
+    cloned.data[0] = 99;
+    try std.testing.expectEqual(@as(f32, 7), orig.data[0]);
+    try std.testing.expectEqual(@as(f32, 99), cloned.data[0]);
+    free(allocator, orig);
+    try std.testing.expectEqual(@as(f32, 99), cloned.data[0]);
+    free(allocator, cloned);
+}
