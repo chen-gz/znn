@@ -42,10 +42,14 @@ pub const SVDResult = linalg.SVDResult;
 pub const OpHandle = opaque {};
 
 /// 张量（Tensor）结构体：承载机器学习网络中所有物理数据与流转拓扑信息
+///
+/// `storage: DeviceBuffer` 是底层物理内存的单一真实来源 (Single Source of Truth)。
+/// `data` 与 `grad` 为非所有权缓存切片 (non-owning cached slices)，其生命周期由 `storage`
+/// 或外部分配器管理，调用方不得独立释放。`device_array` 与 `device` 已整合入 `storage`。
 pub const Tensor = struct {
     storage: backend.DeviceBuffer = backend.DeviceBuffer.emptyCpu(.cpu), // 底层物理设备内存缓冲区单一真实来源
-    data: []f32, // 前向传播的数据缓冲区（行优先存储的一维切片）
-    grad: []f32, // 反向传播的梯度缓冲区（与 data 形状一致，不需梯度的节点可为空）
+    data: []f32 = &.{}, // 非所有权 CPU 宿主缓存切片 (由 storage 派生，严禁独立释放)
+    grad: []f32 = &.{}, // 反向传播梯度缓存切片（与 data 形状一致，不需梯度的节点为空）
     shape: Shape, // 逻辑形状
     strides: Shape, // 各维度的跨度步长（用于非连续张量及快速视图映射）
     requires_grad: bool, // 是否需要求梯度（如模型参数为 true，输入数据为 false）
@@ -56,15 +60,37 @@ pub const Tensor = struct {
     init_constant: ?f32 = null, // 结构性常量初始值 (如 LSTM 遗忘门偏置 1.0)，Graph 自动初始化时以该常量填充，不依赖命名
     is_buffer: bool = false, // 是否为静态缓冲区/非学习常量张量 (如因果掩码 causal_mask, 位置索引 pos_indices)
     scope: []const u8 = "", // 张量在计算图中创建时所处的模块作用域完整路径 ("" 表示根作用域或图外创建)
-    device: backend.Device = .cpu, // 存储所在设备：.cpu (默认) 或 .gpu / .cuda
-    device_array: ?backend.DeviceArray = null, // GPU 驻留统一显存数组句柄 (支持 Apple MLX 与 NVIDIA CUDA)
-    is_graph_owned: bool = false, // 是否由计算图拥有生命周期 (若为 true，计算图 reset/deinit 时自动释放 device_array)
+    is_graph_owned: bool = false, // 是否由计算图拥有生命周期 (若为 true，计算图 reset/deinit 时自动释放)
     name: ?[]const u8 = null, // 可选张量调试名称 (如 "fc1.weight", "conv1.bias")
     name_buf: [64]u8 = undefined,
 
     /// 显存/物理设备缓冲区访问 (Single source of truth)
     pub fn deviceBuffer(self: *const Tensor) *const backend.DeviceBuffer {
         return &self.storage;
+    }
+
+    /// 获取张量存储所在设备 (从 storage 派生，取代原 `device` 字段)
+    pub fn getDevice(self: *const Tensor) backend.Device {
+        return self.storage.device;
+    }
+
+    /// 获取 GPU 驻留数组句柄 (从 storage.typed_owner 派生，取代原 `device_array` 字段)
+    pub fn getDeviceArray(self: *const Tensor) ?backend.DeviceArray {
+        return self.storage.typed_owner;
+    }
+
+    /// 设置 GPU 驻留数组句柄 (连同 storage 一起更新)
+    pub fn setDeviceArray(self: *Tensor, arr: backend.DeviceArray) void {
+        self.storage.typed_owner = arr;
+    }
+
+    /// 清除 GPU 驻留数组句柄
+    pub fn clearDeviceArray(self: *Tensor) void {
+        if (self.storage.typed_owner) |*da| {
+            da.deinit();
+            self.storage.typed_owner = null;
+        }
+        self.storage.device = .cpu;
     }
 
     /// 设置张量的人类可读名称 (用于 Graph.printInitReport 等调试报告)
@@ -192,12 +218,12 @@ pub const Tensor = struct {
 
     /// 判断张量物理数据是否驻留在图形处理器 (Graphics Processing Unit, GPU)
     pub fn isDevice(self: *const Tensor) bool {
-        return self.device.isGpu() and self.device_array != null;
+        return self.storage.device.isGpu() and self.storage.typed_owner != null;
     }
 
     /// 触发 GPU 驻留数组的惰性求值
     pub fn eval(self: *const Tensor) void {
-        if (self.device_array) |da| {
+        if (self.storage.typed_owner) |da| {
             da.eval();
         }
     }
@@ -221,7 +247,7 @@ pub const Tensor = struct {
 
     /// Checked contiguous host access; never allocates or synchronizes devices.
     pub fn asHostSlice(self: *const Tensor) types_mod.TensorError![]const f32 {
-        if (!self.device.eql(.cpu) or self.device_array != null) return error.DeviceMismatch;
+        if (!self.storage.device.eql(.cpu) or self.storage.typed_owner != null) return error.DeviceMismatch;
         const count = try self.contiguousCount();
         if (count > self.data.len) return error.InvalidStorage;
         return self.data[0..count];
@@ -237,7 +263,8 @@ pub const Tensor = struct {
     /// Transfer into staging storage, committing only after successful copying.
     /// Growing storage requires its owning allocator; graph outputs use their arena.
     pub fn syncHost(self: *Tensor, allocator: ?std.mem.Allocator) !void {
-        const da = self.device_array orelse {
+        const da_opt = self.storage.typed_owner;
+        const da = da_opt orelse {
             _ = try self.asHostSlice();
             return;
         };
@@ -261,15 +288,14 @@ pub const Tensor = struct {
         } else {
             @memcpy(self.data[0..count], staged);
         }
-        self.device_array.?.deinit();
-        self.device_array = null;
-        self.device = .cpu;
+        // typed_owner already released by storage.free() above; reset device to CPU
+        self.storage.device = .cpu;
     }
 
     /// Explicit upload; cross-device transfers require syncHost first.
     pub fn toDevice(self: *Tensor, target: backend.Device) !void {
         if (target.eql(.cpu)) return self.syncHost(null);
-        if (self.device.eql(target) and self.device_array != null) return;
+        if (self.storage.device.eql(target) and self.storage.typed_owner != null) return;
         if (!target.isGpu() or target.index != 0) return error.DeviceNotSupported;
         const data = try self.asHostSlice();
         if (!backend.device.isAvailable(target)) return error.DeviceNotSupported;
@@ -281,14 +307,12 @@ pub const Tensor = struct {
         const new_storage = try backend.DeviceBuffer.fromDeviceArray(replacement);
         self.storage.free();
         self.storage = new_storage;
-        self.device_array = replacement;
-        self.device = target;
     }
 
     /// 将张量转换为统一计算设备架构 (Compute Unified Device Architecture, CUDA) 数组
     /// Returns an owned reference; the caller must deinitialize it.
     pub fn toCudaArray(self: *const Tensor) !backend.cuda.Array {
-        if (self.device_array) |da| {
+        if (self.storage.typed_owner) |da| {
             if (da.asCuda()) |arr| return arr.retain();
         }
         return backend.cuda.Array.fromSlice(self.data, self.shape.dims[0..self.shape.len]);
@@ -296,7 +320,7 @@ pub const Tensor = struct {
 
     /// 将只读张量转换为 MLX 数组 (Apple Machine Learning Explore, MLX)
     pub fn toMlxArray(self: *const Tensor) !backend.mlx.Array {
-        if (self.device_array) |da| {
+        if (self.storage.typed_owner) |da| {
             if (da.asMlx()) |arr| return arr;
         }
         return backend.mlx.Array.fromSlice(self.data, self.shape.dims[0..self.shape.len]);
@@ -304,7 +328,7 @@ pub const Tensor = struct {
 
     /// 将张量以零拷贝 (Zero-Copy) 方式映射为 MLX 数组 (统一内存架构 Unified Memory Architecture, UMA)
     pub fn toMlxArrayZeroCopy(self: *Tensor) !backend.mlx.Array {
-        if (self.device_array) |da| {
+        if (self.storage.typed_owner) |da| {
             if (da.asMlx()) |arr| return arr;
         }
         return backend.mlx.Array.fromSliceZeroCopy(self.data, self.shape.dims[0..self.shape.len]);
@@ -1034,16 +1058,8 @@ pub const Tensor = struct {
     }
 
     pub fn deinit(self: *Tensor, allocator: std.mem.Allocator) void {
-        const had_cpu_owner = self.storage.cpu_owner != null;
         self.storage.free();
-        if (self.device_array) |*arr| {
-            arr.deinit();
-            self.device_array = null;
-        }
         if (!self.is_view) {
-            if (!had_cpu_owner and self.data.len > 0) {
-                allocator.free(self.data);
-            }
             if (self.requires_grad and self.grad.len > 0) {
                 allocator.free(self.grad);
             }

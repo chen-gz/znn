@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Removed legacy `device` and `device_array` fields from `Tensor`, consolidating
+  physical device residency and driver handles directly into `storage: DeviceBuffer`
+  as single source of truth. Updated accessors (`getDevice`, `getDeviceArray`,
+  `setDeviceArray`, `clearDeviceArray`), optimizers, autodiff operations, graph
+  lifecycle, and tests to manage device ownership through `DeviceBuffer`.
+
+- Persistent module tensors (`createPersistentTensor`, `createCacheTensor`,
+  `freePersistentTensor`) in `src/nn/module.zig` now allocate host backing memory
+  through `DeviceBuffer.alloc`, eliminating unmanaged CPU buffer lifecycles.
+
 - `DeviceBuffer.free()` no longer accepts an allocator. Call sites release through
   stored ownership; descriptor copies must use `retain()` to acquire a reference.
 

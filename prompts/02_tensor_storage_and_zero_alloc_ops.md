@@ -1,6 +1,6 @@
 # Milestone 2: 张量存储统一与算子零分配体系 (Tensor Storage & Destination Ops)
 
-> **Status**: In Progress (CPU ownership, typed GPU adoption, and six destination APIs implemented; Tensor migration pending)  
+> **Status**: Completed (Legacy device and device_array fields eliminated, physical device storage unified under DeviceBuffer, and persistent tensors migrated to DeviceBuffer.alloc)  
 > **Target Package**: `src/tensor/` (Layer 1) & `src/backend/buffer.zig` (Layer 0)  
 > **Key Files**: `src/tensor/core.zig`, `src/tensor/ops.zig`, `src/tensor/types.zig`
 
@@ -74,7 +74,7 @@ pub const TensorError = error{
 
 ## 3. 验收标准与验证命令 (Acceptance Criteria)
 
-- [ ] `Tensor` 结构体中不再包含独立的 `device_array` 与裸 `data: []f32` 字段，全局统一为 `storage: backend.DeviceBuffer`；
+- [x] `Tensor` 结构体中不再包含独立的 `device_array` 与独立设备字段，全局统一为 `storage: backend.DeviceBuffer`，`data`/`grad` 统一作为由 `storage` 管理的非所有权物理视图；
 - [x] CPU 核心算子均具备对应的 `*Into` 签名，并在单元测试中验证零内存分配；
 - [x] 原地操作保护机制由运行时 `TensorError.InPlaceOpOnGraphTensor` 显式抛出并有测试覆盖；
 - [x] `zig build check-layers` 严格无违规通过；
@@ -230,3 +230,23 @@ are consistently marked `is_graph_owned = true` in `registerSingleOutputOp`,
 and duplicate op output tensor registrations in `Graph.reshape`, `transposeND`,
 and `slice` are eliminated so graph resets and deinitialization reclaim all
 graph-owned buffers without leaks or double-frees.
+
+## 10. Legacy device and device_array elimination implementation
+
+The redundant `device: backend.Device` and `device_array: ?backend.DeviceArray` fields
+have been completely eliminated from `Tensor`. Physical device residency and driver
+handles are now strictly managed by `storage: backend.DeviceBuffer` (`storage.device`
+and `storage.typed_owner`). `Tensor.isDevice()` evaluates residency through `storage`.
+New accessors `getDevice()`, `getDeviceArray()`, `setDeviceArray()`, and `clearDeviceArray()`
+encapsulate device interactions without leaking legacy struct state.
+
+Persistent module parameter allocations (`createPersistentTensor`, `createCacheTensor`,
+and `freePersistentTensor`) in `src/nn/module.zig` now allocate their backing physical
+memory through `backend.DeviceBuffer.alloc()`, binding `t.data` directly to the
+managed CPU slice. `Tensor.deinit()` exclusively frees physical allocations through
+`storage.free()`, eliminating duplicate and unmanaged host frees across the library.
+
+All autodiff backend dispatch operations (`storeCudaOutput`, `storeMlxOutput`,
+`borrowCudaArray`, `borrowMlxArray`), graph operations (`transposeND`, `reshape`, `slice`),
+optimizers (`SGD`, `Adam`, `AdamW`), models (`GPT`), and test suites have been
+migrated to interface directly with `storage: DeviceBuffer`.

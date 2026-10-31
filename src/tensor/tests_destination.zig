@@ -109,15 +109,15 @@ test "destination arithmetic validates shape layout storage and devices before w
         bad.strides = tensor.Shape.init(&.{ 0, 0 });
         try expectError(error.InvalidStorage, op(&dest, &bad, &b));
         bad = a;
-        bad.device = backend.Device.metal;
+        bad.storage.device = backend.Device.metal;
         try expectError(error.DeviceMismatch, op(&dest, &bad, &b));
         bad = a;
-        bad.device_array = .{ .mlx = undefined };
+        bad.storage.typed_owner = .{ .mlx = undefined };
         try expectError(error.DeviceMismatch, op(&dest, &bad, &b));
-        dest.device = backend.Device.cuda;
+        dest.storage.device = backend.Device.cuda;
         try expectError(error.DeviceMismatch, op(&dest, &a, &b));
         dest = good;
-        dest.device_array = .{ .mlx = undefined };
+        dest.storage.typed_owner = .{ .mlx = undefined };
         try expectError(error.DeviceMismatch, op(&dest, &a, &b));
         dest = good;
         dest.is_graph_view = true;
@@ -302,7 +302,7 @@ test "destination neural validation is atomic for layouts devices shapes and ali
         bad.data = data[0..3];
         try expectError(error.InvalidStorage, neuralCall(op, &dest, &bad, &other));
         bad = x;
-        bad.device = backend.Device.metal;
+        bad.storage.device = backend.Device.metal;
         try expectError(error.DeviceMismatch, neuralCall(op, &dest, &bad, &other));
         var bad_dest = dest;
         bad_dest.strides = tensor.Shape.init(&.{ 1, 2 });
@@ -326,7 +326,7 @@ test "destination neural validation is atomic for layouts devices shapes and ali
             bad_other.requires_grad = true;
             try expectError(error.InPlaceOpOnGraphTensor, neuralCall(op, &dest, &x, &bad_other));
             bad_other = other;
-            bad_other.device = backend.Device.metal;
+            bad_other.storage.device = backend.Device.metal;
             try expectError(error.DeviceMismatch, neuralCall(op, &dest, &x, &bad_other));
         }
         try expectEqualSlices(f32, &@as([4]f32, @splat(99)), &output);

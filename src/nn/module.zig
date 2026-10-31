@@ -13,6 +13,7 @@
 const std = @import("std");
 const tensor = @import("../tensor.zig");
 const autodiff = @import("../autodiff.zig");
+const backend = @import("../backend.zig");
 const Tensor = tensor.Tensor;
 const Shape = tensor.Shape;
 
@@ -24,14 +25,17 @@ const Shape = tensor.Shape;
 pub fn createPersistentTensor(allocator: std.mem.Allocator, rows: usize, cols: usize, requires_grad: bool) !*Tensor {
     const t = try allocator.create(Tensor);
     errdefer allocator.destroy(t);
-    const data = try allocator.alloc(f32, rows * cols);
-    errdefer allocator.free(data);
-    const grad: []f32 = if (requires_grad) try allocator.alloc(f32, rows * cols) else &.{};
+    const total = rows * cols;
+    var storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, total * @sizeOf(f32), allocator);
+    errdefer storage.free();
+    const data = try storage.asCpuSliceMut(f32);
+    const grad: []f32 = if (requires_grad) try allocator.alloc(f32, total) else &.{};
     @memset(data, 0.0);
     @memset(grad, 0.0);
 
     const shape = Shape.init(&.{ rows, cols });
     t.* = Tensor{
+        .storage = storage,
         .data = data,
         .grad = grad,
         .shape = shape,
@@ -68,10 +72,12 @@ pub fn createCacheTensor(allocator: std.mem.Allocator, dims: []const usize) !*Te
     const count = shape.numel();
     const t = try allocator.create(Tensor);
     errdefer allocator.destroy(t);
-    const data = try allocator.alloc(f32, count);
-    errdefer allocator.free(data);
+    var storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, count * @sizeOf(f32), allocator);
+    errdefer storage.free();
+    const data = try storage.asCpuSliceMut(f32);
     @memset(data, 0.0);
     t.* = Tensor{
+        .storage = storage,
         .data = data,
         .grad = &.{},
         .shape = shape,
@@ -85,7 +91,7 @@ pub fn createCacheTensor(allocator: std.mem.Allocator, dims: []const usize) !*Te
 
 /// 释放 `createPersistentTensor` 分配的张量；梯度缓冲只要存在即释放（参数被冻结后 `requires_grad` 可能为 false）
 pub fn freePersistentTensor(allocator: std.mem.Allocator, t: *Tensor) void {
-    allocator.free(t.data);
+    t.storage.free();
     if (t.grad.len > 0) allocator.free(t.grad);
     allocator.destroy(t);
 }

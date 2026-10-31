@@ -174,10 +174,6 @@ pub const Graph = struct {
         for (self.tensors.items) |t| {
             if (t.is_graph_owned) {
                 t.storage.free();
-                if (t.device_array) |*arr| {
-                    arr.deinit();
-                    t.device_array = null;
-                }
             }
         }
         self.module_formulas.deinit();
@@ -193,10 +189,6 @@ pub const Graph = struct {
         for (self.tensors.items) |t| {
             if (t.is_graph_owned) {
                 t.storage.free();
-                if (t.device_array) |*arr| {
-                    arr.deinit();
-                    t.device_array = null;
-                }
             }
         }
         self.module_formulas.clearRetainingCapacity();
@@ -265,7 +257,6 @@ pub const Graph = struct {
         }
 
         const effective_req_grad = self.enable_grad and requires_grad;
-        const is_gpu = self.useDevice();
 
         var storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, total_size * @sizeOf(f32), allocator);
         const data = try storage.asCpuSliceMut(f32);
@@ -278,7 +269,6 @@ pub const Graph = struct {
             .requires_grad = effective_req_grad,
             .creator = null,
             .scope = self.currentScope(),
-            .device = if (is_gpu) self.options.device else .cpu,
             .is_graph_owned = true,
         };
         @memset(t.data, 0.0);
@@ -302,8 +292,8 @@ pub const Graph = struct {
 
         const req_grad = self.enable_grad and A.requires_grad;
 
-        if (self.useDevice() and A.device_array != null) {
-            var arr = try A.device_array.?.reshape(new_shape_slice, self.options.mlx_stream);
+        if (self.useDevice() and A.storage.typed_owner != null) {
+            var arr = try A.storage.typed_owner.?.reshape(new_shape_slice, self.options.mlx_stream);
             var registered = false;
             errdefer if (!registered) arr.deinit();
             const dev_storage = try backend.DeviceBuffer.fromDeviceArray(arr);
@@ -315,8 +305,6 @@ pub const Graph = struct {
                 .strides = strides,
                 .requires_grad = req_grad,
                 .creator = null,
-                .device = self.options.device,
-                .device_array = arr,
                 .is_graph_owned = true,
                 .scope = self.currentScope(),
             };
@@ -429,7 +417,7 @@ pub const Graph = struct {
         context: OpContext,
     ) !*Tensor {
         for (inputs) |in| {
-            if (in.device_array != null) {
+            if (in.storage.typed_owner != null) {
                 try in.syncHost(if (in.is_graph_owned) self.arena.allocator() else self.backing_allocator);
             }
         }
@@ -464,14 +452,14 @@ pub const Graph = struct {
         const allocator = self.arena.allocator();
         const req_grad = self.enable_grad and A.requires_grad;
 
-        if (self.useDevice() and A.device_array != null) {
+        if (self.useDevice() and A.storage.typed_owner != null) {
             const rank = A.shape.len;
             if (dim0 >= rank or dim1 >= rank) return error.IndexOutOfBounds;
             var axes: [8]usize = undefined;
             for (0..rank) |i| axes[i] = i;
             axes[dim0] = dim1;
             axes[dim1] = dim0;
-            const res = try A.device_array.?.transposeAxes(axes[0..rank], self.options.mlx_stream);
+            const res = try A.storage.typed_owner.?.transposeAxes(axes[0..rank], self.options.mlx_stream);
             var out_shape = A.shape;
             out_shape.dims[dim0] = A.shape.dims[dim1];
             out_shape.dims[dim1] = A.shape.dims[dim0];
@@ -486,8 +474,6 @@ pub const Graph = struct {
                 .strides = computeContiguousStrides(out_shape),
                 .requires_grad = req_grad,
                 .creator = null,
-                .device = self.options.device,
-                .device_array = res,
                 .is_graph_owned = true,
                 .scope = self.currentScope(),
             };
@@ -1121,8 +1107,8 @@ pub const Graph = struct {
 
         const req_grad = self.enable_grad and A.requires_grad;
 
-        if (self.useDevice() and A.device_array != null) {
-            var curr_arr = A.device_array.?;
+        if (self.useDevice() and A.storage.typed_owner != null) {
+            var curr_arr = A.storage.typed_owner.?;
             var had_slice = false;
             for (0..A.shape.len) |d| {
                 const dim_size = A.shape.dims[d];
@@ -1150,8 +1136,6 @@ pub const Graph = struct {
                 .strides = computeContiguousStrides(shape),
                 .requires_grad = req_grad,
                 .creator = null,
-                .device = self.options.device,
-                .device_array = curr_arr,
                 .is_graph_owned = true,
                 .scope = self.currentScope(),
             };
@@ -1211,12 +1195,12 @@ pub const Graph = struct {
         // 确保参与反向传播计算的所有张量数据从 GPU 同步回主机内存
         for (order.items) |op| {
             for (op.inputs) |in| {
-                if (in.device_array != null) {
+                if (in.storage.typed_owner != null) {
                     try in.syncHost(if (in.is_graph_owned) self.arena.allocator() else allocator);
                 }
             }
             for (op.outputs) |out| {
-                if (out.device_array != null) {
+                if (out.storage.typed_owner != null) {
                     try out.syncHost(if (out.is_graph_owned) self.arena.allocator() else allocator);
                 }
             }

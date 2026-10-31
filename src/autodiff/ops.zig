@@ -39,7 +39,7 @@ pub const BorrowedCudaArray = struct {
 
 /// 借用张量的 CUDA 显存数组句柄
 pub fn borrowCudaArray(t: *const Tensor) cuda.CudaError!BorrowedCudaArray {
-    if (t.device_array) |da| {
+    if (t.storage.typed_owner) |da| {
         if (da.asCuda()) |arr| {
             return .{ .arr = arr, .needs_deinit = false };
         }
@@ -53,10 +53,13 @@ pub fn borrowCudaArray(t: *const Tensor) cuda.CudaError!BorrowedCudaArray {
 
 /// 将计算结果安全存入输出张量 (若输出为 GPU 驻留张量则直接接管 CUDA 显存句柄；若为 CPU 主机张量则拷回内存)
 pub fn storeCudaOutput(out: *Tensor, res_cuda: cuda.Array) cuda.CudaError!void {
-    if (out.device.isGpu() or out.data.len == 0) {
-        if (out.device_array) |*old| old.deinit();
-        out.device_array = .{ .cuda = res_cuda };
-        out.device = .{ .type = .cuda };
+    if (out.storage.device.isGpu() or out.data.len == 0) {
+        var to_free = res_cuda;
+        defer to_free.deinit();
+        const da: backend.DeviceArray = .{ .cuda = res_cuda };
+        const dev_storage = backend.DeviceBuffer.fromDeviceArray(da) catch return error.CudaOperationFailed;
+        out.storage.free();
+        out.storage = dev_storage;
         return;
     }
     var to_free = res_cuda;
@@ -77,7 +80,7 @@ pub const BorrowedMlxArray = struct {
 
 /// 借用张量的 MLX 数组句柄
 pub fn borrowMlxArray(t: *const Tensor) !BorrowedMlxArray {
-    if (t.device_array) |da| {
+    if (t.storage.typed_owner) |da| {
         if (da.asMlx()) |arr| {
             return .{ .arr = arr, .needs_deinit = false };
         }
@@ -90,11 +93,14 @@ pub fn borrowMlxArray(t: *const Tensor) !BorrowedMlxArray {
 }
 
 /// 将 MLX 计算结果安全存入输出张量
-pub fn storeMlxOutput(out: *Tensor, res_mlx: mlx.Array) !void {
-    if (out.device.isGpu() or out.data.len == 0) {
-        if (out.device_array) |*old| old.deinit();
-        out.device_array = .{ .mlx = res_mlx };
-        out.device = .{ .type = .metal };
+pub fn storeMlxOutput(out: *Tensor, res_mlx: mlx.Array) mlx.MlxError!void {
+    if (out.storage.device.isGpu() or out.data.len == 0) {
+        var to_free = res_mlx;
+        defer to_free.deinit();
+        const da: backend.DeviceArray = .{ .mlx = res_mlx };
+        const dev_storage = backend.DeviceBuffer.fromDeviceArray(da) catch return error.MlxOperationFailed;
+        out.storage.free();
+        out.storage = dev_storage;
         return;
     }
     var to_free = res_mlx;

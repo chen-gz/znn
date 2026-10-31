@@ -833,7 +833,7 @@ pub fn embedding(self: *Graph, W_in: *Tensor, X: anytype) !*Tensor {
     out_shape_dims[x_tensor.shape.len] = W.shape.dims[1];
     const shape_slice = out_shape_dims[0 .. x_tensor.shape.len + 1];
 
-    if (self.useDevice() and (W.device.isGpu() or W.device_array != null)) {
+    if (self.useDevice() and (W.storage.device.isGpu() or W.storage.typed_owner != null)) {
         const Y = try self.tensorND(shape_slice, req_grad);
         try ops.embedding(W, x_tensor, Y, self.options.device, self.options.mlx_stream);
         return self.registerSingleOutputOp(

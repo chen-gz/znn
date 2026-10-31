@@ -9,7 +9,7 @@ const TensorError = @import("types.zig").TensorError;
 const Layout = struct { count: usize, span: usize };
 
 fn validate(t: *const Tensor) TensorError!Layout {
-    if (!t.device.eql(backend.Device.cpu) or t.device_array != null) return error.DeviceMismatch;
+    if (!t.storage.device.eql(backend.Device.cpu) or t.storage.typed_owner != null) return error.DeviceMismatch;
     if (t.shape.len > t.shape.dims.len) return error.DimensionOutOfBounds;
     if (t.strides.len != t.shape.len) return error.StrideMismatch;
     for (t.shape.dims[0..t.shape.len]) |dim| {
