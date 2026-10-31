@@ -20,11 +20,20 @@ pub const evalModel = module.evalModel;
 pub const nameModules = module.nameModules;
 pub const enterModuleScope = module.enterModuleScope;
 pub const createPersistentTensor = module.createPersistentTensor;
+pub const createParameter = module.createParameter;
+pub const createBuffer = module.createBuffer;
 pub const createVectorTensor = module.createVectorTensor;
 pub const createLayerScalar = module.createLayerScalar;
 pub const createCacheTensor = module.createCacheTensor;
 pub const freePersistentTensor = module.freePersistentTensor;
 pub const releaseModuleGrads = module.releaseModuleGrads;
+pub const buffers = module.buffers;
+pub const namedBuffers = module.namedBuffers;
+pub const NamedModule = module.NamedModule;
+pub const NamedModuleList = module.NamedModuleList;
+pub const submodules = module.submodules;
+pub const ModuleList = module.ModuleList;
+pub const verifyModule = module.verifyModule;
 const applyCustomInit = module.applyCustomInit;
 
 // ============================================================================

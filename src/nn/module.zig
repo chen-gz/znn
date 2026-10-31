@@ -52,6 +52,55 @@ pub fn createVectorTensor(allocator: std.mem.Allocator, len: usize, fill: f32, r
     @memset(t.data, fill);
     t.shape = Shape.init(&.{len});
     t.strides = tensor.computeContiguousStrides(t.shape);
+    if (!requires_grad) t.is_buffer = true;
+    return t;
+}
+
+/// 分配一个由调用方持有的多维可训练参数张量 (is_buffer = false)
+pub fn createParameter(allocator: std.mem.Allocator, shape_slice: []const usize, requires_grad: bool) !*Tensor {
+    const t = try allocator.create(Tensor);
+    errdefer allocator.destroy(t);
+    const shape = try Shape.fromSlice(shape_slice);
+    const total = shape.numel();
+    var storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, total * @sizeOf(f32), allocator);
+    errdefer storage.free();
+    const data = try storage.asCpuSliceMut(f32);
+    const grad: []f32 = if (requires_grad) try allocator.alloc(f32, total) else &.{};
+    @memset(data, 0.0);
+    @memset(grad, 0.0);
+    t.* = Tensor{
+        .storage = storage,
+        .data = data,
+        .grad = grad,
+        .shape = shape,
+        .strides = tensor.computeContiguousStrides(shape),
+        .requires_grad = requires_grad,
+        .is_buffer = false,
+        .creator = null,
+    };
+    return t;
+}
+
+/// 分配一个由调用方持有的持久化非训练缓冲区张量 (is_buffer = true, requires_grad = false)
+pub fn createBuffer(allocator: std.mem.Allocator, shape_slice: []const usize) !*Tensor {
+    const t = try allocator.create(Tensor);
+    errdefer allocator.destroy(t);
+    const shape = try Shape.fromSlice(shape_slice);
+    const total = shape.numel();
+    var storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, total * @sizeOf(f32), allocator);
+    errdefer storage.free();
+    const data = try storage.asCpuSliceMut(f32);
+    @memset(data, 0.0);
+    t.* = Tensor{
+        .storage = storage,
+        .data = data,
+        .grad = &.{},
+        .shape = shape,
+        .strides = tensor.computeContiguousStrides(shape),
+        .requires_grad = false,
+        .is_buffer = true,
+        .creator = null,
+    };
     return t;
 }
 
@@ -160,7 +209,7 @@ fn walkStruct(model: anytype, visitor: anytype, path: *Path) !void {
         if (!try visitor.enterModule(path.slice(), model)) return;
     }
     inline for (info.@"struct".field_names, info.@"struct".field_types, info.@"struct".field_attrs) |name, FieldType, attrs| {
-        if (attrs.@"comptime" or @sizeOf(FieldType) == 0) continue;
+        if (attrs.@"comptime" or @sizeOf(FieldType) == 0 or FieldType == std.mem.Allocator) continue;
         const mark = try pushPath(V, path, "{s}", .{name});
         defer popPath(V, path, mark);
         try walkField(&@field(model, name), visitor, path);
@@ -179,7 +228,10 @@ fn walkField(field_ptr: anytype, visitor: anytype, path: *Path) !void {
         if (field_ptr.*) |*s| try walkStruct(s, visitor, path);
     } else if (info == .pointer and info.pointer.size == .slice and !info.pointer.attrs.@"const") {
         const E = info.pointer.child;
-        if (E == f32) {
+        if (E == tensor.Q4Block) {
+            if (@hasDecl(V, "visitQuantBlocks")) try visitor.visitQuantBlocks(path.slice(), field_ptr.*);
+            if (@hasDecl(V, "visitOwnedSlice") and !info.pointer.attrs.@"const") try visitor.visitOwnedSlice(field_ptr.*);
+        } else if (E == f32) {
             if (@hasDecl(V, "visitOwnedSlice")) try visitor.visitOwnedSlice(field_ptr.*);
         } else if (E == *Tensor or @typeInfo(E) == .@"struct") {
             for (field_ptr.*, 0..) |*item, idx| {
@@ -352,12 +404,148 @@ pub fn namedParameters(model: anytype, allocator: std.mem.Allocator) !NamedParam
     return .{ .arena = arena, .items = items };
 }
 
+/// 按字段顺序收集全部持久化缓冲区张量 (is_buffer = true)，返回的切片由调用方释放
+pub fn buffers(model: anytype, allocator: std.mem.Allocator) ![]*Tensor {
+    const Visitor = struct {
+        allocator: std.mem.Allocator,
+        list: std.ArrayList(*Tensor) = .empty,
+        pub fn visitTensor(self: *@This(), _: []const u8, t: *Tensor) !void {
+            if (t.is_buffer) try self.list.append(self.allocator, t);
+        }
+    };
+    var v = Visitor{ .allocator = allocator };
+    errdefer v.list.deinit(allocator);
+    try walk(model, &v);
+    return v.list.toOwnedSlice(allocator);
+}
+
+/// 按字段顺序收集全部持久化缓冲区张量及其字段路径
+pub fn namedBuffers(model: anytype, allocator: std.mem.Allocator) !NamedParameterList {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const Visitor = struct {
+        allocator: std.mem.Allocator,
+        list: std.ArrayList(NamedParameter) = .empty,
+        pub const wants_path = true;
+        pub fn visitTensor(self: *@This(), path: []const u8, t: *Tensor) !void {
+            if (!t.is_buffer) return;
+            try self.list.append(self.allocator, .{ .name = try self.allocator.dupe(u8, path), .tensor = t });
+        }
+    };
+    var v = Visitor{ .allocator = arena.allocator() };
+    try walk(model, &v);
+    const items = try v.list.toOwnedSlice(arena.allocator());
+    return .{ .arena = arena, .items = items };
+}
+
+/// 带字段路径名称的子模块描述
+pub const NamedModule = struct {
+    name: []const u8,
+    module_type: []const u8,
+};
+
+/// `submodules` 的结果列表，字符串与切片内存由内置 arena 管理
+pub const NamedModuleList = struct {
+    arena: std.heap.ArenaAllocator,
+    items: []NamedModule,
+
+    pub fn deinit(self: *NamedModuleList) void {
+        self.arena.deinit();
+    }
+};
+
+/// 收集模型内部的所有具名字模块列表 (按字段展开顺序)
+pub fn submodules(model: anytype, allocator: std.mem.Allocator) !NamedModuleList {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const Visitor = struct {
+        allocator: std.mem.Allocator,
+        list: std.ArrayList(NamedModule) = .empty,
+        pub const wants_path = true;
+        pub fn visitTensor(_: *@This(), _: []const u8, _: *Tensor) !void {}
+        pub fn enterModule(self: *@This(), path: []const u8, module_ptr: anytype) !bool {
+            if (path.len == 0) return true; // 跳过根模块自身
+            const M = @TypeOf(module_ptr.*);
+            const m_type: []const u8 = if (comptime @hasField(M, "module_type"))
+                module_ptr.module_type
+            else if (comptime @hasDecl(M, "module_type"))
+                M.module_type
+            else
+                @typeName(M);
+            try self.list.append(self.allocator, .{
+                .name = try self.allocator.dupe(u8, path),
+                .module_type = try self.allocator.dupe(u8, m_type),
+            });
+            return true;
+        }
+    };
+    var v = Visitor{ .allocator = arena.allocator() };
+    try walk(model, &v);
+    const items = try v.list.toOwnedSlice(arena.allocator());
+    return .{ .arena = arena, .items = items };
+}
+
+/// 泛型动态模块列表容器 (类似 PyTorch `nn.ModuleList`)
+pub fn ModuleList(comptime T: type) type {
+    return struct {
+        const Self = @This();
+        items: []T,
+        allocator: std.mem.Allocator,
+        name: ?[]const u8 = null,
+        module_type: []const u8 = "ModuleList",
+
+        pub fn init(allocator: std.mem.Allocator, layers: []const T) !Self {
+            const items = try allocator.dupe(T, layers);
+            return Self{
+                .items = items,
+                .allocator = allocator,
+            };
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            for (self.items) |*item| {
+                deinitModel(item, allocator);
+            }
+            allocator.free(self.items);
+            self.items = &.{};
+        }
+
+        pub fn len(self: *const Self) usize {
+            return self.items.len;
+        }
+
+        pub fn get(self: *const Self, idx: usize) *const T {
+            return &self.items[idx];
+        }
+
+        pub fn getMut(self: *Self, idx: usize) *T {
+            return &self.items[idx];
+        }
+    };
+}
+
+/// 编译期验证类型是否符合 znn Module 契约规范：
+/// 1. 必须为 struct 类型；
+/// 2. 必须具备前向计算方法：`pub fn forward(...)`
+pub fn verifyModule(comptime T: type) void {
+    const info = @typeInfo(T);
+    if (info != .@"struct") {
+        @compileError("Module type " ++ @typeName(T) ++ " must be a struct");
+    }
+    if (!@hasDecl(T, "forward")) {
+        @compileError("Module type " ++ @typeName(T) ++ " must declare a public 'forward' method");
+    }
+}
+
 /// 可训练参数的元素总数
 pub fn numParameters(model: anytype) usize {
     const Visitor = struct {
         count: usize = 0,
         pub fn visitTensor(self: *@This(), _: []const u8, t: *Tensor) !void {
             if (t.requires_grad) self.count += t.data.len;
+        }
+        pub fn visitQuantBlocks(self: *@This(), _: []const u8, blocks: anytype) !void {
+            self.count += blocks.len * tensor.Q4Block.QK;
         }
     };
     var v = Visitor{};

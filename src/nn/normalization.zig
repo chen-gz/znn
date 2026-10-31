@@ -22,7 +22,9 @@ const BatchNormTensors = struct {
         errdefer freePersistentTensor(allocator, beta);
         const running_mean = try createVectorTensor(allocator, num_features, 0.0, false);
         errdefer freePersistentTensor(allocator, running_mean);
+        running_mean.is_buffer = true;
         const running_var = try createVectorTensor(allocator, num_features, 1.0, false);
+        running_var.is_buffer = true;
         return .{ .gamma = gamma, .beta = beta, .running_mean = running_mean, .running_var = running_var };
     }
 };

@@ -156,3 +156,84 @@ test "deinitModel frees tied weights exactly once when the dedup set cannot allo
     nn.deinitModel(&model, failing.allocator());
     try std.testing.expect(failing.has_induced_failure);
 }
+
+test "verifyModule protocol assertions at comptime" {
+    comptime {
+        nn.verifyModule(nn.Linear);
+        nn.verifyModule(nn.ReLU);
+        nn.verifyModule(nn.GELU);
+        nn.verifyModule(nn.RMSNorm);
+        nn.verifyModule(nn.LayerNorm);
+        nn.verifyModule(nn.BatchNorm1d);
+        nn.verifyModule(nn.BatchNorm2d);
+        nn.verifyModule(nn.Q4Linear);
+    }
+}
+
+test "createParameter and createBuffer distinction and buffers query" {
+    const allocator = std.testing.allocator;
+    const p = try nn.createParameter(allocator, &.{ 2, 4 }, true);
+    defer nn.freePersistentTensor(allocator, p);
+    try std.testing.expect(!p.is_buffer);
+    try std.testing.expect(p.requires_grad);
+
+    const b = try nn.createBuffer(allocator, &.{ 2, 4 });
+    defer nn.freePersistentTensor(allocator, b);
+    try std.testing.expect(b.is_buffer);
+    try std.testing.expect(!b.requires_grad);
+
+    const ModelWithBuffers = struct {
+        weight: *Tensor,
+        running_stat: *Tensor,
+    };
+    var model = ModelWithBuffers{
+        .weight = try nn.createParameter(allocator, &.{ 3, 3 }, true),
+        .running_stat = try nn.createBuffer(allocator, &.{3}),
+    };
+    defer nn.deinitModel(&model, allocator);
+
+    const bufs = try nn.buffers(&model, allocator);
+    defer allocator.free(bufs);
+    try std.testing.expectEqual(@as(usize, 1), bufs.len);
+    try std.testing.expect(bufs[0] == model.running_stat);
+
+    var named_b = try nn.namedBuffers(&model, allocator);
+    defer named_b.deinit();
+    try std.testing.expectEqual(@as(usize, 1), named_b.items.len);
+    try std.testing.expectEqualStrings("running_stat", named_b.items[0].name);
+
+    // 验证 setRequiresGrad(true) 不会影响 is_buffer = true 的张量
+    try nn.setRequiresGrad(&model, allocator, true);
+    try std.testing.expect(!model.running_stat.requires_grad);
+    try std.testing.expect(model.running_stat.is_buffer);
+}
+
+test "submodules reflection and ModuleList container" {
+    const allocator = std.testing.allocator;
+    const l1 = try nn.Linear.init(allocator, 2, 4);
+    const l2 = try nn.Linear.init(allocator, 4, 2);
+    var list = try nn.ModuleList(nn.Linear).init(allocator, &.{ l1, l2 });
+    defer list.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), list.len());
+    try std.testing.expectEqual(@as(usize, 2), list.get(0).weight.shape.dims[0]);
+    try std.testing.expectEqual(@as(usize, 4), list.get(1).weight.shape.dims[0]);
+
+    var subs = try nn.submodules(&list, allocator);
+    defer subs.deinit();
+    try std.testing.expectEqual(@as(usize, 2), subs.items.len);
+    try std.testing.expectEqualStrings("items.0", subs.items[0].name);
+    try std.testing.expectEqualStrings("Linear", subs.items[0].module_type);
+    try std.testing.expectEqualStrings("items.1", subs.items[1].name);
+    try std.testing.expectEqualStrings("Linear", subs.items[1].module_type);
+}
+
+test "Q4Linear quant blocks are counted in numParameters" {
+    const allocator = std.testing.allocator;
+    var q4 = try nn.Q4Linear.init(allocator, 32, 64);
+    defer q4.deinit(allocator);
+
+    // 32 * 64 = 2048 parameters
+    const count = nn.numParameters(&q4);
+    try std.testing.expectEqual(@as(usize, 2048), count);
+}
