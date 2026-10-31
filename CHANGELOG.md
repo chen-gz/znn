@@ -48,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `freePersistentTensor`) in `src/nn/module.zig` now allocate host backing memory
   through `DeviceBuffer.alloc`, eliminating unmanaged CPU buffer lifecycles.
 
+- Support dynamic CLI arguments (`-n` / `--max-tokens`, `-p` / `--prompt`, `--model-dir`)
+  and flexible vocabulary resolution in `examples/gemma4_e4b.zig`.
+
 - `DeviceBuffer.free()` no longer accepts an allocator. Call sites release through
   stored ownership; descriptor copies must use `retain()` to acquire a reference.
 

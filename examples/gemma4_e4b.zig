@@ -12,11 +12,31 @@ pub fn main(init: std.process.Init) !void {
     const allocator = std.heap.smp_allocator;
     const io = init.io;
 
-    // 默认模型与生成参数直接配置在代码中，开箱即用
-    const model_dir = "/Users/guangzong/.lmstudio/models/lmstudio-community/gemma-4-E4B-it-MLX-4bit";
-    const prompt = "who are you";
-    const max_new_tokens: usize = 40;
+    // 默认模型与生成参数直接配置在代码中，支持 CLI 参数动态覆盖 (-n, -p, --model-dir)
+    var model_dir: []const u8 = "/Users/guangzong/.lmstudio/models/lmstudio-community/gemma-4-E4B-it-MLX-4bit";
+    var prompt: []const u8 = "who are you";
+    var max_new_tokens: usize = 40;
     const sampling_options = gemma4.Gemma4Config.e4b.generation;
+
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
+    _ = args.next(); // 略过可执行文件名
+
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-n") or std.mem.eql(u8, arg, "--max-tokens")) {
+            if (args.next()) |val| {
+                max_new_tokens = std.fmt.parseInt(usize, val, 10) catch 40;
+            }
+        } else if (std.mem.eql(u8, arg, "-p") or std.mem.eql(u8, arg, "--prompt")) {
+            if (args.next()) |val| {
+                prompt = val;
+            }
+        } else if (std.mem.eql(u8, arg, "--model-dir")) {
+            if (args.next()) |val| {
+                model_dir = val;
+            }
+        }
+    }
 
     var timer_load: std.posix.system.timespec = undefined;
     _ = std.posix.system.clock_gettime(std.posix.system.CLOCK.MONOTONIC, &timer_load);
@@ -28,7 +48,15 @@ pub fn main(init: std.process.Init) !void {
     };
     defer model.deinit();
 
-    var vocab = try gemma4.Gemma4Vocabulary.openFile(io, "gemma4_vocab.bin");
+    const vocab_in_dir = try std.fs.path.join(allocator, &.{ model_dir, "gemma4_vocab.bin" });
+    defer allocator.free(vocab_in_dir);
+
+    var vocab = gemma4.Gemma4Vocabulary.openFile(io, "gemma4_vocab.bin") catch blk: {
+        break :blk gemma4.Gemma4Vocabulary.openFile(io, vocab_in_dir) catch |err| {
+            std.debug.print("❌ 无法打开 gemma4_vocab.bin (当前目录或 {s}): {s}\n", .{ vocab_in_dir, @errorName(err) });
+            return;
+        };
+    };
     defer vocab.deinit();
     try vocab.buildLookupTable(allocator);
 
