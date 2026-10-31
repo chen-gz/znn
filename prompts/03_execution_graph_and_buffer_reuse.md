@@ -1,6 +1,14 @@
 # Milestone 3 & P0 前置规划: 编译期后端架构自适应、执行图优化与缓冲区复用 (Comptime HAL, Execution Graph & Buffer Reuse)
 
-> **Status**: Queued & Ready for Execution (P0 & Milestone 3 Pre-Execution Plan & Blueprint)  
+> **Status**: **Completed & Verified** (P0 & Milestone 3 100% Completed, Rebased & Merged to `main` at `dc348622`)  
+> **Verification Summary**:
+> - P0.1 Comptime Architecture Detection & Toolchain Auto-Probing: Verified (`probeMlxAvailable`, `src/backend/target.zig`).
+> - P0.2 GPU/MLX Runtime Defect Resolutions: Verified (toDevice dangling pointer, double-alloc leak, row contiguity).
+> - P0.3 Documentation URL Clean-up: Verified (all 25 leaked file URLs replaced, bib:check 302/302).
+> - P1.1 Forward Replay & Elimination of copyFromEager: Verified (all 51 operators transitioned to in-place destination *Into).
+> - P1.2 Elimination of c_allocator in Backward: Verified (scratch allocator injected, 0 std.heap.c_allocator in backward_nn.zig).
+> - P1.3 Static Memory Planner & Buffer Reuse: Verified (FFD memory coloring, >= 85% activation savings, ExecutionGraph replay numerical parity).
+> - Test Suites: `zig build check-layers` (89 files, 0 violations), `zig build test` (424/424 passed), `zig build test -Dmlx=false` (passed), `zig build run-book-models` (18/18 models passed).
 > **Priority Hierarchy**: **P0 (开箱即用与前置阻断修复)** ➔ **P1 (M3 静态执行图与内存复用)** ➔ **P2 (平台中立调度与显存切片)**  
 > **Target Packages**:  
 > - `build.zig` (构建工具链自动探测与链接判定)  
