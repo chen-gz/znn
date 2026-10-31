@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const target = @import("target.zig");
 const vec_math = @import("vec_math.zig");
 
 // C 语言基础线性代数子程序 (C Basic Linear Algebra Subprograms, CBLAS) 布局与转置常量的 C 语言接口包装
@@ -8,8 +9,8 @@ pub const CblasColMajor = 102;
 pub const CblasNoTrans = 111;
 pub const CblasTrans = 112;
 
-// 判断是否是 macOS / Apple 平台，来决定链接底层库还是使用纯 Zig 后备实现
-pub const cblas_sgemm = if (builtin.os.tag == .macos or builtin.os.tag == .ios or builtin.os.tag == .tvos or builtin.os.tag == .watchos)
+// 编译期根据硬件加速链决定链接底层 Accelerate 库还是使用纯 Zig 后备实现
+pub const cblas_sgemm = if (target.ActiveToolchains.has_accelerate)
     cblas_sgemm_accelerate
 else
     cblas_sgemm_fallback;

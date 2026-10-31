@@ -6,18 +6,23 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
+const target = @import("target.zig");
 const activation = @import("activation.zig");
 const GeluApproximation = activation.GeluApproximation;
 
 /// 当前构建目标是否支持 Apple 机器学习拓展 (Machine Learning Explore, MLX)
-pub const has_mlx: bool = build_options.enable_mlx and builtin.os.tag == .macos and builtin.cpu.arch == .aarch64;
+pub const has_mlx: bool = target.ActiveToolchains.has_mlx;
 
 pub const c = if (has_mlx) @import("mlx_c.zig") else struct {
     pub const mlx_array = extern struct { ctx: ?*anyopaque = null };
     pub const mlx_vector_array = extern struct { ctx: ?*anyopaque = null };
     pub const mlx_closure = extern struct { ctx: ?*anyopaque = null };
     pub const mlx_stream = extern struct { ctx: ?*anyopaque = null };
+    pub fn _mlx_array_is_row_contiguous(res: [*c]bool, arr: mlx_array) c_int {
+        _ = res;
+        _ = arr;
+        return -1;
+    }
 };
 
 pub const MlxError = error{
@@ -109,7 +114,7 @@ fn defaultGpuStreamHandle() MlxError!c.mlx_stream {
 }
 
 /// 解析算子使用的命令流：显式传入时直接使用（所有权归调用方），否则使用缓存的默认 GPU 命令流
-fn resolveStream(stream: ?Stream) MlxError!c.mlx_stream {
+pub fn resolveStream(stream: ?Stream) MlxError!c.mlx_stream {
     if (!has_mlx) return error.MlxNotSupported;
     if (stream) |st| return st.handle;
     return defaultGpuStreamHandle();
@@ -614,19 +619,11 @@ pub const Array = struct {
     /// 检查张量在显存中是否为标准严格行主序连续存储 (C-contiguous / Row-Major)
     pub fn isContiguousRowMajor(self: Array) bool {
         if (!has_mlx or self.handle.ctx == null) return false;
-        const n = self.ndim();
-        if (n == 0) return true;
-        const c_shape = c.mlx_array_shape(self.handle);
-        const c_strides = c.mlx_array_strides(self.handle);
-        if (c_strides[n - 1] != 1) return false;
-        var expected_stride: usize = 1;
-        var i: usize = n - 1;
-        while (i > 0) {
-            expected_stride *= @intCast(c_shape[i]);
-            i -= 1;
-            if (c_strides[i] != expected_stride) return false;
+        var res: bool = false;
+        if (c._mlx_array_is_row_contiguous(&res, self.handle) == 0) {
+            return res;
         }
-        return true;
+        return false;
     }
 
     /// 将数组重整为标准行主序连续存储 (Row-Major Contiguous)

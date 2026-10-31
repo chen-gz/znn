@@ -273,8 +273,7 @@ pub const Tensor = struct {
         if (self.data.len < count and allocator == null) return error.HostAllocatorRequired;
         const alloc = allocator orelse std.heap.smp_allocator;
         const staged = try alloc.alloc(f32, count);
-        var adopted = false;
-        defer if (!adopted) alloc.free(staged);
+        defer alloc.free(staged);
         try da.copyToSlice(staged);
         if (self.data.len < count) {
             if (self.data.len > 0 and self.storage.cpu_owner == null) alloc.free(self.data);
@@ -284,7 +283,6 @@ pub const Tensor = struct {
             self.storage.free();
             self.storage = new_storage;
             self.data = new_data;
-            adopted = true;
         } else {
             @memcpy(self.data[0..count], staged);
         }
@@ -307,6 +305,7 @@ pub const Tensor = struct {
         const new_storage = try backend.DeviceBuffer.fromDeviceArray(replacement);
         self.storage.free();
         self.storage = new_storage;
+        self.data = &.{};
     }
 
     /// 将张量转换为统一计算设备架构 (Compute Unified Device Architecture, CUDA) 数组

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const target = @import("target.zig");
 
 pub const V8 = @Vector(8, f32);
 
@@ -15,11 +16,7 @@ const U16x16 = @Vector(lanes, u16);
 const U32x16 = @Vector(lanes, u32);
 
 /// 目标平台是否具备硬件融合乘加 (Fused Multiply-Add, FMA) 指令；不具备时 `@mulAdd` 会退化为逐元素软件调用，故改用普通乘加
-pub const has_fma = switch (builtin.cpu.arch) {
-    .x86, .x86_64 => std.Target.x86.featureSetHas(builtin.cpu.features, .fma),
-    .aarch64, .aarch64_be => std.Target.aarch64.featureSetHas(builtin.cpu.features, .neon),
-    else => false,
-};
+pub const has_fma = target.TargetArch.has_fma;
 
 /// 向量乘加 `a * b + c`：有硬件融合乘加时只舍入一次
 pub inline fn mulAdd(comptime V: type, a: V, b: V, c: V) V {

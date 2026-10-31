@@ -2713,8 +2713,10 @@ test "Tensor explicit GPU transitions materialize and re-upload edited host data
             const t = try array(allocator, &.{4}, &.{ 1, 2, 3, 4 });
             defer free(allocator, t);
             try t.toDevice(device);
-            t.data[0] = 99; // Host storage is stale while the device owns the value.
-            try t.toDevice(.cpu);
+            try std.testing.expect(t.isDevice());
+            try std.testing.expectError(error.DeviceMismatch, t.asHostSlice());
+            try std.testing.expectError(error.DeviceMismatch, t.asHostSliceMut());
+            try t.syncHost(allocator);
             try std.testing.expect(t.storage.typed_owner == null);
             try std.testing.expectEqual(@as(f32, 1), (try t.asHostSlice())[0]);
             (try t.asHostSliceMut())[0] = 7;
@@ -2724,8 +2726,6 @@ test "Tensor explicit GPU transitions materialize and re-upload edited host data
             try std.testing.expectEqual(device, t.storage.device);
             try std.testing.expect(t.storage.typed_owner != null);
             t.shape = Shape.init(&.{4});
-            allocator.free(t.data);
-            t.data = &.{};
             try std.testing.expectError(error.HostAllocatorRequired, t.syncHost(null));
             try t.syncHost(allocator);
             try std.testing.expect(t.storage.typed_owner == null);

@@ -51,20 +51,15 @@ pub fn borrowCudaArray(t: *const Tensor) cuda.CudaError!BorrowedCudaArray {
     return error.EmptyTensor;
 }
 
-/// 将计算结果安全存入输出张量 (若输出为 GPU 驻留张量则直接接管 CUDA 显存句柄；若为 CPU 主机张量则拷回内存)
+/// 将计算结果安全存入输出张量 (接管 CUDA 显存句柄并置空宿主切片)
 pub fn storeCudaOutput(out: *Tensor, res_cuda: cuda.Array) cuda.CudaError!void {
-    if (out.storage.device.isGpu() or out.data.len == 0) {
-        var to_free = res_cuda;
-        defer to_free.deinit();
-        const da: backend.DeviceArray = .{ .cuda = res_cuda };
-        const dev_storage = backend.DeviceBuffer.fromDeviceArray(da) catch return error.CudaOperationFailed;
-        out.storage.free();
-        out.storage = dev_storage;
-        return;
-    }
     var to_free = res_cuda;
     defer to_free.deinit();
-    try res_cuda.copyToSlice(out.data);
+    const da: backend.DeviceArray = .{ .cuda = res_cuda };
+    const dev_storage = backend.DeviceBuffer.fromDeviceArray(da) catch return error.CudaOperationFailed;
+    out.storage.free();
+    out.storage = dev_storage;
+    out.data = &.{};
 }
 
 pub const BorrowedMlxArray = struct {
@@ -92,20 +87,15 @@ pub fn borrowMlxArray(t: *const Tensor) !BorrowedMlxArray {
     return error.EmptyTensor;
 }
 
-/// 将 MLX 计算结果安全存入输出张量
+/// 将 MLX 计算结果安全存入输出张量 (接管 MLX 显存句柄并置空宿主切片)
 pub fn storeMlxOutput(out: *Tensor, res_mlx: mlx.Array) mlx.MlxError!void {
-    if (out.storage.device.isGpu() or out.data.len == 0) {
-        var to_free = res_mlx;
-        defer to_free.deinit();
-        const da: backend.DeviceArray = .{ .mlx = res_mlx };
-        const dev_storage = backend.DeviceBuffer.fromDeviceArray(da) catch return error.MlxOperationFailed;
-        out.storage.free();
-        out.storage = dev_storage;
-        return;
-    }
     var to_free = res_mlx;
     defer to_free.deinit();
-    try res_mlx.copyToSlice(out.data);
+    const da: backend.DeviceArray = .{ .mlx = res_mlx };
+    const dev_storage = backend.DeviceBuffer.fromDeviceArray(da) catch return error.MlxOperationFailed;
+    out.storage.free();
+    out.storage = dev_storage;
+    out.data = &.{};
 }
 
 /// 通用矩阵乘法多后端分派 (General Matrix Multiply Dispatcher, GEMM Dispatcher)：C = A * B

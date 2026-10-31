@@ -675,9 +675,17 @@ test "buffer: adopted Metal arrays preserve type and have independent handles" {
     var wrong_type = try mlx.Array.zeros(&.{4}, .uint8, null);
     defer wrong_type.deinit();
     try std.testing.expectError(error.UnsupportedDType, DeviceBuffer.fromDeviceArray(.{ .mlx = wrong_type }));
-    var matrix = try mlx.Array.fromSlice(&.{ 1, 2, 3, 4 }, &.{ 2, 2 });
-    defer matrix.deinit();
-    var transposed = try matrix.transposeAxes(&.{ 1, 0 }, null);
-    defer transposed.deinit();
-    try std.testing.expectError(error.NonContiguousLayout, DeviceBuffer.fromDeviceArray(.{ .mlx = transposed }));
+    var vec = try mlx.Array.fromSlice(&.{ 1, 2, 3, 4 }, &.{4});
+    defer vec.deinit();
+    const start_arr = [_]c_int{0};
+    const stop_arr = [_]c_int{4};
+    const strides_arr = [_]c_int{2};
+    var non_contig = mlx.Array.init();
+    defer non_contig.deinit();
+    const s = try mlx.resolveStream(null);
+    const rc = mlx.c.mlx_slice(&non_contig.handle, vec.handle, &start_arr, 1, &stop_arr, 1, &strides_arr, 1, s);
+    try std.testing.expectEqual(@as(c_int, 0), rc);
+    non_contig.eval();
+    try std.testing.expect(!non_contig.isContiguousRowMajor());
+    try std.testing.expectError(error.NonContiguousLayout, DeviceBuffer.fromDeviceArray(.{ .mlx = non_contig }));
 }

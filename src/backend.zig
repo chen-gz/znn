@@ -50,9 +50,13 @@ pub const offload = @import("backend/offload.zig");
 pub const GpuKvCache = offload.GpuKvCache;
 
 pub const vec_math = @import("backend/vec_math.zig");
+pub const target = @import("backend/target.zig");
+pub const TargetArch = target.TargetArch;
+pub const ActiveToolchains = target.ActiveToolchains;
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("backend/target.zig");
     _ = @import("backend/device.zig");
     _ = @import("backend/buffer.zig");
     _ = @import("backend/kernels.zig");

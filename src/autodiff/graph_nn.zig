@@ -776,6 +776,9 @@ pub fn attention(self: *Graph, q_in: *Tensor, k_in: *Tensor, v_in: *Tensor, opti
         } else |_| {}
     }
     if (!dispatched_device) {
+        if (q.storage.typed_owner != null) try q.syncHost(self.backing_allocator);
+        if (k.storage.typed_owner != null) try k.syncHost(self.backing_allocator);
+        if (v.storage.typed_owner != null) try v.syncHost(self.backing_allocator);
         try tensor_mod.attention_kernels.attentionInto(q, k, v, out, if (req_grad) probs else null, options, self.backing_allocator);
     }
     return self.registerSingleOutputOp(
@@ -866,6 +869,9 @@ pub fn q4MatMul(
 ) !*Tensor {
     const allocator = self.arena.allocator();
     const x = try self.contiguous(x_in);
+    if (x.storage.typed_owner != null) {
+        try x.syncHost(if (x.is_graph_owned) self.arena.allocator() else self.backing_allocator);
+    }
     const Y = try tensor_mod.quant.q4MatMul(self.executor(), x, blocks, in_features, out_features, allocator);
     const ctx: OpContext = .{
         .Q4MatMul = .{

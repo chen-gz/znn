@@ -175,11 +175,35 @@ fn configureMacos(b: *std.Build, mod: *std.Build.Module, sdk: ?[]const u8, enabl
     }
 }
 
+fn probeMlxAvailable(b: *std.Build, target: std.Build.ResolvedTarget) bool {
+    if (target.result.os.tag != .macos or target.result.cpu.arch != .aarch64) return false;
+    const io = b.graph.io;
+    const cwd = std.Io.Dir.cwd();
+    if (b.root.root_dir.path) |root_path| {
+        var buf: [1024]u8 = undefined;
+        const local_path = std.fmt.bufPrint(&buf, "{s}/deps/mlx-c/lib/libmlxc.dylib", .{root_path}) catch return false;
+        if (cwd.openFile(io, local_path, .{})) |file| {
+            file.close(io);
+            return true;
+        } else |_| {}
+    }
+    if (cwd.openFile(io, "deps/mlx-c/lib/libmlxc.dylib", .{})) |file| {
+        file.close(io);
+        return true;
+    } else |_| {}
+    if (cwd.openFile(io, "/opt/homebrew/lib/libmlxc.dylib", .{})) |file| {
+        file.close(io);
+        return true;
+    } else |_| {}
+    return false;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const supports_mlx = target.result.os.tag == .macos and target.result.cpu.arch == .aarch64;
-    const enable_mlx = b.option(bool, "mlx", "Enable Apple MLX acceleration (requires Apple Silicon and MLX libraries)") orelse supports_mlx;
+    const mlx_detected = probeMlxAvailable(b, target);
+    const enable_mlx = b.option(bool, "mlx", "Enable Apple MLX acceleration (requires Apple Silicon and MLX libraries)") orelse mlx_detected;
     if (enable_mlx and !supports_mlx) @panic("MLX requires a macOS aarch64 target; use -Dmlx=false for this target");
     const macos_sdk = b.option([]const u8, "macos-sdk", "macOS SDK directory for explicit framework and library search paths");
     const build_options = b.addOptions();

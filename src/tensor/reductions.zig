@@ -207,6 +207,9 @@ pub fn numel(self: Tensor) usize {
 /// 通用多维张量沿指定轴或全局求和归约 (Sum Reduction)
 /// 非连续输入先物化为连续副本；沿轴归约按 (outer, k, inner) 顺序把整行累加到输出行，访存连续且可向量化
 pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
+    if (self.storage.typed_owner != null) {
+        try self.syncHost(allocator);
+    }
     if (axis) |ax| {
         if (ax >= self.shape.len) return error.DimensionOutOfBounds;
     }
@@ -295,6 +298,9 @@ pub fn mean(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allo
 
 /// 通用多维张量沿指定轴或全局方差 (Variance Reduction)
 pub fn variance(self: *Tensor, axis: ?usize, keepdims: bool, ddof: usize, allocator: std.mem.Allocator) !*Tensor {
+    if (self.storage.typed_owner != null) {
+        try self.syncHost(allocator);
+    }
     if (axis) |ax| {
         if (ax >= self.shape.len) return error.DimensionOutOfBounds;
     }
