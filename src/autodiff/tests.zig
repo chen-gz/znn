@@ -1745,3 +1745,70 @@ test "Graph.dropout rejects probabilities outside [0, 1]" {
     try std.testing.expectError(error.InvalidProbability, graph.dropout(x, 1.5, prng.random()));
     try std.testing.expectError(error.InvalidProbability, graph.dropout(x, std.math.nan(f32), prng.random()));
 }
+
+test "MemoryPlanner achieves high memory savings on multi-layer linear chain" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    // 构建 10 层连续前向线性链
+    const D: usize = 128;
+    var cur = try graph.tensor(1, D, false);
+    @memset(cur.data, 1.0);
+
+    const num_layers = 10;
+    var weights: [num_layers]*Tensor = undefined;
+    for (0..num_layers) |i| {
+        weights[i] = try graph.tensor(D, D, true);
+        @memset(weights[i].data, 0.01);
+        const mm = try graph.matmul(cur, weights[i]);
+        cur = try graph.relu(mm);
+    }
+
+    var planner = autodiff.MemoryPlanner.init(allocator);
+    var plan = try planner.buildPlan(graph.ops.items, graph.tensors.items, &.{cur});
+    defer plan.deinit();
+
+    // 10 层的线性链，每层有 matmul 和 relu，各中间激活生命周期很短
+    // 理论上复用率应达到 85% 以上
+    const savings = plan.savingsRatio();
+    try std.testing.expect(savings >= 0.85);
+    try std.testing.expect(plan.total_arena_bytes < plan.baseline_bytes);
+}
+
+test "ExecutionGraph compiles and replays forward consistently with eager graph" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    const x = try graph.tensorWithData(2, 2, &.{ 1.0, 2.0, 3.0, 4.0 }, false);
+    const w1 = try graph.tensorWithData(2, 2, &.{ 0.5, -0.5, 1.0, 0.5 }, false);
+    const b1 = try graph.tensorWithData(1, 2, &.{ 0.1, -0.1 }, false);
+    const mm1 = try graph.matmul(x, w1);
+    const h1 = try graph.add(mm1, b1);
+    const act1 = try graph.gelu(h1, .none);
+    const out = try graph.silu(act1);
+
+    var exec_graph = try autodiff.ExecutionGraph.compile(&graph, .cpu, &.{out}, allocator);
+    defer exec_graph.deinit();
+
+    // 修改输入数据，重放执行图
+    x.data[0] = 2.0;
+    x.data[3] = 5.0;
+    try exec_graph.replay(allocator);
+
+    // 验证重新计算的值与 eager forward 一致
+    var ref_graph = Graph.initDefault(allocator);
+    defer ref_graph.deinit();
+    const rx = try ref_graph.tensorWithData(2, 2, &.{ 2.0, 2.0, 3.0, 5.0 }, false);
+    const rw1 = try ref_graph.tensorWithData(2, 2, &.{ 0.5, -0.5, 1.0, 0.5 }, false);
+    const rb1 = try ref_graph.tensorWithData(1, 2, &.{ 0.1, -0.1 }, false);
+    const rmm1 = try ref_graph.matmul(rx, rw1);
+    const rh1 = try ref_graph.add(rmm1, rb1);
+    const ract1 = try ref_graph.gelu(rh1, .none);
+    const rout = try ref_graph.silu(ract1);
+
+    for (out.data, rout.data) |v1, v2| {
+        try std.testing.expectApproxEqAbs(v1, v2, 1e-5);
+    }
+}
