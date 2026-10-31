@@ -4,6 +4,7 @@ const c = backend.cblas;
 const core = @import("core.zig");
 const types = @import("types.zig");
 const Tensor = core.Tensor;
+const Shape = types.Shape;
 const ConvOptions = types.ConvOptions;
 const PoolOptions = types.PoolOptions;
 const ops_mod = @import("ops.zig");
@@ -126,9 +127,7 @@ pub fn conv1d(
     }
     const stride = options.stride;
     const padding = options.padding;
-    if (stride == 0) {
-        return error.InvalidStride;
-    }
+    if (stride == 0) return error.InvalidStride;
     const N = self.shape.dims[0];
     const C_in = self.shape.dims[1];
     const L = self.shape.dims[2];
@@ -145,9 +144,44 @@ pub fn conv1d(
     if (L_padded < K) return error.KernelBiggerThanInput;
 
     const L_out = (L_padded - K) / stride + 1;
-
     const out = try zeros(allocator, &.{ N, C_out, L_out });
     errdefer out.deinit(allocator);
+    try conv1dInto(out, self, weight, bias, options, allocator);
+    return out;
+}
+
+pub fn conv1dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    weight: *Tensor,
+    bias: ?*Tensor,
+    options: ConvOptions,
+    allocator: std.mem.Allocator,
+) !void {
+    if (self.shape.len != 3 or weight.shape.len != 3) {
+        return error.IncompatibleDimensions;
+    }
+    const stride = options.stride;
+    const padding = options.padding;
+    if (stride == 0) return error.InvalidStride;
+    const N = self.shape.dims[0];
+    const C_in = self.shape.dims[1];
+    const L = self.shape.dims[2];
+
+    const C_out = weight.shape.dims[0];
+    if (weight.shape.dims[1] != C_in) return error.ShapeMismatch;
+    const K = weight.shape.dims[2];
+
+    if (bias) |b| {
+        if (b.shape.len != 1 or b.shape.dims[0] != C_out) return error.ShapeMismatch;
+    }
+
+    const L_padded = L + 2 * padding;
+    if (L_padded < K) return error.KernelBiggerThanInput;
+
+    const L_out = (L_padded - K) / stride + 1;
+    if (!dest.shape.eq(Shape.init(&.{ N, C_out, L_out }))) return error.ShapeMismatch;
+    @memset(dest.data[0..dest.shape.numel()], 0.0);
 
     const w = if (weight.isContiguous()) weight else try weight.contiguous(allocator);
     defer if (w != weight) w.deinit(allocator);
@@ -165,8 +199,7 @@ pub fn conv1d(
         .pad_w = padding,
         .H_out = 1,
         .W_out = L_out,
-    }, out, allocator);
-    return out;
+    }, dest, allocator);
 }
 
 /// 二维卷积前向计算 (2-Dimensional Convolution, Conv2D)
@@ -183,9 +216,7 @@ pub fn conv2d(
     }
     const stride = options.stride;
     const padding = options.padding;
-    if (stride == 0) {
-        return error.InvalidStride;
-    }
+    if (stride == 0) return error.InvalidStride;
     const N = self.shape.dims[0];
     const C_in = self.shape.dims[1];
     const H = self.shape.dims[2];
@@ -209,6 +240,46 @@ pub fn conv2d(
 
     const out = try zeros(allocator, &.{ N, C_out, H_out, W_out });
     errdefer out.deinit(allocator);
+    try conv2dInto(out, self, weight, bias, options, allocator);
+    return out;
+}
+
+pub fn conv2dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    weight: *Tensor,
+    bias: ?*Tensor,
+    options: ConvOptions,
+    allocator: std.mem.Allocator,
+) !void {
+    if (self.shape.len != 4 or weight.shape.len != 4) {
+        return error.IncompatibleDimensions;
+    }
+    const stride = options.stride;
+    const padding = options.padding;
+    if (stride == 0) return error.InvalidStride;
+    const N = self.shape.dims[0];
+    const C_in = self.shape.dims[1];
+    const H = self.shape.dims[2];
+    const W = self.shape.dims[3];
+
+    const C_out = weight.shape.dims[0];
+    if (weight.shape.dims[1] != C_in) return error.ShapeMismatch;
+    const KH = weight.shape.dims[2];
+    const KW = weight.shape.dims[3];
+
+    if (bias) |b| {
+        if (b.shape.len != 1 or b.shape.dims[0] != C_out) return error.ShapeMismatch;
+    }
+
+    const H_padded = H + 2 * padding;
+    const W_padded = W + 2 * padding;
+    if (H_padded < KH or W_padded < KW) return error.KernelBiggerThanInput;
+
+    const H_out = (H_padded - KH) / stride + 1;
+    const W_out = (W_padded - KW) / stride + 1;
+    if (!dest.shape.eq(Shape.init(&.{ N, C_out, H_out, W_out }))) return error.ShapeMismatch;
+    @memset(dest.data[0..dest.shape.numel()], 0.0);
 
     const w = if (weight.isContiguous()) weight else try weight.contiguous(allocator);
     defer if (w != weight) w.deinit(allocator);
@@ -226,8 +297,7 @@ pub fn conv2d(
         .pad_w = padding,
         .H_out = H_out,
         .W_out = W_out,
-    }, out, allocator);
-    return out;
+    }, dest, allocator);
 }
 
 /// 转置卷积 SGEMM + 列转图像 (Column to Image, col2im) 内核：
@@ -312,9 +382,7 @@ pub fn convTranspose1d(
     }
     const stride = options.stride;
     const padding = options.padding;
-    if (stride == 0) {
-        return error.InvalidStride;
-    }
+    if (stride == 0) return error.InvalidStride;
     const N = self.shape.dims[0];
     const C_in = self.shape.dims[1];
     const L_in = self.shape.dims[2];
@@ -334,7 +402,41 @@ pub fn convTranspose1d(
 
     const out = try zeros(allocator, &.{ N, C_out, L_out });
     errdefer out.deinit(allocator);
-    fillBiasPlanes(out, bias, N, C_out, L_out);
+    try convTranspose1dInto(out, self, weight, bias, options, allocator);
+    return out;
+}
+
+pub fn convTranspose1dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    weight: *Tensor,
+    bias: ?*Tensor,
+    options: ConvOptions,
+    allocator: std.mem.Allocator,
+) !void {
+    if (self.shape.len != 3 or weight.shape.len != 3) return error.IncompatibleDimensions;
+    const stride = options.stride;
+    const padding = options.padding;
+    if (stride == 0) return error.InvalidStride;
+    const N = self.shape.dims[0];
+    const C_in = self.shape.dims[1];
+    const L_in = self.shape.dims[2];
+    if (L_in == 0) return error.InvalidDimension;
+
+    if (weight.shape.dims[0] != C_in) return error.ShapeMismatch;
+    const C_out = weight.shape.dims[1];
+    const K = weight.shape.dims[2];
+
+    if (bias) |b| {
+        if (b.shape.len != 1 or b.shape.dims[0] != C_out) return error.ShapeMismatch;
+    }
+
+    const raw_len = (L_in - 1) * stride + K;
+    if (raw_len <= 2 * padding) return error.KernelBiggerThanInput;
+    const L_out = raw_len - 2 * padding;
+    if (!dest.shape.eq(Shape.init(&.{ N, C_out, L_out }))) return error.ShapeMismatch;
+    @memset(dest.data[0..dest.shape.numel()], 0.0);
+    fillBiasPlanes(dest, bias, N, C_out, L_out);
 
     const x = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (x != self) x.deinit(allocator);
@@ -354,8 +456,7 @@ pub fn convTranspose1d(
         .pad_w = padding,
         .H_out = 1,
         .W_out = L_out,
-    }, out, allocator);
-    return out;
+    }, dest, allocator);
 }
 
 /// 二维转置卷积前向计算 (2-Dimensional Transposed Convolution, ConvTranspose2D)
@@ -372,9 +473,7 @@ pub fn convTranspose2d(
     }
     const stride = options.stride;
     const padding = options.padding;
-    if (stride == 0) {
-        return error.InvalidStride;
-    }
+    if (stride == 0) return error.InvalidStride;
     const N = self.shape.dims[0];
     const C_in = self.shape.dims[1];
     const H_in = self.shape.dims[2];
@@ -399,7 +498,46 @@ pub fn convTranspose2d(
 
     const out = try zeros(allocator, &.{ N, C_out, H_out, W_out });
     errdefer out.deinit(allocator);
-    fillBiasPlanes(out, bias, N, C_out, H_out * W_out);
+    try convTranspose2dInto(out, self, weight, bias, options, allocator);
+    return out;
+}
+
+pub fn convTranspose2dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    weight: *Tensor,
+    bias: ?*Tensor,
+    options: ConvOptions,
+    allocator: std.mem.Allocator,
+) !void {
+    if (self.shape.len != 4 or weight.shape.len != 4) return error.IncompatibleDimensions;
+    const stride = options.stride;
+    const padding = options.padding;
+    if (stride == 0) return error.InvalidStride;
+    const N = self.shape.dims[0];
+    const C_in = self.shape.dims[1];
+    const H_in = self.shape.dims[2];
+    const W_in = self.shape.dims[3];
+    if (H_in == 0 or W_in == 0) return error.InvalidDimension;
+
+    if (weight.shape.dims[0] != C_in) return error.ShapeMismatch;
+    const C_out = weight.shape.dims[1];
+    const KH = weight.shape.dims[2];
+    const KW = weight.shape.dims[3];
+
+    if (bias) |b| {
+        if (b.shape.len != 1 or b.shape.dims[0] != C_out) return error.ShapeMismatch;
+    }
+
+    const raw_h = (H_in - 1) * stride + KH;
+    const raw_w = (W_in - 1) * stride + KW;
+    if (raw_h <= 2 * padding or raw_w <= 2 * padding) return error.KernelBiggerThanInput;
+
+    const H_out = raw_h - 2 * padding;
+    const W_out = raw_w - 2 * padding;
+    if (!dest.shape.eq(Shape.init(&.{ N, C_out, H_out, W_out }))) return error.ShapeMismatch;
+    @memset(dest.data[0..dest.shape.numel()], 0.0);
+    fillBiasPlanes(dest, bias, N, C_out, H_out * W_out);
 
     const x = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (x != self) x.deinit(allocator);
@@ -419,8 +557,7 @@ pub fn convTranspose2d(
         .pad_w = padding,
         .H_out = H_out,
         .W_out = W_out,
-    }, out, allocator);
-    return out;
+    }, dest, allocator);
 }
 
 /// 一维最大池化前向计算 (1-Dimensional Max Pooling, MaxPool1D)
@@ -446,14 +583,38 @@ pub fn maxpool1d(
     const L_out = (L_padded - pool_size) / stride + 1;
     const out = try zeros(allocator, &.{ N, C, L_out });
     errdefer out.deinit(allocator);
+    try maxpool1dInto(out, self, pool_size, options);
+    return out;
+}
+
+pub fn maxpool1dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    pool_size: usize,
+    options: PoolOptions,
+) !void {
+    if (self.shape.len != 3) return error.IncompatibleDimensions;
+    const stride = options.resolveStride(pool_size);
+    const padding = options.padding;
+    if (stride == 0 or pool_size == 0) return error.InvalidStride;
+
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const L = self.shape.dims[2];
+
+    const L_padded = L + 2 * padding;
+    if (L_padded < pool_size) return error.KernelBiggerThanInput;
+
+    const L_out = (L_padded - pool_size) / stride + 1;
+    if (!dest.shape.eq(Shape.init(&.{ N, C, L_out }))) return error.ShapeMismatch;
 
     const s_n = self.strides.dims[0];
     const s_c = self.strides.dims[1];
     const s_l = self.strides.dims[2];
 
-    const o_n = out.strides.dims[0];
-    const o_c = out.strides.dims[1];
-    const o_l = out.strides.dims[2];
+    const o_n = dest.strides.dims[0];
+    const o_c = dest.strides.dims[1];
+    const o_l = dest.strides.dims[2];
 
     for (0..N) |n| {
         for (0..C) |c_| {
@@ -471,11 +632,10 @@ pub fn maxpool1d(
                         }
                     }
                 }
-                out.data[n * o_n + c_ * o_c + ol * o_l] = if (found) max_val else 0.0;
+                dest.data[n * o_n + c_ * o_c + ol * o_l] = if (found) max_val else 0.0;
             }
         }
     }
-    return out;
 }
 
 /// 二维最大池化前向计算 (2-Dimensional Max Pooling, MaxPool2D)
@@ -505,16 +665,43 @@ pub fn maxpool2d(
 
     const out = try zeros(allocator, &.{ N, C, H_out, W_out });
     errdefer out.deinit(allocator);
+    try maxpool2dInto(out, self, pool_size, options);
+    return out;
+}
+
+pub fn maxpool2dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    pool_size: usize,
+    options: PoolOptions,
+) !void {
+    if (self.shape.len != 4) return error.IncompatibleDimensions;
+    const stride = options.resolveStride(pool_size);
+    const padding = options.padding;
+    if (stride == 0 or pool_size == 0) return error.InvalidStride;
+
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const H = self.shape.dims[2];
+    const W = self.shape.dims[3];
+
+    const H_padded = H + 2 * padding;
+    const W_padded = W + 2 * padding;
+    if (H_padded < pool_size or W_padded < pool_size) return error.KernelBiggerThanInput;
+
+    const H_out = (H_padded - pool_size) / stride + 1;
+    const W_out = (W_padded - pool_size) / stride + 1;
+    if (!dest.shape.eq(Shape.init(&.{ N, C, H_out, W_out }))) return error.ShapeMismatch;
 
     const s_n = self.strides.dims[0];
     const s_c = self.strides.dims[1];
     const s_h = self.strides.dims[2];
     const s_w = self.strides.dims[3];
 
-    const o_n = out.strides.dims[0];
-    const o_c = out.strides.dims[1];
-    const o_h = out.strides.dims[2];
-    const o_w = out.strides.dims[3];
+    const o_n = dest.strides.dims[0];
+    const o_c = dest.strides.dims[1];
+    const o_h = dest.strides.dims[2];
+    const o_w = dest.strides.dims[3];
 
     for (0..N) |n| {
         for (0..C) |c_| {
@@ -537,12 +724,11 @@ pub fn maxpool2d(
                             }
                         }
                     }
-                    out.data[n * o_n + c_ * o_c + h * o_h + w * o_w] = if (found) max_val else 0.0;
+                    dest.data[n * o_n + c_ * o_c + h * o_h + w * o_w] = if (found) max_val else 0.0;
                 }
             }
         }
     }
-    return out;
 }
 
 /// 一维平均池化前向计算 (1-Dimensional Average Pooling, AvgPool1D)
@@ -568,15 +754,39 @@ pub fn avgpool1d(
     const out_l = (L_padded - kernel_size) / stride + 1;
     const out = try zeros(allocator, &.{ N, C, out_l });
     errdefer out.deinit(allocator);
+    try avgpool1dInto(out, self, kernel_size, options);
+    return out;
+}
+
+pub fn avgpool1dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    kernel_size: usize,
+    options: PoolOptions,
+) !void {
+    if (self.shape.len != 3) return error.IncompatibleDimensions;
+    const stride = options.resolveStride(kernel_size);
+    const padding = options.padding;
+    if (stride == 0 or kernel_size == 0) return error.InvalidStride;
+
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const L = self.shape.dims[2];
+
+    const L_padded = L + 2 * padding;
+    if (L_padded < kernel_size) return error.KernelBiggerThanInput;
+
+    const out_l = (L_padded - kernel_size) / stride + 1;
+    if (!dest.shape.eq(Shape.init(&.{ N, C, out_l }))) return error.ShapeMismatch;
     const pool_len = @as(f32, @floatFromInt(kernel_size));
 
     const s_n = self.strides.dims[0];
     const s_c = self.strides.dims[1];
     const s_l = self.strides.dims[2];
 
-    const o_n = out.strides.dims[0];
-    const o_c = out.strides.dims[1];
-    const o_l = out.strides.dims[2];
+    const o_n = dest.strides.dims[0];
+    const o_c = dest.strides.dims[1];
+    const o_l = dest.strides.dims[2];
 
     for (0..N) |n| {
         for (0..C) |c_| {
@@ -589,11 +799,10 @@ pub fn avgpool1d(
                         sum_val += self.data[n * s_n + c_ * s_c + il * s_l];
                     }
                 }
-                out.data[n * o_n + c_ * o_c + ol * o_l] = sum_val / pool_len;
+                dest.data[n * o_n + c_ * o_c + ol * o_l] = sum_val / pool_len;
             }
         }
     }
-    return out;
 }
 
 /// 二维平均池化前向计算 (2-Dimensional Average Pooling, AvgPool2D)
@@ -622,6 +831,33 @@ pub fn avgpool2d(
     const out_w = (W_padded - kernel_size) / stride + 1;
     const out = try zeros(allocator, &.{ N, C, out_h, out_w });
     errdefer out.deinit(allocator);
+    try avgpool2dInto(out, self, kernel_size, options);
+    return out;
+}
+
+pub fn avgpool2dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    kernel_size: usize,
+    options: PoolOptions,
+) !void {
+    if (self.shape.len != 4) return error.IncompatibleDimensions;
+    const stride = options.resolveStride(kernel_size);
+    const padding = options.padding;
+    if (stride == 0 or kernel_size == 0) return error.InvalidStride;
+
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const H = self.shape.dims[2];
+    const W = self.shape.dims[3];
+
+    const H_padded = H + 2 * padding;
+    const W_padded = W + 2 * padding;
+    if (H_padded < kernel_size or W_padded < kernel_size) return error.KernelBiggerThanInput;
+
+    const out_h = (H_padded - kernel_size) / stride + 1;
+    const out_w = (W_padded - kernel_size) / stride + 1;
+    if (!dest.shape.eq(Shape.init(&.{ N, C, out_h, out_w }))) return error.ShapeMismatch;
     const pool_area = @as(f32, @floatFromInt(kernel_size * kernel_size));
 
     const s_n = self.strides.dims[0];
@@ -629,10 +865,10 @@ pub fn avgpool2d(
     const s_h = self.strides.dims[2];
     const s_w = self.strides.dims[3];
 
-    const o_n = out.strides.dims[0];
-    const o_c = out.strides.dims[1];
-    const o_h = out.strides.dims[2];
-    const o_w = out.strides.dims[3];
+    const o_n = dest.strides.dims[0];
+    const o_c = dest.strides.dims[1];
+    const o_h = dest.strides.dims[2];
+    const o_w = dest.strides.dims[3];
 
     for (0..N) |n| {
         for (0..C) |c_| {
@@ -650,12 +886,11 @@ pub fn avgpool2d(
                             sum_val += self.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
                         }
                     }
-                    out.data[n * o_n + c_ * o_c + oh * o_h + ow * o_w] = sum_val / pool_area;
+                    dest.data[n * o_n + c_ * o_c + oh * o_h + ow * o_w] = sum_val / pool_area;
                 }
             }
         }
     }
-    return out;
 }
 
 /// 一维自适应平均池化前向计算 (1-Dimensional Adaptive Average Pooling, AdaptiveAvgPool1D)
@@ -676,14 +911,31 @@ pub fn adaptiveAvgPool1d(
 
     const out = try zeros(allocator, &.{ N, C, output_size });
     errdefer out.deinit(allocator);
+    try adaptiveAvgPool1dInto(out, self, output_size);
+    return out;
+}
+
+pub fn adaptiveAvgPool1dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    output_size: usize,
+) !void {
+    if (self.shape.len != 3) return error.IncompatibleDimensions;
+    if (output_size == 0) return error.InvalidDimension;
+
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const L = self.shape.dims[2];
+    if (L == 0) return error.InvalidDimension;
+    if (!dest.shape.eq(Shape.init(&.{ N, C, output_size }))) return error.ShapeMismatch;
 
     const s_n = self.strides.dims[0];
     const s_c = self.strides.dims[1];
     const s_l = self.strides.dims[2];
 
-    const o_n = out.strides.dims[0];
-    const o_c = out.strides.dims[1];
-    const o_l = out.strides.dims[2];
+    const o_n = dest.strides.dims[0];
+    const o_c = dest.strides.dims[1];
+    const o_l = dest.strides.dims[2];
 
     for (0..N) |n| {
         for (0..C) |c_| {
@@ -695,11 +947,10 @@ pub fn adaptiveAvgPool1d(
                 for (l_start..l_end) |il| {
                     sum_val += self.data[n * s_n + c_ * s_c + il * s_l];
                 }
-                out.data[n * o_n + c_ * o_c + ol * o_l] = sum_val / @as(f32, @floatFromInt(count));
+                dest.data[n * o_n + c_ * o_c + ol * o_l] = sum_val / @as(f32, @floatFromInt(count));
             }
         }
     }
-    return out;
 }
 
 /// 二维自适应平均池化前向计算 (2-Dimensional Adaptive Average Pooling, AdaptiveAvgPool2D)
@@ -722,16 +973,36 @@ pub fn adaptiveAvgPool2d(
 
     const out = try zeros(allocator, &.{ N, C, out_h, out_w });
     errdefer out.deinit(allocator);
+    try adaptiveAvgPool2dInto(out, self, output_size);
+    return out;
+}
+
+pub fn adaptiveAvgPool2dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    output_size: [2]usize,
+) !void {
+    if (self.shape.len != 4) return error.IncompatibleDimensions;
+    const out_h = output_size[0];
+    const out_w = output_size[1];
+    if (out_h == 0 or out_w == 0) return error.InvalidDimension;
+
+    const N = self.shape.dims[0];
+    const C = self.shape.dims[1];
+    const H = self.shape.dims[2];
+    const W = self.shape.dims[3];
+    if (H == 0 or W == 0) return error.InvalidDimension;
+    if (!dest.shape.eq(Shape.init(&.{ N, C, out_h, out_w }))) return error.ShapeMismatch;
 
     const s_n = self.strides.dims[0];
     const s_c = self.strides.dims[1];
     const s_h = self.strides.dims[2];
     const s_w = self.strides.dims[3];
 
-    const o_n = out.strides.dims[0];
-    const o_c = out.strides.dims[1];
-    const o_h = out.strides.dims[2];
-    const o_w = out.strides.dims[3];
+    const o_n = dest.strides.dims[0];
+    const o_c = dest.strides.dims[1];
+    const o_h = dest.strides.dims[2];
+    const o_w = dest.strides.dims[3];
 
     for (0..N) |n| {
         for (0..C) |c_| {
@@ -748,10 +1019,9 @@ pub fn adaptiveAvgPool2d(
                             sum_val += self.data[n * s_n + c_ * s_c + ih * s_h + iw * s_w];
                         }
                     }
-                    out.data[n * o_n + c_ * o_c + oh * o_h + ow * o_w] = sum_val / @as(f32, @floatFromInt(area));
+                    dest.data[n * o_n + c_ * o_c + oh * o_h + ow * o_w] = sum_val / @as(f32, @floatFromInt(area));
                 }
             }
         }
     }
-    return out;
 }

@@ -134,7 +134,28 @@ pub fn batchNorm1d(
     allocator: std.mem.Allocator,
 ) !*Tensor {
     if (self.shape.len != 2 and self.shape.len != 3) return error.IncompatibleDimensions;
-    return batchNormChannels(self, gamma, beta, running_mean, running_var, training, eps, momentum, saved_mean_out, saved_inv_std_out, allocator);
+    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    errdefer Y.deinit(allocator);
+    try batchNormChannelsInto(Y, self, gamma, beta, running_mean, running_var, training, eps, momentum, saved_mean_out, saved_inv_std_out, allocator);
+    return Y;
+}
+
+pub fn batchNorm1dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    gamma: *Tensor,
+    beta: *Tensor,
+    running_mean: ?*Tensor,
+    running_var: ?*Tensor,
+    training: bool,
+    eps: f32,
+    momentum: f32,
+    saved_mean_out: ?[]f32,
+    saved_inv_std_out: ?[]f32,
+    allocator: std.mem.Allocator,
+) !void {
+    if (self.shape.len != 2 and self.shape.len != 3) return error.IncompatibleDimensions;
+    return batchNormChannelsInto(dest, self, gamma, beta, running_mean, running_var, training, eps, momentum, saved_mean_out, saved_inv_std_out, allocator);
 }
 
 /// 二维批量归一化统一前向核函数 (2-Dimensional Batch Normalization, BatchNorm2d)
@@ -153,7 +174,28 @@ pub fn batchNorm2d(
     allocator: std.mem.Allocator,
 ) !*Tensor {
     if (self.shape.len != 4) return error.IncompatibleDimensions;
-    return batchNormChannels(self, gamma, beta, running_mean, running_var, training, eps, momentum, saved_mean_out, saved_inv_std_out, allocator);
+    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    errdefer Y.deinit(allocator);
+    try batchNormChannelsInto(Y, self, gamma, beta, running_mean, running_var, training, eps, momentum, saved_mean_out, saved_inv_std_out, allocator);
+    return Y;
+}
+
+pub fn batchNorm2dInto(
+    dest: *Tensor,
+    self: *Tensor,
+    gamma: *Tensor,
+    beta: *Tensor,
+    running_mean: ?*Tensor,
+    running_var: ?*Tensor,
+    training: bool,
+    eps: f32,
+    momentum: f32,
+    saved_mean_out: ?[]f32,
+    saved_inv_std_out: ?[]f32,
+    allocator: std.mem.Allocator,
+) !void {
+    if (self.shape.len != 4) return error.IncompatibleDimensions;
+    return batchNormChannelsInto(dest, self, gamma, beta, running_mean, running_var, training, eps, momentum, saved_mean_out, saved_inv_std_out, allocator);
 }
 
 /// 批量归一化 (Batch Normalization, BatchNorm) 共享内核：输入视为 `[N, C, S]`，
@@ -171,6 +213,26 @@ fn batchNormChannels(
     saved_inv_std_out: ?[]f32,
     allocator: std.mem.Allocator,
 ) !*Tensor {
+    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    errdefer Y.deinit(allocator);
+    try batchNormChannelsInto(Y, self, gamma, beta, running_mean, running_var, training, eps, momentum, saved_mean_out, saved_inv_std_out, allocator);
+    return Y;
+}
+
+pub fn batchNormChannelsInto(
+    dest: *Tensor,
+    self: *Tensor,
+    gamma: *Tensor,
+    beta: *Tensor,
+    running_mean: ?*Tensor,
+    running_var: ?*Tensor,
+    training: bool,
+    eps: f32,
+    momentum: f32,
+    saved_mean_out: ?[]f32,
+    saved_inv_std_out: ?[]f32,
+    allocator: std.mem.Allocator,
+) !void {
     const N = self.shape.dims[0];
     const C = self.shape.dims[1];
     var spatial_size: usize = 1;
@@ -191,9 +253,6 @@ fn batchNormChannels(
 
     const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (!self.isContiguous()) x_contig.deinit(allocator);
-
-    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-    errdefer Y.deinit(allocator);
 
     const m = N * spatial_size;
     const m_f = @as(f32, @floatFromInt(m));
@@ -239,11 +298,10 @@ fn batchNormChannels(
         for (0..N) |n| {
             const start_idx = (n * C + c_) * spatial_size;
             for (0..spatial_size) |i| {
-                Y.data[start_idx + i] = (x_contig.data[start_idx + i] - mean_val) * inv_std * g + b;
+                dest.data[start_idx + i] = (x_contig.data[start_idx + i] - mean_val) * inv_std * g + b;
             }
         }
     }
-    return Y;
 }
 
 /// 分组归一化统一前向核函数 (Group Normalization, GroupNorm)
@@ -259,6 +317,24 @@ pub fn groupNorm(
     allocator: std.mem.Allocator,
 ) !*Tensor {
     if (self.shape.len < 2) return error.IncompatibleDimensions;
+    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    errdefer Y.deinit(allocator);
+    try groupNormInto(Y, self, gamma, beta, num_groups, eps, saved_mean_out, saved_inv_std_out, allocator);
+    return Y;
+}
+
+pub fn groupNormInto(
+    dest: *Tensor,
+    self: *Tensor,
+    gamma: *Tensor,
+    beta: *Tensor,
+    num_groups: usize,
+    eps: f32,
+    saved_mean_out: ?[]f32,
+    saved_inv_std_out: ?[]f32,
+    allocator: std.mem.Allocator,
+) !void {
+    if (self.shape.len < 2) return error.IncompatibleDimensions;
     const N = self.shape.dims[0];
     const C = self.shape.dims[1];
     if (num_groups == 0 or C == 0 or C % num_groups != 0) return error.ShapeMismatch;
@@ -266,9 +342,6 @@ pub fn groupNorm(
 
     const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (!self.isContiguous()) x_contig.deinit(allocator);
-
-    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-    errdefer Y.deinit(allocator);
 
     var spatial_size: usize = 1;
     for (2..self.shape.len) |d| {
@@ -297,26 +370,30 @@ pub fn groupNorm(
                 const b_val = beta.data[c_idx];
                 const ch_offset = (n * C + c_idx) * spatial_size;
                 for (0..spatial_size) |s| {
-                    Y.data[ch_offset + s] = (x_contig.data[ch_offset + s] - mean_val) * inv_std * g_val + b_val;
+                    dest.data[ch_offset + s] = (x_contig.data[ch_offset + s] - mean_val) * inv_std * g_val + b_val;
                 }
             }
         }
     }
-    return Y;
 }
 
 /// 随机失活掩码前向核函数 (Dropout Mask Application)
 pub fn applyDropoutMask(self: *Tensor, mask: []const f32, allocator: std.mem.Allocator) !*Tensor {
+    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    errdefer Y.deinit(allocator);
+    try applyDropoutMaskInto(Y, self, mask, allocator);
+    return Y;
+}
+
+pub fn applyDropoutMaskInto(dest: *Tensor, self: *Tensor, mask: []const f32, allocator: std.mem.Allocator) !void {
     const total = self.shape.numel();
     if (mask.len != total) return error.ShapeMismatch;
     const x_contig = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (x_contig != self) x_contig.deinit(allocator);
 
-    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-    for (x_contig.data[0..total], Y.data, mask) |x_val, *y_val, m_val| {
+    for (x_contig.data[0..total], dest.data[0..total], mask) |x_val, *y_val, m_val| {
         y_val.* = x_val * m_val;
     }
-    return Y;
 }
 
 /// 旋转位置编码统一前向核函数 (Rotary Position Embedding, RoPE)
@@ -325,16 +402,21 @@ pub fn applyDropoutMask(self: *Tensor, mask: []const f32, allocator: std.mem.All
 /// 旋转由共享的 `RopeTable` 完成：每个位置只计算一次三角函数表并复用于全部 outer 行（批次与注意力头）。
 pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: std.mem.Allocator) !*Tensor {
     if (self.shape.len == 0) return error.IncompatibleDimensions;
+    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
+    errdefer free(allocator, Y);
+    try ropeInto(Y, self, start_pos, options, allocator);
+    return Y;
+}
+
+pub fn ropeInto(dest: *Tensor, self: *Tensor, start_pos: usize, options: RopeOptions, allocator: std.mem.Allocator) !void {
+    if (self.shape.len == 0) return error.IncompatibleDimensions;
     const x = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (x != self) x.deinit(allocator);
 
     const D = x.shape.dims[x.shape.len - 1];
     const T = if (x.shape.len >= 2) x.shape.dims[x.shape.len - 2] else 1;
     const table = try RopeTable.init(D, options);
-
-    const Y = try zeros(allocator, self.shape.dims[0..self.shape.len]);
-    errdefer free(allocator, Y);
-    if (T * D == 0) return Y;
+    if (T * D == 0) return;
     const outer = x.shape.numel() / (T * D);
 
     var cos_buf: [rope_mod.max_angles]f32 = undefined;
@@ -345,16 +427,29 @@ pub fn rope(self: *Tensor, start_pos: usize, options: RopeOptions, allocator: st
         table.angles(start_pos + t, cos_tab, sin_tab);
         for (0..outer) |o| {
             // 先复制整行 (仍在一级缓存中)，再原地旋转参与旋转的维度
-            const row = Y.data[(o * T + t) * D ..][0..D];
+            const row = dest.data[(o * T + t) * D ..][0..D];
             @memcpy(row, x.data[(o * T + t) * D ..][0..D]);
             table.applyRow(row, cos_tab, sin_tab, false);
         }
     }
-    return Y;
 }
 
 /// 分组查询注意力 (Grouped-Query Attention, GQA) 键值头复制：`[B, n_kv, T, hs]` -> `[B, n_kv * groups, T, hs]`
 pub fn repeatKV(self: *Tensor, groups: usize, allocator: std.mem.Allocator) !*Tensor {
+    if (self.shape.len != 4) return error.IncompatibleDimensions;
+    const B = self.shape.dims[0];
+    const n_kv = self.shape.dims[1];
+    const T = self.shape.dims[2];
+    const hs = self.shape.dims[3];
+    const nh = n_kv * groups;
+
+    const Y = try zeros(allocator, &.{ B, nh, T, hs });
+    errdefer Y.deinit(allocator);
+    try repeatKVInto(Y, self, groups, allocator);
+    return Y;
+}
+
+pub fn repeatKVInto(dest: *Tensor, self: *Tensor, groups: usize, allocator: std.mem.Allocator) !void {
     if (self.shape.len != 4) return error.IncompatibleDimensions;
     const x = if (self.isContiguous()) self else try self.contiguous(allocator);
     defer if (x != self) x.deinit(allocator);
@@ -364,19 +459,17 @@ pub fn repeatKV(self: *Tensor, groups: usize, allocator: std.mem.Allocator) !*Te
     const hs = self.shape.dims[3];
     const nh = n_kv * groups;
 
-    const Y = try zeros(allocator, &.{ B, nh, T, hs });
     const head_bytes = T * hs;
     for (0..B) |b| {
         for (0..n_kv) |kv_h| {
             const src = x.data[((b * n_kv + kv_h) * head_bytes)..((b * n_kv + kv_h + 1) * head_bytes)];
             for (0..groups) |g| {
                 const h = kv_h * groups + g;
-                const dest = Y.data[((b * nh + h) * head_bytes)..((b * nh + h + 1) * head_bytes)];
-                @memcpy(dest, src);
+                const dst = dest.data[((b * nh + h) * head_bytes)..((b * nh + h + 1) * head_bytes)];
+                @memcpy(dst, src);
             }
         }
     }
-    return Y;
 }
 
 /// 二维矩阵块在基础线性代数子程序 (Basic Linear Algebra Subprograms, BLAS) 中的行优先描述：
@@ -411,6 +504,25 @@ pub fn batchMatMul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) 
     const batch_size = self.shape.dims[0];
     const num_heads = self.shape.dims[1];
     const M = self.shape.dims[2];
+    const N = other.shape.dims[3];
+
+    const C = try zeros(allocator, &.{ batch_size, num_heads, M, N });
+    errdefer C.deinit(allocator);
+    try batchMatMulInto(C, self, other, allocator);
+    return C;
+}
+
+pub fn batchMatMulInto(dest: *Tensor, self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) !void {
+    if (self.shape.len != 4 or other.shape.len != 4) {
+        return error.IncompatibleDimensions;
+    }
+    if (self.shape.dims[0] != other.shape.dims[0] or self.shape.dims[1] != other.shape.dims[1] or self.shape.dims[3] != other.shape.dims[2]) {
+        return error.ShapeMismatch;
+    }
+
+    const batch_size = self.shape.dims[0];
+    const num_heads = self.shape.dims[1];
+    const M = self.shape.dims[2];
     const K = self.shape.dims[3];
     const N = other.shape.dims[3];
 
@@ -423,21 +535,20 @@ pub fn batchMatMul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) 
     const a_mat = a_layout orelse BlasMatrix{ .trans = c.CblasNoTrans, .ld = @max(K, 1) };
     const b_mat = b_layout orelse BlasMatrix{ .trans = c.CblasNoTrans, .ld = @max(N, 1) };
 
-    const C = try zeros(allocator, &.{ batch_size, num_heads, M, N });
-    if (M == 0 or N == 0) return C;
+    if (M == 0 or N == 0) return;
 
     const sA_b = a.strides.dims[0];
     const sA_h = a.strides.dims[1];
     const sB_b = b.strides.dims[0];
     const sB_h = b.strides.dims[1];
-    const sC_b = C.strides.dims[0];
-    const sC_h = C.strides.dims[1];
+    const sC_b = dest.strides.dims[0];
+    const sC_h = dest.strides.dims[1];
 
     for (0..batch_size) |bi| {
         for (0..num_heads) |h| {
             const ptrA = a.data.ptr + bi * sA_b + h * sA_h;
             const ptrB = b.data.ptr + bi * sB_b + h * sB_h;
-            const ptrC = C.data.ptr + bi * sC_b + h * sC_h;
+            const ptrC = dest.data.ptr + bi * sC_b + h * sC_h;
 
             c.cblas_sgemm(
                 c.CblasRowMajor,
@@ -457,7 +568,6 @@ pub fn batchMatMul(self: *Tensor, other: *Tensor, allocator: std.mem.Allocator) 
             );
         }
     }
-    return C;
 }
 
 /// 嵌入查表 (Embedding Lookup) 内核：out[t, :] = table[ids[t], :] * scale，写入 [ids.len, dim] 行主序缓冲区。

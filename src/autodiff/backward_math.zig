@@ -65,7 +65,8 @@ pub fn reduceSumMeanBackward(A: *Tensor, C: *Tensor, axis: ?usize, scale: f32) v
     }
 }
 
-pub fn backwardMath(self: *Op) !void {
+pub fn backwardMath(self: *Op, scratch_allocator: std.mem.Allocator) !void {
+    _ = scratch_allocator;
     switch (self.op_type) {
         .L2Loss => {
             const A = self.inputs[0];

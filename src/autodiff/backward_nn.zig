@@ -14,7 +14,7 @@ const q4_backward_row_tile: usize = 64;
 ///   dX_n[C_in, H*W]            += W[C_in, C_out*KH*KW] * col
 ///   dW[C_in, C_out*KH*KW]      += X_n[C_in, H*W] * col^T
 /// 两者都交给单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM)。输入由 `Graph.contiguous` 保证连续。
-fn convTransposeBackward(self: *Op, stride: usize, padding: usize) !void {
+fn convTransposeBackward(self: *Op, stride: usize, padding: usize, allocator: std.mem.Allocator) !void {
     const A = self.inputs[0];
     const W = self.inputs[1];
     const C = self.outputs[0];
@@ -52,8 +52,8 @@ fn convTransposeBackward(self: *Op, stride: usize, padding: usize) !void {
     const in_plane = H_in * W_in;
     const K_col = C_out * KH * KW;
     if (in_plane == 0 or K_col == 0 or C_in == 0) return;
-    const col = try std.heap.c_allocator.alloc(f32, K_col * in_plane);
-    defer std.heap.c_allocator.free(col);
+    const col = try allocator.alloc(f32, K_col * in_plane);
+    defer allocator.free(col);
 
     for (0..N) |n| {
         const dY_n = C.grad[n * C_out * out_plane ..][0 .. C_out * out_plane];
@@ -198,13 +198,12 @@ fn col2imSample(dx: []f32, col: []const f32, ld: usize, col_off: usize, g: ConvG
 ///   col                       = W^T * dC_blk     (每块一次 SGEMM)，再按样本列转图像 (col2im) 累加到 dX
 /// 相比逐样本调用 SGEMM，内积维度从 L_out 增大为 nb * L_out，权重梯度块只在每块 (而非每个样本) 读写一次。
 /// `col_budget` 为列缓冲区元素上限 (调用方传入 `conv_col_budget`)。任一维度为 0 或缓冲区分配失败时返回 false，由调用方改走逐元素路径。
-fn convIm2colBackward(A: *Tensor, Wt: *Tensor, C: *Tensor, g: ConvGeometry, col_budget: usize) bool {
+fn convIm2colBackward(A: *Tensor, Wt: *Tensor, C: *Tensor, g: ConvGeometry, col_budget: usize, allocator: std.mem.Allocator) bool {
     const K_col = g.C_in * g.KH * g.KW;
     const L_out = g.H_out * g.W_out;
     if (g.N == 0 or K_col == 0 or L_out == 0 or g.C_out == 0) return false;
 
     const nb = std.math.clamp(col_budget / (K_col * L_out), 1, g.N);
-    const allocator = std.heap.c_allocator;
     const col = allocator.alloc(f32, K_col * nb * L_out) catch return false;
     defer allocator.free(col);
     // 单样本块直接使用该样本连续的输出梯度 [C_out, L_out]，不需要重排缓冲区
@@ -276,7 +275,7 @@ fn convIm2colBackward(A: *Tensor, Wt: *Tensor, C: *Tensor, g: ConvGeometry, col_
 ///   dQ   += dS K，dK += dS^T Q
 /// 全部矩阵乘法交给单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM)，分组查询注意力
 /// (Grouped-Query Attention, GQA) 的键值梯度在组内累加。
-fn attentionBackward(self: *Op) !void {
+fn attentionBackward(self: *Op, allocator: std.mem.Allocator) !void {
     const Q = self.inputs[0];
     const K = self.inputs[1];
     const V = self.inputs[2];
@@ -292,7 +291,6 @@ fn attentionBackward(self: *Op) !void {
     const scale = ctx.options.resolveScale(d);
     const need_scores = Q.requires_grad or K.requires_grad;
 
-    const allocator = std.heap.c_allocator;
     const ds: []f32 = if (need_scores) try allocator.alloc(f32, rows * tk) else &.{};
     defer if (need_scores) allocator.free(ds);
     const ld_d: c_int = @intCast(@max(d, 1));
@@ -334,7 +332,7 @@ fn attentionBackward(self: *Op) !void {
     }
 }
 
-pub fn backwardNN(self: *Op) !void {
+pub fn backwardNN(self: *Op, scratch_allocator: std.mem.Allocator) !void {
     switch (self.op_type) {
         .Conv1D => {
             const A = self.inputs[0];
@@ -393,7 +391,7 @@ pub fn backwardNN(self: *Op) !void {
                     .stride_w = stride,
                     .pad_h = 0,
                     .pad_w = padding,
-                }, conv_col_budget);
+                }, conv_col_budget, scratch_allocator);
 
             if (!used_sgemm and (A.requires_grad or W.requires_grad)) {
                 for (0..N) |n| {
@@ -490,7 +488,7 @@ pub fn backwardNN(self: *Op) !void {
                     .stride_w = stride,
                     .pad_h = padding,
                     .pad_w = padding,
-                }, conv_col_budget);
+                }, conv_col_budget, scratch_allocator);
 
             if (!used_sgemm and (A.requires_grad or W.requires_grad)) {
                 for (0..N) |n| {
@@ -530,11 +528,11 @@ pub fn backwardNN(self: *Op) !void {
         },
         .ConvTranspose1D => {
             const ctx = self.context.ConvTranspose1D;
-            try convTransposeBackward(self, ctx.stride, ctx.padding);
+            try convTransposeBackward(self, ctx.stride, ctx.padding, scratch_allocator);
         },
         .ConvTranspose2D => {
             const ctx = self.context.ConvTranspose2D;
-            try convTransposeBackward(self, ctx.stride, ctx.padding);
+            try convTransposeBackward(self, ctx.stride, ctx.padding, scratch_allocator);
         },
         .MaxPool1D => {
             const A = self.inputs[0];
@@ -1140,7 +1138,7 @@ pub fn backwardNN(self: *Op) !void {
                 const outer = X.shape.numel() / (T * D);
                 const table = try tensor_mod.RopeTable.init(D, self.context.RoPE.options);
 
-                const allocator = std.heap.c_allocator;
+                const allocator = scratch_allocator;
                 const scratch = try allocator.alloc(f32, D + 2 * table.num_angles);
                 defer allocator.free(scratch);
                 const row = scratch[0..D];
@@ -1223,7 +1221,7 @@ pub fn backwardNN(self: *Op) !void {
                 }
             }
         },
-        .Attention => try attentionBackward(self),
+        .Attention => try attentionBackward(self, scratch_allocator),
         .Embedding => {
             const W = self.inputs[0];
             const X = self.inputs[1];
@@ -1298,7 +1296,7 @@ pub fn backwardNN(self: *Op) !void {
 
             // 与前向一致按专家分组：每个专家把所属行的 X / dY 收集成稠密块，
             // 用一次 SGEMM 求 dW_e += X_gᵀ dY_g、一次 SGEMM 求 dX_g = dY_g W_eᵀ，代替逐行 M = 1 的矩阵乘法
-            const allocator = std.heap.c_allocator;
+            const allocator = scratch_allocator;
             var groups = try tensor_mod.nn_kernels.ExpertGroups.init(allocator, indices.data[0..rows], E);
             defer groups.deinit(allocator);
             const G = groups.max_group;
@@ -1359,8 +1357,8 @@ pub fn backwardNN(self: *Op) !void {
 
             // 按输出特征分块反量化权重行，再交给单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM)
             const tile = @min(out_f, q4_backward_row_tile);
-            const w_buf = try std.heap.c_allocator.alloc(f32, tile * in_f);
-            defer std.heap.c_allocator.free(w_buf);
+            const w_buf = try scratch_allocator.alloc(f32, tile * in_f);
+            defer scratch_allocator.free(w_buf);
             var j0: usize = 0;
             while (j0 < out_f) : (j0 += tile) {
                 const j1 = @min(j0 + tile, out_f);
@@ -1456,7 +1454,7 @@ test "convIm2colBackward gives the same gradients for any sample block size" {
     for ([_]usize{ K_col * L_out, 2 * K_col * L_out, g.N * K_col * L_out }) |budget| {
         @memset(dX, 0.0);
         @memset(dW, 0.0);
-        try std.testing.expect(convIm2colBackward(A, Wt, C, g, budget));
+        try std.testing.expect(convIm2colBackward(A, Wt, C, g, budget, std.testing.allocator));
         for (ref_dW, dW) |e, a| try std.testing.expectApproxEqAbs(e, a, 1e-4);
         for (ref_dX, dX) |e, a| try std.testing.expectApproxEqAbs(e, a, 1e-4);
     }

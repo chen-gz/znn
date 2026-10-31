@@ -205,11 +205,11 @@ test "destination neural operations match eager kernels with strided inputs" {
     const options: tensor.RmsNormOptions = .{ .eps = 0.01, .weight_offset = 1 };
     const norm = try x.rmsNorm(&w, options, null, allocator);
     defer norm.deinit(allocator);
-    try tensor.rmsNormInto(&dest, &x, &w, options);
+    try tensor.rmsNormInto(&dest, &x, &w, options, null);
     try expectClose(output[0..6], norm.data);
     const unweighted = try x.rmsNorm(null, options, null, allocator);
     defer unweighted.deinit(allocator);
-    try tensor.rmsNormInto(&dest, &x, null, options);
+    try tensor.rmsNormInto(&dest, &x, null, options, null);
     try expectClose(output[0..6], unweighted.data);
     try expectEqualSlices(f32, &.{ 77, 77 }, output[6..]);
 }
@@ -257,19 +257,19 @@ test "destination normalization distinguishes empty outer dimensions and axes" {
     var empty = borrowed(&.{}, &.{ 0, 3 });
     var dest = borrowed(&.{}, &.{ 0, 3 });
     try tensor.softmaxInto(&dest, &empty, null);
-    try tensor.rmsNormInto(&dest, &empty, null, .{});
+    try tensor.rmsNormInto(&dest, &empty, null, .{}, null);
     try tensor.geluInto(&dest, &empty, .none);
     try expectError(error.DivisionByZero, tensor.softmaxInto(&dest, &empty, 0));
     empty.shape = tensor.Shape.init(&.{ 3, 0 });
     dest.shape = empty.shape;
     try expectError(error.DivisionByZero, tensor.softmaxInto(&dest, &empty, null));
-    try expectError(error.DivisionByZero, tensor.rmsNormInto(&dest, &empty, null, .{}));
+    try expectError(error.DivisionByZero, tensor.rmsNormInto(&dest, &empty, null, .{}, null));
     var value = [_]f32{2};
     var result = [_]f32{99};
     var scalar = borrowed(&value, &.{});
     var scalar_dest = borrowed(&result, &.{});
     try expectError(error.IncompatibleDimensions, tensor.softmaxInto(&scalar_dest, &scalar, null));
-    try expectError(error.IncompatibleDimensions, tensor.rmsNormInto(&scalar_dest, &scalar, null, .{}));
+    try expectError(error.IncompatibleDimensions, tensor.rmsNormInto(&scalar_dest, &scalar, null, .{}, null));
     try tensor.geluInto(&scalar_dest, &scalar, .none);
     try expectClose(&result, &.{backend.activation.gelu(.none, 2)});
 }
@@ -278,7 +278,7 @@ const NeuralOp = enum { matmul, rms, softmax, gelu };
 fn neuralCall(op: NeuralOp, dest: *Tensor, x: *Tensor, other: *Tensor) tensor.TensorError!void {
     return switch (op) {
         .matmul => tensor.matmulInto(dest, x, other),
-        .rms => tensor.rmsNormInto(dest, x, other, .{}),
+        .rms => tensor.rmsNormInto(dest, x, other, .{}, null),
         .softmax => tensor.softmaxInto(dest, x, null),
         .gelu => tensor.geluInto(dest, x, .tanh),
     };
@@ -339,7 +339,7 @@ test "destination neural operation-specific validation and partial aliases" {
     var x = borrowed(&input, &.{ 2, 2 });
     var dest = borrowed(storage[0..4], &.{ 2, 2 });
     var invalid_weight = borrowed(&input, &.{ 1, 2 });
-    try expectError(error.ShapeMismatch, tensor.rmsNormInto(&dest, &x, &invalid_weight, .{}));
+    try expectError(error.ShapeMismatch, tensor.rmsNormInto(&dest, &x, &invalid_weight, .{}, null));
     try expectError(error.DimensionOutOfBounds, tensor.softmaxInto(&dest, &x, 2));
     var rank_one = borrowed(&input, &.{4});
     try expectError(error.IncompatibleDimensions, tensor.matmulInto(&dest, &rank_one, &x));
@@ -349,9 +349,9 @@ test "destination neural operation-specific validation and partial aliases" {
     try expectError(error.AliasedOutput, tensor.matmulInto(&dest, &x, &overlap));
     try expectError(error.AliasedOutput, tensor.geluInto(&dest, &overlap, .none));
     try expectError(error.AliasedOutput, tensor.softmaxInto(&dest, &overlap, null));
-    try expectError(error.AliasedOutput, tensor.rmsNormInto(&dest, &overlap, null, .{}));
+    try expectError(error.AliasedOutput, tensor.rmsNormInto(&dest, &overlap, null, .{}, null));
     var weight = borrowed(storage[3..5], &.{2});
-    try expectError(error.AliasedOutput, tensor.rmsNormInto(&dest, &x, &weight, .{}));
+    try expectError(error.AliasedOutput, tensor.rmsNormInto(&dest, &x, &weight, .{}, null));
     try expectEqualSlices(f32, &@as([6]f32, @splat(99)), &storage);
     // Independent outputs may already belong to a graph, without changing gradients.
     var grad = [_]f32{ 10, 11, 12, 13 };
@@ -360,11 +360,11 @@ test "destination neural operation-specific validation and partial aliases" {
     try tensor.matmulInto(&dest, &x, &x);
     try tensor.geluInto(&dest, &x, .tanh);
     try tensor.softmaxInto(&dest, &x, null);
-    try tensor.rmsNormInto(&dest, &x, null, .{});
+    try tensor.rmsNormInto(&dest, &x, null, .{}, null);
     try expectEqualSlices(f32, &.{ 10, 11, 12, 13 }, &grad);
     try expectEqualSlices(f32, &.{ 99, 99 }, storage[4..]);
     // Numeric options retain eager IEEE behavior, without extra validation.
-    try tensor.rmsNormInto(&dest, &x, null, .{ .eps = -100 });
+    try tensor.rmsNormInto(&dest, &x, null, .{ .eps = -100 }, null);
     for (storage[0..4]) |v| try expect(std.math.isNan(v));
 }
 

@@ -17,12 +17,64 @@ pub const GenericTensor = types_mod.GenericTensor;
 
 const core_mod = @import("core.zig");
 pub const Tensor = core_mod.Tensor;
-pub const addInto = @import("destination.zig").addInto;
-pub const mulInto = @import("destination.zig").mulInto;
-pub const matmulInto = @import("destination.zig").matmulInto;
-pub const rmsNormInto = @import("destination.zig").rmsNormInto;
-pub const softmaxInto = @import("destination.zig").softmaxInto;
-pub const geluInto = @import("destination.zig").geluInto;
+pub const destination = @import("destination.zig");
+pub const addInto = destination.addInto;
+pub const subInto = destination.subInto;
+pub const mulInto = destination.mulInto;
+pub const divInto = destination.divInto;
+pub const matmulInto = destination.matmulInto;
+pub const rmsNormInto = destination.rmsNormInto;
+pub const softmaxInto = destination.softmaxInto;
+pub const geluInto = destination.geluInto;
+pub const reluInto = destination.reluInto;
+pub const sigmoidInto = destination.sigmoidInto;
+pub const tanhInto = destination.tanhInto;
+pub const siluInto = destination.siluInto;
+pub const sqrtInto = destination.sqrtInto;
+pub const expInto = destination.expInto;
+pub const logInto = destination.logInto;
+pub const absInto = destination.absInto;
+pub const negInto = destination.negInto;
+pub const softcapInto = destination.softcapInto;
+pub const leakyReluInto = destination.leakyReluInto;
+pub const mulScalarInto = destination.mulScalarInto;
+pub const divScalarInto = destination.divScalarInto;
+pub const addScalarInto = destination.addScalarInto;
+pub const subScalarInto = destination.subScalarInto;
+pub const copyInto = destination.copyInto;
+pub const transposeInto = destination.transposeInto;
+pub const layerNormInto = destination.layerNormInto;
+pub const mseLossInto = destination.mseLossInto;
+pub const bceLossInto = destination.bceLossInto;
+pub const bceWithLogitsLossInto = destination.bceWithLogitsLossInto;
+pub const l1LossInto = destination.l1LossInto;
+pub const l2LossInto = destination.l2LossInto;
+pub const embeddingInto = destination.embeddingInto;
+
+const conv_pool = @import("conv_pool.zig");
+pub const conv1dInto = conv_pool.conv1dInto;
+pub const conv2dInto = conv_pool.conv2dInto;
+pub const convTranspose1dInto = conv_pool.convTranspose1dInto;
+pub const convTranspose2dInto = conv_pool.convTranspose2dInto;
+pub const maxpool1dInto = conv_pool.maxpool1dInto;
+pub const maxpool2dInto = conv_pool.maxpool2dInto;
+pub const avgpool1dInto = conv_pool.avgpool1dInto;
+pub const avgpool2dInto = conv_pool.avgpool2dInto;
+pub const adaptiveAvgPool1dInto = conv_pool.adaptiveAvgPool1dInto;
+pub const adaptiveAvgPool2dInto = conv_pool.adaptiveAvgPool2dInto;
+
+const nn_kernels = @import("nn_kernels.zig");
+pub const batchNorm1dInto = nn_kernels.batchNorm1dInto;
+pub const batchNorm2dInto = nn_kernels.batchNorm2dInto;
+pub const groupNormInto = nn_kernels.groupNormInto;
+pub const applyDropoutMaskInto = nn_kernels.applyDropoutMaskInto;
+pub const ropeInto = nn_kernels.ropeInto;
+pub const repeatKVInto = nn_kernels.repeatKVInto;
+pub const batchMatMulInto = nn_kernels.batchMatMulInto;
+
+const reductions = @import("reductions.zig");
+pub const sumInto = reductions.sumInto;
+pub const meanInto = reductions.meanInto;
 
 const linalg_mod = @import("linalg.zig");
 pub const QRResult = linalg_mod.QRResult;
@@ -197,23 +249,40 @@ pub fn concat(allocator: std.mem.Allocator, inputs: []const *Tensor, dim: usize)
 
     const out = try zeros(allocator, out_shape.dims[0..rank]);
     errdefer free(allocator, out);
+    try concatInto(out, inputs, dim, allocator);
+    return out;
+}
+
+pub fn concatInto(dest: *Tensor, inputs: []const *Tensor, dim: usize, allocator: std.mem.Allocator) !void {
+    if (inputs.len == 0) return error.EmptyInputs;
+    const rank = inputs[0].shape.len;
+    if (dim >= rank) return error.DimensionOutOfBounds;
+
+    var concat_dim_total: usize = 0;
+    for (inputs) |t| {
+        if (t.shape.len != rank) return error.IncompatibleDimensions;
+        for (0..rank) |d| {
+            if (d != dim) {
+                if (t.shape.dims[d] != inputs[0].shape.dims[d]) return error.ShapeMismatch;
+            }
+        }
+        concat_dim_total += t.shape.dims[dim];
+    }
 
     var outer_size: usize = 1;
     for (0..dim) |d| {
-        outer_size *= out_shape.dims[d];
+        outer_size *= dest.shape.dims[d];
     }
     var inner_size: usize = 1;
     for (dim + 1..rank) |d| {
-        inner_size *= out_shape.dims[d];
+        inner_size *= dest.shape.dims[d];
     }
 
-    // 确保所有输入张量为连续内存，非连续张量先物化为连续副本（连续视图直接按偏移读取）
     const contig_inputs = try allocator.alloc(*Tensor, inputs.len);
     defer allocator.free(contig_inputs);
     const needs_free = try allocator.alloc(bool, inputs.len);
     defer allocator.free(needs_free);
     @memset(needs_free, false);
-    // 先注册释放逻辑：物化中途失败时，已物化的连续副本同样会被释放
     defer {
         for (contig_inputs, 0..) |t, i| {
             if (needs_free[i]) free(allocator, t);
@@ -237,12 +306,10 @@ pub fn concat(allocator: std.mem.Allocator, inputs: []const *Tensor, dim: usize)
             const src_base = outer * d_k * inner_size;
             const dest_base = out_base + offset_dim * inner_size;
             const copy_len = d_k * inner_size;
-            @memcpy(out.data[dest_base .. dest_base + copy_len], t.data[src_base .. src_base + copy_len]);
+            @memcpy(dest.data[dest_base .. dest_base + copy_len], t.data[src_base .. src_base + copy_len]);
             offset_dim += d_k;
         }
     }
-
-    return out;
 }
 
 /// 沿新维度堆叠多个张量 (np.stack)
@@ -323,6 +390,20 @@ pub fn split(allocator: std.mem.Allocator, input: *Tensor, num_splits: usize, di
         created += 1;
     }
 
+    try splitInto(outputs, input, dim, allocator);
+    return outputs;
+}
+
+pub fn splitInto(outputs: []const *Tensor, input: *Tensor, dim: usize, allocator: std.mem.Allocator) !void {
+    const num_splits = outputs.len;
+    if (num_splits == 0) return error.InvalidSplitCount;
+    const rank = input.shape.len;
+    if (dim >= rank) return error.DimensionOutOfBounds;
+    const dim_size = input.shape.dims[dim];
+    if (dim_size % num_splits != 0) return error.UnevenSplit;
+
+    const split_dim_size = dim_size / num_splits;
+
     var outer_size: usize = 1;
     for (0..dim) |d| {
         outer_size *= input.shape.dims[d];
@@ -344,8 +425,6 @@ pub fn split(allocator: std.mem.Allocator, input: *Tensor, num_splits: usize, di
             @memcpy(outputs[k].data[dest_base .. dest_base + copy_len], in_contig.data[src_offset .. src_offset + copy_len]);
         }
     }
-
-    return outputs;
 }
 
 pub fn where(cond: anytype, x: *Tensor, y: *Tensor, allocator: std.mem.Allocator) !*Tensor {

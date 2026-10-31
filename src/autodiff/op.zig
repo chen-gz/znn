@@ -13,16 +13,11 @@ const backward_math = @import("backward_math.zig");
 
 // 算子前向重演与反向求导的分发：按 `Op.op_type` 调用对应的张量内核与反向内核
 
-fn copyFromEager(dest: *Tensor, tmp: *Tensor, allocator: std.mem.Allocator) void {
-    defer tmp.deinit(allocator);
-    @memcpy(dest.data, tmp.data);
-}
-
 /// 重新执行算子的前向计算，根据最新输入更新输出张量的数据
 pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
     switch (self.op_type) {
         .MatMul => {
-            copyFromEager(self.outputs[0], try self.inputs[0].matmul(self.inputs[1], allocator), allocator);
+            try tensor_mod.matmulInto(self.outputs[0], self.inputs[0], self.inputs[1]);
         },
         .Q4MatMul => {
             const ctx = self.context.Q4MatMul;
@@ -32,25 +27,25 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             try tensor_mod.quant.q4MatMulInto(.serial, self.outputs[0], x_contig, ctx.blocks, ctx.in_features, ctx.out_features);
         },
         .Relu => {
-            copyFromEager(self.outputs[0], try self.inputs[0].relu(allocator), allocator);
+            try tensor_mod.reluInto(self.outputs[0], self.inputs[0]);
         },
         .Gelu, .GeluTanh => {
-            copyFromEager(self.outputs[0], try self.inputs[0].gelu(self.op_type.geluApproximation().?, allocator), allocator);
+            try tensor_mod.geluInto(self.outputs[0], self.inputs[0], self.op_type.geluApproximation().?);
         },
         .Sigmoid => {
-            copyFromEager(self.outputs[0], try self.inputs[0].sigmoid(allocator), allocator);
+            try tensor_mod.sigmoidInto(self.outputs[0], self.inputs[0]);
         },
         .Tanh => {
-            copyFromEager(self.outputs[0], try self.inputs[0].tanh(allocator), allocator);
+            try tensor_mod.tanhInto(self.outputs[0], self.inputs[0]);
         },
         .Softcap => {
-            copyFromEager(self.outputs[0], try self.inputs[0].softcap(self.context.Softcap.cap, allocator), allocator);
+            try tensor_mod.softcapInto(self.outputs[0], self.inputs[0], self.context.Softcap.cap);
         },
         .LeakyRelu => {
-            copyFromEager(self.outputs[0], try self.inputs[0].leakyRelu(self.context.LeakyRelu.alpha, allocator), allocator);
+            try tensor_mod.leakyReluInto(self.outputs[0], self.inputs[0], self.context.LeakyRelu.alpha);
         },
         .Silu => {
-            copyFromEager(self.outputs[0], try self.inputs[0].silu(allocator), allocator);
+            try tensor_mod.siluInto(self.outputs[0], self.inputs[0]);
         },
         .SoftmaxCrossEntropy => {
             const logits = self.inputs[0];
@@ -121,189 +116,176 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             loss.data[0] = if (N > 0) -(total_obj / @as(f32, @floatFromInt(N))) else 0.0;
         },
         .BceWithLogitsLoss => {
-            copyFromEager(self.outputs[0], try self.inputs[0].bceWithLogitsLoss(self.inputs[1], allocator), allocator);
+            try tensor_mod.bceWithLogitsLossInto(self.outputs[0], self.inputs[0], self.inputs[1]);
         },
         .BceLoss => {
-            copyFromEager(self.outputs[0], try self.inputs[0].bceLoss(self.inputs[1], self.context.BceLoss.eps, allocator), allocator);
+            try tensor_mod.bceLossInto(self.outputs[0], self.inputs[0], self.inputs[1], self.context.BceLoss.eps);
         },
         .Reshape => {
             const A = self.inputs[0];
             const C = self.outputs[0];
             if (!C.is_view) {
-                copyFromEager(C, try A.reshape(C.shape.dims[0..C.shape.len], allocator), allocator);
+                try tensor_mod.copyInto(C, A);
             }
         },
         .Transpose => {
             const ctx = self.context.Transpose;
-            copyFromEager(self.outputs[0], try self.inputs[0].transpose(ctx.dim0, ctx.dim1, allocator), allocator);
+            try tensor_mod.transposeInto(self.outputs[0], self.inputs[0], ctx.dim0, ctx.dim1);
         },
         .Concat => {
-            copyFromEager(self.outputs[0], try tensor_mod.concat(allocator, self.inputs, self.context.Concat.dim), allocator);
+            try tensor_mod.concatInto(self.outputs[0], self.inputs, self.context.Concat.dim, allocator);
         },
         .Split => {
-            const tmp_outs = try tensor_mod.split(allocator, self.inputs[0], self.outputs.len, self.context.Split.dim);
-            defer {
-                for (tmp_outs) |t| t.deinit(allocator);
-                allocator.free(tmp_outs);
-            }
-            for (self.outputs, tmp_outs) |dest, src| {
-                @memcpy(dest.data, src.data);
-            }
+            try tensor_mod.splitInto(self.outputs, self.inputs[0], self.context.Split.dim, allocator);
         },
         .RepeatKV => {
-            copyFromEager(self.outputs[0], try self.inputs[0].repeatKV(self.context.RepeatKV.groups, allocator), allocator);
+            try tensor_mod.repeatKVInto(self.outputs[0], self.inputs[0], self.context.RepeatKV.groups, allocator);
         },
         .MseLoss => {
-            copyFromEager(self.outputs[0], try self.inputs[0].mseLoss(self.inputs[1], allocator), allocator);
+            try tensor_mod.mseLossInto(self.outputs[0], self.inputs[0], self.inputs[1]);
         },
         .MulScalar => {
-            copyFromEager(self.outputs[0], try self.inputs[0].mulScalar(self.context.MulScalar.val, allocator), allocator);
+            try tensor_mod.mulScalarInto(self.outputs[0], self.inputs[0], self.context.MulScalar.val);
         },
         .DivScalar => {
-            copyFromEager(self.outputs[0], try self.inputs[0].divScalar(self.context.DivScalar.val, allocator), allocator);
+            try tensor_mod.divScalarInto(self.outputs[0], self.inputs[0], self.context.DivScalar.val);
         },
         .AddScalar => {
-            copyFromEager(self.outputs[0], try self.inputs[0].addScalar(self.context.AddScalar.val, allocator), allocator);
+            try tensor_mod.addScalarInto(self.outputs[0], self.inputs[0], self.context.AddScalar.val);
         },
         .SubScalar => {
-            copyFromEager(self.outputs[0], try self.inputs[0].subScalar(self.context.SubScalar.val, allocator), allocator);
+            try tensor_mod.subScalarInto(self.outputs[0], self.inputs[0], self.context.SubScalar.val);
         },
         .Add => {
-            copyFromEager(self.outputs[0], try self.inputs[0].add(self.inputs[1], allocator), allocator);
+            try tensor_mod.addInto(self.outputs[0], self.inputs[0], self.inputs[1]);
         },
         .Sub => {
-            copyFromEager(self.outputs[0], try self.inputs[0].sub(self.inputs[1], allocator), allocator);
+            try tensor_mod.subInto(self.outputs[0], self.inputs[0], self.inputs[1]);
         },
         .Mul => {
-            copyFromEager(self.outputs[0], try self.inputs[0].mul(self.inputs[1], allocator), allocator);
+            try tensor_mod.mulInto(self.outputs[0], self.inputs[0], self.inputs[1]);
         },
         .Div => {
-            copyFromEager(self.outputs[0], try self.inputs[0].div(self.inputs[1], allocator), allocator);
+            try tensor_mod.divInto(self.outputs[0], self.inputs[0], self.inputs[1]);
         },
         .Conv1D => {
             const bias = if (self.inputs.len > 2) self.inputs[2] else null;
             const ctx = self.context.Conv1D;
-            copyFromEager(self.outputs[0], try self.inputs[0].conv1d(self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            try tensor_mod.conv1dInto(self.outputs[0], self.inputs[0], self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator);
         },
         .Conv2D => {
             const bias = if (self.inputs.len > 2) self.inputs[2] else null;
             const ctx = self.context.Conv2D;
-            copyFromEager(self.outputs[0], try self.inputs[0].conv2d(self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            try tensor_mod.conv2dInto(self.outputs[0], self.inputs[0], self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator);
         },
         .ConvTranspose1D => {
             const bias = if (self.inputs.len > 2) self.inputs[2] else null;
             const ctx = self.context.ConvTranspose1D;
-            copyFromEager(self.outputs[0], try self.inputs[0].convTranspose1d(self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            try tensor_mod.convTranspose1dInto(self.outputs[0], self.inputs[0], self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator);
         },
         .ConvTranspose2D => {
             const bias = if (self.inputs.len > 2) self.inputs[2] else null;
             const ctx = self.context.ConvTranspose2D;
-            copyFromEager(self.outputs[0], try self.inputs[0].convTranspose2d(self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            try tensor_mod.convTranspose2dInto(self.outputs[0], self.inputs[0], self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator);
         },
         .MaxPool1D => {
             const ctx = self.context.MaxPool1D;
-            copyFromEager(self.outputs[0], try self.inputs[0].maxpool1d(ctx.pool_size, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            try tensor_mod.maxpool1dInto(self.outputs[0], self.inputs[0], ctx.pool_size, .{ .stride = ctx.stride, .padding = ctx.padding });
         },
         .MaxPool2D => {
             const ctx = self.context.MaxPool2D;
-            copyFromEager(self.outputs[0], try self.inputs[0].maxpool2d(ctx.pool_size, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            try tensor_mod.maxpool2dInto(self.outputs[0], self.inputs[0], ctx.pool_size, .{ .stride = ctx.stride, .padding = ctx.padding });
         },
         .AvgPool1D => {
             const ctx = self.context.AvgPool1D;
-            copyFromEager(self.outputs[0], try self.inputs[0].avgpool1d(ctx.kernel_size, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            try tensor_mod.avgpool1dInto(self.outputs[0], self.inputs[0], ctx.kernel_size, .{ .stride = ctx.stride, .padding = ctx.padding });
         },
         .AvgPool2D => {
             const ctx = self.context.AvgPool2D;
-            copyFromEager(self.outputs[0], try self.inputs[0].avgpool2d(ctx.kernel_size, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator), allocator);
+            try tensor_mod.avgpool2dInto(self.outputs[0], self.inputs[0], ctx.kernel_size, .{ .stride = ctx.stride, .padding = ctx.padding });
         },
         .AdaptiveAvgPool1D => {
             const ctx = self.context.AdaptiveAvgPool1D;
-            copyFromEager(self.outputs[0], try self.inputs[0].adaptiveAvgPool1d(ctx.output_size, allocator), allocator);
+            try tensor_mod.adaptiveAvgPool1dInto(self.outputs[0], self.inputs[0], ctx.output_size);
         },
         .AdaptiveAvgPool2D => {
             const ctx = self.context.AdaptiveAvgPool2D;
-            copyFromEager(self.outputs[0], try self.inputs[0].adaptiveAvgPool2d(ctx.output_size, allocator), allocator);
+            try tensor_mod.adaptiveAvgPool2dInto(self.outputs[0], self.inputs[0], ctx.output_size);
         },
         .Softmax => {
-            copyFromEager(self.outputs[0], try self.inputs[0].softmax(allocator), allocator);
+            try tensor_mod.softmaxInto(self.outputs[0], self.inputs[0], null);
         },
         .RmsNorm => {
             const ctx = self.context.RmsNorm;
             const weight: ?*Tensor = if (self.inputs.len > 1) self.inputs[1] else null;
             const inv_rms: ?[]f32 = if (ctx.inv_rms.len > 0) ctx.inv_rms else null;
-            copyFromEager(self.outputs[0], try self.inputs[0].rmsNorm(weight, ctx.options, inv_rms, allocator), allocator);
+            try tensor_mod.rmsNormInto(self.outputs[0], self.inputs[0], weight, ctx.options, inv_rms);
         },
         .LayerNorm => {
             const ctx = self.context.LayerNorm;
             const save_mean: ?[]f32 = if (ctx.save_mean.len > 0) ctx.save_mean else null;
             const save_inv_std: ?[]f32 = if (ctx.save_inv_std.len > 0) ctx.save_inv_std else null;
-            copyFromEager(self.outputs[0], try self.inputs[0].layerNorm(self.inputs[1], self.inputs[2], ctx.eps, save_mean, save_inv_std, allocator), allocator);
+            try tensor_mod.layerNormInto(self.outputs[0], self.inputs[0], self.inputs[1], self.inputs[2], ctx.eps, save_mean, save_inv_std);
         },
         .BatchNorm1d => {
             // 训练模式重演必须重新计算当前批次的统计量 (并更新运行统计量)，否则反向传播会使用过期的批统计量
             const ctx = self.context.BatchNorm1d;
-            copyFromEager(
+            try tensor_mod.batchNorm1dInto(
                 self.outputs[0],
-                try self.inputs[0].batchNorm1d(
-                    self.inputs[1],
-                    self.inputs[2],
-                    ctx.running_mean,
-                    ctx.running_var,
-                    ctx.training,
-                    ctx.eps,
-                    ctx.momentum,
-                    ctx.save_mean,
-                    ctx.save_inv_std,
-                    allocator,
-                ),
+                self.inputs[0],
+                self.inputs[1],
+                self.inputs[2],
+                ctx.running_mean,
+                ctx.running_var,
+                ctx.training,
+                ctx.eps,
+                ctx.momentum,
+                ctx.save_mean,
+                ctx.save_inv_std,
                 allocator,
             );
         },
         .BatchNorm2d => {
             // 训练模式重演必须重新计算当前批次的统计量 (并更新运行统计量)，否则反向传播会使用过期的批统计量
             const ctx = self.context.BatchNorm2d;
-            copyFromEager(
+            try tensor_mod.batchNorm2dInto(
                 self.outputs[0],
-                try self.inputs[0].batchNorm2d(
-                    self.inputs[1],
-                    self.inputs[2],
-                    ctx.running_mean,
-                    ctx.running_var,
-                    ctx.training,
-                    ctx.eps,
-                    ctx.momentum,
-                    ctx.save_mean,
-                    ctx.save_inv_std,
-                    allocator,
-                ),
+                self.inputs[0],
+                self.inputs[1],
+                self.inputs[2],
+                ctx.running_mean,
+                ctx.running_var,
+                ctx.training,
+                ctx.eps,
+                ctx.momentum,
+                ctx.save_mean,
+                ctx.save_inv_std,
                 allocator,
             );
         },
         .GroupNorm => {
             const ctx = self.context.GroupNorm;
-            copyFromEager(
+            try tensor_mod.groupNormInto(
                 self.outputs[0],
-                try self.inputs[0].groupNorm(
-                    self.inputs[1],
-                    self.inputs[2],
-                    ctx.num_groups,
-                    ctx.eps,
-                    ctx.save_mean,
-                    ctx.save_inv_std,
-                    allocator,
-                ),
+                self.inputs[0],
+                self.inputs[1],
+                self.inputs[2],
+                ctx.num_groups,
+                ctx.eps,
+                ctx.save_mean,
+                ctx.save_inv_std,
                 allocator,
             );
         },
         .Dropout => {
-            copyFromEager(self.outputs[0], try self.inputs[0].applyDropoutMask(self.context.Dropout.mask_scale, allocator), allocator);
+            try tensor_mod.applyDropoutMaskInto(self.outputs[0], self.inputs[0], self.context.Dropout.mask_scale, allocator);
         },
         .RoPE => {
             const ctx = self.context.RoPE;
-            copyFromEager(self.outputs[0], try self.inputs[0].rope(ctx.start_pos, ctx.options, allocator), allocator);
+            try tensor_mod.ropeInto(self.outputs[0], self.inputs[0], ctx.start_pos, ctx.options, allocator);
         },
         .BatchMatMul => {
-            copyFromEager(self.outputs[0], try self.inputs[0].batchMatMul(self.inputs[1], allocator), allocator);
+            try tensor_mod.batchMatMulInto(self.outputs[0], self.inputs[0], self.inputs[1], allocator);
         },
         .Attention => {
             const ctx = self.context.Attention;
@@ -311,7 +293,7 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             try tensor_mod.attention_kernels.attentionInto(self.inputs[0], self.inputs[1], self.inputs[2], self.outputs[0], probs, ctx.options, allocator);
         },
         .Embedding => {
-            copyFromEager(self.outputs[0], try self.inputs[0].embedding(self.inputs[1], allocator), allocator);
+            try tensor_mod.embeddingInto(self.outputs[0], self.inputs[0], self.inputs[1]);
         },
         .TopK => {
             try self.inputs[0].topKInto(self.context.TopK.k, self.outputs[0], self.outputs[1]);
@@ -324,30 +306,30 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
             try self.inputs[0].gatherMatMulInto(self.inputs[1], weights, biases, self.outputs[0], allocator);
         },
         .L2Loss => {
-            copyFromEager(self.outputs[0], try self.inputs[0].l2Loss(self.context.L2Loss.lambda, allocator), allocator);
+            try tensor_mod.l2LossInto(self.outputs[0], self.inputs[0], self.context.L2Loss.lambda);
         },
         .L1Loss => {
-            copyFromEager(self.outputs[0], try self.inputs[0].l1Loss(self.context.L1Loss.lambda, allocator), allocator);
+            try tensor_mod.l1LossInto(self.outputs[0], self.inputs[0], self.context.L1Loss.lambda);
         },
         .Sqrt => {
-            copyFromEager(self.outputs[0], try self.inputs[0].sqrt(allocator), allocator);
+            try tensor_mod.sqrtInto(self.outputs[0], self.inputs[0]);
         },
         .Exp => {
-            copyFromEager(self.outputs[0], try self.inputs[0].exp(allocator), allocator);
+            try tensor_mod.expInto(self.outputs[0], self.inputs[0]);
         },
         .Log => {
-            copyFromEager(self.outputs[0], try self.inputs[0].log(allocator), allocator);
+            try tensor_mod.logInto(self.outputs[0], self.inputs[0]);
         },
         .Abs => {
-            copyFromEager(self.outputs[0], try self.inputs[0].abs(allocator), allocator);
+            try tensor_mod.absInto(self.outputs[0], self.inputs[0]);
         },
         .Sum => {
             const ctx = self.context.Sum;
-            copyFromEager(self.outputs[0], try self.inputs[0].sum(ctx.axis, ctx.keepdims, allocator), allocator);
+            try tensor_mod.sumInto(self.outputs[0], self.inputs[0], ctx.axis, ctx.keepdims, allocator);
         },
         .Mean => {
             const ctx = self.context.Mean;
-            copyFromEager(self.outputs[0], try self.inputs[0].mean(ctx.axis, ctx.keepdims, allocator), allocator);
+            try tensor_mod.meanInto(self.outputs[0], self.inputs[0], ctx.axis, ctx.keepdims, allocator);
         },
         .Where => {
             const X = self.inputs[0];
@@ -402,7 +384,7 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
 }
 
 /// 执行算子的反向传播计算，更新其输入节点的梯度
-pub fn backward(self: *Op) !void {
+pub fn backward(self: *Op, scratch_allocator: std.mem.Allocator) !void {
     switch (self.op_type) {
         .MatMul,
         .Relu,
@@ -432,7 +414,7 @@ pub fn backward(self: *Op) !void {
         .Sub,
         .Mul,
         .Div,
-        => try backward_core.backwardCore(self),
+        => try backward_core.backwardCore(self, scratch_allocator),
 
         .Conv1D,
         .Conv2D,
@@ -458,7 +440,7 @@ pub fn backward(self: *Op) !void {
         .TopK,
         .GatherMatMul,
         .Q4MatMul,
-        => try backward_nn.backwardNN(self),
+        => try backward_nn.backwardNN(self, scratch_allocator),
 
         .L2Loss,
         .L1Loss,
@@ -471,6 +453,6 @@ pub fn backward(self: *Op) !void {
         .Where,
         .MaskedFill,
         .Slice,
-        => try backward_math.backwardMath(self),
+        => try backward_math.backwardMath(self, scratch_allocator),
     }
 }

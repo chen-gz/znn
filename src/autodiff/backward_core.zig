@@ -138,7 +138,8 @@ fn mulAccumulateRow(dst: []f32, off: usize, stride: usize, g: []const f32, other
     }
 }
 
-pub fn backwardCore(self: *Op) !void {
+pub fn backwardCore(self: *Op, scratch_allocator: std.mem.Allocator) !void {
+    _ = scratch_allocator;
     switch (self.op_type) {
         // ====================================================================
         // 1. 矩阵乘法反向传播 (MatMul Backward)

@@ -22,6 +22,7 @@ pub const TensorError = error{
     AliasedOutput,
     IncompatibleDimensions,
     DivisionByZero,
+    IndexOutOfBounds,
 };
 
 // ============================================================================

@@ -114,7 +114,13 @@ pub fn matmulInto(dest: *Tensor, a: *const Tensor, b: *const Tensor) TensorError
 
 /// Root mean square normalization (RMSNorm) along the last axis, without
 /// allocation. Optional weights have shape [dim] and may themselves be strided.
-pub fn rmsNormInto(dest: *Tensor, x: *const Tensor, weight: ?*const Tensor, options: @import("types.zig").RmsNormOptions) TensorError!void {
+pub fn rmsNormInto(
+    dest: *Tensor,
+    x: *const Tensor,
+    weight: ?*const Tensor,
+    options: @import("types.zig").RmsNormOptions,
+    save_inv_rms: ?[]f32,
+) TensorError!void {
     const dl = try validate(dest);
     const xl = try validate(x);
     const wl = if (weight) |w| try validate(w) else Layout{ .count = 0, .span = 0 };
@@ -125,17 +131,21 @@ pub fn rmsNormInto(dest: *Tensor, x: *const Tensor, weight: ?*const Tensor, opti
     if (weight) |w| {
         if (w.shape.len != 1 or w.shape.dims[0] != dim) return error.ShapeMismatch;
     }
+    const M = dl.count / dim;
+    if (save_inv_rms) |s| if (s.len != M) return error.ShapeMismatch;
     try validateOutput(dest, dl, &.{x}, &.{xl});
     if (weight) |w| try validateOutput(dest, dl, &.{w}, &.{wl});
     if (dl.count == 0) return;
     const out = dest.data[0..dl.count];
     shape.gatherStrided(out, x.data, x.shape, x.strides);
-    for (0..dl.count / dim) |i| {
+    const w_stride = if (weight) |w| (if (w.shape.len > 0) w.strides.dims[w.shape.len - 1] else 1) else 0;
+    for (0..M) |i| {
         const row = out[i * dim ..][0..dim];
         const inv = 1.0 / @sqrt(backend.vec_math.sumSquares(row) / @as(f32, @floatFromInt(dim)) + options.eps);
+        if (save_inv_rms) |s| s[i] = inv;
         for (row, 0..) |*v, j| {
             v.* *= inv;
-            if (weight) |w| v.* *= w.data[j * w.strides.dims[0]] + options.weight_offset;
+            if (weight) |w| v.* *= w.data[j * w_stride] + options.weight_offset;
         }
     }
 }
@@ -194,4 +204,347 @@ pub fn geluInto(dest: *Tensor, x: *const Tensor, approximation: backend.GeluAppr
             v.* = backend.activation.gelu(approx, v.*);
         },
     }
+}
+
+/// Subtract with the same allocation, layout, and aliasing contract as addInto.
+pub fn subInto(dest: *Tensor, a: *const Tensor, b: *const Tensor) TensorError!void {
+    return binaryInto(dest, a, b, struct {
+        fn apply(x: f32, y: f32) f32 {
+            return x - y;
+        }
+    }.apply);
+}
+
+/// Divide with the same allocation, layout, and aliasing contract as addInto.
+pub fn divInto(dest: *Tensor, a: *const Tensor, b: *const Tensor) TensorError!void {
+    return binaryInto(dest, a, b, struct {
+        fn apply(x: f32, y: f32) f32 {
+            return x / y;
+        }
+    }.apply);
+}
+
+fn unaryInto(dest: *Tensor, x: *const Tensor, comptime op: fn (f32) f32) TensorError!void {
+    const dl = try validate(dest);
+    const xl = try validate(x);
+    if (!dest.shape.eq(x.shape)) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{x}, &.{xl});
+    if (dl.count == 0) return;
+    const out = dest.data[0..dl.count];
+    shape.gatherStrided(out, x.data, x.shape, x.strides);
+    for (out) |*v| {
+        v.* = op(v.*);
+    }
+}
+
+pub fn reluInto(dest: *Tensor, x: *const Tensor) TensorError!void {
+    return unaryInto(dest, x, struct {
+        fn apply(v: f32) f32 {
+            return if (v > 0) v else 0;
+        }
+    }.apply);
+}
+
+pub fn sigmoidInto(dest: *Tensor, x: *const Tensor) TensorError!void {
+    return unaryInto(dest, x, struct {
+        fn apply(v: f32) f32 {
+            return 1.0 / (1.0 + @exp(-v));
+        }
+    }.apply);
+}
+
+pub fn tanhInto(dest: *Tensor, x: *const Tensor) TensorError!void {
+    return unaryInto(dest, x, struct {
+        fn apply(v: f32) f32 {
+            const exp2x = @exp(2.0 * v);
+            return (exp2x - 1.0) / (exp2x + 1.0);
+        }
+    }.apply);
+}
+
+pub fn siluInto(dest: *Tensor, x: *const Tensor) TensorError!void {
+    return unaryInto(dest, x, struct {
+        fn apply(v: f32) f32 {
+            return v / (1.0 + @exp(-v));
+        }
+    }.apply);
+}
+
+pub fn sqrtInto(dest: *Tensor, x: *const Tensor) TensorError!void {
+    return unaryInto(dest, x, struct {
+        fn apply(v: f32) f32 {
+            return @sqrt(v);
+        }
+    }.apply);
+}
+
+pub fn expInto(dest: *Tensor, x: *const Tensor) TensorError!void {
+    return unaryInto(dest, x, struct {
+        fn apply(v: f32) f32 {
+            return @exp(v);
+        }
+    }.apply);
+}
+
+pub fn logInto(dest: *Tensor, x: *const Tensor) TensorError!void {
+    return unaryInto(dest, x, struct {
+        fn apply(v: f32) f32 {
+            return @log(v);
+        }
+    }.apply);
+}
+
+pub fn absInto(dest: *Tensor, x: *const Tensor) TensorError!void {
+    return unaryInto(dest, x, struct {
+        fn apply(v: f32) f32 {
+            return @abs(v);
+        }
+    }.apply);
+}
+
+pub fn negInto(dest: *Tensor, x: *const Tensor) TensorError!void {
+    return unaryInto(dest, x, struct {
+        fn apply(v: f32) f32 {
+            return -v;
+        }
+    }.apply);
+}
+
+pub fn softcapInto(dest: *Tensor, x: *const Tensor, cap: f32) TensorError!void {
+    const dl = try validate(dest);
+    const xl = try validate(x);
+    if (!dest.shape.eq(x.shape)) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{x}, &.{xl});
+    if (dl.count == 0) return;
+    const out = dest.data[0..dl.count];
+    shape.gatherStrided(out, x.data, x.shape, x.strides);
+    const inv_cap = 1.0 / cap;
+    for (out) |*v| {
+        const scaled = v.* * inv_cap;
+        const exp2x = @exp(2.0 * scaled);
+        const th = (exp2x - 1.0) / (exp2x + 1.0);
+        v.* = cap * th;
+    }
+}
+
+pub fn leakyReluInto(dest: *Tensor, x: *const Tensor, alpha: f32) TensorError!void {
+    const dl = try validate(dest);
+    const xl = try validate(x);
+    if (!dest.shape.eq(x.shape)) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{x}, &.{xl});
+    if (dl.count == 0) return;
+    const out = dest.data[0..dl.count];
+    shape.gatherStrided(out, x.data, x.shape, x.strides);
+    for (out) |*v| {
+        v.* = if (v.* > 0) v.* else alpha * v.*;
+    }
+}
+
+fn scalarInto(dest: *Tensor, x: *const Tensor, scalar: f32, comptime op: fn (f32, f32) f32) TensorError!void {
+    const dl = try validate(dest);
+    const xl = try validate(x);
+    if (!dest.shape.eq(x.shape)) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{x}, &.{xl});
+    if (dl.count == 0) return;
+    const out = dest.data[0..dl.count];
+    shape.gatherStrided(out, x.data, x.shape, x.strides);
+    for (out) |*v| {
+        v.* = op(v.*, scalar);
+    }
+}
+
+pub fn mulScalarInto(dest: *Tensor, x: *const Tensor, val: f32) TensorError!void {
+    return scalarInto(dest, x, val, struct {
+        fn apply(a: f32, b: f32) f32 {
+            return a * b;
+        }
+    }.apply);
+}
+
+pub fn divScalarInto(dest: *Tensor, x: *const Tensor, val: f32) TensorError!void {
+    return scalarInto(dest, x, val, struct {
+        fn apply(a: f32, b: f32) f32 {
+            return a / b;
+        }
+    }.apply);
+}
+
+pub fn addScalarInto(dest: *Tensor, x: *const Tensor, val: f32) TensorError!void {
+    return scalarInto(dest, x, val, struct {
+        fn apply(a: f32, b: f32) f32 {
+            return a + b;
+        }
+    }.apply);
+}
+
+pub fn subScalarInto(dest: *Tensor, x: *const Tensor, val: f32) TensorError!void {
+    return scalarInto(dest, x, val, struct {
+        fn apply(a: f32, b: f32) f32 {
+            return a - b;
+        }
+    }.apply);
+}
+
+pub fn copyInto(dest: *Tensor, src: *const Tensor) TensorError!void {
+    const dl = try validate(dest);
+    const sl = try validate(src);
+    if (dl.count != sl.count) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{src}, &.{sl});
+    if (dl.count == 0) return;
+    shape.gatherStrided(dest.data[0..dl.count], src.data, src.shape, src.strides);
+}
+
+pub fn transposeInto(dest: *Tensor, src: *const Tensor, dim0: usize, dim1: usize) TensorError!void {
+    if (dim0 >= src.shape.len or dim1 >= src.shape.len) return error.DimensionOutOfBounds;
+    var t_shape = src.shape;
+    var t_strides = src.strides;
+    std.mem.swap(usize, &t_shape.dims[dim0], &t_shape.dims[dim1]);
+    std.mem.swap(usize, &t_strides.dims[dim0], &t_strides.dims[dim1]);
+    const dl = try validate(dest);
+    const sl = try validate(src);
+    if (!dest.shape.eq(t_shape)) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{src}, &.{sl});
+    if (dl.count == 0) return;
+    shape.gatherStrided(dest.data[0..dl.count], src.data, t_shape, t_strides);
+}
+
+pub fn layerNormInto(
+    dest: *Tensor,
+    x: *const Tensor,
+    gamma: *const Tensor,
+    beta: *const Tensor,
+    eps: f32,
+    save_mean: ?[]f32,
+    save_inv_std: ?[]f32,
+) TensorError!void {
+    const dl = try validate(dest);
+    const xl = try validate(x);
+    const gl = try validate(gamma);
+    const bl = try validate(beta);
+    if (x.shape.len == 0) return error.IncompatibleDimensions;
+    const D = x.shape.dims[x.shape.len - 1];
+    if (D == 0) return error.DivisionByZero;
+    if (!dest.shape.eq(x.shape)) return error.ShapeMismatch;
+    if (gamma.shape.numel() != D or beta.shape.numel() != D) return error.ShapeMismatch;
+    const M = dl.count / D;
+    if (save_mean) |s| if (s.len != M) return error.ShapeMismatch;
+    if (save_inv_std) |s| if (s.len != M) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{ x, gamma, beta }, &.{ xl, gl, bl });
+    if (dl.count == 0) return;
+    const out = dest.data[0..dl.count];
+    shape.gatherStrided(out, x.data, x.shape, x.strides);
+    const d_f = @as(f32, @floatFromInt(D));
+    const g_stride = if (gamma.shape.len > 0) gamma.strides.dims[gamma.shape.len - 1] else 1;
+    const b_stride = if (beta.shape.len > 0) beta.strides.dims[beta.shape.len - 1] else 1;
+    for (0..M) |i| {
+        const row = out[i * D .. (i + 1) * D];
+        const mean_val = backend.vec_math.sum(row) / d_f;
+        const var_sum = backend.vec_math.sumSquaredDeviations(row, mean_val);
+        const inv_std = 1.0 / @sqrt(var_sum / d_f + eps);
+        if (save_mean) |s| s[i] = mean_val;
+        if (save_inv_std) |s| s[i] = inv_std;
+        for (row, 0..) |*val, j| {
+            const g = gamma.data[j * g_stride];
+            const b = beta.data[j * b_stride];
+            val.* = (val.* - mean_val) * inv_std * g + b;
+        }
+    }
+}
+
+pub fn mseLossInto(dest: *Tensor, a: *const Tensor, b: *const Tensor) TensorError!void {
+    const dl = try validate(dest);
+    const al = try validate(a);
+    const bl = try validate(b);
+    if (!a.shape.eq(b.shape)) return error.ShapeMismatch;
+    if (dest.shape.numel() != 1) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{ a, b }, &.{ al, bl });
+    if (al.count == 0) {
+        dest.data[0] = 0;
+        return;
+    }
+    var sum_val: f32 = 0;
+    for (0..al.count) |i| {
+        const diff = a.data[i] - b.data[i];
+        sum_val += diff * diff;
+    }
+    dest.data[0] = sum_val / @as(f32, @floatFromInt(al.count));
+}
+
+pub fn bceLossInto(dest: *Tensor, p_in: *const Tensor, targets: *const Tensor, eps: f32) TensorError!void {
+    const dl = try validate(dest);
+    const pl = try validate(p_in);
+    const tl = try validate(targets);
+    if (!p_in.shape.eq(targets.shape)) return error.ShapeMismatch;
+    if (dest.shape.numel() != 1) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{ p_in, targets }, &.{ pl, tl });
+    const N = pl.count;
+    if (N == 0) {
+        dest.data[0] = 0;
+        return;
+    }
+    var total_loss: f32 = 0.0;
+    for (0..N) |i| {
+        const p = p_in.data[i];
+        const y = targets.data[i];
+        const p_clip = @max(p, eps);
+        const one_minus_p_clip = @max(1.0 - p, eps);
+        total_loss += -(y * @log(p_clip) + (1.0 - y) * @log(one_minus_p_clip));
+    }
+    dest.data[0] = total_loss / @as(f32, @floatFromInt(N));
+}
+
+pub fn bceWithLogitsLossInto(dest: *Tensor, logits: *const Tensor, targets: *const Tensor) TensorError!void {
+    const dl = try validate(dest);
+    const ll = try validate(logits);
+    const tl = try validate(targets);
+    if (!logits.shape.eq(targets.shape)) return error.ShapeMismatch;
+    if (dest.shape.numel() != 1) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{ logits, targets }, &.{ ll, tl });
+    const N = ll.count;
+    if (N == 0) {
+        dest.data[0] = 0;
+        return;
+    }
+    var total_loss: f32 = 0.0;
+    for (0..N) |i| {
+        const x = logits.data[i];
+        const y = targets.data[i];
+        const max_x = @max(x, 0.0);
+        const abs_x = @abs(x);
+        total_loss += max_x - x * y + @log(1.0 + @exp(-abs_x));
+    }
+    dest.data[0] = total_loss / @as(f32, @floatFromInt(N));
+}
+
+pub fn l1LossInto(dest: *Tensor, x: *const Tensor, lambda: f32) TensorError!void {
+    const dl = try validate(dest);
+    const xl = try validate(x);
+    if (dest.shape.numel() != 1) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{x}, &.{xl});
+    var sum_val: f32 = 0;
+    for (x.data[0..xl.count]) |v| sum_val += @abs(v);
+    dest.data[0] = lambda * sum_val;
+}
+
+pub fn l2LossInto(dest: *Tensor, x: *const Tensor, lambda: f32) TensorError!void {
+    const dl = try validate(dest);
+    const xl = try validate(x);
+    if (dest.shape.numel() != 1) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{x}, &.{xl});
+    var sum_val: f32 = 0;
+    for (x.data[0..xl.count]) |v| sum_val += v * v;
+    dest.data[0] = 0.5 * lambda * sum_val;
+}
+
+pub fn embeddingInto(dest: *Tensor, weights: *const Tensor, indices: *const Tensor) TensorError!void {
+    const dl = try validate(dest);
+    const wl = try validate(weights);
+    const il = try validate(indices);
+    if (weights.shape.len != 2) return error.IncompatibleDimensions;
+    const D = weights.shape.dims[1];
+    if (dl.count != il.count * D) return error.ShapeMismatch;
+    try validateOutput(dest, dl, &.{ weights, indices }, &.{ wl, il });
+    if (dl.count == 0) return;
+    const nn_kernels = @import("nn_kernels.zig");
+    try nn_kernels.embeddingLookupInto(f32, weights.data[0..wl.count], indices.data[0..il.count], D, 1.0, dest.data[0..dl.count]);
 }

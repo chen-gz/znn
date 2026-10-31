@@ -153,10 +153,10 @@ test "Tensor ND reshape and transpose autograd" {
 
     // Run backward on C (usually we call graph.backward(loss), but here we manually backward C's creator)
     if (autodiff.Op.creatorOf(C)) |op| {
-        try autodiff.op.backward(op);
+        try autodiff.op.backward(op, arena);
     }
     if (autodiff.Op.creatorOf(B)) |op| {
-        try autodiff.op.backward(op);
+        try autodiff.op.backward(op, arena);
     }
 
     // Check A.grad
@@ -798,7 +798,7 @@ test "Tensor concat and split autograd" {
 
     // Call backward on each split's creator or through graph
     if (autodiff.Op.creatorOf(splits[0])) |op| {
-        try autodiff.op.backward(op);
+        try autodiff.op.backward(op, allocator);
     }
 
     try std.testing.expectEqual(@as(f32, 1.0), X.grad[0]); // [0, 0, 0] in splits[0]

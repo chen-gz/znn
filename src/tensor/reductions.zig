@@ -207,18 +207,8 @@ pub fn numel(self: Tensor) usize {
 /// 通用多维张量沿指定轴或全局求和归约 (Sum Reduction)
 /// 非连续输入先物化为连续副本；沿轴归约按 (outer, k, inner) 顺序把整行累加到输出行，访存连续且可向量化
 pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !*Tensor {
-    if (self.storage.typed_owner != null) {
-        try self.syncHost(allocator);
-    }
     if (axis) |ax| {
         if (ax >= self.shape.len) return error.DimensionOutOfBounds;
-    }
-    const contig_ptr: ?*Tensor = if (!self.isContiguous()) try self.contiguous(allocator) else null;
-    defer if (contig_ptr) |cp| free(allocator, cp);
-    const x_data = (if (contig_ptr) |cp| cp.data else self.data)[0..self.shape.numel()];
-
-    if (axis) |ax| {
-        const reduce_size = self.shape.dims[ax];
 
         var out_shape_dims: [8]usize = @splat(0);
         var out_rank: usize = 0;
@@ -245,7 +235,33 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
         }
 
         const C = try zeros(allocator, out_shape_dims[0..out_rank]);
+        try sumInto(C, self, axis, keepdims, allocator);
+        return C;
+    } else {
+        // 全局归约 (Global reduction over all elements)
+        const C = if (keepdims) blk: {
+            const out_shape_dims: [8]usize = @splat(1);
+            break :blk try zeros(allocator, out_shape_dims[0..self.shape.len]);
+        } else try zeros(allocator, &.{1});
+        try sumInto(C, self, axis, keepdims, allocator);
+        return C;
+    }
+}
 
+pub fn sumInto(dest: *Tensor, self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !void {
+    _ = keepdims;
+    if (self.storage.typed_owner != null) {
+        try self.syncHost(allocator);
+    }
+    if (axis) |ax| {
+        if (ax >= self.shape.len) return error.DimensionOutOfBounds;
+    }
+    const contig_ptr: ?*Tensor = if (!self.isContiguous()) try self.contiguous(allocator) else null;
+    defer if (contig_ptr) |cp| free(allocator, cp);
+    const x_data = (if (contig_ptr) |cp| cp.data else self.data)[0..self.shape.numel()];
+
+    if (axis) |ax| {
+        const reduce_size = self.shape.dims[ax];
         var outer_size: usize = 1;
         for (0..ax) |d| {
             outer_size *= self.shape.dims[d];
@@ -257,11 +273,12 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
 
         if (inner_size == 1) {
             for (0..outer_size) |outer| {
-                C.data[outer] = vec_math.sum(x_data[outer * reduce_size ..][0..reduce_size]);
+                dest.data[outer] = vec_math.sum(x_data[outer * reduce_size ..][0..reduce_size]);
             }
         } else {
+            @memset(dest.data[0..dest.shape.numel()], 0.0);
             for (0..outer_size) |outer| {
-                const out_row = C.data[outer * inner_size ..][0..inner_size];
+                const out_row = dest.data[outer * inner_size ..][0..inner_size];
                 const src_base = outer * reduce_size * inner_size;
                 for (0..reduce_size) |k| {
                     const src_row = x_data[src_base + k * inner_size ..][0..inner_size];
@@ -269,20 +286,17 @@ pub fn sum(self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Alloc
                 }
             }
         }
-        return C;
     } else {
-        // 全局归约 (Global reduction over all elements)
-        const total = vec_math.sum(x_data);
-        if (keepdims) {
-            const out_shape_dims: [8]usize = @splat(1);
-            const C = try zeros(allocator, out_shape_dims[0..self.shape.len]);
-            C.data[0] = total;
-            return C;
-        } else {
-            const C = try zeros(allocator, &.{1});
-            C.data[0] = total;
-            return C;
-        }
+        dest.data[0] = vec_math.sum(x_data);
+    }
+}
+
+pub fn meanInto(dest: *Tensor, self: *Tensor, axis: ?usize, keepdims: bool, allocator: std.mem.Allocator) !void {
+    try sumInto(dest, self, axis, keepdims, allocator);
+    const denom: f32 = if (axis) |ax| @floatFromInt(self.shape.dims[ax]) else @floatFromInt(self.shape.numel());
+    if (denom > 0) {
+        const inv = 1.0 / denom;
+        for (dest.data[0..dest.shape.numel()]) |*v| v.* *= inv;
     }
 }
 

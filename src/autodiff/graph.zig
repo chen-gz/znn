@@ -1217,7 +1217,7 @@ pub const Graph = struct {
         var i = order.items.len;
         while (i > 0) {
             i -= 1;
-            try op_mod.backward(order.items[i]);
+            try op_mod.backward(order.items[i], self.arena.allocator());
         }
     }
 
