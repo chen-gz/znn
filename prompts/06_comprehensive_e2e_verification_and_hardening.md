@@ -1,7 +1,7 @@
 # Milestone 6: 端到端全量验证与对抗性加固 (Comprehensive E2E Verification & Hardening)
 
 > **Status**: Queued (Milestone 6)  
-> **Dependency**: Milestones 1 through 5  
+> **Dependency**: P0, Milestones 1 through 5  
 > **Target Scope**: 全库测试、Schema 2.0 Web 对齐、压力与对抗性测试
 
 ---

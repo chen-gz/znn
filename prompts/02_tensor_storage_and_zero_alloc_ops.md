@@ -1,6 +1,6 @@
 # Milestone 2: 张量存储统一与算子零分配体系 (Tensor Storage & Destination Ops)
 
-> **Status**: Completed (Legacy device and device_array fields eliminated, physical device storage unified under DeviceBuffer, and persistent tensors migrated to DeviceBuffer.alloc)  
+> **Status**: Completed & Merged to `main` (Commit `bc6981a4`, verified with 418 unit tests, 0 leaks, 18 canonical book models export cleanly, Gemma 4 E4B verified at 127 token/s prefill)  
 > **Target Package**: `src/tensor/` (Layer 1) & `src/backend/buffer.zig` (Layer 0)  
 > **Key Files**: `src/tensor/core.zig`, `src/tensor/ops.zig`, `src/tensor/types.zig`
 

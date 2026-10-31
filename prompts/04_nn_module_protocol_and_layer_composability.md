@@ -1,7 +1,7 @@
 # Milestone 4: PyTorch 风格 `nn.Module` 协议与图层标准化
 
 > **Status**: Queued (Milestone 4)  
-> **Dependency**: Milestone 2, Milestone 3  
+> **Dependency**: Milestone 2, P0, Milestone 3 (Execution Graph & Buffer Reuse)  
 > **Target Package**: `src/nn/` (Layer 3)  
 > **Key Files**: `src/nn/module.zig`, `src/nn/core.zig`, `src/nn/attention.zig`, `src/nn/normalization.zig`
 
