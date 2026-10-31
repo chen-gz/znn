@@ -1,6 +1,13 @@
 # Milestone 4: PyTorch 风格 `nn.Module` 协议与图层标准化
 
-> **Status**: Queued (Milestone 4)  
+> **Status**: **Completed & Verified** (Milestone 4 100% Completed, Rebased & Merged to `main` at `4b2f5d8f`)  
+> **Verification Summary**:
+> - `verifyModule` compile-time assertions verified across all standard layers.
+> - `createParameter` and `createBuffer` explicit decoupling verified.
+> - `BatchNorm1d` / `BatchNorm2d` running stats decoupled as persistent buffers, immune to `setRequiresGrad`.
+> - `buffers`, `namedBuffers`, `submodules` and generic `ModuleList` container verified.
+> - `Q4Linear` quantized weights transparently counted in `numParameters`.
+> - Test Suites: `zig build check-layers` (89 files, 0 violations), `zig build test` (428/428 passed, 0 leaks), `zig build test -Dmlx=false` (passed), `zig build run-book-models` (18/18 models passed).
 > **Dependency**: Milestone 2, P0, Milestone 3 (Execution Graph & Buffer Reuse)  
 > **Target Package**: `src/nn/` (Layer 3)  
 > **Key Files**: `src/nn/module.zig`, `src/nn/core.zig`, `src/nn/attention.zig`, `src/nn/normalization.zig`
