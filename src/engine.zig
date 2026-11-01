@@ -175,7 +175,7 @@ pub fn trainClassificationEpoch(
     loader.reset();
     var acc: EpochAccumulator = .{};
 
-    const input_dim = loader.dataset.images.rows * loader.dataset.images.cols;
+    const input_dim = loader.dataset.images.sampleSize();
     const max_batch_size = loader.batch_size;
     const x_buffer = try allocator.alloc(f32, max_batch_size * input_dim);
     defer allocator.free(x_buffer);
@@ -210,7 +210,7 @@ pub fn evaluateClassification(
     loader.reset();
     var acc: EpochAccumulator = .{};
 
-    const input_dim = loader.dataset.images.rows * loader.dataset.images.cols;
+    const input_dim = loader.dataset.images.sampleSize();
     const max_batch_size = loader.batch_size;
     const x_buffer = try allocator.alloc(f32, max_batch_size * input_dim);
     defer allocator.free(x_buffer);

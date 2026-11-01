@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Comprehensive Multi-Domain Dataset Suite (Tiny ImageNet, WikiText-103 & Multimodal Vision-Language)**:
+  - Upgraded `ImageDataset` in `src/dataset.zig` to support arbitrary channel depth (`channels: u32 = 1` for grayscale, `channels = 3` for RGB) and added `sampleSize() = channels * rows * cols`.
+  - Extended `loadImages` to parse both 3D IDX (`0x00000803`) and 4D IDX (`0x00000804` NCHW) tensor files.
+  - Implemented Tiny ImageNet packed binary parser `loadTinyImageNetBin` (3-channel $64 \times 64$ RGB, 200 classes) and instant in-memory generator `createSyntheticTinyImageNet`.
+  - Added `scripts/pack_tiny_imagenet.py` to pack extracted Tiny ImageNet JPEG folders into high-speed binary blobs.
+  - Expanded `tools/download_data.zig` with automated download targets for `tiny_imagenet` and `wikitext103`.
+  - Implemented `MultimodalDataset`, `MultimodalPair`, and `MultimodalDataLoader` with batching, token padding, and shuffling in `src/dataset.zig`.
+  - Added `createSyntheticMultimodalDataset` producing paired high-resolution RGB images and BPE-tokenized descriptive captions.
+  - Created end-to-end vision-language benchmark in `examples/multimodal.zig` (`zig build run-multimodal`) integrating ConvNeXt-atto visual feature extraction, cross-modal linear projection, and causal Transformer autoregressive decoder, processing 21+ pairs/sec with zero memory leaks.
+  - Upgraded `examples/convnext.zig` and `examples/resnet.zig` to support `--dataset tiny_imagenet` (3-channel $64 \times 64$ input, 200 output classes).
+
 - **Modern ConvNeXt Pure Convolutional Vision Architecture Suite (Liu et al. CVPR 2022)**:
   - Added support for grouped convolution and depthwise convolution (`groups: usize = 1` in `ConvOptions`, `conv2d`, `conv2dInto`, `conv1d`, and `nn.Conv2D`).
   - Implemented exact grouped and depthwise convolution backward automatic differentiation in `src/autodiff/backward_nn.zig`, fully validated with numerical gradient checking (`gradcheck`).

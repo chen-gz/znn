@@ -161,6 +161,14 @@ const examples = [_]ExampleTarget{
         .alias_desc = "Run the Gemma 4 E4B inference benchmark and test (alias for run-gemma4-e4b)",
         .forward_args = true,
     },
+    .{
+        .name = "multimodal",
+        .src = "examples/multimodal.zig",
+        .run_step = "run-multimodal",
+        .run_desc = "Run the Multimodal (Vision-Language paired dataset and cross-modal embedding) benchmark",
+        .test_name = "multimodal_tests",
+        .forward_args = true,
+    },
 };
 
 fn forwardArgs(b: *std.Build, run_cmd: *std.Build.Step.Run) void {

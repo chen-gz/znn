@@ -240,6 +240,8 @@ fn walkField(field_ptr: anytype, visitor: anytype, path: *Path) !void {
                 try walkElement(item, visitor, path);
             }
             if (@hasDecl(V, "visitOwnedSlice")) try visitor.visitOwnedSlice(field_ptr.*);
+        } else {
+            if (@hasDecl(V, "visitOwnedSlice")) try visitor.visitOwnedSlice(field_ptr.*);
         }
     } else if (info == .@"struct") {
         try walkStruct(field_ptr, visitor, path);

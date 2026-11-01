@@ -2,9 +2,14 @@ const std = @import("std");
 
 pub const ImageDataset = struct {
     num_images: u32,
+    channels: u32 = 1, // 通道数：1 (灰度图, 如 MNIST/Fashion-MNIST), 3 (彩色 RGB, 如 CIFAR/Tiny ImageNet)
     rows: u32,
     cols: u32,
-    data: []f32, // normalized between 0.0 and 1.0 (shape: num_images * rows * cols)
+    data: []f32, // normalized between 0.0 and 1.0 (shape: num_images * channels * rows * cols)
+
+    pub fn sampleSize(self: ImageDataset) usize {
+        return @as(usize, self.channels) * @as(usize, self.rows) * @as(usize, self.cols);
+    }
 
     pub fn deinit(self: *ImageDataset, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
@@ -38,21 +43,41 @@ pub fn loadImages(allocator: std.mem.Allocator, io: std.Io, file_path: []const u
 
     try reader.readSliceAll(&temp_4);
     const magic = std.mem.readInt(u32, &temp_4, .big);
-    if (magic != 0x00000803) {
+
+    var channels: u32 = 1;
+    var num_images: u32 = 0;
+    var rows: u32 = 0;
+    var cols: u32 = 0;
+
+    if (magic == 0x00000803) {
+        // 3D IDX format: [num_images, rows, cols], channels = 1
+        try reader.readSliceAll(&temp_4);
+        num_images = std.mem.readInt(u32, &temp_4, .big);
+
+        try reader.readSliceAll(&temp_4);
+        rows = std.mem.readInt(u32, &temp_4, .big);
+
+        try reader.readSliceAll(&temp_4);
+        cols = std.mem.readInt(u32, &temp_4, .big);
+    } else if (magic == 0x00000804) {
+        // 4D IDX format: [num_images, channels, rows, cols]
+        try reader.readSliceAll(&temp_4);
+        num_images = std.mem.readInt(u32, &temp_4, .big);
+
+        try reader.readSliceAll(&temp_4);
+        channels = std.mem.readInt(u32, &temp_4, .big);
+
+        try reader.readSliceAll(&temp_4);
+        rows = std.mem.readInt(u32, &temp_4, .big);
+
+        try reader.readSliceAll(&temp_4);
+        cols = std.mem.readInt(u32, &temp_4, .big);
+    } else {
         return error.InvalidMagicNumber;
     }
 
-    try reader.readSliceAll(&temp_4);
-    const num_images = std.mem.readInt(u32, &temp_4, .big);
-
-    try reader.readSliceAll(&temp_4);
-    const rows = std.mem.readInt(u32, &temp_4, .big);
-
-    try reader.readSliceAll(&temp_4);
-    const cols = std.mem.readInt(u32, &temp_4, .big);
-
     // 头部尺寸来自文件，使用带溢出检查的乘法，防止损坏文件导致分配尺寸回绕
-    const num_pixels = try std.math.mul(usize, try std.math.mul(usize, num_images, rows), cols);
+    const num_pixels = try std.math.mul(usize, try std.math.mul(usize, try std.math.mul(usize, num_images, channels), rows), cols);
     const data = try allocator.alloc(f32, num_pixels);
     errdefer allocator.free(data);
 
@@ -70,6 +95,7 @@ pub fn loadImages(allocator: std.mem.Allocator, io: std.Io, file_path: []const u
 
     return ImageDataset{
         .num_images = num_images,
+        .channels = channels,
         .rows = rows,
         .cols = cols,
         .data = data,
@@ -127,6 +153,115 @@ pub fn loadDataset(allocator: std.mem.Allocator, io: std.Io, images_path: []cons
     return Dataset{
         .images = images,
         .labels = labels,
+    };
+}
+
+/// 读取 Tiny ImageNet 紧凑二进制格式 (每张样本: 1 字节类别标签 [0..199] + 3*64*64=12288 字节 RGB 像素，CHW 格式)。
+/// 像素字节按固定线性缩放到 [0, 1]：x = pixel / 255.0。
+pub fn loadTinyImageNetBin(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    file_path: []const u8,
+    max_samples: ?usize,
+) !Dataset {
+    const cwd = std.Io.Dir.cwd();
+    var file = try cwd.openFile(io, file_path, .{});
+    defer file.close(io);
+
+    const file_len = try file.length(io);
+    const bytes_per_record: usize = 1 + 3 * 64 * 64; // 12289
+    if (file_len < bytes_per_record) {
+        return error.InvalidDatasetFormat;
+    }
+
+    const total_records = file_len / bytes_per_record;
+    const num_samples = if (max_samples) |m| @min(m, total_records) else total_records;
+    if (num_samples == 0) return error.EmptyDataset;
+
+    const img_data = try allocator.alloc(f32, num_samples * 3 * 64 * 64);
+    errdefer allocator.free(img_data);
+    const lbl_data = try allocator.alloc(u8, num_samples);
+    errdefer allocator.free(lbl_data);
+
+    var file_buf: [65536]u8 = undefined;
+    var file_reader = file.reader(io, &file_buf);
+    const reader = &file_reader.interface;
+
+    var record_buf: [12289]u8 = undefined;
+    for (0..num_samples) |i| {
+        try reader.readSliceAll(&record_buf);
+        lbl_data[i] = record_buf[0];
+        const pixel_bytes = record_buf[1..12289];
+        const dest_slice = img_data[i * 12288 .. (i + 1) * 12288];
+        for (pixel_bytes, 0..) |p, p_idx| {
+            dest_slice[p_idx] = @as(f32, @floatFromInt(p)) / 255.0;
+        }
+    }
+
+    return Dataset{
+        .images = .{
+            .num_images = @as(u32, @intCast(num_samples)),
+            .channels = 3,
+            .rows = 64,
+            .cols = 64,
+            .data = img_data,
+        },
+        .labels = .{
+            .num_items = @as(u32, @intCast(num_samples)),
+            .data = lbl_data,
+        },
+    };
+}
+
+/// 快速构造用于测试与基准评测的合成 Tiny ImageNet 数据集 (3 通道 64x64，200 个语义类别)。
+/// 每个类别生成具有区分度的空间几何与色彩频谱图案，用于在无外部大文件下载时完整验证 3 通道高分辨率模型。
+pub fn createSyntheticTinyImageNet(allocator: std.mem.Allocator, num_samples: usize) !Dataset {
+    const num_pixels = num_samples * 3 * 64 * 64;
+    const img_data = try allocator.alloc(f32, num_pixels);
+    errdefer allocator.free(img_data);
+    const lbl_data = try allocator.alloc(u8, num_samples);
+    errdefer allocator.free(lbl_data);
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+
+    for (0..num_samples) |i| {
+        const class_id: u8 = @as(u8, @intCast(i % 200));
+        lbl_data[i] = class_id;
+
+        const img_slice = img_data[i * 12288 .. (i + 1) * 12288];
+        const class_f = @as(f32, @floatFromInt(class_id)) / 200.0;
+        for (0..64) |r| {
+            for (0..64) |c| {
+                const pixel_idx = r * 64 + c;
+                const r_val = @as(f32, @floatFromInt(r)) / 64.0;
+                const c_val = @as(f32, @floatFromInt(c)) / 64.0;
+
+                // R 通道: 类别基准强度 + 随机微扰
+                img_slice[0 * 4096 + pixel_idx] = std.math.clamp(class_f * 0.7 + random.float(f32) * 0.3, 0.0, 1.0);
+                // G 通道: 空间斜向渐变
+                img_slice[1 * 4096 + pixel_idx] = (r_val + c_val) * 0.5;
+                // B 通道: 径向距离场 (中心高亮)
+                const dr = r_val - 0.5;
+                const dc = c_val - 0.5;
+                const dist = @sqrt(dr * dr + dc * dc);
+                img_slice[2 * 4096 + pixel_idx] = std.math.clamp(1.0 - dist, 0.0, 1.0);
+            }
+        }
+    }
+
+    return Dataset{
+        .images = .{
+            .num_images = @as(u32, @intCast(num_samples)),
+            .channels = 3,
+            .rows = 64,
+            .cols = 64,
+            .data = img_data,
+        },
+        .labels = .{
+            .num_items = @as(u32, @intCast(num_samples)),
+            .data = lbl_data,
+        },
     };
 }
 
@@ -228,7 +363,7 @@ pub const DataLoader = struct {
             return null;
         }
 
-        const input_dim = self.dataset.images.rows * self.dataset.images.cols;
+        const input_dim = self.dataset.images.sampleSize();
         for (0..actual_batch_size) |j| {
             const idx = self.indices[self.current_index + j];
             @memcpy(x_dest[j * input_dim .. (j + 1) * input_dim], self.dataset.images.data[idx * input_dim .. (idx + 1) * input_dim]);
@@ -591,6 +726,220 @@ pub const BinaryMmapDataset = struct {
     }
 };
 
+// ============================================================================
+// 3. 多模态图文对数据集 (Multimodal Vision-Language Dataset)
+// ============================================================================
+
+pub const MultimodalPair = struct {
+    image: []const f32, // [channels * rows * cols]
+    caption: []const u8,
+    tokens: []const u32,
+};
+
+pub const MultimodalDataset = struct {
+    images: ImageDataset,
+    captions: [][]const u8,
+    tokens: [][]const u32,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *MultimodalDataset) void {
+        self.images.deinit(self.allocator);
+        for (self.captions) |cap| {
+            self.allocator.free(cap);
+        }
+        self.allocator.free(self.captions);
+        for (self.tokens) |toks| {
+            self.allocator.free(toks);
+        }
+        self.allocator.free(self.tokens);
+    }
+
+    pub fn count(self: MultimodalDataset) usize {
+        return @as(usize, self.images.num_images);
+    }
+
+    pub fn get(self: MultimodalDataset, idx: usize) MultimodalPair {
+        const sample_len = self.images.sampleSize();
+        return .{
+            .image = self.images.data[idx * sample_len .. (idx + 1) * sample_len],
+            .caption = self.captions[idx],
+            .tokens = self.tokens[idx],
+        };
+    }
+};
+
+pub const MultimodalDataLoaderOptions = struct {
+    shuffle: bool = false,
+    seed: ?u64 = null,
+    drop_last: bool = false,
+    pad_token_id: u32 = 0,
+
+    pub const default: MultimodalDataLoaderOptions = .{};
+    pub fn defaultOptions() MultimodalDataLoaderOptions {
+        return .{};
+    }
+};
+
+pub const MultimodalDataLoader = struct {
+    dataset: MultimodalDataset,
+    batch_size: usize,
+    max_seq_len: usize,
+    pad_token_id: u32,
+    shuffle: bool,
+    drop_last: bool,
+    indices: []usize,
+    current_index: usize,
+    prng: std.Random.DefaultPrng,
+
+    pub fn initDefault(
+        allocator: std.mem.Allocator,
+        ds: MultimodalDataset,
+        batch_size: usize,
+        max_seq_len: usize,
+    ) !MultimodalDataLoader {
+        return init(allocator, ds, batch_size, max_seq_len, MultimodalDataLoaderOptions.default);
+    }
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        ds: MultimodalDataset,
+        batch_size: usize,
+        max_seq_len: usize,
+        options: MultimodalDataLoaderOptions,
+    ) !MultimodalDataLoader {
+        if (batch_size == 0) return error.InvalidBatchSize;
+        const num_samples = ds.count();
+        if (ds.captions.len != num_samples or ds.tokens.len != num_samples) {
+            return error.DatasetSizeMismatch;
+        }
+        const indices = try allocator.alloc(usize, num_samples);
+        for (indices, 0..) |*idx, i| {
+            idx.* = i;
+        }
+        var self = MultimodalDataLoader{
+            .dataset = ds,
+            .batch_size = batch_size,
+            .max_seq_len = max_seq_len,
+            .pad_token_id = options.pad_token_id,
+            .shuffle = options.shuffle,
+            .drop_last = options.drop_last,
+            .indices = indices,
+            .current_index = 0,
+            .prng = std.Random.DefaultPrng.init(options.seed orelse 1337),
+        };
+        if (self.shuffle) {
+            self.shuffleIndices();
+        }
+        return self;
+    }
+
+    pub fn deinit(self: *MultimodalDataLoader, allocator: std.mem.Allocator) void {
+        allocator.free(self.indices);
+    }
+
+    pub fn shuffleIndices(self: *MultimodalDataLoader) void {
+        if (self.indices.len < 2) return;
+        const random = self.prng.random();
+        var i: usize = self.indices.len - 1;
+        while (i > 0) : (i -= 1) {
+            const j = random.intRangeLessThan(usize, 0, i + 1);
+            const temp = self.indices[i];
+            self.indices[i] = self.indices[j];
+            self.indices[j] = temp;
+        }
+    }
+
+    pub fn reset(self: *MultimodalDataLoader) void {
+        self.current_index = 0;
+        if (self.shuffle) {
+            self.shuffleIndices();
+        }
+    }
+
+    pub fn nextInto(
+        self: *MultimodalDataLoader,
+        img_dest: []f32,
+        tokens_dest: []u32,
+        lengths_dest: []usize,
+    ) ?usize {
+        const num_samples = self.indices.len;
+        if (self.current_index >= num_samples) return null;
+        const remaining = num_samples - self.current_index;
+        if (self.drop_last and remaining < self.batch_size) return null;
+        const actual_batch_size = @min(self.batch_size, remaining);
+        if (actual_batch_size == 0) return null;
+
+        const sample_sz = self.dataset.images.sampleSize();
+        @memset(tokens_dest[0 .. actual_batch_size * self.max_seq_len], self.pad_token_id);
+
+        for (0..actual_batch_size) |j| {
+            const idx = self.indices[self.current_index + j];
+            const pair = self.dataset.get(idx);
+            @memcpy(img_dest[j * sample_sz .. (j + 1) * sample_sz], pair.image);
+
+            const copy_len = @min(pair.tokens.len, self.max_seq_len);
+            @memcpy(tokens_dest[j * self.max_seq_len .. j * self.max_seq_len + copy_len], pair.tokens[0..copy_len]);
+            lengths_dest[j] = copy_len;
+        }
+
+        self.current_index += actual_batch_size;
+        return actual_batch_size;
+    }
+};
+
+/// 构造用于测试与基准评测的多模态图文对数据集。
+/// 包含 3 通道高分辨率图像与其对应的自然语言描述文本，并通过给定的分词器完成离散 Token 编码。
+pub fn createSyntheticMultimodalDataset(
+    allocator: std.mem.Allocator,
+    tokenizer: *const BPETokenizer,
+    num_samples: usize,
+) !MultimodalDataset {
+    var img_ds = try createSyntheticTinyImageNet(allocator, num_samples);
+    errdefer img_ds.deinit(allocator);
+
+    const captions = try allocator.alloc([]const u8, num_samples);
+    var captions_allocated: usize = 0;
+    errdefer {
+        for (captions[0..captions_allocated]) |c| allocator.free(c);
+        allocator.free(captions);
+    }
+
+    const token_arrays = try allocator.alloc([]const u32, num_samples);
+    var tokens_allocated: usize = 0;
+    errdefer {
+        for (token_arrays[0..tokens_allocated]) |t| allocator.free(t);
+        allocator.free(token_arrays);
+    }
+
+    const objects = [_][]const u8{ "cat", "dog", "car", "airplane", "ship", "tree", "mountain", "flower" };
+    const colors = [_][]const u8{ "golden", "crimson", "emerald", "sapphire", "violet", "silver" };
+    const scenes = [_][]const u8{ "under sunlight", "in front of the camera", "against a blue sky", "in the forest", "at sunset" };
+
+    var buf: [256]u8 = undefined;
+    for (0..num_samples) |i| {
+        const obj = objects[i % objects.len];
+        const col = colors[(i / objects.len) % colors.len];
+        const scn = scenes[(i / (objects.len * colors.len)) % scenes.len];
+
+        const text = try std.fmt.bufPrint(&buf, "A high quality picture of a {s} {s} {s}.", .{ col, obj, scn });
+        captions[i] = try allocator.dupe(u8, text);
+        captions_allocated += 1;
+
+        const enc = try tokenizer.encode(allocator, captions[i]);
+        token_arrays[i] = enc;
+        tokens_allocated += 1;
+    }
+
+    img_ds.labels.deinit(allocator);
+
+    return MultimodalDataset{
+        .images = img_ds.images,
+        .captions = captions,
+        .tokens = token_arrays,
+        .allocator = allocator,
+    };
+}
+
 test "BPETokenizer encode, decode and merge" {
     const allocator = std.testing.allocator;
     var tokenizer = try BPETokenizer.init(allocator);
@@ -945,4 +1294,162 @@ test "BinaryMmapDataset loadFromBytes reinterprets aligned bytes" {
     const batch = ds.getBatch(1, 1);
     try std.testing.expectEqualSlices(u32, &.{ 8, 9 }, batch.x);
     try std.testing.expectEqualSlices(u32, &.{ 9, 10 }, batch.y);
+}
+
+test "loadImages 4D multi-channel RGB format" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const cwd = std.Io.Dir.cwd();
+    const io = testing.io;
+
+    const test_file = "test_4d_images.bin";
+    var file = try cwd.createFile(io, test_file, .{});
+    defer cwd.deleteFile(io, test_file) catch {};
+
+    var buf: [1024]u8 = undefined;
+    var file_writer = file.writer(io, &buf);
+    const writer = &file_writer.interface;
+
+    // Magic: 0x00000804 (4D unsigned byte tensor: N, C, H, W)
+    var temp: [4]u8 = undefined;
+    std.mem.writeInt(u32, &temp, 0x00000804, .big);
+    try writer.writeAll(&temp);
+
+    // N = 2
+    std.mem.writeInt(u32, &temp, 2, .big);
+    try writer.writeAll(&temp);
+
+    // C = 3 (RGB)
+    std.mem.writeInt(u32, &temp, 3, .big);
+    try writer.writeAll(&temp);
+
+    // H = 2
+    std.mem.writeInt(u32, &temp, 2, .big);
+    try writer.writeAll(&temp);
+
+    // W = 2
+    std.mem.writeInt(u32, &temp, 2, .big);
+    try writer.writeAll(&temp);
+
+    // 2 * 3 * 2 * 2 = 24 pixels
+    var pixels: [24]u8 = undefined;
+    for (&pixels, 0..) |*p, i| {
+        p.* = @as(u8, @intCast(i * 10));
+    }
+    try writer.writeAll(&pixels);
+    try writer.flush();
+    file.close(io);
+
+    var ds = try loadImages(allocator, io, test_file);
+    defer ds.deinit(allocator);
+
+    try testing.expectEqual(@as(u32, 2), ds.num_images);
+    try testing.expectEqual(@as(u32, 3), ds.channels);
+    try testing.expectEqual(@as(u32, 2), ds.rows);
+    try testing.expectEqual(@as(u32, 2), ds.cols);
+    try testing.expectEqual(@as(usize, 12), ds.sampleSize());
+    try testing.expectApproxEqRel(@as(f32, 0.0), ds.data[0], 1e-4);
+    try testing.expectApproxEqRel(@as(f32, 10.0 / 255.0), ds.data[1], 1e-4);
+}
+
+test "createSyntheticTinyImageNet and loadTinyImageNetBin roundtrip" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const cwd = std.Io.Dir.cwd();
+    const io = testing.io;
+
+    var synth = try createSyntheticTinyImageNet(allocator, 4);
+    defer synth.deinit(allocator);
+
+    try testing.expectEqual(@as(u32, 4), synth.images.num_images);
+    try testing.expectEqual(@as(u32, 3), synth.images.channels);
+    try testing.expectEqual(@as(u32, 64), synth.images.rows);
+    try testing.expectEqual(@as(u32, 64), synth.images.cols);
+    try testing.expectEqual(@as(u32, 4), synth.labels.num_items);
+
+    // Write binary Tiny ImageNet format file
+    const test_bin_file = "test_tiny_imagenet_roundtrip.bin";
+    var file = try cwd.createFile(io, test_bin_file, .{});
+    defer cwd.deleteFile(io, test_bin_file) catch {};
+
+    var buf: [65536]u8 = undefined;
+    var file_writer = file.writer(io, &buf);
+    const writer = &file_writer.interface;
+
+    const sample_pixels = 3 * 64 * 64;
+    var record_buf: [1 + sample_pixels]u8 = undefined;
+    for (0..4) |i| {
+        record_buf[0] = synth.labels.data[i];
+        for (0..sample_pixels) |p_idx| {
+            const float_val = synth.images.data[i * sample_pixels + p_idx];
+            record_buf[1 + p_idx] = @as(u8, @intFromFloat(std.math.clamp(float_val * 255.0, 0.0, 255.0)));
+        }
+        try writer.writeAll(&record_buf);
+    }
+    try writer.flush();
+    file.close(io);
+
+    // Read back with loadTinyImageNetBin
+    var loaded = try loadTinyImageNetBin(allocator, io, test_bin_file, null);
+    defer loaded.deinit(allocator);
+
+    try testing.expectEqual(@as(u32, 4), loaded.images.num_images);
+    try testing.expectEqual(@as(u32, 3), loaded.images.channels);
+    try testing.expectEqual(@as(u32, 64), loaded.images.rows);
+    try testing.expectEqual(@as(u32, 64), loaded.images.cols);
+    try testing.expectEqual(synth.labels.data[0], loaded.labels.data[0]);
+    try testing.expectEqual(synth.labels.data[3], loaded.labels.data[3]);
+}
+
+test "MultimodalDataset and MultimodalDataLoader" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var tokenizer = try BPETokenizer.init(allocator);
+    defer tokenizer.deinit();
+
+    var mm_ds = try createSyntheticMultimodalDataset(allocator, &tokenizer, 8);
+    defer mm_ds.deinit();
+
+    try testing.expectEqual(@as(usize, 8), mm_ds.count());
+    const pair0 = mm_ds.get(0);
+    try testing.expect(pair0.caption.len > 0);
+    try testing.expect(pair0.tokens.len > 0);
+    try testing.expectEqual(@as(usize, 3 * 64 * 64), pair0.image.len);
+
+    // Multimodal DataLoader
+    const batch_sz = 3;
+    const max_seq = 32;
+    var mm_loader = try MultimodalDataLoader.init(
+        allocator,
+        mm_ds,
+        batch_sz,
+        max_seq,
+        .{ .shuffle = true, .drop_last = false, .pad_token_id = 0 },
+    );
+    defer mm_loader.deinit(allocator);
+
+    const img_buf = try allocator.alloc(f32, batch_sz * 3 * 64 * 64);
+    defer allocator.free(img_buf);
+    const tokens_buf = try allocator.alloc(u32, batch_sz * max_seq);
+    defer allocator.free(tokens_buf);
+    const lengths_buf = try allocator.alloc(usize, batch_sz);
+    defer allocator.free(lengths_buf);
+
+    // Batch 1: 3 items
+    const b1 = mm_loader.nextInto(img_buf, tokens_buf, lengths_buf);
+    try testing.expectEqual(@as(?usize, 3), b1);
+    try testing.expect(lengths_buf[0] > 0);
+
+    // Batch 2: 3 items
+    const b2 = mm_loader.nextInto(img_buf, tokens_buf, lengths_buf);
+    try testing.expectEqual(@as(?usize, 3), b2);
+
+    // Batch 3: 2 items (drop_last is false)
+    const b3 = mm_loader.nextInto(img_buf, tokens_buf, lengths_buf);
+    try testing.expectEqual(@as(?usize, 2), b3);
+
+    // Batch 4: null
+    const b4 = mm_loader.nextInto(img_buf, tokens_buf, lengths_buf);
+    try testing.expectEqual(@as(?usize, null), b4);
 }

@@ -20,6 +20,8 @@ pub const CliOptions = struct {
     max_batches: usize = 100, // 默认跑 100 个批次 (6400 张图) 以便快速完成基准评估；设为 0 则跑满全量 937 个批次
     lr: f32 = 0.05,
     momentum: f32 = 0.9,
+    arch: []const u8 = "resnet9", // resnet9, resnet18, resnet20
+    dataset: []const u8 = "fashion_mnist", // fashion_mnist, tiny_imagenet
     test_eval_batches: usize = 20, // 评估时测 20 个批次 (2000 张图)
 };
 
@@ -38,6 +40,10 @@ pub fn parseCli(allocator: std.mem.Allocator, args: anytype) !CliOptions {
             if (iter.next()) |val| opts.max_batches = try std.fmt.parseInt(usize, val, 10);
         } else if (std.mem.eql(u8, arg, "--lr")) {
             if (iter.next()) |val| opts.lr = try std.fmt.parseFloat(f32, val);
+        } else if (std.mem.eql(u8, arg, "--arch") or std.mem.eql(u8, arg, "-a")) {
+            if (iter.next()) |val| opts.arch = val;
+        } else if (std.mem.eql(u8, arg, "--dataset") or std.mem.eql(u8, arg, "-d")) {
+            if (iter.next()) |val| opts.dataset = val;
         } else if (std.mem.eql(u8, arg, "--full")) {
             opts.max_batches = 0; // 全量 60000 张图
             opts.test_eval_batches = 0; // 全量 10000 张测试图
@@ -63,16 +69,33 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("            ZNN - ResNet (Residual Network) Training & Benchmark                \n", .{});
     std.debug.print("================================================================================\n\n", .{});
 
+    const is_tiny_imagenet = std.mem.eql(u8, cli.dataset, "tiny_imagenet") or std.mem.eql(u8, cli.dataset, "tiny-imagenet");
+    const in_channels: usize = if (is_tiny_imagenet) 3 else 1;
+    const num_classes: usize = if (is_tiny_imagenet) 200 else 10;
+    const spatial_size: usize = if (is_tiny_imagenet) 64 else 28;
+
     // 1. 构建 ResNet 模型配置
-    const resnet_config = models.ResNetConfig.resnet9(1, 10);
-    std.debug.print("Building ResNet architecture (Stem: 1->16, Stages: [16, 32, 64], Head: 64->10)...\n", .{});
+    const resnet_config = if (std.mem.eql(u8, cli.arch, "resnet18"))
+        models.ResNetConfig.resnet18(in_channels, num_classes)
+    else if (std.mem.eql(u8, cli.arch, "resnet20"))
+        models.ResNetConfig.resnet20(in_channels, num_classes)
+    else
+        models.ResNetConfig.resnet9(in_channels, num_classes);
+
+    std.debug.print("Building ResNet architecture ({s}: in_channels={d}, num_classes={d}, spatial={d}x{d})...\n", .{
+        cli.arch,
+        in_channels,
+        num_classes,
+        spatial_size,
+        spatial_size,
+    });
 
     var model = try NeuralNetwork.init(arena, try models.ResNet.init(arena, resnet_config));
     defer model.deinit();
 
     // 2. 参数初始化
     var prng = std.Random.DefaultPrng.init(42);
-    const init_sample = try tensor.ones(arena, &.{ 1, 1, 28, 28 });
+    const init_sample = try tensor.ones(arena, &.{ 1, in_channels, spatial_size, spatial_size });
     try model.initParametersWithSample(prng.random(), .{init_sample});
 
     const param_count = model.numParameters();
@@ -82,24 +105,43 @@ pub fn main(init: std.process.Init) !void {
     });
 
     // 3. 数据集加载
-    std.debug.print("Loading Fashion-MNIST dataset from 'data/'...\n", .{});
-    const train_dataset_opt = dataset.loadDataset(arena, io, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte") catch |err| blk: {
-        std.debug.print("  [!] Dataset files not found ({s}). Switching to synthetic data fallback.\n", .{@errorName(err)});
-        break :blk null;
-    };
+    if (is_tiny_imagenet) {
+        std.debug.print("Loading Tiny ImageNet (3 channels RGB, 64x64, 200 classes)...\n", .{});
+        var train_ds = dataset.loadTinyImageNetBin(arena, io, "data/tiny_imagenet_train.bin", null) catch |err| blk: {
+            std.debug.print("  [!] data/tiny_imagenet_train.bin not found ({s}). Generating synthetic Tiny ImageNet (500 train, 100 test samples)...\n", .{@errorName(err)});
+            break :blk try dataset.createSyntheticTinyImageNet(arena, 500);
+        };
+        defer train_ds.deinit(arena);
 
-    if (train_dataset_opt) |train_dataset| {
-        var td = train_dataset;
-        defer td.deinit(arena);
-        var test_dataset = try dataset.loadDataset(arena, io, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
-        defer test_dataset.deinit(arena);
+        var test_ds = dataset.loadTinyImageNetBin(arena, io, "data/tiny_imagenet_val.bin", null) catch blk: {
+            break :blk try dataset.createSyntheticTinyImageNet(arena, 100);
+        };
+        defer test_ds.deinit(arena);
 
-        std.debug.print("  [✓] Loaded {d} train images, {d} test images.\n\n", .{ td.images.num_images, test_dataset.images.num_images });
+        std.debug.print("  [✓] Loaded {d} train images, {d} test images (RGB 3x64x64, 200 classes).\n\n", .{ train_ds.images.num_images, test_ds.images.num_images });
 
-        try runBenchmarkTraining(&model, allocator, arena, td, test_dataset, cli);
-        try printDatasetPredictions(&model, allocator, test_dataset, 5);
+        try runBenchmarkTraining(&model, allocator, arena, train_ds, test_ds, cli);
+        try printPredictions(&model, allocator, test_ds, in_channels, spatial_size, 5);
     } else {
-        try runSyntheticTraining(&model, allocator, arena, prng.random());
+        std.debug.print("Loading Fashion-MNIST dataset from 'data/'...\n", .{});
+        const train_dataset_opt = dataset.loadDataset(arena, io, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte") catch |err| blk: {
+            std.debug.print("  [!] Dataset files not found ({s}). Switching to synthetic data fallback.\n", .{@errorName(err)});
+            break :blk null;
+        };
+
+        if (train_dataset_opt) |train_dataset| {
+            var td = train_dataset;
+            defer td.deinit(arena);
+            var test_dataset = try dataset.loadDataset(arena, io, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
+            defer test_dataset.deinit(arena);
+
+            std.debug.print("  [✓] Loaded {d} train images, {d} test images.\n\n", .{ td.images.num_images, test_dataset.images.num_images });
+
+            try runBenchmarkTraining(&model, allocator, arena, td, test_dataset, cli);
+            try printPredictions(&model, allocator, test_dataset, in_channels, spatial_size, 5);
+        } else {
+            try runSyntheticTraining(&model, allocator, arena, prng.random());
+        }
     }
 }
 
@@ -135,7 +177,7 @@ fn runBenchmarkTraining(
     });
     defer train_loader.deinit(arena);
 
-    const input_dim = train_dataset.images.rows * train_dataset.images.cols;
+    const input_dim = train_dataset.images.sampleSize();
     const x_buffer = try allocator.alloc(f32, cli.batch_size * input_dim);
     defer allocator.free(x_buffer);
     const y_buffer = try allocator.alloc(u8, cli.batch_size);
@@ -277,7 +319,7 @@ fn evaluateModelCapped(
         total_samples: usize = 0,
     }{};
 
-    const input_dim = test_dataset.images.rows * test_dataset.images.cols;
+    const input_dim = test_dataset.images.sampleSize();
     const x_buf = try allocator.alloc(f32, test_batch_size * input_dim);
     defer allocator.free(x_buf);
     const y_buf = try allocator.alloc(u8, test_batch_size);
@@ -366,16 +408,18 @@ fn runSyntheticTraining(
     std.debug.print("\n[✓] ResNet forward, backward autograd, and optimizer step verified successfully!\n", .{});
 }
 
-fn printDatasetPredictions(
+fn printPredictions(
     model: anytype,
     allocator: std.mem.Allocator,
     test_dataset: dataset.Dataset,
+    in_channels: usize,
+    spatial_size: usize,
     num_samples: usize,
 ) !void {
     model.eval();
     defer model.train();
 
-    const input_dim = 784;
+    const input_dim = test_dataset.images.sampleSize();
     std.debug.print("\nSample Predictions from Test Set:\n", .{});
     std.debug.print("--------------------------------------------------------------------------------\n", .{});
     std.debug.print("{s:<8} | {s:<18} | {s:<18} | {s:<12} | {s}\n", .{ "Index", "True Label", "Predicted", "Confidence", "Result" });
@@ -389,8 +433,9 @@ fn printDatasetPredictions(
         var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
         defer g.deinit();
 
-        const x = try g.array(&.{ 1, 1, 28, 28 }, img_slice, false);
+        const x = try g.array(&.{ 1, in_channels, spatial_size, spatial_size }, img_slice, false);
         const logits = try model.forward(&g, x);
+        const num_classes = logits.shape.dims[1];
 
         const preds = try logits.argmax(1, g.arenaAllocator());
         const pred_class = @as(usize, @intFromFloat(preds.data[0]));
@@ -400,13 +445,27 @@ fn printDatasetPredictions(
         const match = pred_class == true_label;
         const result_str = if (match) "✓ CORRECT" else "✗ INCORRECT";
 
-        std.debug.print("{d:<8} | {s:<18} | {s:<18} | {d:>6.2}%     | {s}\n", .{
-            i,
-            CLASS_NAMES[true_label],
-            CLASS_NAMES[pred_class],
-            conf * 100.0,
-            result_str,
-        });
+        if (num_classes == 10 and true_label < CLASS_NAMES.len and pred_class < CLASS_NAMES.len) {
+            std.debug.print("{d:<8} | {s:<18} | {s:<18} | {d:>6.2}%     | {s}\n", .{
+                i,
+                CLASS_NAMES[true_label],
+                CLASS_NAMES[pred_class],
+                conf * 100.0,
+                result_str,
+            });
+        } else {
+            var true_buf: [32]u8 = undefined;
+            var pred_buf: [32]u8 = undefined;
+            const true_str = std.fmt.bufPrint(&true_buf, "Class {d}", .{true_label}) catch "Class ?";
+            const pred_str = std.fmt.bufPrint(&pred_buf, "Class {d}", .{pred_class}) catch "Class ?";
+            std.debug.print("{d:<8} | {s:<18} | {s:<18} | {d:>6.2}%     | {s}\n", .{
+                i,
+                true_str,
+                pred_str,
+                conf * 100.0,
+                result_str,
+            });
+        }
     }
     std.debug.print("--------------------------------------------------------------------------------\n\n", .{});
 }

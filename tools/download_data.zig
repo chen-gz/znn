@@ -177,8 +177,25 @@ pub fn main(init: std.process.Init) !void {
         const url = "https://raw.githubusercontent.com/tatsu-lab/stanford_alpaca/main/alpaca_data.json";
         try downloadFile(&client, io, url, "data/alpaca_data.json", false);
         std.debug.print("✨ Stanford Alpaca dataset is ready in data/alpaca_data.json!\n", .{});
+    } else if (std.mem.eql(u8, dataset_name, "tiny_imagenet") or std.mem.eql(u8, dataset_name, "tiny-imagenet") or std.mem.eql(u8, dataset_name, "tinyimagenet")) {
+        std.debug.print("⬇️  Downloading Tiny ImageNet dataset (~236MB zip)...\n", .{});
+        const url = "http://cs231n.stanford.edu/tiny-imagenet-200.zip";
+        try downloadFile(&client, io, url, "data/tiny-imagenet-200.zip", false);
+        std.debug.print("✨ Downloaded data/tiny-imagenet-200.zip!\n", .{});
+        std.debug.print("💡 Tip: Extract with 'unzip -q data/tiny-imagenet-200.zip -d data/'\n", .{});
+        std.debug.print("   and run 'python3 scripts/pack_tiny_imagenet.py' to generate fast binary format in data/!\n", .{});
+    } else if (std.mem.eql(u8, dataset_name, "wikitext103") or std.mem.eql(u8, dataset_name, "wikitext-103")) {
+        std.debug.print("⬇️  Downloading WikiText-103 dataset (validation & test sets)...\n", .{});
+        cwd.createDir(io, "data/wikitext-103", .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        const base_url = "https://huggingface.co/datasets/segyges/wikitext-103/resolve/main";
+        try downloadFile(&client, io, base_url ++ "/wiki.valid.raw", "data/wikitext-103/wiki.valid.raw", false);
+        try downloadFile(&client, io, base_url ++ "/wiki.test.raw", "data/wikitext-103/wiki.test.raw", false);
+        std.debug.print("✨ WikiText-103 dataset is ready in data/wikitext-103/!\n", .{});
     } else if (std.mem.eql(u8, dataset_name, "all_llm") or std.mem.eql(u8, dataset_name, "llm")) {
-        std.debug.print("⬇️  Downloading all 4 LLM datasets (tinyshakespeare, wikitext2, tinystories, alpaca)...\n", .{});
+        std.debug.print("⬇️  Downloading all LLM datasets (tinyshakespeare, wikitext2, wikitext103, tinystories, alpaca)...\n", .{});
         try downloadFile(&client, io, "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt", "data/tinyshakespeare.txt", false);
 
         cwd.createDir(io, "data/wikitext-2", .default_dir) catch |err| switch (err) {
@@ -189,14 +206,21 @@ pub fn main(init: std.process.Init) !void {
         try downloadFile(&client, io, "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/valid.txt", "data/wikitext-2/valid.txt", false);
         try downloadFile(&client, io, "https://raw.githubusercontent.com/pytorch/examples/main/word_language_model/data/wikitext-2/test.txt", "data/wikitext-2/test.txt", false);
 
+        cwd.createDir(io, "data/wikitext-103", .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        try downloadFile(&client, io, "https://huggingface.co/datasets/segyges/wikitext-103/resolve/main/wiki.valid.raw", "data/wikitext-103/wiki.valid.raw", false);
+        try downloadFile(&client, io, "https://huggingface.co/datasets/segyges/wikitext-103/resolve/main/wiki.test.raw", "data/wikitext-103/wiki.test.raw", false);
+
         try downloadFile(&client, io, "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStories-valid.txt", "data/tinystories_valid.txt", false);
         try downloadFile(&client, io, "https://raw.githubusercontent.com/tatsu-lab/stanford_alpaca/main/alpaca_data.json", "data/alpaca_data.json", false);
         std.debug.print("✨ All LLM datasets downloaded and ready in data/!\n", .{});
     } else {
         std.debug.print("❌ Unknown dataset: '{s}'\n", .{dataset_name});
         std.debug.print("Supported datasets:\n", .{});
-        std.debug.print("  - Vision: fashion_mnist, mnist\n", .{});
-        std.debug.print("  - LLM:    tinyshakespeare, wikitext2, tinystories, alpaca, all_llm\n", .{});
+        std.debug.print("  - Vision: fashion_mnist, mnist, tiny_imagenet\n", .{});
+        std.debug.print("  - LLM:    tinyshakespeare, wikitext2, wikitext103, tinystories, alpaca, all_llm\n", .{});
         return error.InvalidDatasetName;
     }
 }

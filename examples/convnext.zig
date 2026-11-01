@@ -20,6 +20,7 @@ pub const CliOptions = struct {
     max_batches: usize = 100, // 默认跑 100 批次 (6,400 张图) 便于快速基准评估；设为 0 则跑满全量 937 个批次
     lr: f32 = 0.001,
     arch: []const u8 = "pico", // pico, atto, femto
+    dataset: []const u8 = "fashion_mnist", // fashion_mnist, tiny_imagenet
     test_eval_batches: usize = 20, // 评估时测 20 个批次 (2,000 张图)
 };
 
@@ -40,6 +41,8 @@ pub fn parseCli(allocator: std.mem.Allocator, args: anytype) !CliOptions {
             if (iter.next()) |val| opts.lr = try std.fmt.parseFloat(f32, val);
         } else if (std.mem.eql(u8, arg, "--arch") or std.mem.eql(u8, arg, "-a")) {
             if (iter.next()) |val| opts.arch = val;
+        } else if (std.mem.eql(u8, arg, "--dataset") or std.mem.eql(u8, arg, "-d")) {
+            if (iter.next()) |val| opts.dataset = val;
         } else if (std.mem.eql(u8, arg, "--full")) {
             opts.max_batches = 0; // 全量 60000 张图
             opts.test_eval_batches = 0; // 全量 10000 张测试图
@@ -65,22 +68,33 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("        ZNN - ConvNeXt (A ConvNet for the 2020s) Training & Benchmark           \n", .{});
     std.debug.print("================================================================================\n\n", .{});
 
+    const is_tiny_imagenet = std.mem.eql(u8, cli.dataset, "tiny_imagenet") or std.mem.eql(u8, cli.dataset, "tiny-imagenet");
+    const in_channels: usize = if (is_tiny_imagenet) 3 else 1;
+    const num_classes: usize = if (is_tiny_imagenet) 200 else 10;
+    const spatial_size: usize = if (is_tiny_imagenet) 64 else 28;
+
     // 1. 构建 ConvNeXt 模型配置
     const convnext_raw = if (std.mem.eql(u8, cli.arch, "atto"))
-        try models.convnext_atto(arena, 1, 10)
+        try models.convnext_atto(arena, in_channels, num_classes)
     else if (std.mem.eql(u8, cli.arch, "femto"))
-        try models.convnext_femto(arena, 1, 10)
+        try models.convnext_femto(arena, in_channels, num_classes)
     else
-        try models.convnext_pico(arena, 1, 10);
+        try models.convnext_pico(arena, in_channels, num_classes);
 
-    std.debug.print("Building ConvNeXt architecture ({s}: 7x7 DWConv + LayerNorm + 1x1 Conv + GELU + LayerScale)...\n", .{cli.arch});
+    std.debug.print("Building ConvNeXt architecture ({s}: in_channels={d}, num_classes={d}, spatial={d}x{d})...\n", .{
+        cli.arch,
+        in_channels,
+        num_classes,
+        spatial_size,
+        spatial_size,
+    });
 
     var model = try NeuralNetwork.init(arena, convnext_raw);
     defer model.deinit();
 
     // 2. 参数初始化
     var prng = std.Random.DefaultPrng.init(42);
-    const init_sample = try tensor.ones(arena, &.{ 1, 1, 28, 28 });
+    const init_sample = try tensor.ones(arena, &.{ 1, in_channels, spatial_size, spatial_size });
     try model.initParametersWithSample(prng.random(), .{init_sample});
 
     const param_count = model.numParameters();
@@ -90,24 +104,43 @@ pub fn main(init: std.process.Init) !void {
     });
 
     // 3. 数据集加载
-    std.debug.print("Loading Fashion-MNIST dataset from 'data/'...\n", .{});
-    const train_dataset_opt = dataset.loadDataset(arena, io, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte") catch |err| blk: {
-        std.debug.print("  [!] Dataset files not found ({s}). Switching to synthetic data fallback.\n", .{@errorName(err)});
-        break :blk null;
-    };
+    if (is_tiny_imagenet) {
+        std.debug.print("Loading Tiny ImageNet (3 channels RGB, 64x64, 200 classes)...\n", .{});
+        var train_ds = dataset.loadTinyImageNetBin(arena, io, "data/tiny_imagenet_train.bin", null) catch |err| blk: {
+            std.debug.print("  [!] data/tiny_imagenet_train.bin not found ({s}). Generating synthetic Tiny ImageNet (500 train, 100 test samples)...\n", .{@errorName(err)});
+            break :blk try dataset.createSyntheticTinyImageNet(arena, 500);
+        };
+        defer train_ds.deinit(arena);
 
-    if (train_dataset_opt) |train_dataset| {
-        var td = train_dataset;
-        defer td.deinit(arena);
-        var test_dataset = try dataset.loadDataset(arena, io, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
-        defer test_dataset.deinit(arena);
+        var test_ds = dataset.loadTinyImageNetBin(arena, io, "data/tiny_imagenet_val.bin", null) catch blk: {
+            break :blk try dataset.createSyntheticTinyImageNet(arena, 100);
+        };
+        defer test_ds.deinit(arena);
 
-        std.debug.print("  [✓] Loaded {d} train images, {d} test images.\n\n", .{ td.images.num_images, test_dataset.images.num_images });
+        std.debug.print("  [✓] Loaded {d} train images, {d} test images (RGB 3x64x64, 200 classes).\n\n", .{ train_ds.images.num_images, test_ds.images.num_images });
 
-        try runBenchmarkTraining(&model, allocator, arena, td, test_dataset, cli);
-        try printDatasetPredictions(&model, allocator, test_dataset, 5);
+        try runBenchmarkTraining(&model, allocator, arena, train_ds, test_ds, cli);
+        try printDatasetPredictions(&model, allocator, test_ds, 5);
     } else {
-        try runSyntheticTraining(&model, allocator, arena, prng.random());
+        std.debug.print("Loading Fashion-MNIST dataset from 'data/'...\n", .{});
+        const train_dataset_opt = dataset.loadDataset(arena, io, "data/train-images-idx3-ubyte", "data/train-labels-idx1-ubyte") catch |err| blk: {
+            std.debug.print("  [!] Dataset files not found ({s}). Switching to synthetic data fallback.\n", .{@errorName(err)});
+            break :blk null;
+        };
+
+        if (train_dataset_opt) |train_dataset| {
+            var td = train_dataset;
+            defer td.deinit(arena);
+            var test_dataset = try dataset.loadDataset(arena, io, "data/t10k-images-idx3-ubyte", "data/t10k-labels-idx1-ubyte");
+            defer test_dataset.deinit(arena);
+
+            std.debug.print("  [✓] Loaded {d} train images, {d} test images.\n\n", .{ td.images.num_images, test_dataset.images.num_images });
+
+            try runBenchmarkTraining(&model, allocator, arena, td, test_dataset, cli);
+            try printDatasetPredictions(&model, allocator, test_dataset, 5);
+        } else {
+            try runSyntheticTraining(&model, allocator, arena, prng.random());
+        }
     }
 }
 
@@ -143,7 +176,7 @@ fn runBenchmarkTraining(
     });
     defer train_loader.deinit(arena);
 
-    const input_dim = train_dataset.images.rows * train_dataset.images.cols;
+    const input_dim = train_dataset.images.sampleSize();
     const x_buffer = try allocator.alloc(f32, cli.batch_size * input_dim);
     defer allocator.free(x_buffer);
     const y_buffer = try allocator.alloc(u8, cli.batch_size);
@@ -275,7 +308,7 @@ fn evaluateModelCapped(
     });
     defer test_loader.deinit(arena);
 
-    const input_dim = test_dataset.images.rows * test_dataset.images.cols;
+    const input_dim = test_dataset.images.sampleSize();
     const x_buf = try allocator.alloc(f32, eval_batch_size * input_dim);
     defer allocator.free(x_buf);
     const y_buf = try allocator.alloc(u8, eval_batch_size);
@@ -324,21 +357,24 @@ fn printDatasetPredictions(
     std.debug.print("--------------------------------------------------------------------------------\n", .{});
 
     const num_to_show = @min(count, test_dataset.images.num_images);
+    const input_dim = test_dataset.images.sampleSize();
+
     for (0..num_to_show) |idx| {
-        const img_data = test_dataset.images.data[idx * 784 .. (idx + 1) * 784];
+        const img_data = test_dataset.images.data[idx * input_dim .. (idx + 1) * input_dim];
         const label = test_dataset.labels.data[idx];
 
         var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
 
-        const x = try g.tensor(1, 784, false);
+        const x = try g.tensor(1, input_dim, false);
         @memcpy(x.data, img_data);
 
         const logits = try model.forward(&g, x);
+        const num_classes = logits.shape.dims[1];
 
         var max_val = logits.data[0];
         var pred_class: usize = 0;
-        for (1..10) |c| {
+        for (1..num_classes) |c| {
             if (logits.data[c] > max_val) {
                 max_val = logits.data[c];
                 pred_class = c;
@@ -346,14 +382,23 @@ fn printDatasetPredictions(
         }
 
         const is_correct = (pred_class == label);
-        std.debug.print("  Sample #{d}: Pred='{s}' ({d}), Truth='{s}' ({d}) -> {s}\n", .{
-            idx + 1,
-            CLASS_NAMES[pred_class],
-            pred_class,
-            CLASS_NAMES[label],
-            label,
-            if (is_correct) "[CORRECT ✓]" else "[MISMATCH ✗]",
-        });
+        if (num_classes == 10 and label < CLASS_NAMES.len and pred_class < CLASS_NAMES.len) {
+            std.debug.print("  Sample #{d}: Pred='{s}' ({d}), Truth='{s}' ({d}) -> {s}\n", .{
+                idx + 1,
+                CLASS_NAMES[pred_class],
+                pred_class,
+                CLASS_NAMES[label],
+                label,
+                if (is_correct) "[CORRECT ✓]" else "[MISMATCH ✗]",
+            });
+        } else {
+            std.debug.print("  Sample #{d}: Pred=Class {d}, Truth=Class {d} -> {s}\n", .{
+                idx + 1,
+                pred_class,
+                label,
+                if (is_correct) "[CORRECT ✓]" else "[MISMATCH ✗]",
+            });
+        }
     }
     std.debug.print("================================================================================\n\n", .{});
 }
