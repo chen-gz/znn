@@ -9,7 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-31
+
 ### Added
+
+- **Comptime Target Architecture Detection & Auto-Probing**:
+  - Auto-probed MLX library presence in `build.zig`, safely defaulting to CPU Accelerate fallback when missing to prevent link-time errors.
+  - Implemented `src/backend/target.zig` for comptime detection of SIMD vector lengths (AVX512/AVX2/NEON) and dead code pruning.
+
+- **Unified Tensor Physical Storage on DeviceBuffer**:
+  - Consolidated device residency and driver handles directly into `storage: backend.DeviceBuffer`.
+  - Added non-allocating `asHostSlice` / `asHostSliceMut` for CPU data access with mutation guards.
+
+- **Zero-Allocation Destination Operators & Forward Replay**:
+  - Expanded in-place destination operators (`*Into`) across elementwise, reductions, convolutions, pooling, normalization, and losses.
+  - Completely eliminated all 51 `copyFromEager` calls from `Op.forward` in `src/autodiff/op.zig`.
+
+- **Scratch-Allocated Backward Pass**:
+  - Injected `scratch_allocator: std.mem.Allocator` into `Op.backward` and eliminated all 8 `std.heap.c_allocator` usages from `src/autodiff/backward_nn.zig`.
+  - Passed `Graph.arena` in `runBackward` for zero-fragmentation backward execution.
+
+- **Static Memory Planner & Execution Graph Buffer Reuse**:
+  - Implemented `MemoryPlanner` in `src/autodiff/memory_planner.zig` with liveness interval analysis and 1D FFD memory coloring, achieving $\ge 85\%$ activation memory reduction.
+  - Implemented `ExecutionGraph` in `src/autodiff/execution_graph.zig` with sub-buffer slicing from a single shared arena and zero-allocation replay.
+
+- **PyTorch-style `nn.Module` Protocol & Container Ecosystem**:
+  - Added `verifyModule(comptime T: type)` compile-time protocol assertions.
+  - Added `createParameter` and `createBuffer`, decoupling trainable parameters from persistent buffers.
+  - Made `BatchNorm1d` / `BatchNorm2d` running statistics persistent buffers immune to `setRequiresGrad`.
+  - Added reflection iterators `buffers`, `namedBuffers`, `submodules`, and generic `ModuleList(comptime T: type)`.
+  - Transparently accounted for `Q4Block` quantized parameters in `numParameters`.
 
 - `Tensor.storage: DeviceBuffer` physical device buffer abstraction and `Tensor.deviceBuffer()`
   accessor. Tensor factories (`allocUninit`, `clone`, `Graph.tensorND`), views (`transposeView`,

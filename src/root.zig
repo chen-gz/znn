@@ -1,5 +1,5 @@
-pub const VERSION = "0.3.0";
-pub const version = @import("std").SemanticVersion{ .major = 0, .minor = 3, .patch = 0 };
+pub const VERSION = "0.4.0";
+pub const version = @import("std").SemanticVersion{ .major = 0, .minor = 4, .patch = 0 };
 
 pub const tensor = @import("tensor.zig");
 pub const nn = @import("nn.zig");
