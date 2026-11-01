@@ -54,6 +54,14 @@ const examples = [_]ExampleTarget{
         .forward_args = true,
     },
     .{
+        .name = "convnext",
+        .src = "examples/convnext.zig",
+        .run_step = "run-convnext",
+        .run_desc = "Run the ConvNeXt (A ConvNet for the 2020s) Vision benchmark app",
+        .test_name = "convnext_tests",
+        .forward_args = true,
+    },
+    .{
         .name = "transformer_embedding",
         .src = "examples/transformer_embedding.zig",
         .run_step = "run-emb",

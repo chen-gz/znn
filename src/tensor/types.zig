@@ -87,6 +87,7 @@ pub const SliceRange = struct {
 pub const ConvOptions = struct {
     stride: usize = 1,
     padding: usize = 0,
+    groups: usize = 1,
 
     pub const default: ConvOptions = .{};
     pub fn defaultOptions() ConvOptions {

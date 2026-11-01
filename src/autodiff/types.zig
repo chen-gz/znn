@@ -247,10 +247,12 @@ pub const OpContext = union(enum) {
     Conv1D: struct {
         stride: usize = 1,
         padding: usize = 0,
+        groups: usize = 1,
     },
     Conv2D: struct {
         stride: usize = 1,
         padding: usize = 0,
+        groups: usize = 1,
     },
     ConvTranspose1D: struct {
         stride: usize = 1,

@@ -399,6 +399,30 @@ test "gradcheck: conv2d with stride, padding and bias" {
     }, .{});
 }
 
+test "gradcheck: grouped conv2d with groups = 2 and bias" {
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.conv2d(t[0], t[1], t[2], .{ .stride = 1, .padding = 1, .groups = 2 });
+        }
+    }, &.{
+        .{ .shape = &.{ 2, 4, 4, 4 } },
+        .{ .shape = &.{ 4, 2, 3, 3 } },
+        .{ .shape = &.{4} },
+    }, .{});
+}
+
+test "gradcheck: depthwise conv2d with groups = in_channels (ConvNeXt pattern)" {
+    try expectGradientsMatch(struct {
+        fn build(g: *Graph, t: []const *Tensor) !*Tensor {
+            return g.conv2d(t[0], t[1], t[2], .{ .stride = 1, .padding = 1, .groups = 3 });
+        }
+    }, &.{
+        .{ .shape = &.{ 2, 3, 5, 5 } },
+        .{ .shape = &.{ 3, 1, 3, 3 } },
+        .{ .shape = &.{3} },
+    }, .{});
+}
+
 test "gradcheck: conv2d on a non-contiguous input view" {
     try expectGradientsMatch(struct {
         fn build(g: *Graph, t: []const *Tensor) !*Tensor {

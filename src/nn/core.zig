@@ -319,10 +319,15 @@ pub const Conv2D = struct {
     bias: *Tensor,
     stride: usize = 1,
     padding: usize = 0,
+    groups: usize = 1,
     name: ?[]const u8 = null,
     module_type: []const u8 = "Conv2D",
 
     pub const Options = tensor.ConvOptions;
+
+    pub fn defaultOptions() Options {
+        return Options.defaultOptions();
+    }
 
     /// 构造卷积层：只分配参数内存 (卷积核与偏置全零)，不做任何数值初始化
     pub fn init(
@@ -333,9 +338,13 @@ pub const Conv2D = struct {
         options: Options,
     ) !Conv2D {
         if (options.stride == 0) return error.InvalidStride;
-        const weight = try createPersistentTensor(allocator, out_channels, in_channels * kernel_size * kernel_size, true);
+        const groups = if (options.groups == 0) 1 else options.groups;
+        if (in_channels % groups != 0 or out_channels % groups != 0) return error.ShapeMismatch;
+        const in_channels_per_group = in_channels / groups;
+
+        const weight = try createPersistentTensor(allocator, out_channels, in_channels_per_group * kernel_size * kernel_size, true);
         errdefer freePersistentTensor(allocator, weight);
-        weight.shape = Shape.init(&.{ out_channels, in_channels, kernel_size, kernel_size });
+        weight.shape = Shape.init(&.{ out_channels, in_channels_per_group, kernel_size, kernel_size });
         weight.strides = tensor.computeContiguousStrides(weight.shape);
 
         const bias = try createVectorTensor(allocator, out_channels, 0.0, true);
@@ -346,16 +355,21 @@ pub const Conv2D = struct {
             .bias = bias,
             .stride = options.stride,
             .padding = options.padding,
+            .groups = groups,
         };
+    }
+
+    pub fn initDefault(allocator: std.mem.Allocator, in_channels: usize, out_channels: usize, kernel_size: usize) !Conv2D {
+        return init(allocator, in_channels, out_channels, kernel_size, .{});
     }
 
     /// 库内标准参数初始化：在已分配的张量上按 options 重新填充卷积核与偏置，不分配内存，也不设置 is_custom_initialized 标记
     pub fn resetParameters(self: *Conv2D, random: std.Random, options: InitOptions) void {
         const out_channels = self.weight.shape.dims[0];
-        const in_channels = self.weight.shape.dims[1];
+        const in_channels_per_group = self.weight.shape.dims[1];
         const kernel_size = self.weight.shape.dims[2];
-        const fan_in = in_channels * kernel_size * kernel_size;
-        const fan_out = out_channels * kernel_size * kernel_size;
+        const fan_in = in_channels_per_group * kernel_size * kernel_size;
+        const fan_out = (out_channels / self.groups) * kernel_size * kernel_size;
         const w_init = options.resolveWeightInit();
         initWeights(random, self.weight.data, fan_in, fan_out, w_init);
         initWeights(random, self.bias.data, fan_in, fan_out, options.bias_init);
@@ -367,7 +381,11 @@ pub const Conv2D = struct {
     pub fn forward(self: *const Conv2D, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
-        return try graph.conv2d(x, self.weight, self.bias, .{ .stride = self.stride, .padding = self.padding });
+        return try graph.conv2d(x, self.weight, self.bias, .{
+            .stride = self.stride,
+            .padding = self.padding,
+            .groups = self.groups,
+        });
     }
 };
 

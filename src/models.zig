@@ -37,6 +37,20 @@ pub const resnet32 = resnet.resnet32;
 pub const resnet56 = resnet.resnet56;
 pub const resnet110 = resnet.resnet110;
 
+pub const convnext = @import("models/convnext.zig");
+pub const ConvNeXtBlock = convnext.ConvNeXtBlock;
+pub const DownsampleLayer = convnext.DownsampleLayer;
+pub const ConvNeXtConfig = convnext.ConvNeXtConfig;
+pub const ConvNeXt = convnext.ConvNeXt;
+pub const DefaultConvNeXt = convnext.DefaultConvNeXt;
+pub const convnext_tiny = convnext.convnext_tiny;
+pub const convnext_small = convnext.convnext_small;
+pub const convnext_base = convnext.convnext_base;
+pub const convnext_large = convnext.convnext_large;
+pub const convnext_femto = convnext.convnext_femto;
+pub const convnext_atto = convnext.convnext_atto;
+pub const convnext_pico = convnext.convnext_pico;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("models/tests.zig");

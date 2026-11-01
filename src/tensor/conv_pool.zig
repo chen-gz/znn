@@ -24,6 +24,7 @@ const ConvGeometry = struct {
     pad_w: usize,
     H_out: usize,
     W_out: usize,
+    groups: usize = 1,
 };
 
 /// 输入下标 `i * stride + k - padding` 落在 `[0, limit)` 内的 `i` 取值区间 `[lo, hi)`（`i < count`）
@@ -35,10 +36,13 @@ fn validRange(count: usize, limit: usize, k: usize, stride: usize, padding: usiz
 }
 
 /// 图像转列 (Image to Column, im2col) + 单精度通用矩阵乘法 (Single-precision General Matrix Multiply, SGEMM) 卷积内核：
-/// 输入 `self` 可为任意跨步布局，`w_data` 为连续的 `[C_out, C_in * KH * KW]` 权重矩阵；
-/// 每个样本的感受野窗口展平为 `[C_in * KH * KW, H_out * W_out]` 列矩阵后与权重相乘，偏置预先写入输出再以 beta = 1 累加
+/// 输入 `self` 可为任意跨步布局，`w_data` 为连续的 `[C_out, (C_in / groups) * KH * KW]` 权重矩阵；
+/// 支持标准卷积与分组/深度卷积 (`groups >= 1`)。每个样本的感受野窗口按组展平为列矩阵后与对应权重相乘，偏置预先写入输出再以 beta = 1 累加
 fn convIm2col(self: *const Tensor, w_data: []const f32, bias: ?*Tensor, g: ConvGeometry, out: *Tensor, allocator: std.mem.Allocator) !void {
-    const K_col = g.C_in * g.KH * g.KW;
+    const groups = if (g.groups == 0) 1 else g.groups;
+    const C_in_g = g.C_in / groups;
+    const C_out_g = g.C_out / groups;
+    const K_col = C_in_g * g.KH * g.KW;
     const L_out = g.H_out * g.W_out;
     if (L_out == 0 or g.C_out == 0) return;
 
@@ -52,64 +56,71 @@ fn convIm2col(self: *const Tensor, w_data: []const f32, bias: ?*Tensor, g: ConvG
     defer allocator.free(col_buf);
 
     for (0..g.N) |n| {
-        for (0..g.C_in) |ci| {
-            for (0..g.KH) |kh| {
-                for (0..g.KW) |kw| {
-                    const k_row = (ci * g.KH + kh) * g.KW + kw;
-                    const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
-                    const w_range = validRange(g.W_out, g.W, kw, g.stride, g.pad_w);
-                    for (0..g.H_out) |h_out| {
-                        const dst = col_row[h_out * g.W_out .. (h_out + 1) * g.W_out];
-                        const ih_raw = h_out * g.stride + kh;
-                        if (ih_raw < g.pad_h or ih_raw - g.pad_h >= g.H) {
-                            @memset(dst, 0.0);
-                            continue;
-                        }
-                        const ih = ih_raw - g.pad_h;
-                        @memset(dst[0..w_range[0]], 0.0);
-                        @memset(dst[w_range[1]..], 0.0);
-                        if (w_range[1] > w_range[0]) {
-                            // 有效区间内首个输入列下标
-                            const iw0 = w_range[0] * g.stride + kw - g.pad_w;
-                            const base = n * s_n + ci * s_c + ih * s_h + iw0 * s_w;
-                            const valid = dst[w_range[0]..w_range[1]];
-                            const step = g.stride * s_w;
-                            if (step == 1) {
-                                @memcpy(valid, self.data[base..][0..valid.len]);
-                            } else {
-                                for (valid, 0..) |*v, j| v.* = self.data[base + j * step];
+        for (0..groups) |gi| {
+            const ci_start = gi * C_in_g;
+            for (0..C_in_g) |ci_local| {
+                const ci = ci_start + ci_local;
+                for (0..g.KH) |kh| {
+                    for (0..g.KW) |kw| {
+                        const k_row = (ci_local * g.KH + kh) * g.KW + kw;
+                        const col_row = col_buf[k_row * L_out .. (k_row + 1) * L_out];
+                        const w_range = validRange(g.W_out, g.W, kw, g.stride, g.pad_w);
+                        for (0..g.H_out) |h_out| {
+                            const dst = col_row[h_out * g.W_out .. (h_out + 1) * g.W_out];
+                            const ih_raw = h_out * g.stride + kh;
+                            if (ih_raw < g.pad_h or ih_raw - g.pad_h >= g.H) {
+                                @memset(dst, 0.0);
+                                continue;
+                            }
+                            const ih = ih_raw - g.pad_h;
+                            @memset(dst[0..w_range[0]], 0.0);
+                            @memset(dst[w_range[1]..], 0.0);
+                            if (w_range[1] > w_range[0]) {
+                                // 有效区间内首个输入列下标
+                                const iw0 = w_range[0] * g.stride + kw - g.pad_w;
+                                const base = n * s_n + ci * s_c + ih * s_h + iw0 * s_w;
+                                const valid = dst[w_range[0]..w_range[1]];
+                                const step = g.stride * s_w;
+                                if (step == 1) {
+                                    @memcpy(valid, self.data[base..][0..valid.len]);
+                                } else {
+                                    for (valid, 0..) |*v, j| v.* = self.data[base + j * step];
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        const out_n = out.data[n * g.C_out * L_out .. (n + 1) * g.C_out * L_out];
-        if (bias) |b| {
-            const b_stride = b.strides.dims[0];
-            for (0..g.C_out) |co| {
-                @memset(out_n[co * L_out .. (co + 1) * L_out], b.data[co * b_stride]);
+            const co_start = gi * C_out_g;
+            const out_group = out.data[n * g.C_out * L_out + co_start * L_out .. n * g.C_out * L_out + (co_start + C_out_g) * L_out];
+            if (bias) |b| {
+                const b_stride = b.strides.dims[0];
+                for (0..C_out_g) |co_local| {
+                    const co = co_start + co_local;
+                    @memset(out_group[co_local * L_out .. (co_local + 1) * L_out], b.data[co * b_stride]);
+                }
             }
-        }
-        if (K_col == 0) continue;
+            if (K_col == 0) continue;
 
-        c.cblas_sgemm(
-            c.CblasRowMajor,
-            c.CblasNoTrans,
-            c.CblasNoTrans,
-            @intCast(g.C_out),
-            @intCast(L_out),
-            @intCast(K_col),
-            1.0,
-            w_data.ptr,
-            @intCast(K_col),
-            col_buf.ptr,
-            @intCast(L_out),
-            if (bias != null) @as(f32, 1.0) else @as(f32, 0.0),
-            out_n.ptr,
-            @intCast(L_out),
-        );
+            const w_group_ptr = w_data.ptr + (gi * C_out_g * K_col);
+            c.cblas_sgemm(
+                c.CblasRowMajor,
+                c.CblasNoTrans,
+                c.CblasNoTrans,
+                @intCast(C_out_g),
+                @intCast(L_out),
+                @intCast(K_col),
+                1.0,
+                w_group_ptr,
+                @intCast(K_col),
+                col_buf.ptr,
+                @intCast(L_out),
+                if (bias != null) @as(f32, 1.0) else @as(f32, 0.0),
+                out_group.ptr,
+                @intCast(L_out),
+            );
+        }
     }
 }
 
@@ -163,13 +174,15 @@ pub fn conv1dInto(
     }
     const stride = options.stride;
     const padding = options.padding;
+    const groups = if (options.groups == 0) 1 else options.groups;
     if (stride == 0) return error.InvalidStride;
     const N = self.shape.dims[0];
     const C_in = self.shape.dims[1];
     const L = self.shape.dims[2];
 
     const C_out = weight.shape.dims[0];
-    if (weight.shape.dims[1] != C_in) return error.ShapeMismatch;
+    if (C_in % groups != 0 or C_out % groups != 0) return error.ShapeMismatch;
+    if (weight.shape.dims[1] != C_in / groups) return error.ShapeMismatch;
     const K = weight.shape.dims[2];
 
     if (bias) |b| {
@@ -199,11 +212,12 @@ pub fn conv1dInto(
         .pad_w = padding,
         .H_out = 1,
         .W_out = L_out,
+        .groups = groups,
     }, dest, allocator);
 }
 
 /// 二维卷积前向计算 (2-Dimensional Convolution, Conv2D)
-/// 输入形状: `[N, C_in, H, W]`，卷积核形状: `[C_out, C_in, KH, KW]`，可选偏置形状: `[C_out]`
+/// 输入形状: `[N, C_in, H, W]`，卷积核形状: `[C_out, C_in / groups, KH, KW]`，可选偏置形状: `[C_out]`
 pub fn conv2d(
     self: *Tensor,
     weight: *Tensor,
@@ -216,6 +230,7 @@ pub fn conv2d(
     }
     const stride = options.stride;
     const padding = options.padding;
+    const groups = if (options.groups == 0) 1 else options.groups;
     if (stride == 0) return error.InvalidStride;
     const N = self.shape.dims[0];
     const C_in = self.shape.dims[1];
@@ -223,7 +238,8 @@ pub fn conv2d(
     const W = self.shape.dims[3];
 
     const C_out = weight.shape.dims[0];
-    if (weight.shape.dims[1] != C_in) return error.ShapeMismatch;
+    if (C_in % groups != 0 or C_out % groups != 0) return error.ShapeMismatch;
+    if (weight.shape.dims[1] != C_in / groups) return error.ShapeMismatch;
     const KH = weight.shape.dims[2];
     const KW = weight.shape.dims[3];
 
@@ -257,6 +273,7 @@ pub fn conv2dInto(
     }
     const stride = options.stride;
     const padding = options.padding;
+    const groups = if (options.groups == 0) 1 else options.groups;
     if (stride == 0) return error.InvalidStride;
     const N = self.shape.dims[0];
     const C_in = self.shape.dims[1];
@@ -264,7 +281,8 @@ pub fn conv2dInto(
     const W = self.shape.dims[3];
 
     const C_out = weight.shape.dims[0];
-    if (weight.shape.dims[1] != C_in) return error.ShapeMismatch;
+    if (C_in % groups != 0 or C_out % groups != 0) return error.ShapeMismatch;
+    if (weight.shape.dims[1] != C_in / groups) return error.ShapeMismatch;
     const KH = weight.shape.dims[2];
     const KW = weight.shape.dims[3];
 
@@ -297,6 +315,7 @@ pub fn conv2dInto(
         .pad_w = padding,
         .H_out = H_out,
         .W_out = W_out,
+        .groups = groups,
     }, dest, allocator);
 }
 

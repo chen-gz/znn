@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Modern ConvNeXt Pure Convolutional Vision Architecture Suite (Liu et al. CVPR 2022)**:
+  - Added support for grouped convolution and depthwise convolution (`groups: usize = 1` in `ConvOptions`, `conv2d`, `conv2dInto`, `conv1d`, and `nn.Conv2D`).
+  - Implemented exact grouped and depthwise convolution backward automatic differentiation in `src/autodiff/backward_nn.zig`, fully validated with numerical gradient checking (`gradcheck`).
+  - Added `LayerNorm2d` (Channels-First 2D Layer Normalization) in `src/nn/normalization.zig` with `Options` and `initDefault`.
+  - Implemented `ConvNeXtBlock` in `src/models/convnext.zig` featuring 7x7 Depthwise Conv, channels-last LayerNorm, 1x1 pointwise expansion (4x), GELU, 1x1 pointwise projection, learnable LayerScale ($\gamma$), and residual connection.
+  - Implemented `DownsampleLayer` (LayerNorm2d + 2x2 Conv stride=2) and complete `ConvNeXt` model with stem patchify, multi-stage block sequences, global adaptive average pooling, and linear classification head.
+  - Added constructors and presets for canonical ConvNeXt specifications:
+    - ImageNet series: `convnext_tiny`, `convnext_small`, `convnext_base`, `convnext_large`.
+    - Edge & Benchmark series: `convnext_femto`, `convnext_atto`, `convnext_pico`.
+  - Added executable training and benchmark application in `examples/convnext.zig` (`zig build run-convnext`), achieving 186.97 img/s training throughput, 635.49 img/s inference throughput, and 75.10% test accuracy on Fashion-MNIST within 2 epochs.
+
 - **Complete ResNet Paper Architecture Suite (He et al. 2015)**:
   - Implemented both core residual block structures:
     - `BasicBlock` (2-layer 3x3 Conv + BN + ReLU, expansion = 1) for ResNet-18/34 and CIFAR-10 series.

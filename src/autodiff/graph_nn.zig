@@ -315,7 +315,7 @@ pub fn conv1d(
     const allocator = self.arena.allocator();
     const C = try A.conv1d(weight, bias, options, allocator);
     const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
-    const ctx: OpContext = .{ .Conv1D = .{ .stride = options.stride, .padding = options.padding } };
+    const ctx: OpContext = .{ .Conv1D = .{ .stride = options.stride, .padding = options.padding, .groups = options.groups } };
     if (bias) |b| {
         return self.registerSingleOutputOp(C, &.{ A, weight, b }, .Conv1D, ctx, req_grad);
     } else {
@@ -333,7 +333,7 @@ pub fn conv2d(
     const allocator = self.arena.allocator();
     const C = try A.conv2d(weight, bias, options, allocator);
     const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
-    const ctx: OpContext = .{ .Conv2D = .{ .stride = options.stride, .padding = options.padding } };
+    const ctx: OpContext = .{ .Conv2D = .{ .stride = options.stride, .padding = options.padding, .groups = options.groups } };
     if (bias) |b| {
         return self.registerSingleOutputOp(C, &.{ A, weight, b }, .Conv2D, ctx, req_grad);
     } else {

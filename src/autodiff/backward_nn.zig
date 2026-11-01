@@ -428,6 +428,7 @@ pub fn backwardNN(self: *Op, scratch_allocator: std.mem.Allocator) !void {
             const C = self.outputs[0];
             const stride = self.context.Conv2D.stride;
             const padding = self.context.Conv2D.padding;
+            const groups = if (self.context.Conv2D.groups == 0) 1 else self.context.Conv2D.groups;
 
             const N = A.shape.dims[0];
             const C_in = A.shape.dims[1];
@@ -473,49 +474,93 @@ pub fn backwardNN(self: *Op, scratch_allocator: std.mem.Allocator) !void {
                 }
             }
 
-            const used_sgemm = (A.requires_grad or W.requires_grad) and A.isContiguous() and W.isContiguous() and C.isContiguous() and
-                convIm2colBackward(A, W, C, .{
-                    .N = N,
-                    .C_in = C_in,
-                    .H = H,
-                    .W = W_in,
-                    .C_out = C_out,
-                    .KH = KH,
-                    .KW = KW,
-                    .H_out = H_out,
-                    .W_out = W_out,
-                    .stride_h = stride,
-                    .stride_w = stride,
-                    .pad_h = padding,
-                    .pad_w = padding,
-                }, conv_col_budget, scratch_allocator);
+            if (groups > 1) {
+                if (A.requires_grad or W.requires_grad) {
+                    const c_in_g = C_in / groups;
+                    const c_out_g = C_out / groups;
+                    for (0..N) |n| {
+                        for (0..groups) |gi| {
+                            for (0..c_out_g) |co_local| {
+                                const co = gi * c_out_g + co_local;
+                                for (0..H_out) |h_out| {
+                                    for (0..W_out) |w_out| {
+                                        const grad_val = C.grad[n * o_n + co * o_c + h_out * o_h + w_out * o_w];
+                                        if (grad_val == 0.0) continue;
 
-            if (!used_sgemm and (A.requires_grad or W.requires_grad)) {
-                for (0..N) |n| {
-                    for (0..C_out) |co| {
-                        for (0..H_out) |h_out| {
-                            for (0..W_out) |w_out| {
-                                const grad_val = C.grad[n * o_n + co * o_c + h_out * o_h + w_out * o_w];
-                                if (grad_val == 0.0) continue;
+                                        for (0..c_in_g) |ci_local| {
+                                            const ci = gi * c_in_g + ci_local;
+                                            for (0..KH) |kh| {
+                                                const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
+                                                if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
+                                                const ih: usize = @intCast(ih_signed);
+                                                for (0..KW) |kw| {
+                                                    const iw_signed: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
+                                                    if (iw_signed < 0 or iw_signed >= @as(isize, @intCast(W_in))) continue;
+                                                    const iw: usize = @intCast(iw_signed);
 
-                                for (0..C_in) |ci| {
-                                    for (0..KH) |kh| {
-                                        const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
-                                        if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
-                                        const ih: usize = @intCast(ih_signed);
-                                        for (0..KW) |kw| {
-                                            const iw_signed: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
-                                            if (iw_signed < 0 or iw_signed >= @as(isize, @intCast(W_in))) continue;
-                                            const iw: usize = @intCast(iw_signed);
+                                                    if (W.requires_grad) {
+                                                        const input_val = A.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
+                                                        W.grad[co * w_co + ci_local * w_ci + kh * w_kh + kw * w_kw] += grad_val * input_val;
+                                                    }
 
-                                            if (W.requires_grad) {
-                                                const input_val = A.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
-                                                W.grad[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw] += grad_val * input_val;
+                                                    if (A.requires_grad) {
+                                                        const weight_val = W.data[co * w_co + ci_local * w_ci + kh * w_kh + kw * w_kw];
+                                                        A.grad[n * s_n + ci * s_c + ih * s_h + iw * s_w] += grad_val * weight_val;
+                                                    }
+                                                }
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                const used_sgemm = (A.requires_grad or W.requires_grad) and A.isContiguous() and W.isContiguous() and C.isContiguous() and
+                    convIm2colBackward(A, W, C, .{
+                        .N = N,
+                        .C_in = C_in,
+                        .H = H,
+                        .W = W_in,
+                        .C_out = C_out,
+                        .KH = KH,
+                        .KW = KW,
+                        .H_out = H_out,
+                        .W_out = W_out,
+                        .stride_h = stride,
+                        .stride_w = stride,
+                        .pad_h = padding,
+                        .pad_w = padding,
+                    }, conv_col_budget, scratch_allocator);
 
-                                            if (A.requires_grad) {
-                                                const weight_val = W.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
-                                                A.grad[n * s_n + ci * s_c + ih * s_h + iw * s_w] += grad_val * weight_val;
+                if (!used_sgemm and (A.requires_grad or W.requires_grad)) {
+                    for (0..N) |n| {
+                        for (0..C_out) |co| {
+                            for (0..H_out) |h_out| {
+                                for (0..W_out) |w_out| {
+                                    const grad_val = C.grad[n * o_n + co * o_c + h_out * o_h + w_out * o_w];
+                                    if (grad_val == 0.0) continue;
+
+                                    for (0..C_in) |ci| {
+                                        for (0..KH) |kh| {
+                                            const ih_signed: isize = @as(isize, @intCast(h_out * stride + kh)) - @as(isize, @intCast(padding));
+                                            if (ih_signed < 0 or ih_signed >= @as(isize, @intCast(H))) continue;
+                                            const ih: usize = @intCast(ih_signed);
+                                            for (0..KW) |kw| {
+                                                const iw_signed: isize = @as(isize, @intCast(w_out * stride + kw)) - @as(isize, @intCast(padding));
+                                                if (iw_signed < 0 or iw_signed >= @as(isize, @intCast(W_in))) continue;
+                                                const iw: usize = @intCast(iw_signed);
+
+                                                if (W.requires_grad) {
+                                                    const input_val = A.data[n * s_n + ci * s_c + ih * s_h + iw * s_w];
+                                                    W.grad[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw] += grad_val * input_val;
+                                                }
+
+                                                if (A.requires_grad) {
+                                                    const weight_val = W.data[co * w_co + ci * w_ci + kh * w_kh + kw * w_kw];
+                                                    A.grad[n * s_n + ci * s_c + ih * s_h + iw * s_w] += grad_val * weight_val;
+                                                }
                                             }
                                         }
                                     }

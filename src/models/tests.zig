@@ -1691,4 +1691,85 @@ test "ResidualBlock and ResNet architecture and autograd" {
             try std.testing.expect(p.grad.len > 0);
         }
     }
+
+    // 7. ConvNeXt 现代纯卷积视觉架构测试 (ConvNeXtBlock, DownsampleLayer, ConvNeXt)
+    {
+        // (1) 单个 ConvNeXtBlock 前向与反向梯度
+        {
+            var blk = try models.ConvNeXtBlock.init(allocator, 16, .{});
+            defer nn.deinitModel(&blk, allocator);
+
+            var g = autodiff.Graph.initDefault(allocator);
+            defer g.deinit();
+
+            const x = try g.ones(&.{ 2, 16, 8, 8 }, true);
+            const y = try blk.forward(&g, x);
+
+            try std.testing.expectEqualSlices(usize, &.{ 2, 16, 8, 8 }, y.shape.dims[0..y.shape.len]);
+
+            try g.backward(y);
+            try std.testing.expect(x.grad.len > 0);
+            try std.testing.expect(blk.dwconv.weight.grad.len > 0);
+            try std.testing.expect(blk.pwconv1.weight.grad.len > 0);
+            try std.testing.expect(blk.pwconv2.weight.grad.len > 0);
+            if (blk.gamma) |gamma| {
+                try std.testing.expect(gamma.grad.len > 0);
+            }
+        }
+
+        // (2) DownsampleLayer (LayerNorm2d + 2x2 Conv stride=2)
+        {
+            var ds = try models.DownsampleLayer.init(allocator, 16, 32);
+            defer nn.deinitModel(&ds, allocator);
+
+            var g = autodiff.Graph.initDefault(allocator);
+            defer g.deinit();
+
+            const x = try g.ones(&.{ 2, 16, 8, 8 }, true);
+            const y = try ds.forward(&g, x);
+
+            try std.testing.expectEqualSlices(usize, &.{ 2, 32, 4, 4 }, y.shape.dims[0..y.shape.len]);
+
+            try g.backward(y);
+            try std.testing.expect(x.grad.len > 0);
+            try std.testing.expect(ds.conv.weight.grad.len > 0);
+        }
+
+        // (3) ConvNeXt 预设规格与各 stage 块计数
+        {
+            var pico = try models.convnext_pico(allocator, 1, 10);
+            defer pico.deinit();
+            try std.testing.expectEqual(@as(usize, 4), pico.blocks.len());
+            try std.testing.expectEqual(@as(usize, 3), pico.downsamples.len());
+
+            var atto = try models.convnext_atto(allocator, 3, 100);
+            defer atto.deinit();
+            try std.testing.expectEqual(@as(usize, 6), atto.blocks.len()); // [1, 1, 3, 1]
+
+            var femto = try models.convnext_femto(allocator, 3, 100);
+            defer femto.deinit();
+            try std.testing.expectEqual(@as(usize, 12), femto.blocks.len()); // [2, 2, 6, 2]
+        }
+
+        // (4) 端到端 ConvNeXt 前向与反向传播 (Pico 架构, 4 阶段下采样)
+        {
+            var net = try models.convnext_pico(allocator, 1, 5);
+            defer net.deinit();
+
+            var g = autodiff.Graph.initDefault(allocator);
+            defer g.deinit();
+
+            // 输入尺寸: [2, 1, 16, 16] (stem 2x2 s=2 -> 8x8; 3 次下采样 2x2 s=2 -> 4x4 -> 2x2 -> 1x1)
+            const x = try g.ones(&.{ 2, 1, 16, 16 }, true);
+            const logits = try net.forward(&g, x);
+
+            try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, logits.shape.dims[0..logits.shape.len]);
+
+            // 反向梯度与参数求导
+            try g.backward(logits);
+            try std.testing.expect(x.grad.len > 0);
+            try std.testing.expect(net.head.weight.grad.len > 0);
+            try std.testing.expect(net.stem_conv.weight.grad.len > 0);
+        }
+    }
 }

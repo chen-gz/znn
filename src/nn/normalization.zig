@@ -98,6 +98,69 @@ pub const LayerNorm = struct {
     }
 };
 
+/// 二维通道层归一化 (2-Dimensional Layer Normalization, LayerNorm2d)
+///
+/// 专为 ConvNeXt 等现代纯卷积视觉模型设计的通道归一化层：
+/// 对四维图像张量 `[N, C, H, W]`，在每个空间位置 `(h, w)` 上沿通道维度 `C` 计算均值与方差并归一化。
+pub const LayerNorm2d = struct {
+    weight: *Tensor, // 可学习的缩放因子 gamma [C]
+    bias: *Tensor, // 可学习的平移偏置 beta [C]
+    eps: f32 = 1e-6,
+    name: ?[]const u8 = null,
+    module_type: []const u8 = "LayerNorm2d",
+
+    pub const Options = struct {
+        eps: f32 = 1e-6,
+
+        pub const default: Options = .{};
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    pub fn defaultOptions() Options {
+        return Options.defaultOptions();
+    }
+
+    pub fn init(allocator: std.mem.Allocator, num_channels: usize, options: Options) !LayerNorm2d {
+        const weight = try createVectorTensor(allocator, num_channels, 1.0, true);
+        errdefer freePersistentTensor(allocator, weight);
+        const bias = try createVectorTensor(allocator, num_channels, 0.0, true);
+        errdefer freePersistentTensor(allocator, bias);
+
+        return LayerNorm2d{
+            .weight = weight,
+            .bias = bias,
+            .eps = options.eps,
+        };
+    }
+
+    pub fn initDefault(allocator: std.mem.Allocator, num_channels: usize) !LayerNorm2d {
+        return init(allocator, num_channels, .{});
+    }
+
+    /// 模块标准数学变换公式
+    pub const formula = "y_{n,c,h,w} = \\frac{x_{n,c,h,w} - \\mu_{n,h,w}}{\\sqrt{\\sigma_{n,h,w}^2 + \\epsilon}} \\cdot \\gamma_c + \\beta_c";
+
+    pub fn forward(self: *const LayerNorm2d, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
+        const module_scope = try enterModuleScope(graph, self);
+        defer module_scope.exit();
+
+        if (x.shape.len != 4) return error.IncompatibleDimensions;
+
+        // [N, C, H, W] -> [N, H, C, W] -> [N, H, W, C]
+        const p1 = try graph.transpose(x, 1, 2);
+        const p2 = try graph.transpose(p1, 2, 3);
+
+        // 沿末维 C 执行标准 LayerNorm
+        const norm = try graph.layerNorm(p2, self.weight, self.bias, self.eps);
+
+        // [N, H, W, C] -> [N, H, C, W] -> [N, C, H, W]
+        const r1 = try graph.transpose(norm, 2, 3);
+        return try graph.transpose(r1, 1, 2);
+    }
+};
+
 /// 一维批量归一化 (1-Dimensional Batch Normalization, BatchNorm1d)
 pub const BatchNorm1d = struct {
     num_features: usize,

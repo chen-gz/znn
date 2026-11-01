@@ -171,12 +171,12 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         .Conv1D => {
             const bias = if (self.inputs.len > 2) self.inputs[2] else null;
             const ctx = self.context.Conv1D;
-            try tensor_mod.conv1dInto(self.outputs[0], self.inputs[0], self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator);
+            try tensor_mod.conv1dInto(self.outputs[0], self.inputs[0], self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding, .groups = ctx.groups }, allocator);
         },
         .Conv2D => {
             const bias = if (self.inputs.len > 2) self.inputs[2] else null;
             const ctx = self.context.Conv2D;
-            try tensor_mod.conv2dInto(self.outputs[0], self.inputs[0], self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding }, allocator);
+            try tensor_mod.conv2dInto(self.outputs[0], self.inputs[0], self.inputs[1], bias, .{ .stride = ctx.stride, .padding = ctx.padding, .groups = ctx.groups }, allocator);
         },
         .ConvTranspose1D => {
             const bias = if (self.inputs.len > 2) self.inputs[2] else null;
