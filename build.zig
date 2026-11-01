@@ -51,6 +51,7 @@ const examples = [_]ExampleTarget{
         .run_step = "run-resnet",
         .run_desc = "Run the ResNet (Residual Network) Fashion MNIST app",
         .test_name = "resnet_tests",
+        .forward_args = true,
     },
     .{
         .name = "transformer_embedding",
