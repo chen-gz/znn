@@ -19,10 +19,23 @@ pub const TransformerDecoder = gpt.TransformerDecoder;
 pub const DefaultGPT = gpt.DefaultGPT;
 
 pub const resnet = @import("models/resnet.zig");
+pub const BasicBlock = resnet.BasicBlock;
 pub const ResidualBlock = resnet.ResidualBlock;
+pub const Bottleneck = resnet.Bottleneck;
 pub const ResNetConfig = resnet.ResNetConfig;
 pub const ResNet = resnet.ResNet;
+pub const ResNetBottleneck = resnet.ResNetBottleneck;
 pub const DefaultResNet = resnet.DefaultResNet;
+pub const DefaultResNetBottleneck = resnet.DefaultResNetBottleneck;
+pub const resnet18 = resnet.resnet18;
+pub const resnet34 = resnet.resnet34;
+pub const resnet50 = resnet.resnet50;
+pub const resnet101 = resnet.resnet101;
+pub const resnet152 = resnet.resnet152;
+pub const resnet20 = resnet.resnet20;
+pub const resnet32 = resnet.resnet32;
+pub const resnet56 = resnet.resnet56;
+pub const resnet110 = resnet.resnet110;
 
 test {
     std.testing.refAllDecls(@This());

@@ -1556,13 +1556,16 @@ test "ResidualBlock and ResNet architecture and autograd" {
 
     // 1. 编译期 nn.Module 协议断言
     comptime {
+        nn.verifyModule(models.BasicBlock);
         nn.verifyModule(models.ResidualBlock);
+        nn.verifyModule(models.Bottleneck);
         nn.verifyModule(models.ResNet);
+        nn.verifyModule(models.ResNetBottleneck);
     }
 
     // 2. 残差块单测：恒等映射捷径 (stride = 1, in_channels == out_channels)
     {
-        var block = try models.ResidualBlock.initDefault(allocator, 4);
+        var block = try models.BasicBlock.initDefault(allocator, 4);
         defer nn.deinitModel(&block, allocator);
 
         var g = autodiff.Graph.initDefault(allocator);
@@ -1583,7 +1586,7 @@ test "ResidualBlock and ResNet architecture and autograd" {
 
     // 3. 残差块单测：投影升维降采样捷径 (stride = 2, in_channels != out_channels)
     {
-        var block = try models.ResidualBlock.init(allocator, 4, 8, .{ .stride = 2 });
+        var block = try models.BasicBlock.init(allocator, 4, 8, .{ .stride = 2 });
         defer nn.deinitModel(&block, allocator);
 
         var g = autodiff.Graph.initDefault(allocator);
@@ -1602,7 +1605,50 @@ test "ResidualBlock and ResNet architecture and autograd" {
         try std.testing.expect(block.shortcut_conv.?.weight.grad.len > 0);
     }
 
-    // 4. 端到端 ResNet 复合模块测试
+    // 4. Bottleneck 三层残差瓶颈块单测 (expansion = 4)
+    {
+        // in_channels = 16, mid_channels = 8, out_channels = 8 * 4 = 32
+        var bottle = try models.Bottleneck.init(allocator, 16, 8, .{ .stride = 2 });
+        defer nn.deinitModel(&bottle, allocator);
+
+        var g = autodiff.Graph.initDefault(allocator);
+        defer g.deinit();
+
+        const x = try g.ones(&.{ 2, 16, 8, 8 }, true);
+        const y = try bottle.forward(&g, x);
+
+        // mid_channels=8, expansion=4 -> 32 通道；stride=2 -> 4x4
+        try std.testing.expectEqualSlices(usize, &.{ 2, 32, 4, 4 }, y.shape.dims[0..y.shape.len]);
+        try std.testing.expect(bottle.shortcut_conv != null);
+        try std.testing.expect(bottle.shortcut_bn != null);
+
+        try g.backward(y);
+        try std.testing.expect(x.grad.len > 0);
+        try std.testing.expect(bottle.conv1.weight.grad.len > 0);
+        try std.testing.expect(bottle.conv2.weight.grad.len > 0);
+        try std.testing.expect(bottle.conv3.weight.grad.len > 0);
+        try std.testing.expect(bottle.shortcut_conv.?.weight.grad.len > 0);
+    }
+
+    // 5. 论文经典规格构建测试 (ResNet-18, ResNet-50, ResNet-20)
+    {
+        // ResNet-18 (BasicBlock: 4 stages [2, 2, 2, 2])
+        var rn18 = try models.resnet18(allocator, 3, 1000);
+        defer nn.deinitModel(&rn18, allocator);
+        try std.testing.expectEqual(@as(usize, 8), rn18.blocks.len());
+
+        // ResNet-50 (Bottleneck: 4 stages [3, 4, 6, 3])
+        var rn50 = try models.resnet50(allocator, 3, 1000);
+        defer nn.deinitModel(&rn50, allocator);
+        try std.testing.expectEqual(@as(usize, 16), rn50.blocks.len());
+
+        // ResNet-20 (CIFAR-10: 3 stages [3, 3, 3])
+        var rn20 = try models.resnet20(allocator, 3, 10);
+        defer nn.deinitModel(&rn20, allocator);
+        try std.testing.expectEqual(@as(usize, 9), rn20.blocks.len());
+    }
+
+    // 6. 端到端 ResNet 复合模块前向与反向梯度测试
     {
         const config = models.ResNetConfig{
             .in_channels = 1,
@@ -1614,21 +1660,21 @@ test "ResidualBlock and ResNet architecture and autograd" {
             },
         };
 
-        var resnet = try models.DefaultResNet.init(allocator, try models.ResNet.init(allocator, config));
-        defer resnet.deinit();
+        var resnet_mod = try models.DefaultResNet.init(allocator, try models.ResNet.init(allocator, config));
+        defer resnet_mod.deinit();
 
         // 参数初始化
         var prng = std.Random.DefaultPrng.init(1337);
         const sample = try tensor.ones(allocator, &.{ 2, 1, 8, 8 });
         defer tensor.free(allocator, sample);
-        try resnet.initParametersWithSample(prng.random(), .{sample});
+        try resnet_mod.initParametersWithSample(prng.random(), .{sample});
 
         // 前向传播与分类输出验证
         var g = autodiff.Graph.initDefault(allocator);
         defer g.deinit();
 
         const x = try g.ones(&.{ 2, 1, 8, 8 }, true);
-        const logits = try resnet.forward(&g, x);
+        const logits = try resnet_mod.forward(&g, x);
 
         try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, logits.shape.dims[0..logits.shape.len]);
 
@@ -1636,7 +1682,7 @@ test "ResidualBlock and ResNet architecture and autograd" {
         try g.backward(logits);
         try std.testing.expect(x.grad.len > 0);
 
-        const params = try resnet.parameters(allocator);
+        const params = try resnet_mod.parameters(allocator);
         defer allocator.free(params);
         try std.testing.expect(params.len > 0);
 

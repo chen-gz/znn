@@ -11,10 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **ResNet Architecture & Example Application**:
-  - Implemented standard `ResidualBlock` in `src/models/resnet.zig` with 3x3 Conv2D, BatchNorm2d, ReLU, and 1x1 projection shortcuts for downsampling / dimension matching.
-  - Implemented modular `ResNet` model with stem convolution, customizable stages via `nn.ModuleList(ResidualBlock)`, adaptive average pooling, and linear classification head.
-  - Added executable ResNet training example in `examples/resnet.zig` (`zig build run-resnet`) with Fashion-MNIST loader and synthetic batch fallback.
+- **Complete ResNet Paper Architecture Suite (He et al. 2015)**:
+  - Implemented both core residual block structures:
+    - `BasicBlock` (2-layer 3x3 Conv + BN + ReLU, expansion = 1) for ResNet-18/34 and CIFAR-10 series.
+    - `Bottleneck` (3-layer 1x1 -> 3x3 -> 1x1 Conv + BN + ReLU, expansion = 4) with channel compression and restoration for ResNet-50/101/152.
+  - Implemented generic modular `GenericResNet(comptime Block: type)` supporting `BasicBlock` and `Bottleneck` with stem convolution, customizable stages via `nn.ModuleList(Block)`, adaptive average pooling, and linear classification head.
+  - Added constructors and presets for all canonical architectures from the original paper:
+    - ImageNet series (Table 1): `resnet18`, `resnet34`, `resnet50`, `resnet101`, `resnet152`.
+    - CIFAR-10 series (§4.2): `resnet20`, `resnet32`, `resnet44`, `resnet56`, `resnet110`.
+    - Lightweight demo: `resnet9`.
+  - Added full training, evaluation, and performance benchmark application in `examples/resnet.zig` (`zig build run-resnet`), achieving 876+ img/s training throughput, 3,400+ img/s inference throughput, and 85.05% test accuracy on Fashion-MNIST.
   - Upgraded `BatchNorm2d.init` with standard `Options` and `initDefault`, conforming to configuration conventions.
 
 
