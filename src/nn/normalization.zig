@@ -143,6 +143,10 @@ pub const BatchNorm1d = struct {
         };
     }
 
+    pub fn initDefault(allocator: std.mem.Allocator, num_features: usize) !BatchNorm1d {
+        return init(allocator, num_features, .{});
+    }
+
     pub fn forward(self: *const BatchNorm1d, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);
         defer module_scope.exit();
@@ -172,13 +176,31 @@ pub const BatchNorm2d = struct {
     name: ?[]const u8 = null,
     module_type: []const u8 = "BatchNorm2d",
 
-    pub fn init(allocator: std.mem.Allocator, num_features: usize, eps: f32, momentum: f32) !BatchNorm2d {
+    pub const Options = struct {
+        eps: f32 = 1e-5,
+        momentum: f32 = 0.1,
+
+        pub const default: Options = .{};
+
+        pub fn defaultOptions() Options {
+            return .{};
+        }
+    };
+
+    /// 模块标准数学变换公式
+    pub const formula = "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta";
+
+    pub fn defaultOptions() Options {
+        return Options.defaultOptions();
+    }
+
+    pub fn init(allocator: std.mem.Allocator, num_features: usize, options: Options) !BatchNorm2d {
         const t = try BatchNormTensors.init(allocator, num_features);
 
         return BatchNorm2d{
             .num_features = num_features,
-            .eps = eps,
-            .momentum = momentum,
+            .eps = options.eps,
+            .momentum = options.momentum,
             .training = true,
             .gamma = t.gamma,
             .beta = t.beta,
@@ -187,8 +209,9 @@ pub const BatchNorm2d = struct {
         };
     }
 
-    /// 模块标准数学变换公式
-    pub const formula = "y = \\frac{x - \\mathrm{E}[x]}{\\sqrt{\\mathrm{Var}[x] + \\epsilon}} \\odot \\gamma + \\beta";
+    pub fn initDefault(allocator: std.mem.Allocator, num_features: usize) !BatchNorm2d {
+        return init(allocator, num_features, .{});
+    }
 
     pub fn forward(self: *const BatchNorm2d, graph: *autodiff.Graph, x: *Tensor) !*Tensor {
         const module_scope = try enterModuleScope(graph, self);

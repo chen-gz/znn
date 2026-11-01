@@ -1550,3 +1550,99 @@ test "GPT forwardWithCache incremental decoding parity and generate() loop" {
         try std.testing.expect(tok < 32);
     }
 }
+
+test "ResidualBlock and ResNet architecture and autograd" {
+    const allocator = std.testing.allocator;
+
+    // 1. 编译期 nn.Module 协议断言
+    comptime {
+        nn.verifyModule(models.ResidualBlock);
+        nn.verifyModule(models.ResNet);
+    }
+
+    // 2. 残差块单测：恒等映射捷径 (stride = 1, in_channels == out_channels)
+    {
+        var block = try models.ResidualBlock.initDefault(allocator, 4);
+        defer nn.deinitModel(&block, allocator);
+
+        var g = autodiff.Graph.initDefault(allocator);
+        defer g.deinit();
+
+        const x = try g.ones(&.{ 2, 4, 8, 8 }, true);
+        const y = try block.forward(&g, x);
+
+        try std.testing.expectEqualSlices(usize, &.{ 2, 4, 8, 8 }, y.shape.dims[0..y.shape.len]);
+
+        // 反向梯度传播
+        try g.backward(y);
+        try std.testing.expect(x.grad.len > 0);
+        try std.testing.expect(block.conv1.weight.grad.len > 0);
+        try std.testing.expect(block.bn1.gamma.grad.len > 0);
+        try std.testing.expect(block.shortcut_conv == null);
+    }
+
+    // 3. 残差块单测：投影升维降采样捷径 (stride = 2, in_channels != out_channels)
+    {
+        var block = try models.ResidualBlock.init(allocator, 4, 8, .{ .stride = 2 });
+        defer nn.deinitModel(&block, allocator);
+
+        var g = autodiff.Graph.initDefault(allocator);
+        defer g.deinit();
+
+        const x = try g.ones(&.{ 2, 4, 8, 8 }, true);
+        const y = try block.forward(&g, x);
+
+        // 8x8 输入在 stride=2 下变为 4x4
+        try std.testing.expectEqualSlices(usize, &.{ 2, 8, 4, 4 }, y.shape.dims[0..y.shape.len]);
+        try std.testing.expect(block.shortcut_conv != null);
+        try std.testing.expect(block.shortcut_bn != null);
+
+        try g.backward(y);
+        try std.testing.expect(x.grad.len > 0);
+        try std.testing.expect(block.shortcut_conv.?.weight.grad.len > 0);
+    }
+
+    // 4. 端到端 ResNet 复合模块测试
+    {
+        const config = models.ResNetConfig{
+            .in_channels = 1,
+            .num_classes = 5,
+            .base_channels = 4,
+            .stages = &.{
+                .{ .channels = 4, .num_blocks = 1, .stride = 1 },
+                .{ .channels = 8, .num_blocks = 1, .stride = 2 },
+            },
+        };
+
+        var resnet = try models.DefaultResNet.init(allocator, try models.ResNet.init(allocator, config));
+        defer resnet.deinit();
+
+        // 参数初始化
+        var prng = std.Random.DefaultPrng.init(1337);
+        const sample = try tensor.ones(allocator, &.{ 2, 1, 8, 8 });
+        defer tensor.free(allocator, sample);
+        try resnet.initParametersWithSample(prng.random(), .{sample});
+
+        // 前向传播与分类输出验证
+        var g = autodiff.Graph.initDefault(allocator);
+        defer g.deinit();
+
+        const x = try g.ones(&.{ 2, 1, 8, 8 }, true);
+        const logits = try resnet.forward(&g, x);
+
+        try std.testing.expectEqualSlices(usize, &.{ 2, 5 }, logits.shape.dims[0..logits.shape.len]);
+
+        // 反向梯度与参数遍历
+        try g.backward(logits);
+        try std.testing.expect(x.grad.len > 0);
+
+        const params = try resnet.parameters(allocator);
+        defer allocator.free(params);
+        try std.testing.expect(params.len > 0);
+
+        for (params) |p| {
+            try std.testing.expect(p.requires_grad);
+            try std.testing.expect(p.grad.len > 0);
+        }
+    }
+}

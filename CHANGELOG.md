@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **ResNet Architecture & Example Application**:
+  - Implemented standard `ResidualBlock` in `src/models/resnet.zig` with 3x3 Conv2D, BatchNorm2d, ReLU, and 1x1 projection shortcuts for downsampling / dimension matching.
+  - Implemented modular `ResNet` model with stem convolution, customizable stages via `nn.ModuleList(ResidualBlock)`, adaptive average pooling, and linear classification head.
+  - Added executable ResNet training example in `examples/resnet.zig` (`zig build run-resnet`) with Fashion-MNIST loader and synthetic batch fallback.
+  - Upgraded `BatchNorm2d.init` with standard `Options` and `initDefault`, conforming to configuration conventions.
+
+
 ## [0.4.0] - 2026-10-31
 
 ### Added

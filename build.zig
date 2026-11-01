@@ -46,6 +46,13 @@ const examples = [_]ExampleTarget{
         .test_name = "cnn_tests",
     },
     .{
+        .name = "resnet",
+        .src = "examples/resnet.zig",
+        .run_step = "run-resnet",
+        .run_desc = "Run the ResNet (Residual Network) Fashion MNIST app",
+        .test_name = "resnet_tests",
+    },
+    .{
         .name = "transformer_embedding",
         .src = "examples/transformer_embedding.zig",
         .run_step = "run-emb",

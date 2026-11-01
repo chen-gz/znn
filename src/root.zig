@@ -43,6 +43,7 @@ pub const trainModel = nn.trainModel;
 pub const evalModel = nn.evalModel;
 pub const ScaledDotProductAttention = nn.ScaledDotProductAttention;
 pub const DefaultGPT = models.DefaultGPT;
+pub const DefaultResNet = models.DefaultResNet;
 pub const Recurrent = nn.Recurrent;
 pub const RecurrentResult = nn.RecurrentResult;
 pub const RNNResult = nn.RNNResult;

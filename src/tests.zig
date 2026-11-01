@@ -1356,11 +1356,11 @@ test "setTrainingModel, trainModel, and evalModel recursive reflection" {
     };
 
     var m = CompositeModel{
-        .bn = try nn.BatchNorm2d.init(allocator, 4, 1e-5, 0.1),
+        .bn = try nn.BatchNorm2d.init(allocator, 4, .{}),
         .drop = nn.Dropout.initDefault(),
         .sub_bns = .{
-            try nn.BatchNorm2d.init(allocator, 2, 1e-5, 0.1),
-            try nn.BatchNorm2d.init(allocator, 2, 1e-5, 0.1),
+            try nn.BatchNorm2d.init(allocator, 2, .{}),
+            try nn.BatchNorm2d.init(allocator, 2, .{}),
         },
     };
     defer nn.deinitModel(&m, allocator);

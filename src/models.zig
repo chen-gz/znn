@@ -18,6 +18,12 @@ pub const GPT = gpt.GPT;
 pub const TransformerDecoder = gpt.TransformerDecoder;
 pub const DefaultGPT = gpt.DefaultGPT;
 
+pub const resnet = @import("models/resnet.zig");
+pub const ResidualBlock = resnet.ResidualBlock;
+pub const ResNetConfig = resnet.ResNetConfig;
+pub const ResNet = resnet.ResNet;
+pub const DefaultResNet = resnet.DefaultResNet;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("models/tests.zig");

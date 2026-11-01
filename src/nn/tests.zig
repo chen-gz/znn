@@ -541,7 +541,7 @@ test "LayerNorm forward and backward autograd" {
 
 test "BatchNorm2d forward and backward autograd" {
     const allocator = std.testing.allocator;
-    var bn = try BatchNorm2d.init(allocator, 2, 1e-5, 0.1);
+    var bn = try BatchNorm2d.init(allocator, 2, .{});
     defer nn.deinitModel(&bn, allocator);
 
     const x = try tensor.zeros(allocator, &.{ 2, 2, 2, 2 });
@@ -1985,7 +1985,7 @@ test "normalization constructors release partial allocations on failure" {
     }
 
     const allocator = std.testing.allocator;
-    var bn = try BatchNorm2d.init(allocator, 2, 1e-5, 0.1);
+    var bn = try BatchNorm2d.init(allocator, 2, .{});
     defer nn.deinitModel(&bn, allocator);
     try std.testing.expectEqualSlices(f32, &.{ 1.0, 1.0 }, bn.gamma.data);
     try std.testing.expectEqualSlices(f32, &.{ 0.0, 0.0 }, bn.beta.data);
