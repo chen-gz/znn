@@ -112,6 +112,16 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("   Pure Zig Dataset Downloader (znn dataset tool)        \n", .{});
     std.debug.print("=========================================================\n\n", .{});
 
+    if (std.mem.eql(u8, dataset_name, "help") or std.mem.eql(u8, dataset_name, "--help") or std.mem.eql(u8, dataset_name, "-h")) {
+        std.debug.print("Usage:\n", .{});
+        std.debug.print("  zig build download-data -Ddataset=<name>\n", .{});
+        std.debug.print("  zig build download-dataset -Ddataset=<name>\n\n", .{});
+        std.debug.print("Supported datasets:\n", .{});
+        std.debug.print("  - Vision: fashion_mnist, mnist, tiny_imagenet\n", .{});
+        std.debug.print("  - LLM:    tinyshakespeare, wikitext2, wikitext103, tinystories, alpaca, all_llm\n", .{});
+        return;
+    }
+
     if (std.mem.eql(u8, dataset_name, "fashion_mnist") or std.mem.eql(u8, dataset_name, "fashion-mnist")) {
         std.debug.print("⬇️  Downloading Fashion MNIST dataset...\n", .{});
         const base_url = "http://fashion-mnist.s3-website.eu-central-1.amazonaws.com";

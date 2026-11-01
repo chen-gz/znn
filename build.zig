@@ -321,8 +321,8 @@ pub fn build(b: *std.Build) void {
     forwardArgs(b, coverage_cmd);
     coverage_step.dependOn(&coverage_cmd.step);
 
-    // Dataset Download Step (Pure Zig: zig build download-dataset -- tinyshakespeare)
-    const dataset_opt = b.option([]const u8, "dataset", "Dataset name to download (fashion_mnist, mnist, tinyshakespeare, wikitext2, tinystories, alpaca, all_llm)") orelse "fashion_mnist";
+    // Dataset Download Step (Pure Zig: zig build download-dataset -Ddataset=tinyshakespeare)
+    const dataset_opt = b.option([]const u8, "dataset", "Dataset name to download (fashion_mnist, mnist, tiny_imagenet, tinyshakespeare, wikitext2, wikitext103, tinystories, alpaca, all_llm)") orelse "fashion_mnist";
 
     const exe_download = b.addExecutable(.{
         .name = "download_data",
@@ -341,7 +341,7 @@ pub fn build(b: *std.Build) void {
     forwardArgs(b, download_cmd);
     download_cmd.addArg(dataset_opt);
 
-    const download_step = b.step("download-dataset", "Download dataset in pure Zig (e.g. tinyshakespeare, wikitext2, tinystories, alpaca, fashion_mnist, mnist)");
+    const download_step = b.step("download-dataset", "Download dataset in pure Zig (e.g. fashion_mnist, mnist, tiny_imagenet, wikitext103, tinyshakespeare, all_llm)");
     download_step.dependOn(&download_cmd.step);
 
     const download_data_step = b.step("download-data", "Alias for download-dataset");
