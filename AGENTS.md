@@ -36,16 +36,21 @@
 
 ## 2. Versioning & Release Rules (版本更新规则)
 遵循语义化版本规范 (Semantic Versioning: `MAJOR.MINOR.PATCH`):
-- **日常改动记录在 `Unreleased`**：每个功能、重构与修复都记录在 [`CHANGELOG.md`](CHANGELOG.md) 的 `Unreleased` 小节 (遵循 [Keep a Changelog](https://keepachangelog.com/) 规范，分类记录 `Added`、`Changed`、`Fixed` 等条目)，不为单个提交递增版本号。
-- **版本号由用户决定**：版本号只在用户明确要求或确认时更新，通常在积累了一批重大特性后作为里程碑发布。完成重大特性时可以向用户建议发布新版本。
+- **日常改动记录在 `Unreleased`**：每个功能、重构与修复在开发过程中先记录在 [`CHANGELOG.md`](CHANGELOG.md) 的 `Unreleased` 小节 (遵循 [Keep a Changelog](https://keepachangelog.com/) 规范，分类记录 `Added`、`Changed`、`Fixed` 等条目)，不为单个未完成的 commit 递增版本号。
+- **Milestone 驱动小版本发布 (Milestone-Driven Releases)**：
+  - 每个 Milestone 的实现代表一个自包含且经过全量测试验证的完整功能增量（如新增核心算子、架构模型或数值解法）。
+  - **每个 Milestone 落地合入 `main` 后，均可推进一个小版本**（如 `0.4.1`、`0.4.2` 等 PATCH 版本；若涉及重大跨包重构、破坏性 API 升级或重大子系统上线则推进 MINOR 版本如 `0.5.0`）。
+- **Changelog 拆分与独立版本文件归档 (`changelog/X.Y.Z.md`)**：
+  - 根目录 [`CHANGELOG.md`](CHANGELOG.md) 保持短小聚焦，仅保留当前活跃的 `[Unreleased]` 小节与全部已发布版本的快速导航表；
+  - 每次发布新版本时，在 [`changelog/`](changelog/) 目录下创建独立的 `X.Y.Z.md` 版本发布文件（例如 `changelog/0.4.1.md`），完整记录该版本/Milestone 的新增特性（`Added`）、架构变更（`Changed`）与修复项（`Fixed`）。
 - **关联文件同步**：更新版本号时，必须同步更新以下四个文件：
   1. [`build.zig.zon`](build.zig.zon) 中的 `.version = "X.Y.Z"`
   2. [`src/root.zig`](src/root.zig) 中的 `VERSION = "X.Y.Z"` 与 `version = .{ .major = X, .minor = Y, .patch = Z }`
   3. [`src/tests.zig`](src/tests.zig) 中的 `VERSION` 与 `version` 断言
-  4. [`CHANGELOG.md`](CHANGELOG.md) 中把 `Unreleased` 的内容归入新版本小节
+  4. [`CHANGELOG.md`](CHANGELOG.md) 中的版本导航表，并在 [`changelog/`](changelog/) 目录下新增 `X.Y.Z.md`
 - **推送与 Tag 规则**：
-  - **日常改动只推 main 分支**：日常迭代、优化与 Bug 修复只推送 commit 到 `main` 分支，不打 Tag。
-  - **Tag 只用于里程碑**：只有在发布新版本时 (即用户要求或确认之后) 才创建并推送对应的 Git Tag。
+  - **日常改动只推 main 分支**：开发过程中的分支迭代与日常优化只推送 commit 到对应的功能分支或 `main` 分支，不打 Tag。
+  - **Tag 用于 Milestone 版本发布**：在 Milestone 完成并发布新版本时 (即完成上述四个文件同步后) 才创建并推送对应的 Git Tag（如 `v0.4.1`）。
 
 ## 3. Refactoring & No Backward Compatibility (重构优先，不保留向后兼容)
 - **Refactor Freely (允许并鼓励重构)**: When a change exposes a flawed design, refactor the affected code, APIs, data formats and documents directly instead of layering patches on top. Restructuring modules, renaming public APIs and fields, and rewriting components are all allowed.
@@ -109,6 +114,10 @@
 - **Inspection & Continuation Workflow (推进与复工流程)**：
   - 任何 AI 在接手或继续推进项目时，**必须首先检查 `prompts/` 目录下的计划与对应 prompt**，从中恢复上下文和验收条件，避免凭空脑补或重复审计；
   - 某个里程碑任务完成并验证通过后，负责推进的 AI 应当及时更新对应 prompt 文件的状态标记（标记已完成并记录实际测试验证结果），并将下一个里程碑的执行 prompt 准备就绪，一并使用 `jj` 提交入库。
+- **Completed Prompts Archival & Cleanup (完成 Prompt 及时归档与清理)**：
+  - 里程碑完成且全量测试通过、合入 `main` 后，其完整的交付内容、代码提交记录与测试指标统一沉淀归档至 `changelog/X.Y.Z.md` 与 `prompts/README.md` 中；
+  - **已完成的历史 prompt 文件直接删除**，避免工作区积压过时文档；
+  - `prompts/` 目录下仅保留当前正在推进的阶段 prompt（如 `prompts/11_advanced_indexing_and_strided_views.md`）、队列中就绪待执行的 prompt 以及常态化质量门禁（如 `prompts/06_comprehensive_e2e_verification_and_hardening.md`）。
 
 ## 10. Autonomous Project Progress, Architecture Audits & Tests (主动推进、架构审查与测试)
 - **Review unfinished work at task start**: Before choosing project work, inspect `plan/`, `prompts/`, `TODO.md` (if present), the current `jj` state, and relevant remote bookmarks. Identify incomplete, blocked, stale, or conflicting items; reconcile plan status with the actual code and remote state instead of trusting status labels alone.
