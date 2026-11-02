@@ -226,6 +226,60 @@ pub fn solveOLS(
     return solveRidge(allocator, x, y, n_samples, n_features, 0.0);
 }
 
+/// 利用正交三角分解 (QR Decomposition) 求解普通最小二乘回归 (Ordinary Least Squares, OLS)
+///
+/// 相比传统正规方程法 (Normal Equations, M = X^T X / N)，正交三角分解直接对中心化样本矩阵进行正交分解 X_c = Q * R，
+/// 并通过回代求解上三角方程组 R * w = Q^T * y_c。
+/// 数值稳定性分析：正规方程法会将矩阵条件数平方为 kappa(X)^2，容易因浮点下溢与有效数字抵消而失效；
+/// QR 分解则严格保持原矩阵条件数 kappa(X)，在高共线性与病态数据拟合中具有极其优异的数值精度。
+pub fn solveLeastSquaresQR(
+    allocator: std.mem.Allocator,
+    x: []const f32,
+    y: []const f32,
+    n_samples: usize,
+    n_features: usize,
+) !ModelResult {
+    std.debug.assert(x.len == n_samples * n_features);
+    std.debug.assert(y.len == n_samples);
+
+    const N = n_samples;
+    const D = n_features;
+    if (N == 0 or D == 0) return error.EmptyInputs;
+    if (N < D) return error.IncompatibleDimensions;
+
+    var center_res = try centerData(allocator, x, y, N, D);
+    defer center_res.deinit(allocator);
+    const mean_x = center_res.mean_x;
+    const mean_y = center_res.mean_y;
+
+    const X_tensor = try tensor.zeros(allocator, &.{ N, D });
+    defer tensor.free(allocator, X_tensor);
+    for (0..N) |i| {
+        for (0..D) |j| {
+            X_tensor.data[i * D + j] = center_res.X_c[j * N + i];
+        }
+    }
+
+    const y_tensor = try tensor.zeros(allocator, &.{N});
+    defer tensor.free(allocator, y_tensor);
+    @memcpy(y_tensor.data, center_res.y_c);
+
+    const w_tensor = try tensor.qrSolve(X_tensor.*, y_tensor.*, allocator);
+    defer tensor.free(allocator, w_tensor);
+
+    const weights = try allocator.alloc(f32, D);
+    errdefer allocator.free(weights);
+    @memcpy(weights, w_tensor.data);
+
+    const intercept = mean_y - dot(mean_x, weights);
+
+    return ModelResult{
+        .weights = weights,
+        .intercept = intercept,
+        .allocator = allocator,
+    };
+}
+
 /// Solves Least Absolute Shrinkage and Selection Operator (LASSO) Regression using Coordinate Descent:
 /// min (1/2N) * ||Xw + b - y||_2^2 + alpha * ||w||_1
 pub fn solveLasso(
@@ -506,6 +560,13 @@ test "solveRidge and solveElasticNet recover multi-feature coefficients" {
     try std.testing.expectApproxEqAbs(@as(f32, -2.0), ols.weights[1], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), ols.weights[2], 1e-4);
     try std.testing.expectApproxEqAbs(@as(f32, 3.0), ols.intercept, 1e-4);
+
+    var ols_qr = try solveLeastSquaresQR(allocator, &x, &y, N, D);
+    defer ols_qr.deinit();
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), ols_qr.weights[0], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, -2.0), ols_qr.weights[1], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), ols_qr.weights[2], 1e-4);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), ols_qr.intercept, 1e-4);
 
     var enet = try solveElasticNet(allocator, &x, &y, N, D, 1e-4, 0.5, 2000, 1e-7);
     defer enet.deinit();

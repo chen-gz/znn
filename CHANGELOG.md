@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **QR Decomposition, Upper Triangular Back-Substitution & QR Least Squares Solver**:
+  - Added `QRMode` (`.reduced` vs `.complete`) and `QROptions` with `defaultOptions()` in `src/tensor/linalg.zig`, conforming to configuration struct guidelines.
+  - Added `qrWithOptions` supporting complete QR decomposition ($M > N \implies Q \in \mathbb{R}^{M \times M}, R \in \mathbb{R}^{M \times N}$, forming a complete orthonormal basis $Q Q^T = Q^T Q = I_M$).
+  - Implemented upper-triangular back-substitution solver `solveTriangularUpper` for $R x = b$ in $O(K^2)$ time with zero additional allocations.
+  - Implemented `qrSolve` for solving overdetermined least-squares systems $A x \approx b$ via $R x = Q^T b$, completely bypassing the condition-squaring normal equations ($A^T A$).
+  - Added `solveLeastSquaresQR` in `src/regression.zig` to provide high-stability ordinary least-squares regression with $O(\kappa)$ condition number.
+  - Re-exported all new functions and types through `tensor` and `root.zig`.
+  - Added comprehensive unit test coverage in `src/tensor/tests.zig` and `src/regression.zig`.
+
 - **Comprehensive Multi-Domain Dataset Suite (Tiny ImageNet, WikiText-103 & Multimodal Vision-Language)**:
   - Upgraded `ImageDataset` in `src/dataset.zig` to support arbitrary channel depth (`channels: u32 = 1` for grayscale, `channels = 3` for RGB) and added `sampleSize() = channels * rows * cols`.
   - Extended `loadImages` to parse both 3D IDX (`0x00000803`) and 4D IDX (`0x00000804` NCHW) tensor files.

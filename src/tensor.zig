@@ -23,7 +23,9 @@ pub const TensorMeta = safetensors.TensorMeta;
 pub const losses = @import("tensor/losses.zig");
 pub const Q4Block = quant.Q4Block;
 
-// --- Re-export Linear Algebra Results ---
+// --- Re-export Linear Algebra Types & Results ---
+pub const QRMode = linalg.QRMode;
+pub const QROptions = linalg.QROptions;
 pub const QRResult = linalg.QRResult;
 pub const SymEigResult = linalg.SymEigResult;
 pub const SVDResult = linalg.SVDResult;
@@ -189,6 +191,9 @@ pub const abs = ops.abs;
 pub const solveLinearSystem = ops.solveLinearSystem;
 pub const solveRidgeAnalytical = ops.solveRidgeAnalytical;
 pub const qr = ops.qr;
+pub const qrWithOptions = ops.qrWithOptions;
+pub const solveTriangularUpper = ops.solveTriangularUpper;
+pub const qrSolve = ops.qrSolve;
 pub const symeig = ops.symeig;
 pub const svd = ops.svd;
 

@@ -1046,6 +1046,11 @@ pub const Tensor = struct {
         return linalg.qr(self, allocator);
     }
 
+    /// 带选项的正交三角分解 (QR Decomposition with Options, QR)
+    pub fn qrWithOptions(self: Tensor, allocator: std.mem.Allocator, options: linalg.QROptions) !linalg.QRResult {
+        return linalg.qrWithOptions(self, allocator, options);
+    }
+
     /// 实对称特征值分解 (Symmetric Eigenvalue Decomposition, SymEig)
     pub fn symeig(self: Tensor, allocator: std.mem.Allocator) !linalg.SymEigResult {
         return linalg.symeig(self, allocator);

@@ -5,6 +5,21 @@ const ops = @import("ops.zig");
 const zeros = ops.zeros;
 const free = ops.free;
 
+/// 正交三角分解计算模式 (QR Decomposition Mode)
+pub const QRMode = enum {
+    reduced, // 精简模式 (Reduced / Thin QR)
+    complete, // 完整模式 (Complete / Full QR)
+};
+
+/// 正交三角分解配置选项 (QR Decomposition Options)
+pub const QROptions = struct {
+    mode: QRMode = .reduced,
+
+    pub fn defaultOptions() QROptions {
+        return .{};
+    }
+};
+
 /// 正交三角分解 (QR Decomposition, QR) 输出结果
 pub const QRResult = struct {
     Q: *Tensor,
@@ -40,12 +55,16 @@ pub const SVDResult = struct {
     }
 };
 
-/// 基于豪斯霍尔德变换 (Householder Transformation) 的精简正交三角分解 (Reduced QR Decomposition)
+/// 基于豪斯霍尔德变换 (Householder Transformation) 的带选项正交三角分解 (QR Decomposition with Options)
 /// 对于形状为 [M, N] 的矩阵 A (K = min(M, N)):
-/// Q 的形状为 [M, K], 具有标准正交列 (Q^T * Q = I_K)
-/// R 的形状为 [K, N], 为上三角 (Upper Triangular) 矩阵
-/// 满足 A = Q * R 且 R 的对角元素非负
-pub fn qr(self: Tensor, allocator: std.mem.Allocator) !QRResult {
+/// - reduced 模式:
+///   Q 的形状为 [M, K], 具有标准正交列 (Q^T * Q = I_K)
+///   R 的形状为 [K, N], 为上三角 (Upper Triangular) 矩阵
+/// - complete 模式:
+///   Q 的形状为 [M, M], 具有完全标准正交基 (Q^T * Q = Q * Q^T = I_M)
+///   R 的形状为 [M, N], 为上三角/上梯形矩阵 (当 M > N 时底部的 M - N 行全为 0)
+/// 满足 A = Q * R 且 R 的对角元素非负 (保证分解的标准唯一性)
+pub fn qrWithOptions(self: Tensor, allocator: std.mem.Allocator, options: QROptions) !QRResult {
     if (self.shape.len != 2) return error.IncompatibleDimensions;
     const M = self.shape.dims[0];
     const N = self.shape.dims[1];
@@ -154,25 +173,140 @@ pub fn qr(self: Tensor, allocator: std.mem.Allocator) !QRResult {
         }
     }
 
-    const Q = try zeros(allocator, &.{ M, K });
-    errdefer free(allocator, Q);
-    for (0..M) |i| {
-        for (0..K) |j| {
-            Q.data[i * K + j] = Q_work[i * M + j];
+    if (options.mode == .complete and M > N) {
+        const Q = try zeros(allocator, &.{ M, M });
+        errdefer free(allocator, Q);
+        @memcpy(Q.data, Q_work);
+
+        const R = try zeros(allocator, &.{ M, N });
+        for (0..M) |i| {
+            for (0..N) |j| {
+                R.data[i * N + j] = if (i <= j) R_work[i * N + j] else 0.0;
+            }
         }
+
+        return QRResult{
+            .Q = Q,
+            .R = R,
+        };
+    } else {
+        const Q = try zeros(allocator, &.{ M, K });
+        errdefer free(allocator, Q);
+        for (0..M) |i| {
+            for (0..K) |j| {
+                Q.data[i * K + j] = Q_work[i * M + j];
+            }
+        }
+
+        const R = try zeros(allocator, &.{ K, N });
+        for (0..K) |i| {
+            for (0..N) |j| {
+                R.data[i * N + j] = if (i <= j) R_work[i * N + j] else 0.0;
+            }
+        }
+
+        return QRResult{
+            .Q = Q,
+            .R = R,
+        };
+    }
+}
+
+/// 基于豪斯霍尔德变换 (Householder Transformation) 的精简正交三角分解 (Reduced QR Decomposition)
+/// 默认调用 qrWithOptions(self, allocator, .{})
+pub fn qr(self: Tensor, allocator: std.mem.Allocator) !QRResult {
+    return qrWithOptions(self, allocator, .{});
+}
+
+/// 解上三角线性方程组 R * x = b (回代法 / Back Substitution)
+/// R: 形状 [K, K] 上三角方阵 (主对角线元素非零)
+/// b: 形状 [K] 或 [K, 1] 向量
+/// 返回解向量 x: 形状 [K]
+pub fn solveTriangularUpper(R: Tensor, b: Tensor, allocator: std.mem.Allocator) !*Tensor {
+    if (R.shape.len != 2) return error.IncompatibleDimensions;
+    const K = R.shape.dims[0];
+    if (R.shape.dims[1] != K) return error.ShapeMismatch;
+    if (K == 0) return error.EmptyInputs;
+
+    const b_len = if (b.shape.len == 1)
+        b.shape.dims[0]
+    else if (b.shape.len == 2 and (b.shape.dims[1] == 1 or b.shape.dims[0] == 1))
+        b.shape.dims[0] * b.shape.dims[1]
+    else
+        return error.IncompatibleDimensions;
+
+    if (b_len != K) return error.ShapeMismatch;
+
+    const r_contig: ?*Tensor = if (!R.isContiguous()) try R.contiguous(allocator) else null;
+    defer if (r_contig) |cp| free(allocator, cp);
+    const r_data = (if (r_contig) |cp| cp.data else R.data)[0 .. K * K];
+
+    const b_contig: ?*Tensor = if (!b.isContiguous()) try b.contiguous(allocator) else null;
+    defer if (b_contig) |cp| free(allocator, cp);
+    const b_data = (if (b_contig) |cp| cp.data else b.data)[0..K];
+
+    const x = try zeros(allocator, &.{K});
+    errdefer free(allocator, x);
+
+    var i: usize = K;
+    while (i > 0) {
+        i -= 1;
+        const diag = r_data[i * K + i];
+        if (@abs(diag) < 1e-12) {
+            return error.SingularMatrix;
+        }
+        var sum: f32 = b_data[i];
+        for (i + 1..K) |j| {
+            sum -= r_data[i * K + j] * x.data[j];
+        }
+        x.data[i] = sum / diag;
     }
 
-    const R = try zeros(allocator, &.{ K, N });
-    for (0..K) |i| {
-        for (0..N) |j| {
-            R.data[i * N + j] = if (i <= j) R_work[i * N + j] else 0.0;
+    return x;
+}
+
+/// 求解线性方程组或超定最小二乘问题 A * x \approx b (利用正交三角分解 / QR Decomposition)
+/// A: 形状 [M, N] 矩阵 (要求 M >= N > 0，且 A 为满列秩)
+/// b: 形状 [M] 或 [M, 1] 向量
+/// 原理: 对 A 进行精简 QR 分解 A = Q * R (Q 为 [M, N], R 为 [N, N])
+/// 最小二乘解满足: R * x = Q^T * b
+/// 先计算向量 c = Q^T * b (形状 [N]), 再通过回代法求解上三角系统 R * x = c
+/// 返回解向量 x: 形状 [N]
+pub fn qrSolve(A: Tensor, b: Tensor, allocator: std.mem.Allocator) !*Tensor {
+    if (A.shape.len != 2) return error.IncompatibleDimensions;
+    const M = A.shape.dims[0];
+    const N = A.shape.dims[1];
+    if (M == 0 or N == 0) return error.EmptyInputs;
+    if (M < N) return error.IncompatibleDimensions;
+
+    const b_len = if (b.shape.len == 1)
+        b.shape.dims[0]
+    else if (b.shape.len == 2 and (b.shape.dims[1] == 1 or b.shape.dims[0] == 1))
+        b.shape.dims[0] * b.shape.dims[1]
+    else
+        return error.IncompatibleDimensions;
+
+    if (b_len != M) return error.ShapeMismatch;
+
+    const b_contig: ?*Tensor = if (!b.isContiguous()) try b.contiguous(allocator) else null;
+    defer if (b_contig) |cp| free(allocator, cp);
+    const b_data = (if (b_contig) |cp| cp.data else b.data)[0..M];
+
+    const qr_res = try qr(A, allocator);
+    defer qr_res.deinit(allocator);
+
+    const c = try zeros(allocator, &.{N});
+    defer free(allocator, c);
+
+    for (0..N) |j| {
+        var dot_val: f32 = 0.0;
+        for (0..M) |i| {
+            dot_val += qr_res.Q.data[i * N + j] * b_data[i];
         }
+        c.data[j] = dot_val;
     }
 
-    return QRResult{
-        .Q = Q,
-        .R = R,
-    };
+    return solveTriangularUpper(qr_res.R.*, c.*, allocator);
 }
 
 /// 基于雅可比旋转法 (Jacobi Rotation Method) 的实对称特征值分解 (Symmetric Eigenvalue Decomposition, SymEig)

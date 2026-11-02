@@ -77,9 +77,13 @@ pub const sumInto = reductions.sumInto;
 pub const meanInto = reductions.meanInto;
 
 const linalg_mod = @import("linalg.zig");
+pub const QRMode = linalg_mod.QRMode;
+pub const QROptions = linalg_mod.QROptions;
 pub const QRResult = linalg_mod.QRResult;
 pub const SymEigResult = linalg_mod.SymEigResult;
 pub const SVDResult = linalg_mod.SVDResult;
+pub const solveTriangularUpper = linalg_mod.solveTriangularUpper;
+pub const qrSolve = linalg_mod.qrSolve;
 
 // ============================================================================
 // NumPy-like raw tensor creation APIs (independent of Graph)
@@ -497,6 +501,10 @@ pub fn min(t: Tensor, dim: usize, allocator: std.mem.Allocator) !*Tensor {
 
 pub fn qr(t: Tensor, allocator: std.mem.Allocator) !QRResult {
     return t.qr(allocator);
+}
+
+pub fn qrWithOptions(t: Tensor, allocator: std.mem.Allocator, options: QROptions) !QRResult {
+    return t.qrWithOptions(allocator, options);
 }
 
 pub fn symeig(t: Tensor, allocator: std.mem.Allocator) !SymEigResult {

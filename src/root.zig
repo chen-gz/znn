@@ -65,12 +65,18 @@ pub const SliceRange = tensor.SliceRange;
 pub const ConvOptions = tensor.ConvOptions;
 pub const PoolOptions = tensor.PoolOptions;
 pub const RopeOptions = tensor.RopeOptions;
+pub const QRMode = tensor.QRMode;
+pub const QROptions = tensor.QROptions;
 pub const QRResult = tensor.QRResult;
 pub const SymEigResult = tensor.SymEigResult;
 pub const SVDResult = tensor.SVDResult;
 pub const qr = tensor.qr;
+pub const qrWithOptions = tensor.qrWithOptions;
+pub const solveTriangularUpper = tensor.solveTriangularUpper;
+pub const qrSolve = tensor.qrSolve;
 pub const symeig = tensor.symeig;
 pub const svd = tensor.svd;
+pub const solveLeastSquaresQR = regression.solveLeastSquaresQR;
 
 pub const CrossValidationOptions = cv.CrossValidationOptions;
 
