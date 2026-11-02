@@ -21,6 +21,8 @@ pub const safetensors = @import("tensor/safetensors.zig");
 pub const SafetensorsArchive = safetensors.SafetensorsArchive;
 pub const TensorMeta = safetensors.TensorMeta;
 pub const losses = @import("tensor/losses.zig");
+pub const indexing = @import("tensor/indexing.zig");
+pub const IndexingError = indexing.IndexingError;
 pub const Q4Block = quant.Q4Block;
 
 // --- Re-export Linear Algebra Types & Results ---

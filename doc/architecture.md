@@ -41,9 +41,14 @@ src/
 │   ├── reductions.zig            # 多轴归约 (sum, mean, var, std, min, max, argmin, argmax)、条件掩码、跨步切片与排序检索
 │   ├── quant.zig                 # 4-bit 量化 (Q4Block split-half 排布)、F32/BF16 量化 (quantizeSlice / quantizeSliceBf16)、反量化与矩阵乘法 (q4MatMulInto / q4MatMul)
 │   ├── linalg.zig                # 豪斯霍尔德 QR 分解 (qr)、雅可比对称特征分解 (symeig) 与单边雅可比奇异值分解 (svd)
+│   ├── indexing.zig              # 高级索引、切片选择与散射聚集操作 (Milestone 11 基础设施)
 │   ├── weight_init.zig           # He, Xavier, LeCun, Normal, Uniform 权重初始化与激活增益计算 (经 nn.init_mod 导出)
 │   ├── ops.zig                   # 张量创建工厂、拼接切分 (concat/split/stack) 与线性方程组求解
-│   └── tests.zig                 # 张量与线性代数单元测试集
+│   ├── tests.zig                 # 张量核心与生命周期单元测试集
+│   ├── tests_linalg.zig          # QR 分解、SVD 奇异值与特征值分解专项测试
+│   ├── tests_conv.zig            # 1D/2D 卷积与转置卷积朴素参考对比测试
+│   ├── tests_destination.zig     # 目标驱动原地张量计算与零分配测试
+│   └── tests_indexing.zig        # 高级索引与视图选择专项测试 (Milestone 11)
 ├── autodiff.zig                  # 自动微分门面 (导出 Graph, GraphOptions, Op, OpType, OpContext, ops)
 ├── autodiff/
 │   ├── types.zig                 # 算子枚举 OpType (含 GeluTanh, Softcap, Attention, Q4MatMul)、算子上下文联合体 OpContext 与 Op 节点数据结构
@@ -75,25 +80,37 @@ src/
 │   ├── tests.zig                 # 核心网络层、循环网络、Transformer/LLM 与 Safetensors 测试
 │   ├── tests_init.zig            # 权重自动初始化与增益推导专项测试
 │   └── tests_module.zig          # 编译期反射协议、字段路径命名与权重共享 (Tied Weights) 生命周期测试
-├── engine.zig                    # 训练工作流、评估调度器与采样门面 (导出 ClassificationTrainer, trainCausalLMStep, sampling, logits_processor)
-├── engine/
-│   ├── causal_lm.zig             # 因果语言模型单步训练循环与指标统计
-│   ├── sampling.zig              # 通用采样基础设施 (TokenRange 排除区间, argmaxWithPenalty, BF16 排除掩码, SamplingOptions / Sampler 温度 + Top-K + Top-P 随机采样, selectTopK 部分选择, 投机采样校验)
-│   └── logits_processor.zig      # 模型无关的设备端对数几率截断 (softcapLogits)、重复惩罚 (penalizeDevice)、候选生成 (deviceCandidates) 与词元选取 (selectToken / LogitsProcessor)
-├── models.zig                    # 专用模型门面 (导出 gpt, gemma4, gemma4_q4, gemma4_e4b, GPT, GPTConfig, TransformerDecoder, DefaultGPT, Gemma4ForCausalLM, DefaultGemma4Q4, Gemma4E4BModel, Gemma4E4BDecoderLayer, Gemma4E4BForCausalLM)
+├── models.zig                    # 专用模型门面 (导出 GPT, Gemma4, ConvNeXt, ResNet 族)
 ├── models/
 │   ├── gpt.zig                   # GPT 架构定义 (GPTConfig, TransformerDecoder, GPT, DefaultGPT)
-│   ├── gemma4.zig                # Gemma 4 配置、泛型注意力与解码层 (Gemma4AttentionT, Gemma4DecoderLayerT)、全精度模型 (Gemma4ForCausalLM, TinyGemma4) 与词表/对话模板 (Gemma4Vocabulary)
-│   ├── gemma4_q4.zig             # Gemma 4 架构 4-bit 量化实现、内聚 GPU 解码上下文与统一流式生成会话 (Gemma4Q4ForCausalLM.generate / Generation, Gemma4GpuLayer, Gemma4GpuContext, TinyQ4Gemma4)
+│   ├── gemma4.zig                # Gemma 4 配置、泛型注意力与解码层、全精度模型与词表/对话模板
+│   ├── gemma4_q4.zig             # Gemma 4 架构 4-bit 量化实现与 UMA GPU 流式生成会话
 │   ├── gemma4_ple.zig            # Gemma 4 逐层嵌入增强纯模块 (Gemma4PleLayer, Gemma4PleEmbedding)
-│   ├── gemma4_e4b.zig            # Gemma 4 E4B 原生内聚模型架构与 UMA GPU 自回归推理 (Gemma4E4BDecoderLayer, Gemma4E4BForCausalLM, Gemma4E4BModel)
-│   ├── tests.zig                 # Gemma 4 全精度、4-bit 量化、PLE、E4B 推理与对话模板单元测试
+│   ├── gemma4_e4b.zig            # Gemma 4 E4B 原生内聚模型架构与 GPU 自回归推理
+│   ├── convnext.zig              # 现代纯卷积视觉架构 (ConvNeXt-Tiny/Small/Base/Large, 7x7 深度可分离卷积与反向瓶颈)
+│   ├── resnet.zig                # 经典残差卷积网络 (ResNet-18/34/50, BasicBlock 与 Bottleneck 残差捷径)
+│   ├── tests.zig                 # 视觉与语言大模型架构端到端单元测试
 │   └── tests_vis.zig             # 可视化作用域归属、Schema 2.0 黄金边集与 18 个经典模型导出测试
-├── optim.zig                     # SGD, Adam, AdamW 优化器、4 类学习率调度器、梯度裁剪与 ZNNO 检查点
-├── engine.zig                    # 执行引擎门面 (导出分类训练器、评估器与 causal_lm 因果语言模型训练单步)
+├── optim.zig                     # 优化器与调度器顶层门面 (Layer 4 Facade)
+├── optim/
+│   ├── types.zig                 # 优化器基础接口、Config 与梯度步进公用类型
+│   ├── sgd.zig                   # SGD、SGDConfig、Momentum 与 Nesterov 算法
+│   ├── adam.zig                  # Adam、AdamW、AdamWConfig 与状态容器
+│   ├── lr_scheduler.zig          # LRScheduler 协议与调度器族 (CosineAnnealing, StepLR, Linear, Exponential)
+│   ├── checkpoint.zig            # saveCheckpoint, loadCheckpoint 与 ZNNO 检查点序列化
+│   └── tests.zig                 # 优化器与调度器专用单元测试集
+├── engine.zig                    # 训练工作流、评估调度器与采样门面 (导出 ClassificationTrainer, trainCausalLMStep, sampling, logits_processor)
 ├── engine/
-│   └── causal_lm.zig             # 因果自回归语言模型训练单步调度器 (trainCausalLMStep: 前向、交叉熵、反向传播与优化器更新)
-├── dataset.zig                   # MNIST/Fashion-MNIST IDX 加载器、DataLoader、BPETokenizer 与 BinaryMmapDataset
+│   ├── causal_lm.zig             # 因果自回归语言模型训练单步调度器 (trainCausalLMStep: 前向、交叉熵、反向传播与优化器更新)
+│   ├── sampling.zig              # 通用采样基础设施 (TokenRange, argmaxWithPenalty, BF16 排除掩码, SamplingOptions / Sampler 温度 + Top-K + Top-P 随机采样)
+│   └── logits_processor.zig      # 模型无关的设备端对数几率截断 (softcapLogits)、重复惩罚 (penalizeDevice) 与词元选取
+├── dataset.zig                   # 数据集与数据加载器顶层门面 (Layer 1 Facade)
+├── dataset/
+│   ├── dataloader.zig            # 通用 DataLoader, Batch, Sampler, Collate 协议
+│   ├── vision.zig                # MNIST/CIFAR IDX 解析、Synthetic Tiny ImageNet 与视觉数据集
+│   ├── text.zig                  # BPETokenizer, WikiText-103 因果自回归文本流与二进制内存映射
+│   ├── multimodal.zig            # MultimodalDataset 与 MultimodalPair 图文配对数据集
+│   └── tests.zig                 # 数据加载与管道专用单元测试集
 ├── regression.zig                # OLS、Ridge、Lasso、ElasticNet 经典回归算法
 ├── cross_validation.zig          # 分层 K-Fold 交叉验证、StandardScaler 与网格超参数搜索
 ├── manifold.zig                  # t-SNE 高维流形降维算法
@@ -106,17 +123,17 @@ src/
 
 ```mermaid
 flowchart TD
-    Dataset["数据与分词层 (src/dataset.zig)\n• MNIST/Fashion-MNIST IDX 解析器\n• BPETokenizer & BinaryMmapDataset\n• DataLoader (批次切片、打乱、丢弃余数)"]
+    Dataset["数据与分词层 (src/dataset.zig & src/dataset/)\n• MNIST/CIFAR IDX 解析器与合成 Tiny ImageNet\n• BPETokenizer & WikiText-103 因果自回归文本流\n• MultimodalDataset 图文配对数据集\n• DataLoader (批次切片、打乱、Collate 协议)"]
     
-    TensorCore["张量底座 (src/tensor/{shape,types,static,core,conv_pool,nn_kernels,reductions,linalg,ops}.zig)\n• Shape 维度系统与物理 Strides 步长映射\n• GenericTensor(T) 泛型系统与编译期 StaticTensor(T, dims)\n• 统一算子配置 (ConvOptions, PoolOptions, RopeOptions)\n• 广播机制、跨步切片视图 (SliceRange)、1D/2D 卷积池化与 QR/SymEig/SVD 分解"]
+    TensorCore["张量底座 (src/tensor/{shape,types,static,core,conv_pool,nn_kernels,reductions,linalg,ops,indexing}.zig)\n• Shape 维度系统与物理 Strides 步长映射\n• GenericTensor(T) 泛型系统与编译期 StaticTensor(T, dims)\n• 统一算子配置 (ConvOptions, PoolOptions, RopeOptions)\n• 广播机制、跨步切片视图 (SliceRange)、1D/2D 卷积池化与 QR/SymEig/SVD 分解\n• 高级索引与散射聚集基础设施 (Milestone 11)"]
     
     Autodiff["动态自动微分引擎 (src/autodiff/{types,op,backward_*,graph*}.zig)\n• Graph 计算图容器 (Arena 生命周期管理)\n• 节点与算子追踪 (Tensor.creator / Op / OpContext) 与单源前向内核复用\n• 算子级逆拓扑排序调度 (topologicalSortOps) 与分域反向内核 (backward_core/nn/math)\n• 模块作用域跟踪栈 (enterModule / enterChildScope)"]
     
-    NNModules["神经网络与专用模型 (src/nn/, src/models/)\n• 核心层 (nn/core.zig): Linear (1D/2D/N-D), Conv1D/2D, ConvTranspose1D/2D\n• 激活、归一化与池化 (nn/activations.zig, nn/normalization.zig): RMSNorm, LayerNorm, BatchNorm1d/2d, GroupNorm, 1D/2D/自适应池化\n• 循环网络 (nn/recurrent.zig): RNN, LSTM, StackedLSTM, GRU\n• 注意力与大模型 (nn/attention.zig, nn/transformer.zig, nn/llm.zig, models/gemma4.zig, models/gemma4_q4.zig)\n• 权重初始化 (tensor/weight_init.zig，经 nn.init_mod 导出): He, Xavier, LeCun, Normal, 激活增益自动推导"]
+    NNModules["神经网络与专用模型 (src/nn/, src/models/)\n• 核心层 (nn/core.zig): Linear (1D/2D/N-D), Conv1D/2D, ConvTranspose1D/2D\n• 现代视觉架构 (models/convnext.zig, models/resnet.zig): ConvNeXt 族与 ResNet 族\n• 循环网络 (nn/recurrent.zig): RNN, LSTM, StackedLSTM, GRU\n• 注意力与大模型 (nn/attention.zig, nn/transformer.zig, nn/llm.zig, models/gemma4.zig, models/gpt.zig)\n• 权重初始化 (tensor/weight_init.zig，经 nn.init_mod 导出): He, Xavier, LeCun, Normal, 激活增益自动推导"]
     
-    Engine["执行引擎与统计学习 (src/engine.zig, src/regression.zig)\n• trainClassificationStepWithClip / evalClassificationStep\n• 经典回归: OLS 闭式解, Ridge, Lasso, ElasticNet\n• K-Fold 交叉验证与网格超参数搜索 (src/cross_validation.zig)\n• t-SNE 高维流形降维 (src/manifold.zig)"]
+    Engine["执行引擎与统计学习 (src/engine.zig, src/regression.zig)\n• trainClassificationStepWithClip / evalClassificationStep\n• 因果自回归训练单步 (engine/causal_lm.zig)\n• 经典回归: OLS 闭式解, Ridge, Lasso, ElasticNet\n• K-Fold 交叉验证与网格超参数搜索 (src/cross_validation.zig)\n• t-SNE 高维流形降维 (src/manifold.zig)"]
     
-    Optimizers["解耦优化器与调度器 (src/optim.zig)\n• SGDOptimizer (含动量缓冲)\n• AdamOptimizer (一阶/二阶矩估计与偏差修正)\n• AdamWOptimizer (解耦权重衰减更新)\n• 学习率调度器: Cosine (含预热), StepLR, LinearWarmup, ExponentialLR\n• 梯度控制: 全局 L2 范数剪裁 (clipGradNorm) 与数值截断"]
+    Optimizers["解耦优化器与调度器 (src/optim.zig & src/optim/)\n• SGDOptimizer (含动量缓冲与 Nesterov)\n• AdamOptimizer (一阶/二阶矩估计与偏差修正)\n• AdamWOptimizer (解耦权重衰减更新)\n• 学习率调度器族: Cosine (含预热), StepLR, Linear, Exponential\n• 梯度控制: 全局 L2 范数剪裁 (clipGradNorm) 与数值截断"]
     
     Persistence["序列化与持久化 (src/nn/serialization.zig, src/optim.zig)\n• 零依赖 Safetensors (F32/BF16/F16) 模型权重读写 (saveModel / loadModel)\n• 优化器二进制状态检查点 (ZNNO 校验、版本与张量结构验证)"]
     

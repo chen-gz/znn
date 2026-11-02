@@ -19,6 +19,7 @@ Detailed release notes for past versions are archived in individual files under 
 
 | Version | Release Date | Summary | Release Note File |
 | :--- | :--- | :--- | :--- |
+| **0.4.2** | 2026-11-02 | Modularization of `src/optim/` and `src/dataset/`, test decoupling in `src/tensor/`, Python script hygiene, Milestone 11 indexing foundation | [`changelog/0.4.2.md`](changelog/0.4.2.md) |
 | **0.4.1** | 2026-11-01 | QR decomposition & least squares (M10), multi-domain datasets (Tiny ImageNet, WikiText-103, Multimodal) (M8), ConvNeXt suite (M7), full ResNet paper architecture suite | [`changelog/0.4.1.md`](changelog/0.4.1.md) |
 | **0.4.0** | 2026-10-31 | Unified tensor storage on `DeviceBuffer`, zero-allocation destination ops, static memory planner & execution graph replay, PyTorch-style `nn.Module` protocol, modular `GPT` and `Gemma 4` models | [`changelog/0.4.0.md`](changelog/0.4.0.md) |
 | **0.3.0** | 2026-10-16 | DeepSeek MLA multi-head latent attention, SwiGLU, rotary position embedding (RoPE), Q4 quantization engine, Householder QR and symmetric eigenvalue decomposition | [`changelog/0.3.0.md`](changelog/0.3.0.md) |

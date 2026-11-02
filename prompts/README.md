@@ -26,8 +26,7 @@
 
 | 优先级 / 阶段 | 文件 / 来源 | 核心任务 | 当前状态 |
 | :--- | :--- | :--- | :--- |
-| **P0 优先级**<br>*(最高优先 / 即刻启动)* | [`10_5_structural_optimization_and_modularization.md`](10_5_structural_optimization_and_modularization.md) | **架构整洁度、超长单体模块目录化拆分与测试解耦**：<br>1. 拆解 61KB `src/optim.zig` 为 `src/optim/` 子模块与独立门面；<br>2. 拆解 55KB `src/dataset.zig` 为视觉/文本/多模态子模块与独立门面；<br>3. 拆分 130KB `src/tensor/tests.zig` 为领域专用测试；<br>4. 归位 `examples/linear_regression.py`，同步 `doc/architecture.md`。 | **🔥 当前最高优先级待启动 (Top of Queue)** |
-| **P1 优先级**<br>*(M11 首要)* | [`11_advanced_indexing_and_strided_views.md`](11_advanced_indexing_and_strided_views.md) | **高级张量索引、跨步切片视图与离散累加体系**：<br>1. 通用轴向索引收集 `gather(dim, index)`；<br>2. 通用离散散布与累加 `scatter` / `scatterAdd` (含 `scatterAddInto` / `scatterInto`)；<br>3. 子张量一维切片与累加 `indexSelect` / `indexAdd` 与掩码过滤 `maskedSelect`；<br>4. 跨步切片带符号步长与逆序物化 (`step < 0`)；<br>5. 离散索引操作的 Autograd 计算图与梯度回传闭环。 | **⏳ 待排期 (Next in Queue)** |
+| **P1 优先级**<br>*(M11 即刻启动)* | [`11_advanced_indexing_and_strided_views.md`](11_advanced_indexing_and_strided_views.md) | **高级张量索引、跨步切片视图与离散累加体系**：<br>1. 通用轴向索引收集 `gather(dim, index)`；<br>2. 通用离散散布与累加 `scatter` / `scatterAdd` (含 `scatterAddInto` / `scatterInto`)；<br>3. 子张量一维切片与累加 `indexSelect` / `indexAdd` 与掩码过滤 `maskedSelect`；<br>4. 跨步切片带符号步长与逆序物化 (`step < 0`)；<br>5. 离散索引操作的 Autograd 计算图与梯度回传闭环。 | **🔥 当前最高优先级待启动 (Top of Queue)** |
 | **P1 优先级**<br>*(M12 待办)* | `12_multiaxis_reductions_and_statistics.md` | **多轴联合归约与进阶统计算子库**：<br>1. 多轴切片联合归约 `sumAxes`, `meanAxes`, `varianceAxes`；<br>2. 累乘 `prod`、前缀扫描 `cumsum` / `cumprod`；<br>3. 通用向量与矩阵范数 `norm` (L1, L2, Frobenius, Inf)；<br>4. 分位数 `quantile` 与中位数 `median`；<br>5. `OpType.Max` / `OpType.Min` Autograd 梯度路由与 `logSumExp`。 | **⏳ 待启动 (Queued)** |
 | **P2 优先级**<br>*(M13 待办)* | `13_advanced_linear_algebra_and_solvers.md` | **进阶数值线性代数库与求解器**：<br>1. 对称正定矩阵 Cholesky 分解 ($A = LL^T$)；<br>2. 下三角前代求解器 `solveTriangularLower` 与 `choSolve`；<br>3. 显式方阵求逆 `inv` 与基于 SVD 的摩尔-彭若斯伪逆 `pinv`；<br>4. 行列式 `det` 与数值稳定对数绝对值行列式 `slogdet`；<br>5. 轻量级爱因斯坦求和 `einsum` 引擎。 | **⏳ 待启动 (Queued)** |
 | **P2 优先级**<br>*(M14 待办)* | `14_modern_scientific_computing_and_distributions.md` | **现代科学计算与可微概率分布体系**：<br>1. 线程安全独立 `Generator` 对象与张量随机排列 `permutation`/`shuffle`；<br>2. 连续与离散概率分布体系 (`Normal`, `Uniform`, `Categorical` 等)；<br>3. 重参数化可微路径采样 `rsample` 与对数概率密度 `log_prob`；<br>4. 特殊数学函数库（`erfinv`, `gammaln`, `digamma`, `log1p`, `expm1`）。 | **⏳ 待启动 (Queued)** |
@@ -39,6 +38,10 @@
 ## 📜 已完成里程碑归档索引 (Completed Milestones Archive)
 
 > **归档说明**：根据工程整洁与维护规范，已通过全量测试并合入 `main` 的历史里程碑 Prompt 已经从 `prompts/` 目录中清理删除。所有功能清单、技术细节与测试指标均已归档至根目录 [`CHANGELOG.md`](../CHANGELOG.md) 及 [`changelog/`](../changelog/) 对应版本中。
+
+- **[Milestone 10.5] 核心代码库架构整洁度与超长单体模块目录化拆解**（详见 [`changelog/0.4.2.md`](../changelog/0.4.2.md)）：
+  - 交付：`src/optim/` (5 个专用子模块与独立测试，门面降至 40 行)；`src/dataset/` (4 个领域子模块，0 跨层张量依赖)；`src/tensor/` 解耦测试 `tests_linalg.zig` 与 `tests_conv.zig`，预留 `indexing.zig` 与 `tests_indexing.zig`；`examples/linear_regression.py` 归位至 `scripts/`；`doc/architecture.md` 全量同步。438 项测试与 203 项 Web 可视化测试全通。
+  - 状态：**✅ Done & Merged to `main` (`v0.4.2`)**。
 
 - **[Milestone 10] 正交三角分解 (QR Decomposition) 与高精度最小二乘求解**（详见 [`CHANGELOG.md` Unreleased](../CHANGELOG.md)）：
   - 交付：`QROptions` 与 `QRMode`（支持 `.reduced` 与 `.complete`），完整 Householder QR 分解 ($Q \in \mathbb{R}^{M \times M}$ 正交基)，上三角回代求解器 `solveTriangularUpper`，通用最小二乘求解器 `qrSolve`，线性回归高精度 QR 求解器 `solveLeastSquaresQR`（条件数严格保持 $O(\kappa)$）；全量 433 项测试通过，0 泄漏。
