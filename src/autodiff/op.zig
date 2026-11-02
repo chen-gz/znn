@@ -380,6 +380,27 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
                 C.shape.incrementCoord(&coord);
             }
         },
+        .Gather => {
+            const ctx = self.context.Gather;
+            try tensor_mod.gatherInto(self.outputs[0], self.inputs[0], ctx.dim, self.inputs[1]);
+        },
+        .Scatter => {
+            const ctx = self.context.Scatter;
+            try tensor_mod.scatterInto(self.outputs[0], self.inputs[0], ctx.dim, self.inputs[1], self.inputs[2]);
+        },
+        .ScatterAdd => {
+            const ctx = self.context.ScatterAdd;
+            if (self.outputs[0].isContiguous() and self.inputs[0].isContiguous()) {
+                @memcpy(self.outputs[0].data, self.inputs[0].data);
+            } else {
+                tensor_mod.shape.gatherStrided(self.outputs[0].data, self.inputs[0].data, self.inputs[0].shape, self.inputs[0].strides);
+            }
+            try tensor_mod.scatterAddInto(self.outputs[0], ctx.dim, self.inputs[1], self.inputs[2]);
+        },
+        .IndexSelect => {
+            const ctx = self.context.IndexSelect;
+            try tensor_mod.indexSelectInto(self.outputs[0], self.inputs[0], ctx.dim, self.inputs[1]);
+        },
     }
 }
 
@@ -453,6 +474,10 @@ pub fn backward(self: *Op, scratch_allocator: std.mem.Allocator) !void {
         .Where,
         .MaskedFill,
         .Slice,
+        .Gather,
+        .Scatter,
+        .ScatterAdd,
+        .IndexSelect,
         => try backward_math.backwardMath(self, scratch_allocator),
     }
 }

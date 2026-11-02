@@ -1122,17 +1122,32 @@ pub const Graph = struct {
             const dim_size = A.shape.dims[d];
             const stride = A.strides.dims[d];
             const range = if (d < ranges.len) ranges[d] else tensor_mod.SliceRange{};
-            if (range.step == 0) return error.InvalidStep;
+            if (range.step <= 0) return error.InvalidStep;
+            const s_step: usize = @intCast(range.step);
 
-            const start = range.start orelse 0;
-            const end = range.end orelse dim_size;
+            const s_raw = range.start orelse 0;
+            const start: usize = if (s_raw < 0) blk: {
+                const adj = @as(isize, @intCast(dim_size)) + s_raw;
+                break :blk if (adj < 0) 0 else @intCast(adj);
+            } else blk: {
+                if (@as(usize, @intCast(s_raw)) > dim_size) return error.IndexOutOfBounds;
+                break :blk @intCast(s_raw);
+            };
 
-            if (start > dim_size or end > dim_size) return error.IndexOutOfBounds;
+            const e_raw = range.end orelse @as(isize, @intCast(dim_size));
+            const end: usize = if (e_raw < 0) blk: {
+                const adj = @as(isize, @intCast(dim_size)) + e_raw;
+                break :blk if (adj < 0) 0 else @intCast(adj);
+            } else blk: {
+                if (@as(usize, @intCast(e_raw)) > dim_size) return error.IndexOutOfBounds;
+                break :blk @intCast(e_raw);
+            };
+
             if (end < start) return error.InvalidSliceRange;
 
-            const slice_len = if (end > start) (end - start + range.step - 1) / range.step else 0;
+            const slice_len = if (end > start) (end - start + s_step - 1) / s_step else 0;
             new_dims[d] = slice_len;
-            new_strides[d] = stride * range.step;
+            new_strides[d] = stride * s_step;
             offset += start * stride;
         }
 
@@ -1144,8 +1159,16 @@ pub const Graph = struct {
             for (0..A.shape.len) |d| {
                 const dim_size = A.shape.dims[d];
                 const range = if (d < ranges.len) ranges[d] else tensor_mod.SliceRange{};
-                const start = range.start orelse 0;
-                const end = range.end orelse dim_size;
+                const s_raw = range.start orelse 0;
+                const start: usize = if (s_raw < 0) blk: {
+                    const adj = @as(isize, @intCast(dim_size)) + s_raw;
+                    break :blk if (adj < 0) 0 else @intCast(adj);
+                } else @intCast(s_raw);
+                const e_raw = range.end orelse @as(isize, @intCast(dim_size));
+                const end: usize = if (e_raw < 0) blk: {
+                    const adj = @as(isize, @intCast(dim_size)) + e_raw;
+                    break :blk if (adj < 0) 0 else @intCast(adj);
+                } else @intCast(e_raw);
                 if (start != 0 or end != dim_size) {
                     curr_arr = try curr_arr.sliceAxis(d, start, end, self.options.mlx_stream);
                     had_slice = true;
@@ -1198,6 +1221,67 @@ pub const Graph = struct {
                     .rank = A.shape.len,
                 },
             },
+        );
+    }
+
+    pub fn gather(self: *Graph, x: *Tensor, dim: usize, index: *const Tensor) !*Tensor {
+        if (dim >= x.shape.len) return error.DimensionOutOfBounds;
+        if (x.shape.len != index.shape.len) return error.IndexShapeMismatch;
+        for (0..x.shape.len) |d| {
+            if (d != dim and index.shape.dims[d] > x.shape.dims[d]) {
+                return error.IndexShapeMismatch;
+            }
+        }
+        const req_grad = self.enable_grad and x.requires_grad;
+        const C = try self.tensorND(index.shape.dims[0..index.shape.len], req_grad);
+        return self.runAndRecordPreallocatedOp(
+            C,
+            &.{ x, @constCast(index) },
+            .Gather,
+            .{ .Gather = .{ .dim = dim } },
+        );
+    }
+
+    pub fn scatter(self: *Graph, x: *Tensor, dim: usize, index: *const Tensor, src: *Tensor) !*Tensor {
+        if (dim >= x.shape.len) return error.DimensionOutOfBounds;
+        if (x.shape.len != index.shape.len or x.shape.len != src.shape.len) return error.IndexShapeMismatch;
+        const req_grad = self.enable_grad and (x.requires_grad or src.requires_grad);
+        const C = try self.tensorND(x.shape.dims[0..x.shape.len], req_grad);
+        return self.runAndRecordPreallocatedOp(
+            C,
+            &.{ x, @constCast(index), src },
+            .Scatter,
+            .{ .Scatter = .{ .dim = dim } },
+        );
+    }
+
+    pub fn scatterAdd(self: *Graph, x: *Tensor, dim: usize, index: *const Tensor, src: *Tensor) !*Tensor {
+        if (dim >= x.shape.len) return error.DimensionOutOfBounds;
+        if (x.shape.len != index.shape.len or x.shape.len != src.shape.len) return error.IndexShapeMismatch;
+        const req_grad = self.enable_grad and (x.requires_grad or src.requires_grad);
+        const C = try self.tensorND(x.shape.dims[0..x.shape.len], req_grad);
+        return self.runAndRecordPreallocatedOp(
+            C,
+            &.{ x, @constCast(index), src },
+            .ScatterAdd,
+            .{ .ScatterAdd = .{ .dim = dim } },
+        );
+    }
+
+    pub fn indexSelect(self: *Graph, x: *Tensor, dim: usize, index: *const Tensor) !*Tensor {
+        if (dim >= x.shape.len) return error.DimensionOutOfBounds;
+        if (index.shape.len != 1) return error.IndexShapeMismatch;
+        var out_dims: [8]usize = @splat(0);
+        for (0..x.shape.len) |d| {
+            out_dims[d] = if (d == dim) index.shape.dims[0] else x.shape.dims[d];
+        }
+        const req_grad = self.enable_grad and x.requires_grad;
+        const C = try self.tensorND(out_dims[0..x.shape.len], req_grad);
+        return self.runAndRecordPreallocatedOp(
+            C,
+            &.{ x, @constCast(index) },
+            .IndexSelect,
+            .{ .IndexSelect = .{ .dim = dim } },
         );
     }
 

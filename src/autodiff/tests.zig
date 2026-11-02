@@ -1812,3 +1812,301 @@ test "ExecutionGraph compiles and replays forward consistently with eager graph"
         try std.testing.expectApproxEqAbs(v1, v2, 1e-5);
     }
 }
+
+test "Autograd gather forward and backward (dual scatter_add)" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    // X: [2, 3]
+    const x = try graph.array(&.{ 2, 3 }, &.{
+        10.0, 20.0, 30.0,
+        40.0, 50.0, 60.0,
+    }, true);
+
+    // Index along dim 1: [2, 2]
+    // row 0: select cols [0, 2]
+    // row 1: select cols [1, 0]
+    const idx = try graph.array(&.{ 2, 2 }, &.{
+        0.0, 2.0,
+        1.0, 0.0,
+    }, false);
+
+    const gathered = try graph.gather(x, 1, idx);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 2 }, gathered.shape.dims[0..gathered.shape.len]);
+    try std.testing.expectEqualSlices(f32, &.{
+        10.0, 30.0,
+        50.0, 40.0,
+    }, gathered.data);
+
+    // Backward with specific gradients:
+    // dC = [[1.0, 2.0], [3.0, 4.0]]
+    @memcpy(gathered.grad, &[_]f32{ 1.0, 2.0, 3.0, 4.0 });
+    try graph.backwardWithGrad(gathered);
+
+    // Expected dX via scatterAdd:
+    // row 0: col 0 gets 1.0, col 1 gets 0.0, col 2 gets 2.0
+    // row 1: col 0 gets 4.0, col 1 gets 3.0, col 2 gets 0.0
+    try std.testing.expectEqualSlices(f32, &.{
+        1.0, 0.0, 2.0,
+        4.0, 3.0, 0.0,
+    }, x.grad);
+
+    // Test dual accumulation with duplicate index entries
+    var graph2 = Graph.initDefault(allocator);
+    defer graph2.deinit();
+
+    const x2 = try graph2.array(&.{ 1, 3 }, &.{ 1.0, 2.0, 3.0 }, true);
+    // Gather both times from col 1: [1, 2] with indices [1.0, 1.0]
+    const idx2 = try graph2.array(&.{ 1, 2 }, &.{ 1.0, 1.0 }, false);
+    const gathered2 = try graph2.gather(x2, 1, idx2);
+    try std.testing.expectEqualSlices(f32, &.{ 2.0, 2.0 }, gathered2.data);
+
+    @memcpy(gathered2.grad, &[_]f32{ 5.0, 7.0 });
+    try graph2.backwardWithGrad(gathered2);
+
+    // x2.grad col 1 should be 5.0 + 7.0 = 12.0
+    try std.testing.expectEqualSlices(f32, &.{ 0.0, 12.0, 0.0 }, x2.grad);
+}
+
+test "Autograd scatter forward and backward (masking overwritten entries)" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    // X: [2, 3]
+    const x = try graph.array(&.{ 2, 3 }, &.{
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+    }, true);
+
+    // Index along dim 1: [2, 2]
+    const idx = try graph.array(&.{ 2, 2 }, &.{
+        0.0, 2.0,
+        1.0, 0.0,
+    }, false);
+
+    // Src: [2, 2]
+    const src = try graph.array(&.{ 2, 2 }, &.{
+        100.0, 300.0,
+        500.0, 400.0,
+    }, true);
+
+    const scattered = try graph.scatter(x, 1, idx, src);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, scattered.shape.dims[0..scattered.shape.len]);
+    try std.testing.expectEqualSlices(f32, &.{
+        100.0, 2.0, 300.0,
+        400.0, 500.0, 6.0,
+    }, scattered.data);
+
+    // dC: [2, 3]
+    @memcpy(scattered.grad, &[_]f32{
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+    });
+    try graph.backwardWithGrad(scattered);
+
+    // X entries overwritten at (0, 0), (0, 2), (1, 0), (1, 1) should have grad = 0.
+    // X entries preserved at (0, 1) and (1, 2) should receive dC values: 2.0 and 6.0.
+    try std.testing.expectEqualSlices(f32, &.{
+        0.0, 2.0, 0.0,
+        0.0, 0.0, 6.0,
+    }, x.grad);
+
+    // Src entries should receive gathered dC:
+    // src(0, 0) -> dC(0, 0) = 1.0
+    // src(0, 1) -> dC(0, 2) = 3.0
+    // src(1, 0) -> dC(1, 1) = 5.0
+    // src(1, 1) -> dC(1, 0) = 4.0
+    try std.testing.expectEqualSlices(f32, &.{
+        1.0, 3.0,
+        5.0, 400.0 * 0.0 + 4.0,
+    }, src.grad);
+}
+
+test "Autograd scatterAdd forward and backward (duplicate accumulation and direct gradient pass-through)" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    // X: [2, 3]
+    const x = try graph.array(&.{ 2, 3 }, &.{
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+    }, true);
+
+    // Index along dim 1: [2, 2], row 0 has DUPLICATE index 1.0!
+    const idx = try graph.array(&.{ 2, 2 }, &.{
+        1.0, 1.0,
+        0.0, 2.0,
+    }, false);
+
+    // Src: [2, 2]
+    const src = try graph.array(&.{ 2, 2 }, &.{
+        10.0, 20.0,
+        30.0, 40.0,
+    }, true);
+
+    const out = try graph.scatterAdd(x, 1, idx, src);
+    try std.testing.expectEqualSlices(usize, &.{ 2, 3 }, out.shape.dims[0..out.shape.len]);
+    // row 0: col 0 = 1.0; col 1 = 2.0 + 10.0 + 20.0 = 32.0; col 2 = 3.0
+    // row 1: col 0 = 4.0 + 30.0 = 34.0; col 1 = 5.0; col 2 = 6.0 + 40.0 = 46.0
+    try std.testing.expectEqualSlices(f32, &.{
+        1.0, 32.0, 3.0,
+        34.0, 5.0, 46.0,
+    }, out.data);
+
+    // dC: [2, 3]
+    @memcpy(out.grad, &[_]f32{
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+    });
+    try graph.backwardWithGrad(out);
+
+    // X receives dC directly without masking
+    try std.testing.expectEqualSlices(f32, &.{
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+    }, x.grad);
+
+    // src receives gather(dC, dim=1, index):
+    // src(0, 0) -> dC(0, 1) = 2.0
+    // src(0, 1) -> dC(0, 1) = 2.0
+    // src(1, 0) -> dC(1, 0) = 4.0
+    // src(1, 1) -> dC(1, 2) = 6.0
+    try std.testing.expectEqualSlices(f32, &.{
+        2.0, 2.0,
+        4.0, 6.0,
+    }, src.grad);
+}
+
+test "Autograd indexSelect forward and backward (dual index_add)" {
+    const allocator = std.testing.allocator;
+    var graph = Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    // X: [3, 2]
+    const x = try graph.array(&.{ 3, 2 }, &.{
+        10.0, 11.0,
+        20.0, 21.0,
+        30.0, 31.0,
+    }, true);
+
+    // 1D index: [4] with repeated index 2
+    const idx = try graph.array(&.{4}, &.{ 2.0, 0.0, 2.0, 1.0 }, false);
+
+    const out = try graph.indexSelect(x, 0, idx);
+    try std.testing.expectEqualSlices(usize, &.{ 4, 2 }, out.shape.dims[0..out.shape.len]);
+    try std.testing.expectEqualSlices(f32, &.{
+        30.0, 31.0, // row 0: x[2]
+        10.0, 11.0, // row 1: x[0]
+        30.0, 31.0, // row 2: x[2]
+        20.0, 21.0, // row 3: x[1]
+    }, out.data);
+
+    // Set out.grad to ones
+    @memset(out.grad, 1.0);
+    try graph.backwardWithGrad(out);
+
+    // x[0] was selected once -> grad [1.0, 1.0]
+    // x[1] was selected once -> grad [1.0, 1.0]
+    // x[2] was selected twice -> grad [2.0, 2.0]
+    try std.testing.expectEqualSlices(f32, &.{
+        1.0, 1.0,
+        1.0, 1.0,
+        2.0, 2.0,
+    }, x.grad);
+}
+
+test "Autograd numerical gradcheck for indexing operations" {
+    const allocator = std.testing.allocator;
+    const eps: f32 = 1e-3;
+
+    // 1. Gather gradcheck
+    {
+        var base_x = [_]f32{ 1.5, -2.3, 3.1, -4.7, 5.2, -6.8 };
+        const idx_data = [_]f32{ 0.0, 2.0, 1.0, 0.0 };
+
+        for (0..base_x.len) |target_i| {
+            // Forward perturbed +eps
+            var g_pos = Graph.initDefault(allocator);
+            defer g_pos.deinit();
+            var x_pos_data = base_x;
+            x_pos_data[target_i] += eps;
+            const x_pos = try g_pos.array(&.{ 2, 3 }, &x_pos_data, false);
+            const idx_pos = try g_pos.array(&.{ 2, 2 }, &idx_data, false);
+            const c_pos = try g_pos.gather(x_pos, 1, idx_pos);
+            var sum_pos: f32 = 0.0;
+            for (c_pos.data) |v| sum_pos += v;
+
+            // Forward perturbed -eps
+            var g_neg = Graph.initDefault(allocator);
+            defer g_neg.deinit();
+            var x_neg_data = base_x;
+            x_neg_data[target_i] -= eps;
+            const x_neg = try g_neg.array(&.{ 2, 3 }, &x_neg_data, false);
+            const idx_neg = try g_neg.array(&.{ 2, 2 }, &idx_data, false);
+            const c_neg = try g_neg.gather(x_neg, 1, idx_neg);
+            var sum_neg: f32 = 0.0;
+            for (c_neg.data) |v| sum_neg += v;
+
+            const numerical_grad = (sum_pos - sum_neg) / (2.0 * eps);
+
+            // Analytical grad via autodiff
+            var g_ana = Graph.initDefault(allocator);
+            defer g_ana.deinit();
+            const x_ana = try g_ana.array(&.{ 2, 3 }, &base_x, true);
+            const idx_ana = try g_ana.array(&.{ 2, 2 }, &idx_data, false);
+            const c_ana = try g_ana.gather(x_ana, 1, idx_ana);
+            const total = try g_ana.sum(c_ana, null, false);
+            try g_ana.backward(total);
+
+            try std.testing.expectApproxEqAbs(numerical_grad, x_ana.grad[target_i], 1e-3);
+        }
+    }
+
+    // 2. ScatterAdd gradcheck (both x and src)
+    {
+        var base_x = [_]f32{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0 };
+        var base_src = [_]f32{ 10.0, 20.0, 30.0, 40.0 };
+        const idx_data = [_]f32{ 1.0, 1.0, 0.0, 2.0 };
+
+        // Analytical
+        var g_ana = Graph.initDefault(allocator);
+        defer g_ana.deinit();
+        const x_ana = try g_ana.array(&.{ 2, 3 }, &base_x, true);
+        const idx_ana = try g_ana.array(&.{ 2, 2 }, &idx_data, false);
+        const src_ana = try g_ana.array(&.{ 2, 2 }, &base_src, true);
+        const out_ana = try g_ana.scatterAdd(x_ana, 1, idx_ana, src_ana);
+        const total = try g_ana.sum(out_ana, null, false);
+        try g_ana.backward(total);
+
+        // Check src numerical grad
+        for (0..base_src.len) |target_i| {
+            var g_pos = Graph.initDefault(allocator);
+            defer g_pos.deinit();
+            var s_pos_data = base_src;
+            s_pos_data[target_i] += eps;
+            const x_p = try g_pos.array(&.{ 2, 3 }, &base_x, false);
+            const idx_p = try g_pos.array(&.{ 2, 2 }, &idx_data, false);
+            const s_p = try g_pos.array(&.{ 2, 2 }, &s_pos_data, false);
+            const out_p = try g_pos.scatterAdd(x_p, 1, idx_p, s_p);
+            var sum_p: f32 = 0.0;
+            for (out_p.data) |v| sum_p += v;
+
+            var g_neg = Graph.initDefault(allocator);
+            defer g_neg.deinit();
+            var s_neg_data = base_src;
+            s_neg_data[target_i] -= eps;
+            const x_n = try g_neg.array(&.{ 2, 3 }, &base_x, false);
+            const idx_n = try g_neg.array(&.{ 2, 2 }, &idx_data, false);
+            const s_n = try g_neg.array(&.{ 2, 2 }, &s_neg_data, false);
+            const out_n = try g_neg.scatterAdd(x_n, 1, idx_n, s_n);
+            var sum_n: f32 = 0.0;
+            for (out_n.data) |v| sum_n += v;
+
+            const numerical_grad = (sum_p - sum_n) / (2.0 * eps);
+            try std.testing.expectApproxEqAbs(numerical_grad, src_ana.grad[target_i], 1e-3);
+        }
+    }
+}

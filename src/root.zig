@@ -1,5 +1,5 @@
-pub const VERSION = "0.4.2";
-pub const version = @import("std").SemanticVersion{ .major = 0, .minor = 4, .patch = 2 };
+pub const VERSION = "0.5.0";
+pub const version = @import("std").SemanticVersion{ .major = 0, .minor = 5, .patch = 0 };
 
 pub const tensor = @import("tensor.zig");
 pub const nn = @import("nn.zig");
@@ -77,6 +77,20 @@ pub const qrSolve = tensor.qrSolve;
 pub const symeig = tensor.symeig;
 pub const svd = tensor.svd;
 pub const solveLeastSquaresQR = regression.solveLeastSquaresQR;
+
+pub const gather = tensor.gather;
+pub const gatherInto = tensor.gatherInto;
+pub const scatter = tensor.scatter;
+pub const scatterInto = tensor.scatterInto;
+pub const scatterAdd = tensor.scatterAdd;
+pub const scatterAddInto = tensor.scatterAddInto;
+pub const indexSelect = tensor.indexSelect;
+pub const indexSelectInto = tensor.indexSelectInto;
+pub const indexAdd = tensor.indexAdd;
+pub const indexAddInto = tensor.indexAddInto;
+pub const maskedSelect = tensor.maskedSelect;
+pub const gatherSlice = tensor.gatherSlice;
+pub const IndexingError = tensor.IndexingError;
 
 pub const CrossValidationOptions = cv.CrossValidationOptions;
 

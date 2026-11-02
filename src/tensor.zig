@@ -199,6 +199,20 @@ pub const qrSolve = ops.qrSolve;
 pub const symeig = ops.symeig;
 pub const svd = ops.svd;
 
+// --- Advanced Indexing & Scatter Operations ---
+pub const gather = indexing.gather;
+pub const gatherInto = indexing.gatherInto;
+pub const scatter = indexing.scatter;
+pub const scatterInto = indexing.scatterInto;
+pub const scatterAdd = indexing.scatterAdd;
+pub const scatterAddInto = indexing.scatterAddInto;
+pub const indexSelect = indexing.indexSelect;
+pub const indexSelectInto = indexing.indexSelectInto;
+pub const indexAdd = indexing.indexAdd;
+pub const indexAddInto = indexing.indexAddInto;
+pub const maskedSelect = indexing.maskedSelect;
+pub const gatherSlice = indexing.gatherSlice;
+
 test {
     std.testing.refAllDecls(@This());
     _ = @import("tensor/tests.zig");

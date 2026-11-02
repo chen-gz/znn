@@ -1422,7 +1422,7 @@ pub fn Gemma4E4BForCausalLM(comptime cfg: Gemma4Config) type {
                 const ple_slice_4d = try graph.slice(ple_inputs, &.{
                     .{},
                     .{},
-                    .{ .start = layer_idx, .end = layer_idx + 1 },
+                    .{ .start = @intCast(layer_idx), .end = @intCast(layer_idx + 1) },
                     .{},
                 });
                 const ple_slice = try graph.squeeze(ple_slice_4d, 2);

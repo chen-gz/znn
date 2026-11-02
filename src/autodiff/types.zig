@@ -32,6 +32,10 @@ pub const OpType = enum {
     Split, // 张量沿指定维度切分
     RepeatKV, // 分组查询注意力 (Grouped-Query Attention, GQA) 中沿注意力头维度复制广播键/值 (Key/Value, KV) 张量
     Slice, // 多维跨步切片
+    Gather, // 通用轴向索引收集 (Gather)
+    Scatter, // 通用轴向离散覆写 (Scatter)
+    ScatterAdd, // 通用轴向离散累加 (Scatter-Add)
+    IndexSelect, // 一维子张量索引切片提取 (Index-Select)
 
     // --- 激活函数与非线性变换 (Activation Functions) ---
     Relu, // 修正线性单元 (Rectified Linear Unit, ReLU) 激活函数
@@ -105,6 +109,10 @@ pub const OpType = enum {
             .Split => "[y_1, y_2, \\dots, y_k] = \\text{split}(x)",
             .RepeatKV => "y = \\text{repeat\\_kv}(x, \\text{groups})",
             .Slice => "y = x[\\text{ranges}]",
+            .Gather => "y = \\text{gather}(x, d, I)",
+            .Scatter => "y = \\text{scatter}(x, d, I, v)",
+            .ScatterAdd => "y = x + \\text{scatterAdd}(0, d, I, v)",
+            .IndexSelect => "y = \\text{indexSelect}(x, d, I)",
             .Relu => "y = \\max(0, x)",
             .LeakyRelu => "y = \\max(\\alpha x, x)",
             .Gelu => "y = 0.5 x \\left(1 + \\text{erf}\\left(\\frac{x}{\\sqrt{2}}\\right)\\right)",
@@ -226,6 +234,18 @@ pub const OpContext = union(enum) {
         offset: usize,
         strides: [8]usize,
         rank: usize,
+    },
+    Gather: struct {
+        dim: usize,
+    },
+    Scatter: struct {
+        dim: usize,
+    },
+    ScatterAdd: struct {
+        dim: usize,
+    },
+    IndexSelect: struct {
+        dim: usize,
     },
 
     // --- 激活函数与非线性变换 ---

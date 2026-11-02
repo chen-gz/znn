@@ -28,6 +28,7 @@ const nn_kernels = @import("nn_kernels.zig");
 const reductions = @import("reductions.zig");
 const losses = @import("losses.zig");
 pub const linalg = @import("linalg.zig");
+pub const indexing = @import("indexing.zig");
 pub const QRResult = linalg.QRResult;
 pub const SymEigResult = linalg.SymEigResult;
 pub const SVDResult = linalg.SVDResult;
@@ -1059,6 +1060,51 @@ pub const Tensor = struct {
     /// 奇异值分解 (Singular Value Decomposition, SVD)
     pub fn svd(self: Tensor, allocator: std.mem.Allocator) !linalg.SVDResult {
         return linalg.svd(self, allocator);
+    }
+
+    // --- 高级索引与离散散布/累加算子 (Advanced Indexing & Scatter) ---
+    pub fn gather(self: *Tensor, dim: usize, index: *const Tensor, allocator: std.mem.Allocator) !*Tensor {
+        return indexing.gather(self, dim, index, allocator);
+    }
+
+    pub fn gatherInto(self: *Tensor, dest: *Tensor, dim: usize, index: *const Tensor) !void {
+        return indexing.gatherInto(dest, self, dim, index);
+    }
+
+    pub fn scatter(self: *Tensor, dim: usize, index: *const Tensor, src: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+        return indexing.scatter(self, dim, index, src, allocator);
+    }
+
+    pub fn scatterInto(dest: *Tensor, base: *const Tensor, dim: usize, index: *const Tensor, src: *Tensor) !void {
+        return indexing.scatterInto(dest, base, dim, index, src);
+    }
+
+    pub fn scatterAdd(self: *Tensor, dim: usize, index: *const Tensor, src: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+        return indexing.scatterAdd(self, dim, index, src, allocator);
+    }
+
+    pub fn scatterAddInto(self: *Tensor, dim: usize, index: *const Tensor, src: *Tensor) !void {
+        return indexing.scatterAddInto(self, dim, index, src);
+    }
+
+    pub fn indexSelect(self: *Tensor, dim: usize, index: *const Tensor, allocator: std.mem.Allocator) !*Tensor {
+        return indexing.indexSelect(self, dim, index, allocator);
+    }
+
+    pub fn indexSelectInto(self: *Tensor, dest: *Tensor, dim: usize, index: *const Tensor) !void {
+        return indexing.indexSelectInto(dest, self, dim, index);
+    }
+
+    pub fn indexAdd(self: *Tensor, dim: usize, index: *const Tensor, src: *Tensor, allocator: std.mem.Allocator) !*Tensor {
+        return indexing.indexAdd(self, dim, index, src, allocator);
+    }
+
+    pub fn indexAddInto(self: *Tensor, dim: usize, index: *const Tensor, src: *Tensor) !void {
+        return indexing.indexAddInto(self, dim, index, src);
+    }
+
+    pub fn maskedSelect(self: *Tensor, mask: *const Tensor, allocator: std.mem.Allocator) !*Tensor {
+        return indexing.maskedSelect(self, mask, allocator);
     }
 
     pub fn deinit(self: *Tensor, allocator: std.mem.Allocator) void {

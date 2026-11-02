@@ -66,7 +66,6 @@ pub fn reduceSumMeanBackward(A: *Tensor, C: *Tensor, axis: ?usize, scale: f32) v
 }
 
 pub fn backwardMath(self: *Op, scratch_allocator: std.mem.Allocator) !void {
-    _ = scratch_allocator;
     switch (self.op_type) {
         .L2Loss => {
             const A = self.inputs[0];
@@ -247,6 +246,108 @@ pub fn backwardMath(self: *Op, scratch_allocator: std.mem.Allocator) !void {
                     X.grad[src_idx] += C.grad[dest_i];
                     C.shape.incrementCoord(&coord);
                 }
+            }
+        },
+        .Gather => {
+            const X = self.inputs[0];
+            const index = self.inputs[1];
+            const C = self.outputs[0];
+            const dim = self.context.Gather.dim;
+            if (X.requires_grad) {
+                var x_grad_tensor = X.*;
+                x_grad_tensor.data = X.grad;
+                var c_grad_tensor = C.*;
+                c_grad_tensor.data = C.grad;
+                try tensor_mod.indexing.scatterAddInto(&x_grad_tensor, dim, index, &c_grad_tensor);
+            }
+        },
+        .Scatter => {
+            const X = self.inputs[0];
+            const index = self.inputs[1];
+            const src = self.inputs[2];
+            const C = self.outputs[0];
+            const dim = self.context.Scatter.dim;
+
+            if (src.requires_grad) {
+                var c_grad_tensor = C.*;
+                c_grad_tensor.data = C.grad;
+                const temp_gathered = try tensor_mod.indexing.gather(&c_grad_tensor, dim, index, scratch_allocator);
+                defer tensor_mod.free(scratch_allocator, temp_gathered);
+                for (src.grad, temp_gathered.data) |*sg, tg| {
+                    sg.* += tg;
+                }
+            }
+
+            if (X.requires_grad) {
+                const c_grad_copy = try tensor_mod.array(scratch_allocator, C.shape.dims[0..C.shape.len], C.grad);
+                defer tensor_mod.free(scratch_allocator, c_grad_copy);
+
+                const zero_src = try tensor_mod.zeros(scratch_allocator, index.shape.dims[0..index.shape.len]);
+                defer tensor_mod.free(scratch_allocator, zero_src);
+                try tensor_mod.indexing.scatterInto(c_grad_copy, c_grad_copy, dim, index, zero_src);
+
+                if (X.isContiguous() and X.grad.len >= c_grad_copy.data.len) {
+                    for (X.grad[0..c_grad_copy.data.len], c_grad_copy.data) |*xg, cg| {
+                        xg.* += cg;
+                    }
+                } else {
+                    var coord: [8]usize = @splat(0);
+                    const rank = X.shape.len;
+                    for (c_grad_copy.data) |cg| {
+                        var x_off: usize = 0;
+                        for (0..rank) |d| x_off += coord[d] * X.strides.dims[d];
+                        X.grad[x_off] += cg;
+                        X.shape.incrementCoord(&coord);
+                    }
+                }
+            }
+        },
+        .ScatterAdd => {
+            const X = self.inputs[0];
+            const index = self.inputs[1];
+            const src = self.inputs[2];
+            const C = self.outputs[0];
+            const dim = self.context.ScatterAdd.dim;
+
+            if (X.requires_grad) {
+                if (X.isContiguous() and X.grad.len >= C.grad.len) {
+                    for (X.grad[0..C.grad.len], C.grad) |*xg, cg| {
+                        xg.* += cg;
+                    }
+                } else {
+                    var coord: [8]usize = @splat(0);
+                    const rank = X.shape.len;
+                    for (C.grad) |cg| {
+                        var x_off: usize = 0;
+                        for (0..rank) |d| x_off += coord[d] * X.strides.dims[d];
+                        X.grad[x_off] += cg;
+                        X.shape.incrementCoord(&coord);
+                    }
+                }
+            }
+
+            if (src.requires_grad) {
+                var c_grad_tensor = C.*;
+                c_grad_tensor.data = C.grad;
+                const temp_gathered = try tensor_mod.indexing.gather(&c_grad_tensor, dim, index, scratch_allocator);
+                defer tensor_mod.free(scratch_allocator, temp_gathered);
+                for (src.grad, temp_gathered.data) |*sg, tg| {
+                    sg.* += tg;
+                }
+            }
+        },
+        .IndexSelect => {
+            const X = self.inputs[0];
+            const index = self.inputs[1];
+            const C = self.outputs[0];
+            const dim = self.context.IndexSelect.dim;
+
+            if (X.requires_grad) {
+                var x_grad_tensor = X.*;
+                x_grad_tensor.data = X.grad;
+                var c_grad_tensor = C.*;
+                c_grad_tensor.data = C.grad;
+                try tensor_mod.indexing.indexAddInto(&x_grad_tensor, dim, index, &c_grad_tensor);
             }
         },
         else => unreachable,

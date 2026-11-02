@@ -73,9 +73,9 @@ pub const bf16 = packed struct {
 
 /// 跨步切片范围描述 (SliceRange)
 pub const SliceRange = struct {
-    start: ?usize = null,
-    end: ?usize = null,
-    step: usize = 1,
+    start: ?isize = null,
+    end: ?isize = null,
+    step: isize = 1,
 
     pub const default: SliceRange = .{};
     pub fn defaultOptions() SliceRange {
@@ -385,30 +385,135 @@ pub fn GenericTensor(comptime T: type) type {
 
             var new_dims: [8]usize = @splat(0);
             var new_strides: [8]usize = @splat(0);
+            var starts: [8]usize = @splat(0);
+            var steps: [8]isize = @splat(1);
             var offset: usize = 0;
+            var has_negative_step = false;
 
             for (0..self.shape.len) |d| {
                 const dim_size = self.shape.dims[d];
                 const stride = self.strides.dims[d];
                 const range = if (d < ranges.len) ranges[d] else SliceRange{};
                 if (range.step == 0) return error.InvalidStep;
+                steps[d] = range.step;
 
-                const start = range.start orelse 0;
-                const end = range.end orelse dim_size;
+                if (range.step > 0) {
+                    const s_step: usize = @intCast(range.step);
+                    const s_raw = range.start orelse 0;
+                    var start: usize = undefined;
+                    if (s_raw < 0) {
+                        const adjusted = @as(isize, @intCast(dim_size)) + s_raw;
+                        start = if (adjusted < 0) 0 else @intCast(adjusted);
+                    } else {
+                        if (@as(usize, @intCast(s_raw)) > dim_size) return error.IndexOutOfBounds;
+                        start = @intCast(s_raw);
+                    }
 
-                if (start > dim_size or end > dim_size) return error.IndexOutOfBounds;
-                if (end < start) return error.InvalidSliceRange;
+                    const e_raw = range.end orelse @as(isize, @intCast(dim_size));
+                    var end: usize = undefined;
+                    if (e_raw < 0) {
+                        const adjusted = @as(isize, @intCast(dim_size)) + e_raw;
+                        end = if (adjusted < 0) 0 else @intCast(adjusted);
+                    } else {
+                        if (@as(usize, @intCast(e_raw)) > dim_size) return error.IndexOutOfBounds;
+                        end = @intCast(e_raw);
+                    }
 
-                const slice_len = if (end > start) (end - start + range.step - 1) / range.step else 0;
-                new_dims[d] = slice_len;
-                new_strides[d] = stride * range.step;
-                offset += start * stride;
+                    if (end < start) return error.InvalidSliceRange;
+
+                    const slice_len = if (end > start) (end - start + s_step - 1) / s_step else 0;
+                    new_dims[d] = slice_len;
+                    new_strides[d] = stride * s_step;
+                    starts[d] = start;
+                    offset += start * stride;
+                } else {
+                    has_negative_step = true;
+                    const abs_step: usize = @intCast(-range.step);
+
+                    const s_raw = range.start orelse (if (dim_size == 0) 0 else @as(isize, @intCast(dim_size - 1)));
+                    var actual_start: isize = undefined;
+                    if (s_raw < 0) {
+                        actual_start = @as(isize, @intCast(dim_size)) + s_raw;
+                        if (actual_start < 0) actual_start = -1;
+                    } else {
+                        if (@as(usize, @intCast(s_raw)) >= dim_size and dim_size > 0) {
+                            return error.IndexOutOfBounds;
+                        }
+                        actual_start = s_raw;
+                    }
+
+                    const e_raw = range.end orelse -1;
+                    var actual_end: isize = undefined;
+                    if (e_raw < 0 and range.end != null) {
+                        actual_end = @as(isize, @intCast(dim_size)) + e_raw;
+                        if (actual_end < -1) actual_end = -1;
+                    } else {
+                        actual_end = e_raw;
+                    }
+
+                    if (actual_start < actual_end) return error.InvalidSliceRange;
+
+                    const slice_len: usize = if (actual_start > actual_end and actual_start >= 0)
+                        @intCast(@divTrunc(actual_start - actual_end + @as(isize, @intCast(abs_step)) - 1, @as(isize, @intCast(abs_step))))
+                    else
+                        0;
+
+                    new_dims[d] = slice_len;
+                    starts[d] = if (actual_start >= 0) @intCast(actual_start) else 0;
+                }
             }
 
-            // 空切片不引用任何元素：偏移归零，避免累加偏移越过缓冲区末尾
             var is_empty = false;
             for (new_dims[0..self.shape.len]) |dim| {
                 if (dim == 0) is_empty = true;
+            }
+            if (is_empty) offset = 0;
+
+            if (has_negative_step) {
+                const out_shape = Shape{ .dims = new_dims, .len = self.shape.len };
+                const total_numel = out_shape.numel();
+                const out_data = try allocator.alloc(T, total_numel);
+                errdefer allocator.free(out_data);
+
+                if (total_numel > 0) {
+                    var out_coord: [8]usize = @splat(0);
+                    var in_coord: [8]usize = @splat(0);
+                    const rank = self.shape.len;
+
+                    for (0..total_numel) |out_idx| {
+                        for (0..rank) |d| {
+                            if (steps[d] > 0) {
+                                in_coord[d] = starts[d] + out_coord[d] * @as(usize, @intCast(steps[d]));
+                            } else {
+                                const step_u: usize = @intCast(-steps[d]);
+                                in_coord[d] = starts[d] - out_coord[d] * step_u;
+                            }
+                        }
+
+                        var in_off: usize = 0;
+                        for (0..rank) |d| {
+                            in_off += in_coord[d] * self.strides.dims[d];
+                        }
+                        out_data[out_idx] = self.data[in_off];
+
+                        var d = rank;
+                        while (d > 0) {
+                            d -= 1;
+                            out_coord[d] += 1;
+                            if (out_coord[d] < new_dims[d]) break;
+                            out_coord[d] = 0;
+                        }
+                    }
+                }
+
+                const out = try allocator.create(Self);
+                out.* = Self{
+                    .data = out_data,
+                    .shape = out_shape,
+                    .strides = computeContiguousStrides(out_shape),
+                    .is_view = false,
+                };
+                return out;
             }
 
             const out = try allocator.create(Self);
