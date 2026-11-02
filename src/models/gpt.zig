@@ -156,46 +156,33 @@ pub fn GPT(comptime config: GPTConfig) type {
         pub fn forwardWithCache(self: *const Self, graph: *autodiff.Graph, x: anytype, caches: ?[]nn.KVCache, start_pos: usize) !*Tensor {
             const module_scope = try enterModuleScope(graph, self);
             defer module_scope.exit();
-            const B = x.shape.dims[0];
             const T = x.shape.dims[1];
 
             // 1. 获取词元 (Token) 嵌入向量: [B, T] -> [B, T, n_embd]
             const tok_emb = try self.token_embedding.forward(graph, x);
 
-            // 2. 生成对应的时间/位置索引 [start_pos, start_pos + 1, ... start_pos + T - 1]，并将其转换为二维 (2-Dimensional, 2D) 位置张量 (Tensor) [B, T]
-            const pos_node = try graph.tensorND(&.{ B, T }, false);
-            for (0..B) |b| {
-                for (0..T) |t| {
-                    pos_node.data[b * T + t] = @as(f32, @floatFromInt(start_pos + t));
-                }
-            }
-            // 位置索引由输入形状在模型内部生成，属于生成式预训练变换器 (Generative Pre-trained Transformer, GPT) 自身的常量缓冲区，而非模型输入
-            pos_node.is_buffer = true;
+            // 2. 声明式生成对应的时间/位置索引: [T]
+            const pos_start = @as(f32, @floatFromInt(start_pos));
+            const pos_stop = @as(f32, @floatFromInt(start_pos + T));
+            const pos_node = try graph.arange(pos_start, pos_stop, 1.0);
             if (self.name) |mod_name| {
                 pos_node.setNameFormatted("{s}.pos_indices", .{mod_name});
             }
 
-            // 3. 获取对应的可学习 (Learned) 位置嵌入向量: [B, T] -> [B, T, n_embd]
+            // 3. 获取对应的可学习 (Learned) 位置嵌入向量: [T] -> [T, n_embd]
             const pos_emb = try self.position_embedding.forward(graph, pos_node);
 
-            // 4. 将词元 (Token) 嵌入和位置嵌入进行求和融合，作为初始隐藏输入: h = tok_emb + pos_emb
+            // 4. 将词元 (Token) 嵌入和位置嵌入通过广播求和融合: [B, T, n_embd] + [T, n_embd] -> [B, T, n_embd]
             const h_x = try graph.add(tok_emb, pos_emb);
             if (self.name) |mod_name| {
                 h_x.setNameFormatted("{s}.embeddings_sum", .{mod_name});
             }
 
-            // 5. 将混合后的输入送进层叠的变换器解码器 (Transformer Decoder) 主干网络中依次计算
-            // 输出形状保持为: [B, T, n_embd]
+            // 5. 将混合后的输入送进层叠的变换器解码器 (Transformer Decoder) 主干网络中依次计算: [B, T, n_embd]
             const decoder_out = try self.decoder.forwardWithCache(graph, h_x, caches);
 
-            // 6. 将输出展平为二维 (2-Dimensional, 2D)，以便进行最终分类头的全连接投影计算: [B, T, n_embd] -> [B*T, n_embd]
-            const ln_x_2d = try graph.reshape(decoder_out, &.{ B * T, config.n_embd });
-
-            // 7. 进行投影以获得词表空间未归一化的分类对数几率 (Logits): [B*T, n_embd] -> [B*T, vocab_size]
-            const logits_2d = try self.lm_head.forward(graph, ln_x_2d);
-
-            // 8. 将形状重塑还原成三维 (3-Dimensional, 3D) 形式返回: [B, T, vocab_size]
-            return try graph.reshape(logits_2d, &.{ B, T, config.vocab_size });
+            // 6. 最终语言模型分类头投影 (Linear 原生支持多维输入): [B, T, n_embd] -> [B, T, vocab_size]
+            return try self.lm_head.forward(graph, decoder_out);
         }
 
         /// 自回归流式生成循环 (基于 KVCache 与无梯度计算图)

@@ -407,10 +407,10 @@ test "Explicit module scopes attribute ops and tensors to the executing module" 
     try std.testing.expect(core_attn_found);
     try std.testing.expect(attn_reshape_found);
 
-    // 输出 logits 的最终 Reshape 由 GPT 自身执行，归属 "gpt"
+    // 输出 logits 的最终 Reshape 由 lm_head 的 RowView 恢复形状执行，归属 "gpt.lm_head"
     const last_op = graph.ops.items[graph.ops.items.len - 1];
     try std.testing.expectEqual(autodiff.OpType.Reshape, last_op.op_type);
-    try std.testing.expectEqualStrings("gpt", last_op.scope);
+    try std.testing.expectEqualStrings("gpt.lm_head", last_op.scope);
 
     // pos_indices 是 GPT 内部创建的静态缓冲区
     var pos_found = false;
@@ -484,8 +484,8 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
     });
     const to_head = try VisTestUtil.findEdge(root, "gpt", "decoder", "lm_head");
     try std.testing.expectEqualStrings("[2, 8, 32]", to_head.get("shape").?.string);
-    try std.testing.expectEqualStrings("[16, 32]", to_head.get("dst_shape").?.string);
-    try std.testing.expectEqual(@as(usize, 1), to_head.get("transforms").?.array.items.len);
+    try std.testing.expect(to_head.get("dst_shape") == null);
+    try std.testing.expect(to_head.get("transforms") == null);
 
     // gpt.decoder：块列表 h (ModuleList 容器) 之后接 ln_f；h 内部层间串联，无虚假残差
     try VisTestUtil.expectEdgeSet(allocator, root, "gpt.decoder", &.{ "@in0->h", "h->ln_f", "ln_f->@out0" });
@@ -538,6 +538,54 @@ test "Scoped local graph export matches golden edge sets (schema 2.0)" {
         const leaf = VisTestUtil.findModule(root, leaf_path).?;
         if (leaf.get("edges")) |e| try std.testing.expectEqual(@as(usize, 0), e.array.items.len);
     }
+}
+
+test "Transparent ops folded into edge transforms and dst_shape (schema 2.0)" {
+    const allocator = std.testing.allocator;
+    var graph = autodiff.Graph.initDefault(allocator);
+    defer graph.deinit();
+
+    const TwoLinears = struct {
+        l1: nn.Linear,
+        l2: nn.Linear,
+        name: ?[]const u8 = null,
+        module_type: []const u8 = "TwoLinears",
+
+        pub fn forward(self: *const @This(), g: *autodiff.Graph, x: *Tensor) !*Tensor {
+            const scope = try nn.enterModuleScope(g, self);
+            defer scope.exit();
+            const h1 = try self.l1.forward(g, x);
+            const h1_reshaped = try g.reshape(h1, &.{ 8, 32 });
+            return try self.l2.forward(g, h1_reshaped);
+        }
+    };
+
+    var model = TwoLinears{
+        .l1 = try nn.Linear.init(allocator, 16, 32),
+        .l2 = try nn.Linear.init(allocator, 32, 64),
+    };
+    defer nn.deinitModel(&model, allocator);
+
+    var names = std.heap.ArenaAllocator.init(allocator);
+    defer names.deinit();
+    try nn.nameModules(&model, names.allocator(), "mod");
+
+    const in_x = try graph.tensorND(&.{ 2, 4, 16 }, false);
+    in_x.setName("inputs.x");
+    const out_y = try model.forward(&graph, in_x);
+    out_y.setName("outputs.y");
+
+    const json_data = try nn.generateJson(&graph, allocator);
+    defer allocator.free(json_data);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_data, .{});
+    defer parsed.deinit();
+
+    const top = parsed.value.object;
+    const root = top.get("root").?.object;
+    const edge = try VisTestUtil.findEdge(root, "mod", "l1", "l2");
+    try std.testing.expectEqualStrings("[2, 4, 32]", edge.get("shape").?.string);
+    try std.testing.expectEqualStrings("[8, 32]", edge.get("dst_shape").?.string);
+    try std.testing.expectEqual(@as(usize, 1), edge.get("transforms").?.array.items.len);
 }
 
 /// 可视化测试辅助：按 model_graph.schema.json 所用的 JSON Schema 关键字子集校验 JSON

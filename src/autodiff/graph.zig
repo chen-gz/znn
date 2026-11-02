@@ -239,6 +239,37 @@ pub const Graph = struct {
         return self.tensorNDWithData(shape_slice, initial_data, requires_grad);
     }
 
+    // NumPy-like API: arange
+    pub fn arange(self: *Graph, start: f32, stop: ?f32, step: ?f32) !*Tensor {
+        const count = blk: {
+            var actual_start: f32 = 0.0;
+            var actual_stop: f32 = start;
+            const actual_step: f32 = step orelse 1.0;
+            if (actual_step == 0.0) return error.InvalidStep;
+            if (stop) |st| {
+                actual_start = start;
+                actual_stop = st;
+            }
+            if ((actual_step > 0.0 and actual_start >= actual_stop) or (actual_step < 0.0 and actual_start <= actual_stop)) {
+                break :blk @as(usize, 0);
+            }
+            const count_f = @ceil((actual_stop - actual_start) / actual_step);
+            break :blk @as(usize, @intFromFloat(@max(0.0, count_f)));
+        };
+
+        const t = try self.tensorND(&.{count}, false);
+        t.is_buffer = true;
+        var actual_start: f32 = 0.0;
+        const actual_step: f32 = step orelse 1.0;
+        if (stop) |_| {
+            actual_start = start;
+        }
+        for (t.data, 0..) |*v, i| {
+            v.* = actual_start + @as(f32, @floatFromInt(i)) * actual_step;
+        }
+        return t;
+    }
+
     // NumPy-like API: transpose alias
     pub fn transpose(self: *Graph, A: *Tensor, dim0: usize, dim1: usize) !*Tensor {
         return self.transposeND(A, dim0, dim1);

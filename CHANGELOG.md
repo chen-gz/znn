@@ -104,6 +104,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Composable Models & Declarative Tensor Flow (Milestone 5)**:
+  - Added `Graph.arange` in `src/autodiff/graph.zig` allocating directly in the graph arena for leak-free index generation.
+  - Refactored `models.GPT` in `src/models/gpt.zig`: replaced procedural loops with declarative `graph.arange` and standard `nn.Embedding` broadcasting; eliminated outer temporary reshapes, delegating multi-rank input handling natively to `Linear.forward` via `RowView`.
+  - Refactored `decodeAttention` in `src/models/gemma4.zig`: eliminated host-memory scalar pointer loops and replaced per-query calls with vectorized `graph.attention` (BLAS SGEMM), unifying incremental decoding and prefill under standard `Tensor` and graph operator execution.
+  - Aligned model JSON exports, visualizer tests (`web/src/utils/model-graph.test.ts`), and unit tests (`src/models/tests_vis.zig`).
+
 - Removed legacy `device` and `device_array` fields from `Tensor`, consolidating
   physical device residency and driver handles directly into `storage: DeviceBuffer`
   as single source of truth. Updated accessors (`getDevice`, `getDeviceArray`,

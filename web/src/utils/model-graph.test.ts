@@ -140,10 +140,11 @@ describe("model-graph schema 2.0", () => {
   });
 
   it("labels edges with shape transitions", () => {
-    const g = buildLocalGraph(mod("gpt"));
-    const e = g.edges.find((x) => x.from === "decoder" && x.to === "lm_head")!;
-    expect(edgeShapeLabel(e)).toBe("[2, 16, 64] → [32, 64]");
-    expect(edgeShapeLabel(g.edges.find((x) => x.from === "token_embedding")!)).toBe("[2, 16, 64]");
+    const g = buildLocalGraph(mod(`${BLOCK}.attn`));
+    const e = g.edges.find((x) => x.from === "q_attn" && x.to === "core")!;
+    expect(edgeShapeLabel(e)).toBe("[2, 16, 64] → [2, 4, 16, 16]");
+    const gpt = buildLocalGraph(mod("gpt"));
+    expect(edgeShapeLabel(gpt.edges.find((x) => x.from === "token_embedding")!)).toBe("[2, 16, 64]");
   });
 
   it("generates Mermaid for a local graph with dashed skips and dotted buffers", () => {

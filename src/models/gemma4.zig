@@ -243,9 +243,17 @@ pub fn writePrefillKVCache(
     try cache.core.writePrefill(k_rot, v, seq_len);
 }
 
+fn toSlice(val: anytype) []const f32 {
+    const T = @TypeOf(val);
+    if (T == *Tensor or T == *const Tensor) {
+        return val.data;
+    } else {
+        return val;
+    }
+}
+
 /// 单查询增量解码注意力：将当前时间步旋转后的键 (k_rot: [n_kv, hd]) 与值 (v: [n_kv, hd]) 追加写入层键值缓存，
-/// 随后每个查询头对缓存中的可见键 (`Gemma4AttentionType.mask` 给出的区间，滑动窗口层仅最近 sliding_window 个位置)
-/// 执行共享的单查询注意力内核 (`attendOneQuery`，scale = 1.0)。
+/// 随后使用标准声明式计算图注意力算子 (`graph.attention`) 计算增量注意力，完全消除底层过程式裸指针切片与单查询循环。
 /// 返回输出投影前的注意力特征 [1, nh * hd]。缓存已满时返回 `error.ContextWindowExceeded`，不修改缓存。
 pub fn decodeAttention(
     graph: *autodiff.Graph,
@@ -253,37 +261,49 @@ pub fn decodeAttention(
     attn_type: Gemma4AttentionType,
     sliding_window: usize,
     num_heads: usize,
-    q_rot: []const f32,
-    k_rot: []const f32,
-    v: []const f32,
+    q_in: anytype,
+    k_in: anytype,
+    v_in: anytype,
 ) !*Tensor {
-    _ = attn_type;
-    _ = sliding_window;
+    const q_slice = toSlice(q_in);
+    const k_slice = toSlice(k_in);
+    const v_slice = toSlice(v_in);
+
     const pos = cache.core.curr_len;
-    try cache.core.append(k_rot, v);
+    try cache.core.append(k_slice, v_slice);
 
     const n_kv = cache.core.num_kv_heads;
     const hd = cache.core.head_dim;
     const max_len = cache.core.max_seq_len;
+    const curr_len = cache.core.curr_len;
     const groups = num_heads / n_kv;
 
-    const y_2d = try graph.zeros(&.{ 1, num_heads * hd }, false);
-    const range = cache.core.visibleRange(pos);
-    const scores = try graph.arenaAllocator().alloc(f32, range.len());
+    const q_4d = if (@TypeOf(q_in) == *Tensor or @TypeOf(q_in) == *const Tensor)
+        if (q_in.shape.len == 4) q_in else try graph.reshape(q_in, &.{ 1, num_heads, 1, hd })
+    else blk: {
+        const q_t = try graph.tensorND(&.{ 1, num_heads, 1, hd }, false);
+        @memcpy(q_t.data, q_slice);
+        break :blk q_t;
+    };
 
-    for (0..num_heads) |h| {
-        const kv_base = (h / groups) * max_len * hd;
-        tensor.attention_kernels.attendOneQuery(
-            q_rot[h * hd .. (h + 1) * hd],
-            cache.core.k[kv_base..][0 .. cache.core.curr_len * hd],
-            cache.core.v[kv_base..][0 .. cache.core.curr_len * hd],
-            range,
-            1.0,
-            scores,
-            y_2d.data[h * hd .. (h + 1) * hd],
-        );
+    const k_4d = try graph.tensorND(&.{ 1, n_kv, curr_len, hd }, false);
+    const v_4d = try graph.tensorND(&.{ 1, n_kv, curr_len, hd }, false);
+    for (0..n_kv) |kv_h| {
+        const src = kv_h * max_len * hd;
+        const dst = kv_h * curr_len * hd;
+        @memcpy(k_4d.data[dst .. dst + curr_len * hd], cache.core.k[src .. src + curr_len * hd]);
+        @memcpy(v_4d.data[dst .. dst + curr_len * hd], cache.core.v[src .. src + curr_len * hd]);
     }
-    return y_2d;
+
+    const y_4d = try graph.attention(q_4d, k_4d, v_4d, .{
+        .scale = 1.0,
+        .mask = attn_type.mask(sliding_window),
+        .kv_groups = groups,
+        .q_pos0 = pos,
+        .k_pos0 = 0,
+    });
+
+    return try graph.reshape(y_4d, &.{ 1, num_heads * hd });
 }
 
 /// 词元嵌入查表并施加 Gemma 嵌入缩放 sqrt(hidden_size)，返回 [1, T, hidden_size] (F32 与 Q4 CPU 路径共用)。
@@ -1023,7 +1043,7 @@ pub fn Gemma4AttentionT(comptime Proj: type) type {
             const q_rot = try graph.rope(q_4d, pos, self.rope);
             const k_rot = try graph.rope(k_4d, pos, self.rope);
 
-            return decodeAttention(graph, layer_cache, self.attn_type, self.sliding_window, nh, q_rot.data, k_rot.data, v_normed.data);
+            return decodeAttention(graph, layer_cache, self.attn_type, self.sliding_window, nh, q_rot, k_rot, v_normed);
         }
 
         pub fn forwardDecode(
