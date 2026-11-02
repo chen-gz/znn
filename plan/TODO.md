@@ -6,7 +6,7 @@
 
 ## 🔍 第一部分：代码库现状诊断与演进空间 (Current Architecture Review)
 
-经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.4.0`，433+ 单元测试与 91 文件单向分层 100% 通过）已完成核心架构解耦与模块化清晰划分（涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Apple Silicon MLX GPU 端到端硬件卸载、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
+经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.4.1`，433+ 单元测试与 91 文件单向分层 100% 通过）已完成核心架构解耦与模块化清晰划分（涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Apple Silicon MLX GPU 端到端硬件卸载、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
 
 ### 1. 核心计算与张量系统 (Tensor Engine & Core Math)
 * **自动微分多精度与量化张量扩展 (Mixed-Precision Autograd & Quantization)**：
