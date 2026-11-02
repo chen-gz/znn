@@ -1,6 +1,6 @@
-# Milestone: 综合测试数据集扩展 (Tiny ImageNet & 多模态大语言模型数据集)
+# Milestone 8: 综合测试数据集扩展 (Tiny ImageNet & 多模态大语言模型数据集)
 
-> **Status**: Completed  
+> **Status**: Completed & Verified (Commit `5ee4f515`, `992418e0`)  
 > **Target Package**: `src/dataset/` (`src/dataset.zig`), `tools/download_data.zig`, `examples/`  
 > **Key Files**: `src/dataset.zig`, `tools/download_data.zig`, `examples/convnext.zig`, `examples/resnet.zig`, `examples/multimodal.zig`
 

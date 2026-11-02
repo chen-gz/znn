@@ -1,6 +1,6 @@
-# Milestone: ConvNeXt 现代纯卷积视觉模型架构 (A ConvNet for the 2020s)
+# Milestone 7: ConvNeXt 现代纯卷积视觉模型架构 (A ConvNet for the 2020s)
 
-> **Status**: Completed  
+> **Status**: Completed & Verified (Commit `6b6b9464`)  
 > **Target Package**: `src/tensor/`, `src/autodiff/`, `src/nn/`, `src/models/`  
 > **Key Files**: `src/tensor/conv_pool.zig`, `src/autodiff/graph_nn.zig`, `src/autodiff/backward_nn.zig`, `src/nn/core.zig`, `src/nn/normalization.zig`, `src/models/convnext.zig`, `examples/convnext.zig`
 

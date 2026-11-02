@@ -1,6 +1,11 @@
 # Milestone 5: 核心模型全模块化重构 (Composable GPT & Gemma 4)
 
-> **Status**: Completed (Milestone 5)  
+> **Status**: **Completed & Verified** (Milestone 5 100% Completed, Rebased & Merged to `main` at `9a691413` & `42050e5a`)  
+> **Verification Summary**:
+> - GPT declarative position embeddings via `graph.arange` and `nn.Embedding`.
+> - Eliminated procedural slice offsets and raw pointer loops in `decodeAttention`.
+> - Fully modular model definitions decoupled from execution engines.
+> - Test Suites: `zig build check-layers` (91 files, 0 violations), `zig build test` (433 passed, 0 leaks), `zig build run-book-models` (18/18 models passed), `cd web && npm test` (203/203 passed).
 > **Dependency**: Milestone 4 (`nn.Module` Protocol & Layers)  
 > **Target Package**: `src/models/` (Layer 4)  
 > **Key Files**: `src/models/gpt.zig`, `src/models/gemma4.zig`, `gemma4_q4.zig`, `gemma4_e4b.zig`

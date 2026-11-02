@@ -62,9 +62,9 @@
 
 ## 3. 验收标准与验证命令 (Acceptance Criteria)
 
-- [ ] `src/nn/` 中所有基础层均通过 `verifyModule` 编译期协议断言；
-- [ ] `BatchNorm` 与归一化层的缓冲区与学习参数生命周期完全解耦，`setRequiresGrad(false)` 不破坏缓冲区；
-- [ ] `Q4Linear` 能被 `nn.parameters` 与 `nn.namedParameters` 正确遍历；
-- [ ] `zig build check-layers` 严格无违规通过；
-- [ ] `zig build test` 全量通过（0 错误，0 内存泄漏）；
-- [ ] `zig build run-book-models` 18 个模型图正常导出。
+- [x] `src/nn/` 中所有基础层均通过 `verifyModule` 编译期协议断言；
+- [x] `BatchNorm` 与归一化层的缓冲区与学习参数生命周期完全解耦，`setRequiresGrad(false)` 不破坏缓冲区；
+- [x] `Q4Linear` 能被 `nn.parameters` 与 `nn.namedParameters` 正确遍历；
+- [x] `zig build check-layers` 严格无违规通过；
+- [x] `zig build test` 全量通过（0 错误，0 内存泄漏）；
+- [x] `zig build run-book-models` 18 个模型图正常导出。

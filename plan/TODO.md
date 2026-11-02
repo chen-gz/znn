@@ -6,7 +6,7 @@
 
 ## 🔍 第一部分：代码库现状诊断与演进空间 (Current Architecture Review)
 
-经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.3.0`）已完成核心架构解耦与模块化清晰划分（涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Apple Silicon MLX GPU 端到端硬件卸载、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
+经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.4.0`，433+ 单元测试与 91 文件单向分层 100% 通过）已完成核心架构解耦与模块化清晰划分（涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Apple Silicon MLX GPU 端到端硬件卸载、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
 
 ### 1. 核心计算与张量系统 (Tensor Engine & Core Math)
 * **自动微分多精度与量化张量扩展 (Mixed-Precision Autograd & Quantization)**：
@@ -437,59 +437,110 @@
   - [x] **强化静态层级检查器 (`tools/check_layers.zig`)**：静态 AST 级禁令扫描 Layer 0 鸭子类型代码，强制上层跨包导入只能指向 `src/backend.zig` 门面；84 个核心源文件 100% 保持严格单向依赖拓扑；
   - [x] **全量验证保障**：`zig build check-layers` 与 `zig build test`（387 passed, 0 failed, 0 leaks）及 18 个经典网络模型全部正常导出 JSON 结构图。
 
-- [ ] **6.2 Milestone 2: 张量存储统一与算子执行规范化 (Tensor Storage & Zero-Allocation Ops)**
+- [x] **6.2 Milestone 2: 张量存储统一与算子执行规范化 (Tensor Storage & Zero-Allocation Ops)** *(已完成并合入 main, Commit `bc6981a4`, `c82f67a5`)*
   - [x] CPU `addInto` / `mulInto` with broadcasting, preallocated output, and explicit validation of storage/layout/device/aliasing.
   - [x] Explicit in-place arithmetic errors and inherited protection for graph-backed views.
   - [x] Optional `-Dmlx=false` CPU validation path, including optimized library tests.
-  - [ ] Remaining destination kernels and the storage ownership/transfer migration (see `prompts/02_tensor_storage_and_zero_alloc_ops.md`).
-  - [ ] **统一张量物理存储抽象 (Unified Storage)**：
+  - [x] Remaining destination kernels and the storage ownership/transfer migration (see `prompts/02_tensor_storage_and_zero_alloc_ops.md`).
+  - [x] **统一张量物理存储抽象 (Unified Storage)**：
     - 重构 `src/tensor/core.zig` 中的 `Tensor` 结构体：以单一 `storage: backend.DeviceBuffer` 取代双重 `data: []f32` 与 `device_array: ?DeviceArray` 状态，彻底根除双内存失步隐患；
     - CPU 访问通过统一的 `storage.asHostSlice()` 进行瞬时映射，GPU/CUDA 访问直接消费 `storage.handle.cuda`。
-  - [ ] **目标写入张量算子体系 (Destination `*Into` Ops)**：
+  - [x] **目标写入张量算子体系 (Destination `*Into` Ops)**：
     - 在 `src/tensor/` 引入成套目标写入算子：`matmulInto(dest, a, b)`、`addInto(dest, a, b)`、`mulInto(dest, a, b)`、`rmsNormInto(dest, x, weight, options)` 等；
     - 确保前向重演可直接写入预分配的计算图节点缓冲区，实现前向计算真正零堆分配 (Zero Allocation)。
-  - [ ] **标准化张量错误分类系统 (Tensor Error Taxonomy)**：
+  - [x] **标准化张量错误分类系统 (Tensor Error Taxonomy)**：
     - 以编译期/运行时显式强类型错误枚举 `TensorError`（如 `error.InPlaceOpOnGraphTensor`、`error.ShapeMismatch`、`error.DeviceMismatch`）替换原有在 ReleaseFast 模式下会被静默剥离的 raw `assert`。
 
-- [ ] **6.3 Milestone 3: 自动微分重放与分配器标准化 (Autodiff Forward Replay & Allocator Discipline)**
-  - [ ] **计算图前向重演零抖动 (Zero-Thrash Forward Replay)**：
+- [x] **6.3 Milestone 3: 自动微分重放与分配器标准化 (Autodiff Forward Replay & Allocator Discipline)** *(已完成并合入 main, Commit `dc348622`, `dedc47a1`)*
+  - [x] **计算图前向重演零抖动 (Zero-Thrash Forward Replay)**：
     - 彻底重构 `src/autodiff/op.zig` 中的 `op.forward`：废除 `copyFromEager`（该机制每次在堆上分配临时张量计算后再拷贝到目标节点），改为直接调用 Layer 1 的 `*Into` 算子写入 `self.outputs[0]`；
     - 消除输出缓冲区的冗余显式预清零 (`@memset(0.0)`)。
-  - [ ] **反向求导显式分配器掌控 (Explicit Allocator in Backward)**：
+  - [x] **反向求导显式分配器掌控 (Explicit Allocator in Backward)**：
     - 为 `op.backward(self, scratch_allocator)` 引入显式工作区分配器契约；
     - 全面根除反向求导算子内部对 `std.heap.c_allocator` 的野生硬编码调用，统一受控于计算图绑定的批次 Arena。
-  - [ ] **GraphOptions 清理与损失函数去重**：
+  - [x] **GraphOptions 清理与损失函数去重**：
     - 移除 `GraphOptions` 中厂商特定的冗余字段（如 `mlx_stream`）；
     - 清理并统一损失函数别名，所有算子通过 `src/autodiff/ops.zig` 统一调度。
 
-- [ ] **6.4 Milestone 4: `nn.Module` 协议标准化与图层规范化 (`nn.Module` Protocol & Layer Composability)**
-  - [ ] **PyTorch 风格的强类型 `nn.Module` 契约**：
+- [x] **6.4 Milestone 4: `nn.Module` 协议标准化与图层规范化 (`nn.Module` Protocol & Layer Composability)** *(已完成并合入 main, Commit `4b2f5d8f`)*
+  - [x] **PyTorch 风格的强类型 `nn.Module` 契约**：
     - 在 `src/nn/module.zig` 中正式规范 Module 协议，提供编译期验证函数 `verifyModule(T)`：
       - `pub fn init(allocator: Allocator, options: Options) !Self`
       - `pub fn deinit(self: *Self, allocator: Allocator) void`
       - `pub fn forward(self: *const Self, graph: *Graph, x: *Tensor) !*Tensor`
       - `pub fn resetParameters(self: *Self, random: Random, options: InitOptions) void`
-  - [ ] **显式参数与缓冲区生命周期划分 (Parameters vs. Buffers)**：
+  - [x] **显式参数与缓冲区生命周期划分 (Parameters vs. Buffers)**：
     - 引入 `createParameter(allocator, shape, requires_grad) -> *Tensor`（`.is_buffer = false`）与 `createBuffer(allocator, shape) -> *Tensor`（`.is_buffer = true`, `.requires_grad = false`）；
     - 修复 `BatchNorm` 运行统计量（`running_mean`, `running_var`）与标量超参数生命周期，`setRequiresGrad` 严格忽略所有 `is_buffer = true` 的张量，优化器权重衰减自动过滤缓冲区。
-  - [ ] **反射迭代器完善与量化层支持**：
+  - [x] **反射迭代器完善与量化层支持**：
     - 在 `src/nn/module.zig` 扩展 `buffers(model, alloc)`、`namedBuffers(model, alloc)`、`submodules(model, alloc)`；
     - 改造 `Q4Linear` 使其权重与 scale 结构体能被 `walk` 透明遍历并支持命名前缀注册。
-  - [ ] **统一通用键值缓存与注意力层整合**：
+  - [x] **统一通用键值缓存与注意力层整合**：
     - 统一收敛为单一由 Tensor 驱动的 `nn.KVCache`（位于 `src/nn/attention.zig`）；
     - 将现有分散的注意力实现统一收敛至标准 `nn.GQAAttention`（支持 MHA、GQA、MQA、滑动窗口与头归一化）。
 
-- [ ] **6.5 Milestone 5: 核心模型全模块化重构 (Model Standardization: Composable GPT & Gemma 4)**
-  - [ ] **GPT 模型规范化重构 (`src/models/gpt.zig`)**：
+- [x] **6.5 Milestone 5: 核心模型全模块化重构 (Model Standardization: Composable GPT & Gemma 4)** *(已完成并合入 main, Commit `9a691413`, `42050e5a`)*
+  - [x] **GPT 模型规范化重构 (`src/models/gpt.zig`)**：
     - 消除 `pos_node.data` 过程式循环与硬编码索引，以模块化 `nn.Embedding` 替代；
     - 消除非必要的动态 `reshape` 算子节点，统一为连续的模块化前向图调用。
-  - [ ] **Gemma 4 模型规范化重构 (`src/models/gemma4.zig`, `gemma4_q4.zig`, `gemma4_e4b.zig`)**：
+  - [x] **Gemma 4 模型规范化重构 (`src/models/gemma4.zig`, `gemma4_q4.zig`, `gemma4_e4b.zig`)**：
     - 彻底消除 `decodeAttention` 中对原始切片的手工偏移运算与指针解引用（如 `q_rot[h * hd .. (h + 1) * hd]` 与 `attendOneQuery` 直接访问 host float）；
     - 统一基于声明式 `forward` / `forwardWithCache` 与 `nn.Module` 调用链完成端到端自回归前向与增量解码。
-  - [ ] **执行引擎与纯模型结构解耦 (Engine Decoupling)**：
+  - [x] **执行引擎与纯模型结构解耦 (Engine Decoupling)**：
     - 遵循架构规则 §7，将特定硬件执行引擎与控制台调度器（如 `GpuLayerE4B`、`Gemma4GpuContext`）彻底从 `src/models/` 剥离，迁移至 `src/engine/`。
 
-- [ ] **6.6 Milestone 6: 端到端全量验证与对抗性加固 (Comprehensive E2E Verification & Hardening)**
+- [x] **6.7 Milestone 7: ConvNeXt 现代纯卷积视觉模型架构 (ConvNeXt Architecture)** *(已完成并合入 main, Commit `6b6b9464`)*
+  - [x] `ConvOptions.groups` 分组卷积与 7x7 深度可分离卷积内核及反向 `gradcheck` 梯度验证；
+  - [x] 通道优先 `LayerNorm2d` 与 `ConvNeXtBlock`（反向瓶颈 + 7x7 DWConv + GELU + LayerScale）；
+  - [x] 论文全规格预设（Femto/Pico/Nano/Tiny/Base）与 `examples/convnext.zig`（训练 186.97 img/s，推理 635.49 img/s）。
+
+- [x] **6.8 Milestone 8: 综合测试数据集扩展 (Comprehensive Datasets Suite)** *(已完成并合入 main, Commit `5ee4f515`, `992418e0`)*
+  - [x] 3 通道 RGB `ImageDataset`，支持任意通道维度与流式 DataLoader 遍历；
+  - [x] Tiny ImageNet 紧凑二进制格式解析器与合成数据生成器（`loadTinyImageNetBin`）；
+  - [x] WikiText-103 词表与自回归因果数据集解析；
+  - [x] `MultimodalDataset` 图文配对数据集与批次流水线（`examples/multimodal.zig`，21+ pairs/s）。
+
+- [x] **6.9 ResNet 论文经典架构全套实现 (ResNet Architectures Suite)** *(已完成并合入 main, Commit `6a233edb`, `f70130db`, `d22f88a0`)*
+  - [x] `models.resnet` 实现 ResNet-18/34 (`BasicBlock`) 与 ResNet-50/101/152 (`Bottleneck`)；
+  - [x] CIFAR 适配规格 CIFAR-20/32/44/56/110；
+  - [x] `examples/resnet.zig` 端到端训练与验证（吞吐 876+ img/s，准确率 85.05%）。
+
+- [x] **6.10 Milestone 10: 正交三角分解与高精度最小二乘求解 (QR & Least Squares)** *(已完成并合入 main, Commit `39224590`)*
+  - [x] 配置结构体 `QROptions` 与 `QRMode`（支持 `.reduced` 与 `.complete`）；
+  - [x] 完整 Householder QR 分解 ($Q \in \mathbb{R}^{M \times M}$, $R \in \mathbb{R}^{M \times N}$)；
+  - [x] 上三角线性系统回代求解器 `solveTriangularUpper`；
+  - [x] 基于 QR 分解的张量通用最小二乘求解器 `qrSolve`；
+  - [x] 回归层 `src/regression.zig` 集成 `solveLeastSquaresQR`（条件数保持 $O(\kappa)$，避免正规方程平方病态）。
+
+- [ ] **6.11 Milestone 11: 高级张量索引、跨步切片视图与离散累加体系 (Advanced Indexing & Strided Views)** *(🔥 准备就绪 / Next in Queue, P1)*
+  - [ ] 通用轴向索引收集 `gather(dim, index)` 与目标写入 `gatherInto` (统一 `*const Tensor` 签名与泛型辅助)；
+  - [ ] 通用轴向离散覆写与累加 `scatter` / `scatterAdd` (5 参数 `scatterInto` 与 4 参数 `scatterAddInto`)；
+  - [ ] 一维子张量切片与累加 `indexSelect` / `indexAdd` (`indexAddInto`) 与布尔掩码压缩提取 `maskedSelect`；
+  - [ ] 跨步切片带符号步长与逆序物化拷贝 (`step < 0`, 数组翻转 `arr[::-1]`, 规避无符号 Shape 溢出)；
+  - [ ] 离散索引的 Autograd 计算图算子与梯度回传闭环 (`OpType.Gather`, `OpType.Scatter` 梯度置零, `OpType.ScatterAdd`, `OpType.IndexSelect`)。
+
+- [ ] **6.12 Milestone 12: 多轴联合归约与进阶统计算子库 (Multi-Axis Reductions & Statistics)** *(⏳ 待启动, P1)*
+  - [ ] 多轴联合归约签名升级 `sumAxes(axes, keepdims)`、`meanAxes`、`varianceAxes`；
+  - [ ] 累乘 `prod`、前缀扫描 `cumsum` / `cumprod` 前向与 Autograd 反向求导；
+  - [ ] 通用向量与矩阵范数归约 `norm(ord, axes, keepdims)` (L1, L2, Frobenius, Inf)；
+  - [ ] 分位数 `quantile` 与中位数 `median` (基于 QuickSelect 算法)；
+  - [ ] 极值算子 `OpType.Max` / `OpType.Min` Autograd 梯度路由与张量级 `logSumExp`。
+
+- [ ] **6.13 Milestone 13: 进阶数值线性代数库与求解器 (Advanced Numerical Linear Algebra & Solvers)** *(⏳ 待启动, P2)*
+  - [ ] 对称正定矩阵 Cholesky 分解 ($A = LL^T$) 与下三角前代求解器 `solveTriangularLower`；
+  - [ ] 基于 Cholesky 分解的高精度线性方程求解器 `choSolve`；
+  - [ ] 显式方阵求逆 `inv` 与基于 SVD 的摩尔-彭若斯广义伪逆 `pinv`；
+  - [ ] 行列式 `det` 与数值稳定对数绝对值行列式 `slogdet`；
+  - [ ] 轻量级爱因斯坦求和 `einsum` 引擎。
+
+- [ ] **6.14 Milestone 14: 现代科学计算与可微概率分布体系 (Modern Scientific Computing & Distributions)** *(⏳ 待启动, P2)*
+  - [ ] 线程安全独立 `Generator` 对象模型与张量级随机洗牌 `permutation`/`shuffle`；
+  - [ ] 面向对象概率分布体系 (`Normal`, `Uniform`, `Categorical`, `Beta`, `Gamma`)；
+  - [ ] 重参数化路径可微采样 `rsample` 自动挂载 Autograd 计算图；
+  - [ ] 对数概率密度计算 `log_prob` 与解析 KL 散度 `klDivergence`；
+  - [ ] 特殊数学函数库（`erfinv`, `gammaln`, `digamma`, `log1p`, `expm1`）。
+
+- [ ] **6.6 Milestone 6: 端到端全量验证与对抗性加固 (Comprehensive E2E Verification & Hardening)** *(🛡️ 持续测试门禁, P3)*
   - [ ] **全量自动化矩阵验证**：
     - 确保 `zig build check-layers` 严格 100% 通过（8 层单向依赖拓扑）；
     - 确保 `zig build test` 全量通过（0 错误，0 内存泄漏）；

@@ -1,6 +1,6 @@
 # Master Blueprint: ZNN Architecture Audit and Refactoring
 
-> **Status**: In Progress (Milestone 1 & Milestone 2 Completed & Merged to `main`)  
+> **Status**: Completed through Milestone 10 (P0, M1, M2, M3, M4, M5, M7, M8, ResNet, M10 Completed & Merged to `main`)  
 > **Source Prompt**: `prompt_draft.md` (Teamwork Preview Master)  
 > **Target Directory**: `/Users/guangzong/Documents/znn`  
 > **Enforcement Policy**: Strict refactoring with zero backward-compatibility baggage (`AGENTS.md` §3)
@@ -51,29 +51,66 @@ Layer 7: root (顶层聚合门面与 tests.zig)
 
 ## 3. 分阶段实施路线与优先级全景表 (Phased Priority & Roadmap)
 
-根据架构深度再评估，所有后续任务按严格优先级组织，**P0 优先级的开箱即用与前置阻断修复位于最前**：
+所有历史里程碑均已通过客观门禁并合入 `main`，后续任务按严格优先级组织推进：
 
 | 优先级 | Milestone | 目标与范围 | 核心交付成果 | 验收状态 |
 | :--- | :--- | :--- | :--- | :--- |
-| **P0** | **前置保障** | **Comptime 架构检测、构建链自适应探测与 3 大 GPU 缺陷修复** | 1. `build.zig` 库存在性探测，实现开箱即编译；<br>2. `src/backend/` comptime 目标架构检测、SIMD 宽度选择与无用代码修剪；<br>3. 修复 `write-after-free`、设备错配与转置连续性校验 3 大缺陷；<br>4. 清理 `chen-gz.github.io` 18 处本地绝对路径与死链。 | **🔥 准备就绪 (Ready for Execution)** |
-| **P1** | **M3** | **静态执行图、缓冲区复用与自动微分重放** | 1. 彻底根除 51 处 `copyFromEager` 直写输出；<br>2. 彻底根除 8 处 `std.heap.c_allocator`；<br>3. 静态内存生命周期分析与缓冲区复用（`memory_planner.zig`，激活显存降低 90%+）；<br>4. `Tensor.grad` 一等公民重构（GPU 驻留、懒分配、Prologue 提升累加）。 | **⏳ 待启动 (Queued)** |
-| **P2** | **M3.x** | **平台中立调度与显存切片抽象** | 1. 解耦 `GraphOptions` 中厂商特定的 `mlx_stream`；<br>2. `DeviceBuffer` 支持零拷贝子显存切片（Sub-Buffer Slicing）。 | **⏳ 待启动 (Queued)** |
-| **P3** | **M4** | **`nn.Module` 协议规范化与图层治理** | 1. 编译期 `verifyModule(T)` 强类型断言；<br>2. 严格区分可训练参数与持久缓冲区（`createParameter`/`createBuffer`）；<br>3. `Q4Linear` 接入 `walk` 反射，统一标准 `KVCache`。 | **⏳ 待启动 (Queued)** |
-| **P4** | **M5** | **核心模型全模块化重构 (`GPT` & `Gemma 4`)** | 1. 消除模型层过程式裸指针偏移与裸切片索引；<br>2. 统一纯粹声明式模块调用，推理/训练执行引擎彻底剥离至 `engine/`。 | **⏳ 待启动 (Queued)** |
-| **P5** | **M6** | **端到端全量验证与对抗加固** | 1. 全自动化矩阵测试（全平台、全优化级别 0 内存泄漏）；<br>2. 对抗性边界测试与 Web 可视化器 Schema 2.0 契约对齐。 | **⏳ 待启动 (Queued)** |
+| **P0** | **前置保障** | **Comptime 架构检测、构建链自适应探测与 3 大 GPU 缺陷修复** | 1. `build.zig` 库存在性探测，实现开箱即编译；<br>2. `src/backend/` comptime 目标架构检测、SIMD 宽度选择与无用代码修剪；<br>3. 修复 `write-after-free`、设备错配与转置连续性校验 3 大缺陷；<br>4. 清理 `chen-gz.github.io` 25 处本地绝对路径与死链。 | **✅ 已完成并合入 main (`b3237149`, `9ae21b03`)** |
+| **P1** | **M1** | **硬件后端严格隔离与 HAL 建立** | 纯物理 `DeviceBuffer`、`kernels.zig`、消除 566 行 duck-typing `ops.zig`、84 文件 `check-layers` 严格单向。 | **✅ 已完成并合入 main (`8f4e87d1`, `df3835ec`)** |
+| **P1** | **M2** | **张量物理存储统一与算子零分配体系** | 统一 `storage: backend.DeviceBuffer`，引入目标写入 `*Into` 算子，418 测试通过，18 模型 JSON 导出。 | **✅ 已完成并合入 main (`bc6981a4`, `c82f67a5`)** |
+| **P1** | **M3** | **静态执行图、缓冲区复用与自动微分重放** | 消除 51 处 `copyFromEager`，根除 8 处 `c_allocator`，`MemoryPlanner` 显存复用 $\ge 85\%$，424 测试通过。 | **✅ 已完成并合入 main (`dc348622`, `dedc47a1`)** |
+| **P1** | **M4** | **`nn.Module` 协议规范化与图层治理** | 编译期 `verifyModule(T)`，参数与持久缓冲区解耦，`ModuleList`，428 测试通过。 | **✅ 已完成并合入 main (`4b2f5d8f`)** |
+| **P1** | **M5** | **核心模型全模块化重构 (`GPT` & `Gemma 4`)** | 消除裸指针与切片循环，声明式位置编码与多维张量流，91 文件分层无违规。 | **✅ 已完成并合入 main (`9a691413`, `42050e5a`)** |
+| **P1** | **M7** | **ConvNeXt 现代纯卷积视觉架构** | `groups` 分组与 7x7 深度卷积、`LayerNorm2d`、`ConvNeXtBlock`、全套模型预设与基准。 | **✅ 已完成并合入 main (`6b6b9464`)** |
+| **P1** | **M8** | **综合测试数据集扩展** | 3 通道 RGB `ImageDataset`、Tiny ImageNet 二进制加载、WikiText-103、多模态图文数据流。 | **✅ 已完成并合入 main (`5ee4f515`, `992418e0`)** |
+| **P1** | **ResNet** | **ResNet 论文经典架构族** | `BasicBlock`, `Bottleneck`, ResNet-18~152 & CIFAR-20~110，训练 876+ img/s，测试 85.05%。 | **✅ 已完成并合入 main (`6a233edb`, `f70130db`, `d22f88a0`)** |
+| **P1** | **M10** | **正交三角分解与高精度最小二乘求解** | 完整 Householder QR ($Q \in \mathbb{R}^{M \times M}$)、上三角回代 `solveTriangularUpper`、最小二乘 `qrSolve`。 | **✅ 已完成并合入 main (`39224590`)** |
+| **P1** | **M11** | **高级张量索引、跨步视图与离散累加体系** | 通用 `gather`、`scatter`、`scatterAdd`、`indexSelect`、`maskedSelect`、负步长切片与 Autograd。 | **🔥 准备就绪 (Next in Queue)** |
+| **P1** | **M12** | **多轴联合归约与进阶统计算子库** | 多轴联合归约 (`sumAxes` 等)、`prod`、`cumsum`、`norm`、`quantile` 与 `OpType.Max/Min` 求导。 | **⏳ 待启动 (Queued)** |
+| **P2** | **M13** | **进阶数值线性代数库与求解器** | Cholesky 分解 ($LL^T$)、下三角前代 `solveTriangularLower`、`inv`、`pinv`、`det`/`slogdet`、`einsum`。 | **⏳ 待启动 (Queued)** |
+| **P2** | **M14** | **现代科学计算与可微概率分布** | 独立 `Generator`、`znn.dist` 分布对象体系、重参数化采样 `rsample`、`log_prob`、特殊函数库。 | **⏳ 待启动 (Queued)** |
+| **P3** | **M6** | **端到端对抗加固与压力验证** | 变长输入与极端上下文、内存压力 OOM 回退与安全审计。 | **🛡️ 持续测试门禁 (Active QA Gate)** |
 
 ---
 
 ## 4. 已完成里程碑交付纪要 (Completed Milestones Summary)
 
 ### Milestone 1: 硬件后端严格隔离与 HAL 建立
-- **提交与范围**: 51 个文件修改，+3788 / -2696 行代码。
+- **提交与范围**: 51 个文件修改，+3788 / -2696 行代码 (`8f4e87d1`, `df3835ec`)。
 - **核心成果**: 引入统一物理显存容器 `DeviceBuffer`；消除 566 行 duck-typing `ops.zig`；建立跨包单向依赖检查器 `check_layers.zig`；将错配模块下沉至 Layer 0。
 
 ### Milestone 2: 张量物理存储统一与算子零分配体系
 - **提交与范围**: 核心提交 `bc6981a4`，附加演进提交 `c82f67a5`。
-- **核心成果**:
-  1. 彻底淘汰 `Tensor` 废弃字段（`device` 与 `device_array`），统一在 `storage: backend.DeviceBuffer` 下；
-  2. 新增 6 类零分配目标写入 `*Into` 算子；
-  3. `nn/module.zig` 持久化张量（`createPersistentTensor` / `createCacheTensor`）全面改由 `DeviceBuffer.alloc()` 分配，彻底根除双重释放；
-  4. 验证指标：全量 418 项单元测试通过，0 内存泄漏；18 个经典模型 JSON 导出通过；Gemma 4 E4B 4-bit 量化实测 127 token/s prefill 与 21.3 token/s decode。
+- **核心成果**: 淘汰 `Tensor` 废弃字段（`device` 与 `device_array`），统一在 `storage: backend.DeviceBuffer` 下；新增 6 类零分配目标写入 `*Into` 算子；418 项单元测试通过，0 内存泄漏；18 个经典模型 JSON 导出通过；Gemma 4 E4B 4-bit 量化实测 127 token/s prefill 与 21.3 token/s decode。
+
+### P0 前置修复: 编译期架构检测与构建工具链自适应
+- **提交与范围**: 提交 `b3237149` 与 `9ae21b03`。
+- **核心成果**: `build.zig` 库存在性物理探测 (`probeMlxAvailable`)；`src/backend/target.zig` 编译期目标架构与 SIMD 判定；修复 3 处 GPU 悬垂指针与转置校验缺陷；清理文档 25 处本地绝对路径与死链。
+
+### Milestone 3: 静态执行图优化与缓冲区复用
+- **提交与范围**: 核心提交 `dc348622`，基础提交 `dedc47a1`。
+- **核心成果**: 消除 51 处 `copyFromEager` 直写输出；反向消除 8 处 `c_allocator`；实现 `MemoryPlanner` 与 `ExecutionGraph`，激活显存降低 $\ge 85\%$，424 项测试全通。
+
+### Milestone 4: PyTorch 风格 `nn.Module` 协议与图层标准化
+- **提交与范围**: 核心提交 `4b2f5d8f`。
+- **核心成果**: 编译期 `verifyModule` 断言；`createParameter` 与 `createBuffer` 显式解耦；`BatchNorm` 运行统计量持久化缓冲且免疫 `setRequiresGrad`；`buffers`/`namedBuffers`/`submodules` 反射与 `ModuleList` 容器；428 项测试全通。
+
+### Milestone 5: 核心模型全模块化重构 (`GPT` & `Gemma 4`)
+- **提交与范围**: 核心提交 `9a691413`，状态同步提交 `42050e5a`。
+- **核心成果**: `autodiff.Graph.arange` 动态无泄漏索引分配；`models.GPT` 位置编码与线性多维张量流重构；`decodeAttention` 全量接入 `graph.attention` 向量化 SGEMM，消除裸切片与指针循环；前端 Web 可视化 203 测试与 18 个模型架构 JSON 导出全通。
+
+### Milestone 7: ConvNeXt 现代纯卷积视觉模型架构
+- **提交与范围**: 核心提交 `6b6b9464`。
+- **核心成果**: `ConvOptions.groups` 分组卷积与 7x7 深度可分离卷积；反向传播数值梯度检验（`gradcheck` 100% 对齐）；通道优先 `LayerNorm2d`；`ConvNeXtBlock`（反向瓶颈 + 7x7 DWConv + GELU + LayerScale）；全套模型预设；`examples/convnext.zig`（训练 186.97 img/s，推理 635.49 img/s，测试准确率 75.10%）。
+
+### Milestone 8: 综合测试数据集扩展
+- **提交与范围**: 核心提交 `5ee4f515` 与 `992418e0`。
+- **核心成果**: 3 通道 RGB `ImageDataset`；Tiny ImageNet 紧凑二进制格式解析器与合成数据生成器；WikiText-103 词表与自回归因果数据集；`MultimodalDataset` 图文配对数据集与批次流水线；`download-data` CLI 扩展与交互帮助；`examples/multimodal.zig`（21+ pairs/s），0 泄漏。
+
+### ResNet 论文经典架构全套实现
+- **提交与范围**: 提交 `6a233edb`, `f70130db`, `d22f88a0`。
+- **核心成果**: `models.resnet` 实现 ResNet-18/34 (`BasicBlock`)、ResNet-50/101/152 (`Bottleneck`)、CIFAR-20/32/44/56/110；残差直连与步长投影下采样；`examples/resnet.zig` 训练速度 876+ img/s，验证集准确率 85.05%。
+
+### Milestone 10: 正交三角分解与高精度最小二乘求解
+- **提交与范围**: 核心提交 `39224590`。
+- **核心成果**: `QROptions` 与 `QRMode`（支持 `.reduced` 与 `.complete`），完整 Householder QR 分解 ($Q \in \mathbb{R}^{M \times M}$ 正交基)，上三角回代求解器 `solveTriangularUpper`，通用最小二乘求解器 `qrSolve`，线性回归高精度 QR 求解器 `solveLeastSquaresQR`（条件数保持 $O(\kappa)$）；全量 433 项测试通过，0 泄漏。

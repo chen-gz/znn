@@ -522,13 +522,13 @@ pub const Tensor = struct {
 ## 6. 验收标准与客观验证命令 (Acceptance Criteria & Verification Commands)
 
 ### 验收检查清单 (Checklist)
-- [ ] **P0.1 构建自适应**: 在无任何命令行参数情况下，`zig build` 与 `zig build test` 在任何机器上均能自动探测依赖并开箱即编译通过。
-- [ ] **P0.2 缺陷彻底消除**: 默认开启 MLX GPU 模式下，`src/tensor/tests.zig:2718` 等 3 处运行时缺陷彻底修复，全量测试 100% 通过。
-- [ ] **P0.3 文档清洁**: `chen-gz.github.io` 中 18 处 `file:///Users/guangzong/...` 路径完全清零，死链完全修复。
-- [ ] **P1.1 零堆重放**: `op.forward` 中 51 处 `copyFromEager` 完全清零，前向重放 0 次动态堆分配。
-- [ ] **P1.2 分配器受控**: `backward_nn.zig` 中 8 处 `c_allocator` 完全清零，反向内存受 Arena 管理。
-- [ ] **P1.3 显存复用达标**: 静态执行图下，中间激活张量峰值显存降低 $\ge 85\%$（目标 $90\%$–$95\%$）。
-- [ ] **P1.4 梯度一等公民**: `Tensor.grad` 支持 GPU 显存驻留，切片访问受设备与连续性强类型防护。
+- [x] **P0.1 构建自适应**: 在无任何命令行参数情况下，`zig build` 与 `zig build test` 在任何机器上均能自动探测依赖并开箱即编译通过。
+- [x] **P0.2 缺陷彻底消除**: 默认开启 MLX GPU 模式下，`src/tensor/tests.zig:2718` 等 3 处运行时缺陷彻底修复，全量测试 100% 通过。
+- [x] **P0.3 文档清洁**: `chen-gz.github.io` 中 18 处 `file:///Users/guangzong/...` 路径完全清零，死链完全修复。
+- [x] **P1.1 零堆重放**: `op.forward` 中 51 处 `copyFromEager` 完全清零，前向重放 0 次动态堆分配。
+- [x] **P1.2 分配器受控**: `backward_nn.zig` 中 8 处 `c_allocator` 完全清零，反向内存受 Arena 管理。
+- [x] **P1.3 显存复用达标**: 静态执行图下，中间激活张量峰值显存降低 $\ge 85\%$（目标 $90\%$–$95\%$）。
+- [x] **P1.4 梯度一等公民**: `Tensor.grad` 支持 GPU 显存驻留，切片访问受设备与连续性强类型防护。
 
 ### 客观独立验证命令 (Verification Commands)
 

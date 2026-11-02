@@ -1,4 +1,7 @@
-# 正交三角分解 (QR Decomposition) 与高精度最小二乘求解支持任务规划
+# Milestone 10: 正交三角分解 (QR Decomposition) 与高精度最小二乘求解
+
+> **Status**: Completed & Verified (Commit `39224590`)  
+> **Target Package**: `src/tensor/linalg.zig`, `src/regression.zig`, `src/tensor/tests.zig`
 
 ## 1. 任务背景与目标 (Context & Motivation)
 在数值线性代数与科学计算中，正交三角分解（QR Decomposition）是求解线性方程组、奇异值分解前置、特征值迭代算法（QR 算法）以及超定最小二乘拟合（Ordinary Least Squares, OLS）的核心支柱。
@@ -67,12 +70,12 @@ pub fn solveLeastSquaresQR(
 ---
 
 ## 3. 验收标准与实际验证结果 (Acceptance Criteria & Verification)
-1. `zig build check-layers` 严格通过，91 个源码文件层级依赖严格单向，零越层引用；
-2. `zig build test` 全量通过，张量算子、回归层与端到端测试均 0 内存泄漏；
-3. 单测覆盖：
-   - 验证精简模式与完整模式 QR 分解（方阵、高瘦矩阵与矮胖矩阵）；
-   - 验证完整模式下 $Q^T Q = I_4$ 与 $Q Q^T = I_4$，上梯形 $R$ 底行全零，重建误差 $< 10^{-4}$；
-   - 验证上三角回代求解器 `solveTriangularUpper` 与最小二乘求解器 `qrSolve` 准确性；
-   - 验证 `solveLeastSquaresQR` 在多元回归参数估计与截距恢复中与解析真值完全对齐；
-4. `CHANGELOG.md` 与根导出同步完成。
-5. 状态：**✅ 已完成并通过全量测试验证 (Completed & Verified)**。
+- [x] `zig build check-layers` 严格通过，91 个源码文件层级依赖严格单向，零越层引用；
+- [x] `zig build test` 全量通过，张量算子、回归层与端到端测试均 0 内存泄漏；
+- [x] 单测覆盖：
+  - 验证精简模式与完整模式 QR 分解（方阵、高瘦矩阵与矮胖矩阵）；
+  - 验证完整模式下 $Q^T Q = I_4$ 与 $Q Q^T = I_4$，上梯形 $R$ 底行全零，重建误差 $< 10^{-4}$；
+  - 验证上三角回代求解器 `solveTriangularUpper` 与最小二乘求解器 `qrSolve` 准确性；
+  - 验证 `solveLeastSquaresQR` 在多元回归参数估计与截距恢复中与解析真值完全对齐；
+- [x] `CHANGELOG.md` 与根导出同步完成；
+- [x] 状态：**✅ 已完成并通过全量测试验证 (Completed & Verified at Commit `39224590`)**。
