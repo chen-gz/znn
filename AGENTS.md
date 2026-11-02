@@ -118,6 +118,8 @@
   - 里程碑完成且全量测试通过、合入 `main` 后，其完整的交付内容、代码提交记录与测试指标统一沉淀归档至 `changelog/X.Y.Z.md` 与 `prompts/README.md` 中；
   - **已完成的历史 prompt 文件直接删除**，避免工作区积压过时文档；
   - `prompts/` 目录下仅保留当前正在推进的阶段 prompt（如 `prompts/11_advanced_indexing_and_strided_views.md`）、队列中就绪待执行的 prompt 以及常态化质量门禁（如 `prompts/06_comprehensive_e2e_verification_and_hardening.md`）。
+- **Continuous Improvement & Prompt Ingestion (发现待改进项即刻建档规划)**：
+  - 在推进任何任务、日常开发、代码审查或架构审计过程中，一旦发现任何需要优化、重构、特性补充或技术债积累之处（如潜在性能瓶颈、内存分配热点、缺失的算子或与 PyTorch/NumPy/SciPy 对齐缺口），**严禁遗漏或仅口头带过，必须立即编写结构完整、自包含且带验收标准的 Prompt 文件保存至 `prompts/` 目录下**（并在 `prompts/README.md` 与 `plan/TODO.md` 中登记排期与优先级），确保所有架构优化点均成为未来有迹可循的演进蓝图。
 
 ## 10. Autonomous Project Progress, Architecture Audits & Tests (主动推进、架构审查与测试)
 - **Review unfinished work at task start**: Before choosing project work, inspect `plan/`, `prompts/`, `TODO.md` (if present), the current `jj` state, and relevant remote bookmarks. Identify incomplete, blocked, stale, or conflicting items; reconcile plan status with the actual code and remote state instead of trusting status labels alone.
