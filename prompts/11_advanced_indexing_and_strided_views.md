@@ -3,10 +3,10 @@
 > **Target Version**: `v0.5.0`  
 > **Status**: 🔥 **准备就绪 / 待启动 (Queued / Ready for Execution)**  
 > **Priority**: **P1 (核心深度学习与离散求导底座)**  
-> **Dependencies**: Milestone 2 (张量统一存储与 `*Into` 算子), Milestone 3 (执行图重放与分配器掌控), Milestone 4 (`nn.Module` 协议), Milestone 10 (QR 与线性代数基础)  
+> **Dependencies**: Milestone 10.5 (架构整洁度与模块目录化拆分), Milestone 2 (张量统一存储与 `*Into` 算子), Milestone 3 (执行图重放与分配器掌控), Milestone 4 (`nn.Module` 协议), Milestone 10 (QR 与线性代数基础)  
 > **Target Packages**:  
-> - `src/tensor/` (Layer 1: `indexing.zig` [新建], `core.zig`, `reductions.zig`, `tests.zig`)  
-> - `src/autodiff/` (Layer 2: `types.zig`, `op.zig`, `graph.zig`, `backward_math.zig`, `tests.zig`)  
+> - `src/tensor/` (Layer 1: `indexing.zig` [新建], `tests_indexing.zig` [新建], `reductions.zig`)  
+> - `src/autodiff/` (Layer 2: `types.zig`, `op.zig`, `graph.zig`, `backward_indexing.zig` [新建], `backward_math.zig`)  
 > - `src/root.zig` (Layer 7: 顶层门面导出)  
 > **Enforcement Policy**: Strict refactoring with zero backward-compatibility baggage (`AGENTS.md` §3)
 

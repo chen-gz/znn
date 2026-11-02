@@ -512,7 +512,13 @@
   - [x] 基于 QR 分解的张量通用最小二乘求解器 `qrSolve`；
   - [x] 回归层 `src/regression.zig` 集成 `solveLeastSquaresQR`（条件数保持 $O(\kappa)$，避免正规方程平方病态）。
 
-- [ ] **6.11 Milestone 11: 高级张量索引、跨步切片视图与离散累加体系 (Advanced Indexing & Strided Views)** *(🔥 准备就绪 / Next in Queue, P1)*
+- [ ] **6.10.5 Milestone 10.5: 核心代码库架构整洁度与超长单体模块目录化拆分 (Structural Optimization & Package Modularization)** *(🔥 最高优先级待启动 / Top of Queue, P0)*
+  - [ ] **优化器模块目录化拆分 (`src/optim/`)**：将 61KB 单体拆分为 `sgd.zig`、`adam.zig`、`lr_scheduler.zig`、`checkpoint.zig` 与独立 `tests.zig`，`src/optim.zig` 精简为纯公共门面；
+  - [ ] **数据集模块目录化拆分 (`src/dataset/`)**：将 55KB 单体拆分为 `dataloader.zig`、`vision.zig`、`text.zig`、`multimodal.zig` 与独立 `tests.zig`，`src/dataset.zig` 精简为纯公共门面；
+  - [ ] **测试文件解耦**：将 130KB `src/tensor/tests.zig` 拆分为 `tests_ops.zig`、`tests_linalg.zig` 与 `tests_conv.zig`，预留 `tests_indexing.zig`；
+  - [ ] **示例与文档整洁度**：将 `examples/linear_regression.py` 迁移至 `scripts/`，同步 `doc/architecture.md` 目录全景。
+
+- [ ] **6.11 Milestone 11: 高级张量索引、跨步切片视图与离散累加体系 (Advanced Indexing & Strided Views)** *(⏳ 待排期 / Next in Queue, P1)*
   - [ ] 通用轴向索引收集 `gather(dim, index)` 与目标写入 `gatherInto` (统一 `*const Tensor` 签名与泛型辅助)；
   - [ ] 通用轴向离散覆写与累加 `scatter` / `scatterAdd` (5 参数 `scatterInto` 与 4 参数 `scatterAddInto`)；
   - [ ] 一维子张量切片与累加 `indexSelect` / `indexAdd` (`indexAddInto`) 与布尔掩码压缩提取 `maskedSelect`；
