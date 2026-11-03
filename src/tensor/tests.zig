@@ -2480,4 +2480,18 @@ test "Tensor DeviceBuffer storage lifecycle, retention, and view independence" {
     free(allocator, orig);
     try std.testing.expectEqual(@as(f32, 99), cloned.data[0]);
     free(allocator, cloned);
+
+    // 7. item() and toHost() scalar & host synchronization API
+    const scalar = try array(allocator, &.{1}, &.{42.5});
+    defer free(allocator, scalar);
+    try std.testing.expectEqual(@as(f32, 42.5), try scalar.item(allocator));
+
+    const host_slice = try scalar.toHost(allocator);
+    try std.testing.expectEqual(@as(usize, 1), host_slice.len);
+    try std.testing.expectEqual(@as(f32, 42.5), host_slice[0]);
+
+    // item() on multi-element tensor returns error
+    const multi = try array(allocator, &.{2}, &.{ 1.0, 2.0 });
+    defer free(allocator, multi);
+    try std.testing.expectError(error.IncompatibleDimensions, multi.item(allocator));
 }

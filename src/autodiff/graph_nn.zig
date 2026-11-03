@@ -312,6 +312,9 @@ pub fn conv1d(
     bias: ?*Tensor,
     options: tensor_mod.ConvOptions,
 ) !*Tensor {
+    try self.ensureHost(A);
+    try self.ensureHost(weight);
+    if (bias) |b| try self.ensureHost(b);
     const allocator = self.arena.allocator();
     const C = try A.conv1d(weight, bias, options, allocator);
     const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
@@ -330,6 +333,9 @@ pub fn conv2d(
     bias: ?*Tensor,
     options: tensor_mod.ConvOptions,
 ) !*Tensor {
+    try self.ensureHost(A);
+    try self.ensureHost(weight);
+    if (bias) |b| try self.ensureHost(b);
     const allocator = self.arena.allocator();
     const C = try A.conv2d(weight, bias, options, allocator);
     const req_grad = self.enable_grad and (A.requires_grad or weight.requires_grad or (bias != null and bias.?.requires_grad));
@@ -348,6 +354,9 @@ pub fn convTranspose1d(
     bias_in: ?*Tensor,
     options: tensor_mod.ConvOptions,
 ) !*Tensor {
+    try self.ensureHost(A_in);
+    try self.ensureHost(weight_in);
+    if (bias_in) |b| try self.ensureHost(b);
     const allocator = self.arena.allocator();
     const A = try self.contiguous(A_in);
     const weight = try self.contiguous(weight_in);
@@ -369,6 +378,9 @@ pub fn convTranspose2d(
     bias_in: ?*Tensor,
     options: tensor_mod.ConvOptions,
 ) !*Tensor {
+    try self.ensureHost(A_in);
+    try self.ensureHost(weight_in);
+    if (bias_in) |b| try self.ensureHost(b);
     const allocator = self.arena.allocator();
     const A = try self.contiguous(A_in);
     const weight = try self.contiguous(weight_in);
@@ -384,6 +396,7 @@ pub fn convTranspose2d(
 }
 
 pub fn maxpool1d(self: *Graph, A: *Tensor, pool_size: usize, options: tensor_mod.PoolOptions) !*Tensor {
+    try self.ensureHost(A);
     const allocator = self.arena.allocator();
     const C = try A.maxpool1d(pool_size, options, allocator);
     return self.registerSingleOutputOp(
@@ -400,6 +413,7 @@ pub fn maxpool1d(self: *Graph, A: *Tensor, pool_size: usize, options: tensor_mod
 }
 
 pub fn maxpool2d(self: *Graph, A: *Tensor, pool_size: usize, options: tensor_mod.PoolOptions) !*Tensor {
+    try self.ensureHost(A);
     const allocator = self.arena.allocator();
     const C = try A.maxpool2d(pool_size, options, allocator);
     return self.registerSingleOutputOp(
@@ -416,6 +430,7 @@ pub fn maxpool2d(self: *Graph, A: *Tensor, pool_size: usize, options: tensor_mod
 }
 
 pub fn avgpool1d(self: *Graph, A: *Tensor, kernel_size: usize, options: tensor_mod.PoolOptions) !*Tensor {
+    try self.ensureHost(A);
     const allocator = self.arena.allocator();
     const C = try A.avgpool1d(kernel_size, options, allocator);
     return self.registerSingleOutputOp(
@@ -432,6 +447,7 @@ pub fn avgpool1d(self: *Graph, A: *Tensor, kernel_size: usize, options: tensor_m
 }
 
 pub fn avgpool2d(self: *Graph, A: *Tensor, kernel_size: usize, options: tensor_mod.PoolOptions) !*Tensor {
+    try self.ensureHost(A);
     const allocator = self.arena.allocator();
     const C = try A.avgpool2d(kernel_size, options, allocator);
     return self.registerSingleOutputOp(
@@ -512,6 +528,9 @@ pub fn rmsNorm(self: *Graph, X_in: *Tensor, W_in: ?*Tensor, options: tensor_mod.
 
 /// 层归一化 (Layer Normalization, LayerNorm)：需要梯度时在算子上下文中保存每行的均值与标准差倒数，反向传播直接复用
 pub fn layerNorm(self: *Graph, X_in: *Tensor, G_in: *Tensor, B_in: *Tensor, eps: f32) !*Tensor {
+    try self.ensureHost(X_in);
+    try self.ensureHost(G_in);
+    try self.ensureHost(B_in);
     const allocator = self.arena.allocator();
     const X = try self.contiguous(X_in);
     const G = try self.contiguous(G_in);
@@ -546,6 +565,11 @@ pub fn batchNorm1d(
     momentum: f32,
     training: bool,
 ) !*Tensor {
+    try self.ensureHost(X_in);
+    try self.ensureHost(G_in);
+    try self.ensureHost(B_in);
+    try self.ensureHost(running_mean);
+    try self.ensureHost(running_var);
     const X = try self.contiguous(X_in);
     const G = try self.contiguous(G_in);
     const B = try self.contiguous(B_in);
@@ -600,6 +624,11 @@ pub fn batchNorm2d(
     momentum: f32,
     training: bool,
 ) !*Tensor {
+    try self.ensureHost(X_in);
+    try self.ensureHost(G_in);
+    try self.ensureHost(B_in);
+    try self.ensureHost(running_mean);
+    try self.ensureHost(running_var);
     const X = try self.contiguous(X_in);
     const G = try self.contiguous(G_in);
     const B = try self.contiguous(B_in);
@@ -653,6 +682,9 @@ pub fn groupNorm(
     num_groups: usize,
     eps: f32,
 ) !*Tensor {
+    try self.ensureHost(X_in);
+    try self.ensureHost(G_in);
+    try self.ensureHost(B_in);
     const X = try self.contiguous(X_in);
     const G = try self.contiguous(G_in);
     const B = try self.contiguous(B_in);
@@ -727,7 +759,10 @@ pub fn rope(self: *Graph, X_in: *Tensor, start_pos: usize, options: tensor_mod.R
         const out = try self.tensorND(X.shape.dims[0..X.shape.len], req_grad);
         try ops.rope(X, out, options, start_pos, self.options.device, self.options.mlx_stream);
         break :blk out;
-    } else try X.rope(start_pos, options, allocator);
+    } else blk: {
+        try self.ensureHost(X);
+        break :blk try X.rope(start_pos, options, allocator);
+    };
     return self.registerSingleOutputOp(
         Y,
         &.{X},
@@ -749,7 +784,11 @@ pub fn batchMatMul(self: *Graph, A_in: *Tensor, B_in: *Tensor) !*Tensor {
         const out = try self.tensorND(&.{ A.shape.dims[0], A.shape.dims[1], A.shape.dims[2], B.shape.dims[3] }, req_grad);
         try ops.matmul(A, B, out, self.options.device, self.options.mlx_stream);
         break :blk out;
-    } else try A.batchMatMul(B, allocator);
+    } else blk: {
+        try self.ensureHost(A);
+        try self.ensureHost(B);
+        break :blk try A.batchMatMul(B, allocator);
+    };
     return self.registerSingleOutputOp(C, &.{ A, B }, .BatchMatMul, .{ .BatchMatMul = {} }, req_grad);
 }
 
@@ -776,9 +815,9 @@ pub fn attention(self: *Graph, q_in: *Tensor, k_in: *Tensor, v_in: *Tensor, opti
         } else |_| {}
     }
     if (!dispatched_device) {
-        if (q.storage.typed_owner != null) try q.syncHost(self.backing_allocator);
-        if (k.storage.typed_owner != null) try k.syncHost(self.backing_allocator);
-        if (v.storage.typed_owner != null) try v.syncHost(self.backing_allocator);
+        try self.ensureHost(q);
+        try self.ensureHost(k);
+        try self.ensureHost(v);
         try tensor_mod.attention_kernels.attentionInto(q, k, v, out, if (req_grad) probs else null, options, self.backing_allocator);
     }
     return self.registerSingleOutputOp(
@@ -869,9 +908,7 @@ pub fn q4MatMul(
 ) !*Tensor {
     const allocator = self.arena.allocator();
     const x = try self.contiguous(x_in);
-    if (x.storage.typed_owner != null) {
-        try x.syncHost(if (x.is_graph_owned) self.arena.allocator() else self.backing_allocator);
-    }
+    try self.ensureHost(x);
     const Y = try tensor_mod.quant.q4MatMul(self.executor(), x, blocks, in_features, out_features, allocator);
     const ctx: OpContext = .{
         .Q4MatMul = .{

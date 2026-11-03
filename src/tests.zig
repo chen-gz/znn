@@ -1107,7 +1107,7 @@ test "MLALayer with MLACache matrix absorption inference" {
             seq_x.data[step * dim + i] = @as(f32, @floatFromInt(step + i)) * 0.05;
         }
     }
-    var full_out_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    var full_out_graph = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .cpu });
     defer full_out_graph.deinit();
     const full_out = try mla.forward(&full_out_graph, seq_x);
 

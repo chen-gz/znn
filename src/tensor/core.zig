@@ -270,14 +270,15 @@ pub const Tensor = struct {
             return;
         };
         const count = try self.contiguousCount();
-        if (self.is_view) return error.BorrowedStorage;
-        if (self.data.len < count and allocator == null) return error.HostAllocatorRequired;
+        if (self.data.len < count) {
+            if (self.is_view and !self.is_graph_owned) return error.BorrowedStorage;
+            if (allocator == null) return error.HostAllocatorRequired;
+        }
         const alloc = allocator orelse std.heap.smp_allocator;
         const staged = try alloc.alloc(f32, count);
         defer alloc.free(staged);
         try da.copyToSlice(staged);
-        if (self.data.len < count) {
-            if (self.data.len > 0 and self.storage.cpu_owner == null) alloc.free(self.data);
+        if (self.data.len < count or self.storage.cpu_owner == null) {
             var new_storage = try backend.DeviceBuffer.alloc(backend.Device.cpu, count * @sizeOf(f32), alloc);
             const new_data = try new_storage.asCpuSliceMut(f32);
             @memcpy(new_data, staged);
@@ -286,9 +287,30 @@ pub const Tensor = struct {
             self.data = new_data;
         } else {
             @memcpy(self.data[0..count], staged);
+            self.storage.free();
+            self.storage = .{ .device = .cpu, .byte_size = count * @sizeOf(f32), .handle = .{ .cpu = @ptrCast(self.data.ptr) }, .typed_owner = null };
         }
         // typed_owner already released by storage.free() above; reset device to CPU
         self.storage.device = .cpu;
+        self.storage.typed_owner = null;
+    }
+
+    /// 提取标量数值（对标 PyTorch tensor.item()）：若张量位于 GPU，自动完成宿主同步并返回首个标量元素
+    pub fn item(self: *Tensor, allocator: ?std.mem.Allocator) !f32 {
+        if (self.shape.totalElements() != 1) return error.IncompatibleDimensions;
+        if (self.storage.typed_owner != null or !self.storage.device.isCpu()) {
+            try self.syncHost(allocator);
+        }
+        if (self.data.len == 0) return error.EmptyTensor;
+        return self.data[0];
+    }
+
+    /// 获取同步至宿主的有效数据切片：若张量位于 GPU 且宿主数据未就绪，自动完成宿主同步并返回只读切片
+    pub fn toHost(self: *Tensor, allocator: ?std.mem.Allocator) ![]const f32 {
+        if (self.storage.typed_owner != null or !self.storage.device.isCpu()) {
+            try self.syncHost(allocator);
+        }
+        return self.asHostSlice();
     }
 
     /// Explicit upload; cross-device transfers require syncHost first.
@@ -650,9 +672,9 @@ pub const Tensor = struct {
             stddev: f32,
             spare: ?f32 = null,
 
-            fn next(item: *f32, state: *@This()) void {
+            fn next(elem: *f32, state: *@This()) void {
                 if (state.spare) |z1| {
-                    item.* = state.mean + z1 * state.stddev;
+                    elem.* = state.mean + z1 * state.stddev;
                     state.spare = null;
                     return;
                 }
@@ -664,7 +686,7 @@ pub const Tensor = struct {
                 const radius = @sqrt(-2.0 * @log(u_1));
                 const theta = 2.0 * std.math.pi * u_2;
                 state.spare = radius * @sin(theta);
-                item.* = state.mean + radius * @cos(theta) * state.stddev;
+                elem.* = state.mean + radius * @cos(theta) * state.stddev;
             }
         };
         var state = NormalFill{ .random = random, .mean = mean_val, .stddev = stddev };
@@ -678,8 +700,8 @@ pub const Tensor = struct {
             min: f32,
             range: f32,
 
-            fn next(item: *f32, state: *const @This()) void {
-                item.* = state.min + state.random.float(f32) * state.range;
+            fn next(elem: *f32, state: *const @This()) void {
+                elem.* = state.min + state.random.float(f32) * state.range;
             }
         };
         const state = UniformFill{ .random = random, .min = min_val, .range = max_val - min_val };

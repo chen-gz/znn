@@ -608,7 +608,8 @@ pub fn maskedAttention(
     stream: ?Stream,
 ) OffloadError!mlx.Array {
     if (!isAvailable()) return error.OffloadNotSupported;
-    if (q.ndim() != 4 or k.ndim() != 4) return error.InvalidShape;
+    if (q.ndim() != 4 or k.ndim() != 4 or v.ndim() != 4) return error.InvalidShape;
+    if (q.dimSize(3) != k.dimSize(3) or k.dimSize(3) != v.dimSize(3)) return error.OffloadNotSupported;
     const tq = q.dimSize(2);
     const tk = k.dimSize(2);
 

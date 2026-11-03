@@ -23,6 +23,9 @@ pub const isTypeAvailable = device.isTypeAvailable;
 pub const defaultDevice = device.defaultDevice;
 pub const defaultGpu = device.defaultGpu;
 pub const activeBackend = device.activeBackend;
+pub const AccelerationInfo = device.AccelerationInfo;
+pub const getAccelerationInfo = device.getAccelerationInfo;
+pub const accelerationSummary = device.accelerationSummary;
 
 pub const buffer = @import("backend/buffer.zig");
 pub const DeviceBuffer = buffer.DeviceBuffer;

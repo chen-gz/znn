@@ -83,7 +83,7 @@ fn evalLoss(allocator: std.mem.Allocator, comptime Builder: type, inputs: []cons
     const ts = try buildInputs(&g, inputs, values);
     const out = try Builder.build(&g, ts);
     const loss = try projectToScalar(&g, out);
-    return loss.data[0];
+    return loss.item(g.arenaAllocator());
 }
 
 /// 比较 `Builder.build(graph, inputs)` 输出对每个 `requires_grad` 输入的解析梯度与中心差分数值梯度

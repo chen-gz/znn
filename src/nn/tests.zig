@@ -1752,7 +1752,7 @@ fn mlaIncrementalMaxDiff(batch_2d: bool, d_r: usize, rope: tensor.RopeOptions) !
         for (p.data) |*v| v.* = random.floatNorm(f32) * 0.3;
     }
 
-    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .cpu });
     defer g.deinit();
     const x = try g.tensorND(&.{ B, T, dim }, false);
     for (x.data) |*v| v.* = random.floatNorm(f32);
@@ -1806,7 +1806,7 @@ test "CausalSelfAttention forwardInference matches full forward and reports a fu
         for (p.data) |*v| v.* = random.floatNorm(f32) * 0.3;
     }
 
-    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false });
+    var g = autodiff.Graph.init(allocator, .{ .enable_grad = false, .device = .cpu });
     defer g.deinit();
     const x = try g.tensorND(&.{ B, T, C }, false);
     for (x.data) |*v| v.* = random.floatNorm(f32);

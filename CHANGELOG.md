@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Zero-Config Adaptive Hardware Acceleration (Milestone 11.5)**:
+  - `Device.defaultOptions()` and `GraphOptions.device` automatically resolve to the optimal available accelerator (`Metal (Apple Silicon) > CUDA > CPU`), enabling zero-boilerplate hardware acceleration out of the box.
+  - Apple Silicon Unified Memory Architecture (UMA) zero-copy bridge: `ops.storeMlxOutput` directly borrows contiguous float32 device memory into `out.data` without staging copies.
+  - Transparent CPU fallback engine: automatic `ensureHost` guards synchronize host data on demand when non-GPU ops execute in GPU-default graphs, safely dispatching to CPU SIMD / Accelerate kernels and re-promoting to GPU as needed.
+  - Standard host data accessors: `tensor.item(allocator) !f32` (PyTorch alignment) and `tensor.toHost(allocator) ![]const f32`.
+  - Hardware introspection API: `backend.accelerationSummary(allocator) ![]const u8` formats active device, backend driver, and SIMD hardware details.
+  - Automatic `gatherStrided` materialization for non-contiguous views passed to device ops and graph reshapes, preserving exact mathematical autograd back-scattering.
+
+### Fixed
+- Fixed `error.BorrowedStorage` and potential dangling host slices during `syncHost` on views and unified memory arrays.
+- Fixed `op_mod.forward` for `.Reshape` to guarantee data synchronization whenever destination and source memory addresses differ.
+- Added head dimension equivalence check in `offload.maskedAttention` to prevent illegal FlashAttention calls on MLA asymmetric key/value configurations, cleanly falling back to exact CPU attention.
 
 ---
 

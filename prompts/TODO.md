@@ -527,7 +527,14 @@
   - [x] 跨步切片带符号步长与逆序物化拷贝 (`step < 0`, 数组翻转 `arr[::-1]`, 规避无符号 Shape 溢出)；
   - [x] 离散索引的 Autograd 计算图算子与梯度回传闭环 (`OpType.Gather`, `OpType.Scatter` 覆写掩码置零, `OpType.ScatterAdd`, `OpType.IndexSelect`) 与有限差分数值梯度检验 (`gradcheck`)。
 
-- [ ] **6.12 Milestone 12: 多轴联合归约与进阶统计算子库 (Multi-Axis Reductions & Statistics)** *(🔥 队列首位待启动, P1)*
+- [x] **6.11.5 Milestone 11.5: 自适应硬件加速与零配置自动分发体系 (Adaptive Hardware Acceleration & Zero-Config Auto-Dispatch)** *(✅ 已完成交付, P0)*
+  - [x] 编译期与运行期自适应检测：默认计算设备自适应分派（Metal > CUDA > CPU），前端 `GraphOptions.device` 与模型配置默认零显式参数；
+  - [x] Apple Silicon 统一内存架构 (UMA) 零拷贝桥接：`ops.storeMlxOutput` 利用 `res_mlx.dataFloat32()` 连续时直接赋值 `out.data`，消除额外复制；
+  - [x] 混合调度引擎与透明 CPU 回退：非 GPU 算子自动 `ensureHost` 并安全分派至 CPU SIMD/Accelerate，下游算子自动重新提升回 GPU；
+  - [x] 标量提取 `item()` 与宿主切片读取 `toHost()` 标准协议；
+  - [x] 硬件内省与摘要工具（`accelerationSummary`）及全矩阵验证（`check-layers`, `test`, `run-book-models`）。
+
+- [ ] **6.12 Milestone 12: 多轴联合归约与进阶统计算子库 (Multi-Axis Reductions & Statistics)** *(🔥 下一阶段首要目标, P1)*
   - [ ] 多轴联合归约签名升级 `sumAxes(axes, keepdims)`、`meanAxes`、`varianceAxes`、`stdAxes`；
   - [ ] 累乘 `prod`、前缀扫描 `cumsum` / `cumprod` 前向与 Autograd 反向求导；
   - [ ] 通用向量与矩阵范数归约 `norm(ord, axes, keepdims)` (L1, L2, Frobenius, Inf)；

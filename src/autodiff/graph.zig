@@ -30,7 +30,7 @@ pub const GraphOptions = struct {
     enable_grad: bool = true,
     mode: ExecutionMode = .eager,
     max_tasks: ?usize = null,
-    device: Device = .cpu, // 目标计算设备：.cpu (默认) 或 .gpu (Apple Silicon MLX 硬件加速)
+    device: Device = Device.defaultOptions(), // 目标计算设备：自适应自动分派 (Metal > CUDA > CPU)
     mlx_stream: ?backend.mlx.Stream = null, // 可选注入的 MLX 执行流 (Stream)；为 null 时使用默认流
 
     pub const default: GraphOptions = .{};
@@ -323,20 +323,31 @@ pub const Graph = struct {
 
         const req_grad = self.enable_grad and A.requires_grad;
 
-        if (self.useDevice() and A.storage.typed_owner != null) {
+        if (self.useDevice() and A.storage.typed_owner != null and A.isContiguous()) {
             var arr = try A.storage.typed_owner.?.reshape(new_shape_slice, self.options.mlx_stream);
             var registered = false;
             errdefer if (!registered) arr.deinit();
             const dev_storage = try backend.DeviceBuffer.fromDeviceArray(arr);
+            var data_slice: []f32 = &.{};
+            if (dev_storage.typed_owner) |owned_da| {
+                if (owned_da.asMlx()) |mlx_arr| {
+                    if (mlx_arr.isContiguousRowMajor()) {
+                        if (mlx_arr.dataFloat32()) |host_buf| {
+                            data_slice = @constCast(host_buf);
+                        } else |_| {}
+                    }
+                }
+            }
             C.* = Tensor{
                 .storage = dev_storage,
-                .data = if (req_grad) try allocator.alloc(f32, new_total) else &.{},
+                .data = data_slice,
                 .grad = if (req_grad) try allocator.alloc(f32, new_total) else &.{},
                 .shape = shape,
                 .strides = strides,
                 .requires_grad = req_grad,
                 .creator = null,
                 .is_graph_owned = true,
+                .is_view = true,
                 .scope = self.currentScope(),
             };
             if (req_grad) @memset(C.grad, 0.0);
@@ -366,16 +377,24 @@ pub const Graph = struct {
             .is_view = can_alias,
         };
         if (!can_alias) {
-            var coord: [8]usize = @splat(0);
-            const len = A.shape.len;
-            for (0..new_total) |dest_i| {
-                var src_idx: usize = 0;
-                for (0..len) |d| {
-                    src_idx += coord[d] * A.strides.dims[d];
+            tensor_mod.shape.gatherStrided(C.data, A.data, A.shape, A.strides);
+            if (self.useDevice()) {
+                const da: backend.DeviceArray = switch (self.options.device.type) {
+                    .metal => .{ .mlx = try backend.mlx.Array.fromSlice(C.data, shape.dims[0..shape.len]) },
+                    .cuda => .{ .cuda = try backend.cuda.Array.fromSlice(C.data, shape.dims[0..shape.len]) },
+                    .cpu => unreachable,
+                };
+                cpu_storage.free();
+                C.storage = try backend.DeviceBuffer.fromDeviceArray(da);
+                if (C.storage.typed_owner) |owned_da| {
+                    if (owned_da.asMlx()) |mlx_arr| {
+                        if (mlx_arr.isContiguousRowMajor()) {
+                            if (mlx_arr.dataFloat32()) |host_buf| {
+                                C.data = @constCast(host_buf);
+                            } else |_| {}
+                        }
+                    }
                 }
-                C.data[dest_i] = A.data[src_idx];
-
-                A.shape.incrementCoord(&coord);
             }
         }
         if (req_grad) {
@@ -392,6 +411,13 @@ pub const Graph = struct {
     }
 
     /// 返回张量的连续 (行优先) 版本：连续张量原样返回；跨步视图 (如 `transposeView`) 物化为连续副本，
+    /// 确保张量在宿主端具有有效的浮点切片数据；若张量驻留在 GPU 且宿主数据未就绪，自动通过 Arena 分配器同步至宿主
+    pub fn ensureHost(self: *Graph, t: *Tensor) !void {
+        if (t.storage.typed_owner != null and t.data.len == 0) {
+            try t.syncHost(self.arena.allocator());
+        }
+    }
+
     /// 复制记录为 `Reshape` 算子，其反向按原跨步把梯度散射回视图。
     /// 只支持连续布局的算子内核在入口处调用它，从而对视图输入也给出正确的前向结果与梯度。
     pub fn contiguous(self: *Graph, t: *Tensor) !*Tensor {
@@ -413,7 +439,7 @@ pub const Graph = struct {
         C.requires_grad = req_grad;
         C.is_graph_owned = true;
         if (req_grad and C.grad.len == 0) {
-            C.grad = try allocator.alloc(f32, C.data.len);
+            C.grad = try allocator.alloc(f32, C.shape.totalElements());
             @memset(C.grad, 0.0);
         }
 
@@ -497,9 +523,19 @@ pub const Graph = struct {
             const numel = out_shape.numel();
             const C = try allocator.create(Tensor);
             const dev_storage = try backend.DeviceBuffer.fromDeviceArray(res);
+            var data_slice: []f32 = &.{};
+            if (dev_storage.typed_owner) |owned_da| {
+                if (owned_da.asMlx()) |mlx_arr| {
+                    if (mlx_arr.isContiguousRowMajor()) {
+                        if (mlx_arr.dataFloat32()) |host_buf| {
+                            data_slice = @constCast(host_buf);
+                        } else |_| {}
+                    }
+                }
+            }
             C.* = Tensor{
                 .storage = dev_storage,
-                .data = if (req_grad) try allocator.alloc(f32, numel) else &.{},
+                .data = data_slice,
                 .grad = if (req_grad) try allocator.alloc(f32, numel) else &.{},
                 .shape = out_shape,
                 .strides = computeContiguousStrides(out_shape),
@@ -645,7 +681,11 @@ pub const Graph = struct {
             const out = try self.tensorND(&.{ A.shape.dims[0], B.shape.dims[1] }, req_grad);
             try ops.matmul(A, B, out, self.options.device, self.options.mlx_stream);
             break :blk out;
-        } else try A.matmul(B, allocator);
+        } else blk: {
+            try self.ensureHost(A);
+            try self.ensureHost(B);
+            break :blk try A.matmul(B, allocator);
+        };
         return self.registerSingleOutputOp(C, &.{ A, B }, .MatMul, .{ .MatMul = {} }, req_grad);
     }
 
@@ -662,6 +702,7 @@ pub const Graph = struct {
 
     // 修正线性单元 (Rectified Linear Unit, ReLU) 激活函数前向传播：C = max(0, A)
     pub fn relu(self: *Graph, A_in: *Tensor) !*Tensor {
+        try self.ensureHost(A_in);
         const allocator = self.arena.allocator();
         const A = try self.contiguous(A_in);
         const C = try A.relu(allocator);
@@ -694,6 +735,7 @@ pub const Graph = struct {
                 req_grad,
             );
         }
+        try self.ensureHost(A_in);
         const A = try self.contiguous(A_in);
         const C = try A.gelu(approximation, allocator);
         return self.registerSingleOutputOp(
@@ -706,6 +748,7 @@ pub const Graph = struct {
     }
 
     pub fn sigmoid(self: *Graph, A_in: *Tensor) !*Tensor {
+        try self.ensureHost(A_in);
         const allocator = self.arena.allocator();
         const A = try self.contiguous(A_in);
         const C = try A.sigmoid(allocator);
@@ -719,6 +762,7 @@ pub const Graph = struct {
     }
 
     pub fn tanh(self: *Graph, A_in: *Tensor) !*Tensor {
+        try self.ensureHost(A_in);
         const allocator = self.arena.allocator();
         const A = try self.contiguous(A_in);
         const C = try A.tanh(allocator);
@@ -760,6 +804,7 @@ pub const Graph = struct {
     }
 
     pub fn leakyRelu(self: *Graph, A_in: *Tensor, alpha: f32) !*Tensor {
+        try self.ensureHost(A_in);
         const allocator = self.arena.allocator();
         const A = try self.contiguous(A_in);
         const C = try A.leakyRelu(alpha, allocator);
@@ -774,6 +819,7 @@ pub const Graph = struct {
 
     // Sigmoid 线性单元 (Sigmoid Linear Unit, SiLU / Swish) 激活函数前向传播：C = A * sigmoid(A)
     pub fn silu(self: *Graph, A_in: *Tensor) !*Tensor {
+        try self.ensureHost(A_in);
         const allocator = self.arena.allocator();
         const A = try self.contiguous(A_in);
         const C = try A.silu(allocator);
@@ -806,20 +852,16 @@ pub const Graph = struct {
     // 标量乘法（缩放）：C = val * A
     pub fn mulScalar(self: *Graph, A_in: *Tensor, val: f32) !*Tensor {
         const allocator = self.arena.allocator();
-        const req_grad = self.enable_grad and A_in.requires_grad;
-        if (self.useDevice()) {
-            const out = try self.tensorND(A_in.shape.slice(), req_grad);
-            try ops.mulScalar(A_in, val, out, self.options.device, self.options.mlx_stream);
-            return self.registerSingleOutputOp(
-                out,
-                &.{A_in},
-                .MulScalar,
-                .{ .MulScalar = .{ .val = val } },
-                req_grad,
-            );
-        }
         const A = try self.contiguous(A_in);
-        const C = try A.mulScalar(val, allocator);
+        const req_grad = self.enable_grad and A.requires_grad;
+        const C = if (self.useDevice()) blk: {
+            const out = try self.tensorND(A.shape.slice(), req_grad);
+            try ops.mulScalar(A, val, out, self.options.device, self.options.mlx_stream);
+            break :blk out;
+        } else blk: {
+            try self.ensureHost(A);
+            break :blk try A.mulScalar(val, allocator);
+        };
         return self.registerSingleOutputOp(
             C,
             &.{A},
@@ -831,6 +873,7 @@ pub const Graph = struct {
 
     // 标量加法：C = A + val
     pub fn addScalar(self: *Graph, A_in: *Tensor, val: f32) !*Tensor {
+        try self.ensureHost(A_in);
         const allocator = self.arena.allocator();
         const A = try self.contiguous(A_in);
         const C = try A.addScalar(val, allocator);
@@ -845,6 +888,7 @@ pub const Graph = struct {
 
     // 标量减法：C = A - val
     pub fn subScalar(self: *Graph, A_in: *Tensor, val: f32) !*Tensor {
+        try self.ensureHost(A_in);
         const allocator = self.arena.allocator();
         const A = try self.contiguous(A_in);
         const C = try A.subScalar(val, allocator);
@@ -859,6 +903,7 @@ pub const Graph = struct {
 
     // 标量除法：C = A / val
     pub fn divScalar(self: *Graph, A_in: *Tensor, val: f32) !*Tensor {
+        try self.ensureHost(A_in);
         const allocator = self.arena.allocator();
         const A = try self.contiguous(A_in);
         const C = try A.divScalar(val, allocator);
@@ -872,15 +917,21 @@ pub const Graph = struct {
     }
 
     // 逐元素张量加法：C = A + B (支持多维广播)
-    pub fn add(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+    pub fn add(self: *Graph, A_in: *Tensor, B_in: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
+        const B = try self.contiguous(B_in);
         const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
         const C = if (self.useDevice()) blk: {
             const out_shape = try tensor_mod.broadcastShapes(A.shape, B.shape);
             const out = try self.tensorND(out_shape.slice(), req_grad);
             try ops.add(A, B, out, self.options.device, self.options.mlx_stream);
             break :blk out;
-        } else try A.add(B, allocator);
+        } else blk: {
+            try self.ensureHost(A);
+            try self.ensureHost(B);
+            break :blk try A.add(B, allocator);
+        };
         return self.registerSingleOutputOp(
             C,
             &.{ A, B },
@@ -891,7 +942,11 @@ pub const Graph = struct {
     }
 
     // 逐元素张量减法：C = A - B (支持多维广播)
-    pub fn sub(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+    pub fn sub(self: *Graph, A_in: *Tensor, B_in: *Tensor) !*Tensor {
+        const A = try self.contiguous(A_in);
+        const B = try self.contiguous(B_in);
+        try self.ensureHost(A);
+        try self.ensureHost(B);
         const allocator = self.arena.allocator();
         const C = try A.sub(B, allocator);
         return self.registerSingleOutputOp(
@@ -904,15 +959,21 @@ pub const Graph = struct {
     }
 
     // 逐元素张量乘法 (Hadamard 积)：C = A * B (支持多维广播)
-    pub fn mul(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+    pub fn mul(self: *Graph, A_in: *Tensor, B_in: *Tensor) !*Tensor {
         const allocator = self.arena.allocator();
+        const A = try self.contiguous(A_in);
+        const B = try self.contiguous(B_in);
         const req_grad = self.enable_grad and (A.requires_grad or B.requires_grad);
         const C = if (self.useDevice()) blk: {
             const out_shape = try tensor_mod.broadcastShapes(A.shape, B.shape);
             const out = try self.tensorND(out_shape.slice(), req_grad);
             try ops.multiply(A, B, out, self.options.device, self.options.mlx_stream);
             break :blk out;
-        } else try A.mul(B, allocator);
+        } else blk: {
+            try self.ensureHost(A);
+            try self.ensureHost(B);
+            break :blk try A.mul(B, allocator);
+        };
         return self.registerSingleOutputOp(
             C,
             &.{ A, B },
@@ -923,7 +984,11 @@ pub const Graph = struct {
     }
 
     // 逐元素张量除法：C = A / B (支持多维广播)
-    pub fn div(self: *Graph, A: *Tensor, B: *Tensor) !*Tensor {
+    pub fn div(self: *Graph, A_in: *Tensor, B_in: *Tensor) !*Tensor {
+        const A = try self.contiguous(A_in);
+        const B = try self.contiguous(B_in);
+        try self.ensureHost(A);
+        try self.ensureHost(B);
         const allocator = self.arena.allocator();
         const C = try A.div(B, allocator);
         return self.registerSingleOutputOp(
@@ -962,6 +1027,7 @@ pub const Graph = struct {
     pub const attention = graph_nn.attention;
 
     pub fn sqrt(self: *Graph, A: *Tensor) !*Tensor {
+        try self.ensureHost(A);
         const allocator = self.arena.allocator();
         const C = try A.sqrt(allocator);
         return self.registerSingleOutputOp(
@@ -974,6 +1040,7 @@ pub const Graph = struct {
     }
 
     pub fn exp(self: *Graph, A: *Tensor) !*Tensor {
+        try self.ensureHost(A);
         const allocator = self.arena.allocator();
         const C = try A.exp(allocator);
         return self.registerSingleOutputOp(
@@ -986,6 +1053,7 @@ pub const Graph = struct {
     }
 
     pub fn log(self: *Graph, A: *Tensor) !*Tensor {
+        try self.ensureHost(A);
         const allocator = self.arena.allocator();
         const C = try A.log(allocator);
         return self.registerSingleOutputOp(
@@ -998,6 +1066,7 @@ pub const Graph = struct {
     }
 
     pub fn abs(self: *Graph, A: *Tensor) !*Tensor {
+        try self.ensureHost(A);
         const allocator = self.arena.allocator();
         const C = try A.abs(allocator);
         return self.registerSingleOutputOp(
@@ -1010,6 +1079,7 @@ pub const Graph = struct {
     }
 
     pub fn sum(self: *Graph, A: *Tensor, axis: ?usize, keepdims: bool) !*Tensor {
+        try self.ensureHost(A);
         const allocator = self.arena.allocator();
         const C = try A.sum(axis, keepdims, allocator);
         return self.registerSingleOutputOp(
@@ -1022,6 +1092,7 @@ pub const Graph = struct {
     }
 
     pub fn mean(self: *Graph, A: *Tensor, axis: ?usize, keepdims: bool) !*Tensor {
+        try self.ensureHost(A);
         const allocator = self.arena.allocator();
         const C = try A.mean(axis, keepdims, allocator);
         return self.registerSingleOutputOp(
@@ -1307,7 +1378,7 @@ pub const Graph = struct {
             try self.collectBackwardOps(root_op, &order);
         }
 
-        // 确保参与反向传播计算的所有张量数据从 GPU 同步回主机内存
+        // 确保参与反向传播计算的所有张量数据在宿主内存就绪
         for (order.items) |op| {
             for (op.inputs) |in| {
                 if (in.storage.typed_owner != null) {
@@ -1371,6 +1442,16 @@ pub const Graph = struct {
     // 运行计算图的前向传播，根据输入更新所有算子节点的值
     pub fn forward(self: *Graph) !void {
         for (self.ops.items) |op| {
+            for (op.inputs) |in| {
+                if (in.storage.typed_owner != null) {
+                    try in.syncHost(if (in.is_graph_owned) self.arena.allocator() else self.backing_allocator);
+                }
+            }
+            for (op.outputs) |out| {
+                if (out.storage.typed_owner != null) {
+                    try out.syncHost(if (out.is_graph_owned) self.arena.allocator() else self.backing_allocator);
+                }
+            }
             try op_mod.forward(op, self.backing_allocator);
         }
     }

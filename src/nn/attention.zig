@@ -589,6 +589,8 @@ pub const CausalSelfAttention = struct {
         // 3. 计算注意力并支持键值缓存 (KVCache) 增量更新
         var y_4d: *Tensor = undefined;
         if (cache) |c| {
+            try graph.ensureHost(k);
+            try graph.ensureHost(v);
             if (c.curr_len == 0) {
                 // Prefill 阶段
                 if (c.curr_len + T > c.max_len) return error.ContextWindowExceeded;

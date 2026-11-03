@@ -124,8 +124,12 @@ pub fn forward(self: *Op, allocator: std.mem.Allocator) !void {
         .Reshape => {
             const A = self.inputs[0];
             const C = self.outputs[0];
-            if (!C.is_view) {
-                try tensor_mod.copyInto(C, A);
+            if (C.data.ptr != A.data.ptr) {
+                if (!A.isContiguous()) {
+                    tensor_mod.shape.gatherStrided(C.data, A.data, A.shape, A.strides);
+                } else {
+                    try tensor_mod.copyInto(C, A);
+                }
             }
         },
         .Transpose => {

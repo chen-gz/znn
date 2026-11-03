@@ -265,6 +265,16 @@ pub fn decodeAttention(
     k_in: anytype,
     v_in: anytype,
 ) !*Tensor {
+    if (@TypeOf(q_in) == *Tensor or @TypeOf(q_in) == *const Tensor) {
+        try graph.ensureHost(@constCast(q_in));
+    }
+    if (@TypeOf(k_in) == *Tensor or @TypeOf(k_in) == *const Tensor) {
+        try graph.ensureHost(@constCast(k_in));
+    }
+    if (@TypeOf(v_in) == *Tensor or @TypeOf(v_in) == *const Tensor) {
+        try graph.ensureHost(@constCast(v_in));
+    }
+
     const q_slice = toSlice(q_in);
     const k_slice = toSlice(k_in);
     const v_slice = toSlice(v_in);
@@ -999,7 +1009,11 @@ pub fn Gemma4AttentionT(comptime Proj: type) type {
             const q_rot = try graph.rope(q, 0, self.rope);
             const k_rot = try graph.rope(k_t_unrot, 0, self.rope);
 
-            if (layer_cache) |cache| try writePrefillKVCache(cache, k_rot.data, v.data, B, T);
+            if (layer_cache) |cache| {
+                try graph.ensureHost(k_rot);
+                try graph.ensureHost(v);
+                try writePrefillKVCache(cache, k_rot.data, v.data, B, T);
+            }
 
             const y_4d = try graph.attention(q_rot, k_rot, v, .{
                 .scale = 1.0,

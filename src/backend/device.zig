@@ -7,6 +7,10 @@ const std = @import("std");
 const cuda = @import("cuda.zig");
 const mlx = @import("mlx.zig");
 const offload = @import("offload.zig");
+const target = @import("target.zig");
+
+/// 编译期内省决定的默认计算设备类型
+pub const comptime_default_device_type: DeviceType = if (target.ActiveToolchains.has_mlx) .metal else .cpu;
 
 /// 目标计算设备硬件类型枚举 (Hardware Device Type)
 pub const DeviceType = enum {
@@ -34,12 +38,13 @@ pub const DeviceType = enum {
 /// 计算设备结构体 (Compute Device with Ordinal)
 /// 遵循 AGENTS.md §4 规范：默认字段值提供开箱即用，暴露 defaultOptions()
 pub const Device = struct {
-    type: DeviceType = .cpu,
+    type: DeviceType = comptime_default_device_type,
     index: u32 = 0,
 
     pub const cpu: Device = .{ .type = .cpu, .index = 0 };
     pub const cuda: Device = .{ .type = .cuda, .index = 0 };
     pub const metal: Device = .{ .type = .metal, .index = 0 };
+    pub const auto: Device = .{ .type = comptime_default_device_type, .index = 0 };
 
     pub fn defaultOptions() Device {
         return defaultDevice();
@@ -271,6 +276,10 @@ pub fn isTypeAvailable(dev_type: DeviceType) bool {
 
 /// 获取系统默认首选计算设备 (CUDA > Metal > CPU)
 pub fn defaultDevice() Device {
+    if (@inComptime()) {
+        if (mlx.has_mlx) return Device.metal;
+        return Device.cpu;
+    }
     if (cuda.isAvailable()) return Device.cuda;
     if (mlx.has_mlx) return Device.metal;
     return Device.cpu;
@@ -292,6 +301,50 @@ pub fn activeBackend(dev: Device) BackendType {
     };
 }
 
+/// 硬件加速摘要信息结构体 (Hardware Acceleration Summary Information)
+pub const AccelerationInfo = struct {
+    default_device: Device,
+    active_backend: BackendType,
+    has_metal: bool,
+    has_cuda: bool,
+    has_accelerate: bool,
+    simd_width_bits: usize,
+    arch_name: []const u8,
+};
+
+/// 探测当前环境生效的硬件加速体系详细参数
+pub fn getAccelerationInfo() AccelerationInfo {
+    const dev = defaultDevice();
+    return .{
+        .default_device = dev,
+        .active_backend = activeBackend(dev),
+        .has_metal = mlx.has_mlx,
+        .has_cuda = cuda.isAvailable(),
+        .has_accelerate = target.ActiveToolchains.has_accelerate,
+        .simd_width_bits = target.TargetArch.optimal_vector_len * @sizeOf(f32) * 8,
+        .arch_name = @tagName(target.TargetArch.arch),
+    };
+}
+
+/// 格式化紧凑的硬件加速单行摘要字符串
+pub fn accelerationSummary(allocator: std.mem.Allocator) ![]const u8 {
+    const info = getAccelerationInfo();
+    return std.fmt.allocPrint(
+        allocator,
+        "[znn-hardware] Device: {s}:{d} | Backend: {s} | Accelerators: {s}{s}{s} | SIMD: {d}-bit ({s})",
+        .{
+            @tagName(info.default_device.type),
+            info.default_device.index,
+            @tagName(info.active_backend),
+            if (info.has_metal) "Metal(MLX) " else "",
+            if (info.has_cuda) "CUDA " else "",
+            if (info.has_accelerate) "Accelerate " else "CPU ",
+            info.simd_width_bits,
+            info.arch_name,
+        },
+    );
+}
+
 test "device: detection and conversions" {
     const dev = defaultDevice();
     if (cuda.isAvailable()) {
@@ -311,4 +364,9 @@ test "device: detection and conversions" {
         try std.testing.expect(dev.isCpu());
         try std.testing.expectEqual(BackendType.cpu, activeBackend(Device.cpu));
     }
+
+    const summary = try accelerationSummary(std.testing.allocator);
+    defer std.testing.allocator.free(summary);
+    try std.testing.expect(summary.len > 0);
+    try std.testing.expect(std.mem.startsWith(u8, summary, "[znn-hardware]"));
 }

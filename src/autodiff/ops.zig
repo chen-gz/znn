@@ -41,10 +41,20 @@ pub const BorrowedCudaArray = struct {
 pub fn borrowCudaArray(t: *const Tensor) cuda.CudaError!BorrowedCudaArray {
     if (t.storage.typed_owner) |da| {
         if (da.asCuda()) |arr| {
-            return .{ .arr = arr, .needs_deinit = false };
+            if (t.isContiguous()) {
+                return .{ .arr = arr, .needs_deinit = false };
+            }
         }
     }
     if (t.data.len > 0) {
+        if (!t.isContiguous()) {
+            const count = t.shape.numel();
+            const contiguous_buf = std.heap.smp_allocator.alloc(f32, count) catch return error.CudaOperationFailed;
+            defer std.heap.smp_allocator.free(contiguous_buf);
+            tensor.shape.gatherStrided(contiguous_buf, t.data, t.shape, t.strides);
+            const arr = try cuda.Array.fromSlice(contiguous_buf, t.shape.dims[0..t.shape.len]);
+            return .{ .arr = arr, .needs_deinit = true };
+        }
         const arr = try cuda.Array.fromSlice(t.data, t.shape.dims[0..t.shape.len]);
         return .{ .arr = arr, .needs_deinit = true };
     }
@@ -77,10 +87,20 @@ pub const BorrowedMlxArray = struct {
 pub fn borrowMlxArray(t: *const Tensor) !BorrowedMlxArray {
     if (t.storage.typed_owner) |da| {
         if (da.asMlx()) |arr| {
-            return .{ .arr = arr, .needs_deinit = false };
+            if (t.isContiguous()) {
+                return .{ .arr = arr, .needs_deinit = false };
+            }
         }
     }
     if (t.data.len > 0) {
+        if (!t.isContiguous()) {
+            const count = t.shape.numel();
+            const contiguous_buf = try std.heap.smp_allocator.alloc(f32, count);
+            defer std.heap.smp_allocator.free(contiguous_buf);
+            tensor.shape.gatherStrided(contiguous_buf, t.data, t.shape, t.strides);
+            const arr = try mlx.Array.fromSlice(contiguous_buf, t.shape.dims[0..t.shape.len]);
+            return .{ .arr = arr, .needs_deinit = true };
+        }
         const arr = try mlx.Array.fromSlice(t.data, t.shape.dims[0..t.shape.len]);
         return .{ .arr = arr, .needs_deinit = true };
     }
@@ -95,6 +115,16 @@ pub fn storeMlxOutput(out: *Tensor, res_mlx: mlx.Array) mlx.MlxError!void {
     const dev_storage = backend.DeviceBuffer.fromDeviceArray(da) catch return error.MlxOperationFailed;
     out.storage.free();
     out.storage = dev_storage;
+    if (dev_storage.typed_owner) |owned_da| {
+        if (owned_da.asMlx()) |arr| {
+            if (arr.isContiguousRowMajor()) {
+                if (arr.dataFloat32()) |slice| {
+                    out.data = @constCast(slice);
+                    return;
+                } else |_| {}
+            }
+        }
+    }
     out.data = &.{};
 }
 

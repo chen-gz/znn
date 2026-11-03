@@ -48,6 +48,9 @@ pub const Shape = struct {
         return total;
     }
 
+    /// 元素总数别名 (PyTorch numel / totalElements 对齐)
+    pub const totalElements = numel;
+
     /// 获取形状有效维度的切片
     pub fn slice(self: *const Shape) []const usize {
         return self.dims[0..self.len];
