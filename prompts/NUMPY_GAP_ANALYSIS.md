@@ -1,7 +1,7 @@
 # 🔬 ZNN vs. PyTorch / SciPy / NumPy 2.x 系统性对齐差距分析与架构演进全景报告 (Comprehensive Gap Analysis & Roadmap)
 
-**版本号**：`v0.4.0`  
-**审计基准提交**：`39224590` (通过 `zig build check-layers` 91 源码文件单向分层，`zig build test` 433 项测试全通 0 内存泄漏)  
+**版本号**：`v0.5.0`  
+**审计基准提交**：`d681b3aa` (通过 `zig build check-layers` 106 源码文件单向分层，`zig build test` 440+ 项测试全通 0 内存泄漏)  
 **对标生态系统**：
 - **PyTorch 2.5+** (`torch`, `torch.autograd`, `torch.linalg`, `torch.special`, `torch.distributions`)
 - **SciPy 1.14+** (`scipy.linalg`, `scipy.stats`, `scipy.special`)
@@ -25,24 +25,25 @@
 
 通过对 `src/tensor/`、`src/autodiff/`、`src/nn/`、`src/backend/` 的全面代码审计，`znn` 已经构建了极其稳固的 8 层单向依赖拓扑和基础张量计算底座（涵盖 Householder QR 分解、Jacobi SVD、SymEig 特征分解、零分配 `*Into` 目标算子体系、PyTorch 风格 `nn.Module` 反射、ConvNeXt 与 ResNet 全套模型族）。
 
-然而，若要对标现代深度学习框架（PyTorch）与科学计算库（SciPy、NumPy 2.x），`znn` 目前存在 **四大系统性功能断层**：
-1. **断层 1：缺乏通用离散索引与累加原语**：
-   - 现存 `slice` 仅支持正步长（`step > 0` 且 `end >= start`），无法表达负步长零拷贝翻转（`arr[::-1]`）；
-   - 张量层完全缺失通用 `gather(dim, index)`、`scatter(dim, index, src)`、`scatterAdd(dim, index, src)`、`indexSelect(dim, index)` 与 `maskedSelect(mask)`；
-   - Autograd 计算图缺少离散索引求导节点，直接阻碍了图神经网络（GNN）、稀疏 Token 分发、稀疏注意力和复杂强化学习损失函数的原生表达。
-2. **断层 2：多维归约算子维度表达单一且缺少极值 Autograd**：
-   - 所有统计归约算子（`sum`、`mean`、`variance`、`stdDev`）的签名固定为 `axis: ?usize`，只接受单轴或全局归约，无法联合多轴归约（如图像特征图空间归约 `axes = &.{2, 3}`）；
-   - `max` 与 `min` 未接入 Autograd 计算图（`OpType` 枚举中仅有 `Sum` 与 `Mean`，缺少 `Max` 与 `Min`），导致极值损失函数无法反向求导；
-   - 缺失累乘 `prod`、前缀扫描 `cumsum` / `cumprod`、通用范数 `norm`、分位数 `quantile` 与中位数 `median`。
-3. **断层 3：数值线性代数缺少对称正定系统与显式求逆**：
+**在最新交付的 `v0.5.0` (Milestone 11) 中**：
+- **断层 1 已彻底闭环攻克**：`src/tensor/indexing.zig` 与 `src/autodiff/backward_math.zig` 已完整实现 PyTorch 对齐的通用离散索引与累加原语，包括 `gather`/`gatherInto`、`scatter`/`scatterInto`、`scatterAdd`/`scatterAddInto`（支持重叠索引累加）、`indexSelect`/`indexSelectInto`、`maskedSelect`、带符号负步长逆序物化切片 (`arr[::-1]`) 以及伴随对偶梯度闭环与 `gradcheck`。
+
+若要继续全面对标现代深度学习框架（PyTorch）与科学计算库（SciPy、NumPy 2.x），系统当前聚焦于以下 **三大核心演进断层**：
+1. **断层 1（即刻推进 M12）**：多维归约算子维度表达单一且缺少极值 Autograd：
+   - 归约算子尚不支持多轴切片（如图像空间维度 `axes = &.{2, 3}`）；
+   - `max` 与 `min` 尚待接入 Autograd 计算图 (`OpType.Max` / `OpType.Min`)；
+   - 补齐累乘 `prod`、前缀扫描 `cumsum` / `cumprod`、通用范数 `norm`、分位数 `quantile` 与中位数 `median` 及 `logSumExp`。
+2. **断层 2（排期推进 M13）**：数值线性代数缺少对称正定系统与显式求逆：
    - 求解线性系统仍依赖高斯-若尔当消元（`solveLinearSystem`，开销 $O(n^3)$）；
-   - 缺失对称正定矩阵（SPD）的 Cholesky 分解 ($A = LL^T$) 与下三角前代求解器 `solveTriangularLower`，在协方差分析、高斯过程和高维回归中计算量比 Cholesky 多消耗 $100\%$ 浮点操作；
-   - 缺失显式矩阵求逆 `inv`、摩尔-彭若斯广义伪逆 `pinv`、数值稳定对数行列式 `slogdet` 与轻量级 `einsum` 缩并引擎。
-4. **断层 4：概率计算、随机发生器与特殊函数体系缺位**：
-   - 现有随机初始化（`fillNormal`/`fillUniform`）依赖包级静态全局可变变量 `default_prng`，并发或多线程下存在竞态与状态污染；
-   - 缺少独立线程安全的 `Generator` 对象体系；
-   - 缺乏对象化概率分布体系（`Distribution`），无法通过重参数化技巧（`rsample`）进行路径可微采样（VAE、扩散模型、RL 必备）；
-   - 缺失逆误差函数 `erfinv`、对数伽马 `lgamma`、双伽马 `digamma` 以及浮点稳定初等超越函数 `log1p` / `expm1`。
+   - 缺失对称正定矩阵（SPD）的 Cholesky 分解 ($A = LL^T$) 与下三角前代求解器 `solveTriangularLower`；
+   - 缺失显式矩阵求逆 `inv`、摩尔-彭若斯广义伪逆 `pinv`、数值稳定对数绝对值行列式 `slogdet` 与轻量级 `einsum` 缩并引擎。
+3. **断层 3（排期推进 M14）**：概率计算、随机发生器与特殊函数体系缺位：
+   - 现有随机初始化依赖包级全局变量，需迁移至独立线程安全的 `Generator` 对象体系；
+   - 缺乏对象化概率分布体系（`Distribution`）与重参数化路径可微采样（`rsample`）；
+   - 缺失特殊数学函数库（`erfinv`、`gammaln`、`digamma`、`log1p`、`expm1`）。
+4. **进阶演进（排期推进 M15）**：GPU 加速张量索引与多维布尔掩码赋值：
+   - MLX / Metal `take_along_axis` 与 GPU 端原子累加散布；
+   - 多维布尔掩码原位赋值 `maskedScatter` / `maskedScatterInto` 与省略号切片 (`Ellipsis` / `NewAxis`)。
 
 ---
 
@@ -55,14 +56,14 @@
 
 | 模块领域 | 算子 / 功能特性 | PyTorch 2.5+ 等价实现 | NumPy 2.x / SciPy 等价实现 | ZNN 当前实现状态 | 现有代码位置与技术现状 |
 | :--- | :--- | :--- | :--- | :---: | :--- |
-| **1. 索引与切片视图** | 跨步零拷贝切片 | `tensor[start:end:step]` | `arr[start:end:step]` | ⚠️ 部分支持 | `src/tensor/reductions.zig:568` 支持 `SliceRange` 正步长零拷贝视图（`is_view = true`）；负步长 (`step < 0`) 计划通过显式逆序物化拷贝（`is_view = false`）对齐，规避无符号 `Shape.dims: [8]usize` 溢出风险 |
-| | 通用轴向收集 | `torch.gather(dim, index)` | `np.take_along_axis(arr, idx, axis)` | ❌ 缺失 | 仅有特化的 `gatherMatMul` (`nn_kernels.zig:736`) 与嵌入查表 `embeddingLookup` |
-| | 轴向离散散布/累加 | `torch.scatter` / `scatter_add` | `np.put_along_axis` | ❌ 缺失 | 张量层与 Autograd 缺失通用 `scatter` / `scatterAdd` 及伴随对偶 `index_add` |
-| | 维度子张量切片提取 | `torch.index_select(dim, index)` | `np.take(arr, indices, axis)` | ❌ 缺失 | 无法按一维整型下标切片提取特定批次或通道 |
-| | 条件布尔压缩过滤 | `torch.masked_select(mask)` | `arr[mask]` (1D Boolean Mask) | ❌ 缺失 | 仅支持标量覆写 `maskedFill` 与三元选择 `where`，无法提取变长有效元素 |
+| **1. 索引与切片视图** | 跨步切片视图与逆序物化 | `tensor[start:end:step]` | `arr[start:end:step]` | ✅ 已支持 | `src/tensor/reductions.zig` 与 `types.zig`：正步长为 $O(1)$ 零拷贝视图（`is_view = true`）；负步长 (`step < 0`) 显式逆序物化拷贝（`is_view = false`，对标 NumPy `arr[::-1]`，防止无符号溢出） |
+| | 通用轴向收集 | `torch.gather(dim, index)` | `np.take_along_axis(arr, idx, axis)` | ✅ 已支持 | `src/tensor/indexing.zig` 实现 `gather`/`gatherInto`，`autodiff.Graph.gather` (`OpType.Gather`) 伴随对偶 `scatterAddInto` 梯度回传 |
+| | 轴向离散散布/累加 | `torch.scatter` / `scatter_add` | `np.put_along_axis` | ✅ 已支持 | `src/tensor/indexing.zig` 实现 `scatter`/`scatterInto` 与 `scatterAdd`/`scatterAddInto`（支持重复累加），Autograd `OpType.Scatter` 与 `ScatterAdd` 闭环 |
+| | 维度子张量切片提取 | `torch.index_select(dim, index)` | `np.take(arr, indices, axis)` | ✅ 已支持 | `src/tensor/indexing.zig` 实现 `indexSelect`/`indexSelectInto` 与 `indexAdd`/`indexAddInto`，Autograd `OpType.IndexSelect` 闭环 |
+| | 条件布尔压缩过滤 | `torch.masked_select(mask)` | `arr[mask]` (1D Boolean Mask) | ✅ 已支持 | `src/tensor/indexing.zig` 实现 `maskedSelect`，多维布尔掩码提取 1D 压缩张量 |
 | | 非零元素坐标检索 | `torch.nonzero()` | `np.nonzero(arr)` | ✅ 已支持 | `src/tensor/reductions.zig:791` 返回 `*GenericTensor(usize)` |
 | | 轴向稳定全序排序 | `torch.sort` / `argsort` | `np.sort` / `argsort` | ✅ 已支持 | `src/tensor/reductions.zig:680` 原生支持沿任意轴升降序稳定排序 |
-| **2. 归约与统计分析** | 多轴联合求和/均值 | `torch.sum(dim=(1, 2))` | `np.sum(axis=(1, 2))` | ⚠️ 部分支持 | `reductions.zig:209` 仅支持单轴 `axis: ?usize` 或全局，**不支持多轴切片 `axes: []const usize`** |
+| **2. 归约与统计分析** | 多轴联合求和/均值 | `torch.sum(dim=(1, 2))` | `np.sum(axis=(1, 2))` | ⚠️ 部分支持 | `reductions.zig:209` 仅支持单轴 `axis: ?usize` 或全局，多轴 `sumAxes`/`meanAxes` 正在 Milestone 12 实现 |
 | | 多轴方差与标准差 | `torch.var` / `std` | `np.var` / `std(ddof=1)` | ⚠️ 部分支持 | `reductions.zig:314` 支持 `ddof` 与 Autograd，但仅限单轴或全局 |
 | | 极值与极值索引 | `torch.max` / `min` (含计算图) | `np.max` / `min`, `argmax/min` | ⚠️ 部分支持 | `reductions.zig:183` 仅支持单轴且**未接入 Autograd (`OpType` 无 Max/Min)**，无全局极值 |
 | | 累乘归约算子 | `torch.prod(dim)` | `np.prod(axis)` | ❌ 缺失 | 缺失前向累乘与反向传播求导 |
@@ -430,4 +431,5 @@
 1. **测试驱动与零内存泄漏**：每一个新算子必须提供端到端测试，并通过 GPA 0 内存泄漏验证；
 2. **8 层架构禁令**：新增文件必须严格注册在 `tools/check_layers.zig` 对应的层级，严禁反向越层导入；
 3. **默认配置与开箱即用**：所有选项结构体必须提供 `defaultOptions()` 并支持 `.{}` 零样板调用；
-4. **即刻启动 M11**：首要编写并推进 `prompts/11_advanced_indexing_and_strided_views.md`。
+4. **M11 已闭环**：高级索引、切片物化与散布累加已在 `v0.5.0` 交付；
+5. **即刻启动 M12**：首要推进多轴联合归约与前缀统计算子体系 (`prompts/12_multiaxis_reductions_and_statistics.md`)。

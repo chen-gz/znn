@@ -6,24 +6,26 @@
 
 ## 🔍 第一部分：代码库现状诊断与演进空间 (Current Architecture Review)
 
-经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.4.1`，433+ 单元测试与 91 文件单向分层 100% 通过）已完成核心架构解耦与模块化清晰划分（涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Apple Silicon MLX GPU 端到端硬件卸载、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
+经全面审查与模块化重构（详见 [`doc/architecture.md`](../doc/architecture.md)），`znn`（`v0.5.0`，440+ 单元测试与 106 文件单向分层 100% 通过）已完成核心架构解耦与模块化清晰划分（涵盖 N 维跨步张量、`GenericTensor(T)`、编译期 `StaticTensor(T, dims)`、算子级拓扑排序动态 Autograd、1D/2D 卷积与自适应池化、循环/现代 LLM 与 Gemma 4 Q4 架构、Apple Silicon MLX GPU 端到端硬件卸载、Householder QR / Jacobi SymEig / 单边 Jacobi SVD、AdamW 优化器、BPE 分词器、高级张量索引与散布 `gather`/`scatter`/`scatterAdd`/`indexSelect`/`maskedSelect`、交叉验证与内聚的 Schema 2.0 Web 可视化器），在以下 **6 个维度** 仍存在进一步演进空间：
 
 ### 1. 核心计算与张量系统 (Tensor Engine & Core Math)
+* **高级索引与离散散布体系 (已由 Milestone 11 闭环交付)**：
+  [`src/tensor/indexing.zig`](../src/tensor/indexing.zig) 已完整实现 PyTorch 对齐的 `gather`、`scatter`、`scatterAdd`、`indexSelect`、`indexAdd`、`maskedSelect`，并重构带符号 `SliceRange` 实现 NumPy 语义逆序切片物化 (`arr[::-1]`)；[`src/autodiff/backward_math.zig`](../src/autodiff/backward_math.zig) 完成伴随对偶梯度闭环与有限差分数值梯度检验。后续进一步演进见 Milestone 15（GPU MLX 加速与多维布尔掩码赋值）。
 * **自动微分多精度与量化张量扩展 (Mixed-Precision Autograd & Quantization)**：
   [`src/tensor/types.zig`](../src/tensor/types.zig) 已实现支持 `f32`、`f64`、`bf16`、`i32`、`i64`、`usize`、`bool` 的泛型 [`GenericTensor(T)`](../src/tensor/types.zig)，且 [`src/tensor/static.zig`](../src/tensor/static.zig) 已提供编译期形状检查的 [`StaticTensor(T, dims)`](../src/tensor/static.zig)；但动态计算图节点 [`Tensor`](../src/tensor/core.zig) 与 [`Graph`](../src/autodiff/graph.zig) 的前向/反向传播目前仍以 `f32` 为主，尚未实现原生 `f16`/`bf16` 自动混合精度梯度流与低比特量化类型（如 `int8`、`q4_0`、`q8_0`）；低比特量化目前仅以 Gemma 4 专用的 `Q4Block` / `Q4Linear` 形式存在于 [`src/models/gemma4.zig`](../src/models/gemma4.zig)，尚未作为张量层算子提供。
 * **维度上限与高维扩展**：
   [`Shape.init`](../src/tensor/shape.zig) 与 [`Shape.fromSlice`](../src/tensor/shape.zig) 采用固定 `[8]usize` 栈数组并通过 `MaxDimensionsExceeded` 进行显式边界校验，满足绝大多数深度学习场景（最高 8 维），但尚未支持超过 8 维的任意高维张量缩并。
 * **正定线性代数求解器扩展**：
-  [`src/tensor/core.zig`](../src/tensor/core.zig) 与 [`src/tensor/linalg.zig`](../src/tensor/linalg.zig) 已支持基于 Householder 变换的 QR 分解 (`Tensor.qr`)、奇异值分解 (`Tensor.svd`) 与实对称特征值分解 (`Tensor.symeig`)，但 [`solveLinearSystem`](../src/tensor/ops.zig) 仍采用高斯-若尔当消元（Gauss-Jordan），尚待引入针对对称正定矩阵的 Cholesky 分解 ($LL^T$) 求解器。
+  [`src/tensor/core.zig`](../src/tensor/core.zig) 与 [`src/tensor/linalg.zig`](../src/tensor/linalg.zig) 已支持基于 Householder 变换的 QR 分解 (`Tensor.qr`，含完整 `QROptions` 与 `qrSolve`)、奇异值分解 (`Tensor.svd`) 与实对称特征值分解 (`Tensor.symeig`)，但 [`solveLinearSystem`](../src/tensor/ops.zig) 仍采用高斯-若尔当消元（Gauss-Jordan），尚待引入针对对称正定矩阵的 Cholesky 分解 ($LL^T$) 求解器（规划于 Milestone 13）。
 
 ### 2. 自动求导与计算图 (Autodiff & Graph Engine)
 * **不支持高阶导数 (No Higher-Order Gradients)**：
   [`Tensor.grad`](../src/tensor/core.zig) 是一维切片 (`[]f32`)，反向传播由 [`Graph.backward`](../src/autodiff/graph.zig) 调度 [`backward_core.zig`](../src/autodiff/backward_core.zig)、[`backward_nn.zig`](../src/autodiff/backward_nn.zig) 与 [`backward_math.zig`](../src/autodiff/backward_math.zig) 执行单向链式传导，梯度计算本身不在图上注册为新节点，暂不支持二阶导数或 Hessian 向量积。
 * **就地操作 (In-place Ops) 版本计数器与前向零梯度内存优化**：
-  就地算子（如 [`mulScalar_`](../src/tensor/reductions.zig)、[`add_`](../src/tensor/reductions.zig)）目前通过显式 `TensorError.InPlaceOpOnGraphTensor` 错误防御，并保留共享视图的图存储保护状态，尚缺计算图版本计数器（Version Counter）。无梯度推理图 (`Graph.initNoGrad`) 已不为中间张量分配 `grad` 缓冲，但也不记录 `Op` 节点，因此没有可供规划或重放的计算图；同时 `op.forward` 与 `runAndRecordPreallocatedOp` 经 `copyFromEager` 先算到临时张量再拷贝，输出缓冲还会被预先清零，这些是降低推理内存与带宽开销的关键优化点。
+  就地算子（如 [`mulScalar_`](../src/tensor/reductions.zig)、[`add_`](../src/tensor/reductions.zig)）目前通过显式 `TensorError.InPlaceOpOnGraphTensor` 错误防御，并保留共享视图的图存储保护状态，尚缺计算图版本计数器（Version Counter）。无梯度推理图（`enable_grad: false`）已不为中间张量分配 `grad` 缓冲；静态重放 `ExecutionGraph` 与 `MemoryPlanner` 已实现激活显存降低 $\ge 85\%$。
 
 ### 3. 硬件加速与平台生态 (Hardware Acceleration & Parallelism)
-> 📐 **专项设计**：详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)（Apple Silicon Metal 优先；并发经 `io: std.Io` 注入；`eager` / `deferred` 双模式；按流有序命令队列；Phase 0–5 路线图），对应任务见第二部分 2.4 与 2.5。
+> 📐 **专项设计**：详见 [`prompts/ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)（Apple Silicon Metal 优先；并发经 `io: std.Io` 注入；`eager` / `deferred` 双模式；按流有序命令队列；Phase 0–5 路线图），对应任务见第二部分 2.4 与 2.5。
 * **缺少 GPU 加速后端**：
   所有前向计算与反向梯度求解均在 CPU 上执行。首要目标为 Apple Silicon Metal（统一内存零拷贝），CUDA / Vulkan / WebGPU 不在近期范围内。
 * **跨平台系统级 BLAS 链接选项与 Linux Fallback GEMM 瓶颈**：
@@ -518,15 +520,15 @@
   - [x] **测试文件解耦**：将 130KB `src/tensor/tests.zig` 解耦出 `tests_linalg.zig` 与 `tests_conv.zig`，预留 `indexing.zig` 与 `tests_indexing.zig`；
   - [x] **示例与文档整洁度**：将 `examples/linear_regression.py` 迁移至 `scripts/benchmarks/`，同步 `doc/architecture.md` 目录全景。
 
-- [ ] **6.11 Milestone 11: 高级张量索引、跨步切片视图与离散累加体系 (Advanced Indexing & Strided Views)** *(🔥 待启动 / Next in Queue, P1)*
-  - [ ] 通用轴向索引收集 `gather(dim, index)` 与目标写入 `gatherInto` (统一 `*const Tensor` 签名与泛型辅助)；
-  - [ ] 通用轴向离散覆写与累加 `scatter` / `scatterAdd` (5 参数 `scatterInto` 与 4 参数 `scatterAddInto`)；
-  - [ ] 一维子张量切片与累加 `indexSelect` / `indexAdd` (`indexAddInto`) 与布尔掩码压缩提取 `maskedSelect`；
-  - [ ] 跨步切片带符号步长与逆序物化拷贝 (`step < 0`, 数组翻转 `arr[::-1]`, 规避无符号 Shape 溢出)；
-  - [ ] 离散索引的 Autograd 计算图算子与梯度回传闭环 (`OpType.Gather`, `OpType.Scatter` 梯度置零, `OpType.ScatterAdd`, `OpType.IndexSelect`)。
+- [x] **6.11 Milestone 11: 高级张量索引、跨步切片视图与离散累加体系 (Advanced Indexing & Strided Views)** *(✅ 已完成并合入 main, v0.5.0)*
+  - [x] 通用轴向索引收集 `gather(dim, index)` 与目标写入 `gatherInto` (统一 `*const Tensor` 签名与泛型辅助)；
+  - [x] 通用轴向离散覆写与累加 `scatter` / `scatterAdd` (5 参数 `scatterInto` 与 4 参数 `scatterAddInto`，支持重叠索引累加)；
+  - [x] 一维子张量切片与累加 `indexSelect` / `indexAdd` (`indexAddInto`) 与布尔掩码压缩提取 `maskedSelect`；
+  - [x] 跨步切片带符号步长与逆序物化拷贝 (`step < 0`, 数组翻转 `arr[::-1]`, 规避无符号 Shape 溢出)；
+  - [x] 离散索引的 Autograd 计算图算子与梯度回传闭环 (`OpType.Gather`, `OpType.Scatter` 覆写掩码置零, `OpType.ScatterAdd`, `OpType.IndexSelect`) 与有限差分数值梯度检验 (`gradcheck`)。
 
-- [ ] **6.12 Milestone 12: 多轴联合归约与进阶统计算子库 (Multi-Axis Reductions & Statistics)** *(⏳ 待启动, P1)*
-  - [ ] 多轴联合归约签名升级 `sumAxes(axes, keepdims)`、`meanAxes`、`varianceAxes`；
+- [ ] **6.12 Milestone 12: 多轴联合归约与进阶统计算子库 (Multi-Axis Reductions & Statistics)** *(🔥 队列首位待启动, P1)*
+  - [ ] 多轴联合归约签名升级 `sumAxes(axes, keepdims)`、`meanAxes`、`varianceAxes`、`stdAxes`；
   - [ ] 累乘 `prod`、前缀扫描 `cumsum` / `cumprod` 前向与 Autograd 反向求导；
   - [ ] 通用向量与矩阵范数归约 `norm(ord, axes, keepdims)` (L1, L2, Frobenius, Inf)；
   - [ ] 分位数 `quantile` 与中位数 `median` (基于 QuickSelect 算法)；
@@ -545,6 +547,11 @@
   - [ ] 重参数化路径可微采样 `rsample` 自动挂载 Autograd 计算图；
   - [ ] 对数概率密度计算 `log_prob` 与解析 KL 散度 `klDivergence`；
   - [ ] 特殊数学函数库（`erfinv`, `gammaln`, `digamma`, `log1p`, `expm1`）。
+
+- [ ] **6.15 Milestone 15: GPU 加速张量索引与进阶多维布尔掩码赋值体系 (GPU Indexing & Advanced Masking)** *(⏳ 待启动, P2)*
+  - [ ] MLX / Metal `take_along_axis` 与原子散布累加 GPU 内核流；
+  - [ ] 多维布尔掩码散布与原位赋值 `maskedScatter` / `maskedScatterInto`；
+  - [ ] `Ellipsis` 与 `NewAxis` 高阶多维复合切片说明符。
 
 - [ ] **6.6 Milestone 6: 端到端全量验证与对抗性加固 (Comprehensive E2E Verification & Hardening)** *(🛡️ 持续测试门禁, P3)*
   - [ ] **全量自动化矩阵验证**：

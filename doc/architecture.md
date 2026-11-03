@@ -496,12 +496,12 @@ flowchart LR
 
 ## 9. 核心架构演进与瓶颈诊断清单 (Architectural Bottlenecks & Roadmap)
 
-以下关键瓶颈已列入技术演进追踪（详见 [`plan/TODO.md`](../plan/TODO.md)）：
+以下关键瓶颈已列入技术演进追踪（详见 [`prompts/TODO.md`](../prompts/TODO.md)）：
 
 ### 9.1 CPU 多核并行瓶颈
 * **现状定位**：
   在 macOS 平台，`znn` 通过构建期链接的 Accelerate 框架调用 Apple Silicon AMX 协处理器完成 GEMM；在 Linux 与 Windows 上，`src/cblas.zig` 的纯 Zig 后备实现为单线程 `@Vector(8, f32)` SIMD 向量化。逐元素、Softmax、归一化与卷积算子均为单线程；Gemma 4 的 `Q4Linear.forward` 与 LM head argmax 每次调用临时 spawn 8 个 OS 线程。
-* **规划方案**（详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](../plan/ASYNC_OFFLOAD_DESIGN.md)）：
+* **规划方案**（详见 [`prompts/ASYNC_OFFLOAD_DESIGN.md`](../prompts/ASYNC_OFFLOAD_DESIGN.md)）：
   1. 基于 Zig 0.16 `std.Io` 实现固定粒度分块的确定性执行器，由应用创建 `std.Io.Threaded` 并经 `GraphOptions.io` 注入，替换临时 spawn 线程的实现；
   2. 随目标传入式 (DPS) 内核改造，将行内归约、归一化与逐元素算子改为按行/按块并行；Linux GEMM 微内核与 `-Dblas=openblas` 作为后续阶段。
 
@@ -515,7 +515,7 @@ flowchart LR
 ### 9.3 Apple Silicon Metal GPU 卸载
 * **现状定位**：
   所有前向与反向计算均在 CPU 上执行；算子在记录时即分配输出并同步计算，无梯度图不记录 `Op`，`nn` / `models` 的 forward 中存在直接读写 `.data` 的宿主逻辑（如 MoE 路由与 KV Cache 推理路径）。
-* **规划方案**（详见 [`plan/ASYNC_OFFLOAD_DESIGN.md`](../plan/ASYNC_OFFLOAD_DESIGN.md)）：
+* **规划方案**（详见 [`prompts/ASYNC_OFFLOAD_DESIGN.md`](../prompts/ASYNC_OFFLOAD_DESIGN.md)）：
   1. 算子改造为目标传入式 (DPS) 内核，引入 `hostSlice` 宿主访问协议与 `eager` / `deferred` 双执行模式；
   2. 以统一内存零拷贝 `MetalAllocator`、单一有序命令队列与运行期编译的 Metal 着色语言 (Metal Shading Language, MSL) 内核实现 Metal 后端，先推理、后训练。
 

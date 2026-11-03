@@ -20,6 +20,18 @@
 
 ---
 
+## 📚 统一规划与架构蓝图文档库 (Architecture Blueprints & Master References)
+
+为避免多处文档分散与状态冲突，项目所有技术架构设计、功能缺口对比及全生命周期任务跟踪均统一收敛存放于本目录（`prompts/`）：
+
+| 蓝图文件 | 核心主题 | 核心内容 |
+| :--- | :--- | :--- |
+| **[`TODO.md`](TODO.md)** | **全面现状诊断与分阶段任务清单** | • 6 个核心技术维度的现状诊断与最新成熟度评估<br>• Phase 0 至 Phase 6 细分开发任务明细与全周期开发看板<br>• 实时同步各个里程碑完成与验证状态（已同步至 `v0.5.0`） |
+| **[`NUMPY_GAP_ANALYSIS.md`](NUMPY_GAP_ANALYSIS.md)** | **PyTorch 2.5+ / NumPy 2.x / SciPy 系统性差距分析** | • 科学计算底座 vs. 深度学习框架的定位差异与设计权衡<br>• 4 大领域全景能力对比矩阵（离散索引已在 M11 闭环交付，多轴归约推进中）<br>• 算子复杂度、内存模型与分阶段演进路线 |
+| **[`ASYNC_OFFLOAD_DESIGN.md`](ASYNC_OFFLOAD_DESIGN.md)** | **异步执行与 Apple Silicon Metal 卸载设计** | • Apple Silicon Metal 优先，并发经 `io: std.Io` 注入，`eager` / `deferred` 双执行模式<br>• 统一内存零拷贝、按流有序命令队列、运行期 MSL 编译与 CPU 回退机制<br>• DPS 目标传入式内核改造、静态内存规划与 FlashAttention 算子 |
+
+---
+
 ## 🗺️ 架构演进与优先级索引表 (Master Priority & Phase Index)
 
 根据最新架构再评估，系统将所有后续任务划分为严格的优先级序列（历史已完成里程碑全部合入 `main`，新一阶段以 M11 为首要推进目标）：
