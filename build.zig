@@ -169,6 +169,16 @@ const examples = [_]ExampleTarget{
         .test_name = "multimodal_tests",
         .forward_args = true,
     },
+    .{
+        .name = "recurrent_benchmark",
+        .src = "examples/recurrent_benchmark.zig",
+        .run_step = "run-recurrent",
+        .run_desc = "Run the Recurrent & Tied Convolution Benchmark and Exploration suite",
+        .alias_step = "recurrent",
+        .alias_desc = "Run the Recurrent & Tied Convolution Benchmark and Exploration suite (alias for run-recurrent)",
+        .test_name = "recurrent_bench_tests",
+        .forward_args = true,
+    },
 };
 
 fn forwardArgs(b: *std.Build, run_cmd: *std.Build.Step.Run) void {

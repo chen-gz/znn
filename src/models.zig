@@ -51,7 +51,18 @@ pub const convnext_femto = convnext.convnext_femto;
 pub const convnext_atto = convnext.convnext_atto;
 pub const convnext_pico = convnext.convnext_pico;
 
+pub const recurrent_conv = @import("models/recurrent_conv.zig");
+pub const RecurrentConvOptions = recurrent_conv.RecurrentConvOptions;
+pub const RecurrentConvResult = recurrent_conv.RecurrentConvResult;
+pub const RecurrentWorkspace = recurrent_conv.RecurrentWorkspace;
+pub const RecurrentConvBlock = recurrent_conv.RecurrentConvBlock;
+pub const RecurrentConvNetConfig = recurrent_conv.RecurrentConvNetConfig;
+pub const RecurrentConvNet = recurrent_conv.RecurrentConvNet;
+
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("models/recurrent_conv.zig");
     _ = @import("models/tests.zig");
 }
+
+
